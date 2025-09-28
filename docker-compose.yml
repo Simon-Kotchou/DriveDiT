@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # Development environment
+  drivedit-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    volumes:
+      - .:/home/drivedit/drivedit
+      - drivedit-data:/home/drivedit/data
+      - drivedit-cache:/home/drivedit/cache
+      - drivedit-checkpoints:/home/drivedit/checkpoints
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["python3", "-c", "print('DriveDiT development environment ready'); import time; time.sleep(3600)"]
+
+  # Training service
+  drivedit-train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    volumes:
+      - drivedit-data:/home/drivedit/data
+      - drivedit-checkpoints:/home/drivedit/checkpoints
+      - drivedit-logs:/home/drivedit/logs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
+      - PYTHONPATH=/home/drivedit/drivedit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["training.self_forcing"]
+
+  # Multi-GPU training (if available)
+  drivedit-train-multi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    volumes:
+      - drivedit-data:/home/drivedit/data
+      - drivedit-checkpoints:/home/drivedit/checkpoints
+      - drivedit-logs:/home/drivedit/logs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0,1,2,3
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
+      - PYTHONPATH=/home/drivedit/drivedit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: ["training.self_forcing", "--distributed"]
+
+  # Inference server
+  drivedit-inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: inference
+    ports:
+      - "8000:8000"
+    volumes:
+      - drivedit-checkpoints:/home/drivedit/checkpoints
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Data processing service
+  drivedit-process:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: data-processor
+    volumes:
+      - ./raw_data:/home/drivedit/raw_data
+      - drivedit-data:/home/drivedit/processed_data
+      - drivedit-cache:/home/drivedit/cache
+    environment:
+      - PYTHONPATH=/home/drivedit/drivedit
+    command: ["data.pipeline"]
+
+  # Jupyter notebook for development
+  drivedit-notebook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/home/drivedit/drivedit
+      - drivedit-data:/home/drivedit/data
+      - drivedit-cache:/home/drivedit/cache
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - JUPYTER_ENABLE_LAB=yes
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+
+volumes:
+  drivedit-data:
+    driver: local
+  drivedit-cache:
+    driver: local
+  drivedit-checkpoints:
+    driver: local
+  drivedit-logs:
+    driver: local

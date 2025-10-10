@@ -1,0 +1,116 @@
+	{
+        super.OnGameStart();
+
+        string waypointType = "{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_ForcedMove.et";
+        string spawnGroup = "{35681BE27C302FF5}Prefabs/Groups/BLUFOR/GreenBerets/Group_US_GreenBeret_SentryTeam.et";
+
+        // Arrays to hold group data
+        ref array<SCR_AIGroup> groupArray = new array<SCR_AIGroup>();
+        ref array<IEntity> vehicleArray = new array<IEntity>();
+
+        // Main loop to spawn AI groups
+        for (int i = 1; i <= 6; i++)
+        {
+            string spawnPointName = "US_AI_Spawn_Point_" + i;
+            IEntity spawnPositionEntity = GetGame().GetWorld().FindEntityByName(spawnPointName);
+            if (!spawnPositionEntity)
+            {
+                Print("[OnGameStart] Unable to find spawn point entity: " + spawnPointName, LogLevel.ERROR);
+                continue;
+            }
+            vector spawnPosition = spawnPositionEntity.GetOrigin();
+
+            string carName = "S105_darkblue" + i;
+            IEntity carID = GetGame().GetWorld().FindEntityByName(carName);
+            if (!carID)
+            {
+                Print("[OnGameStart] Unable to find vehicle entity: " + carName, LogLevel.ERROR);
+                continue;
+            }
+
+            // Generate random waypoint number between 1 and 81
+            int rand_wp_num = Math.RandomIntInclusive(1, 81);
+            string waypointName = "US_AI_Waypoint_" + rand_wp_num;
+            IEntity waypointPositionEntity = GetGame().GetWorld().FindEntityByName(waypointName);
+            if (!waypointPositionEntity)
+            {
+                Print("[OnGameStart] Unable to find waypoint entity: " + waypointName, LogLevel.ERROR);
+                continue;
+            }
+            vector waypointPosition = waypointPositionEntity.GetOrigin();
+
+            // Load the spawn group resource
+            Resource resource = Resource.Load(spawnGroup);
+            if (!resource.IsValid())
+            {
+                Print("[OnGameStart] Resource is invalid: " + spawnGroup, LogLevel.ERROR);
+                continue;
+            }
+
+            // Generate spawn parameters
+            EntitySpawnParams spawnParams = new EntitySpawnParams();
+            spawnParams.TransformMode = ETransformMode.WORLD;
+            spawnParams.Transform[3] = spawnPosition;
+
+            // Spawn the AI group
+            SCR_AIGroup group = SCR_AIGroup.Cast(GetGame().SpawnEntityPrefab(resource, null, spawnParams));
+            if (!group)
+            {
+                Print("[OnGameStart] Unable to spawn group!", LogLevel.ERROR);
+                continue;
+            }
+
+            // Add the vehicle to the group
+            group.AddUsableVehicle(carID);
+
+            // Load the waypoint resource
+            Resource waypointResource = Resource.Load(waypointType);
+            if (!waypointResource.IsValid())
+            {
+                Print("[OnGameStart] Resource is invalid: " + waypointType, LogLevel.ERROR);
+                continue;
+            }
+
+            // Spawn the waypoint
+            EntitySpawnParams waypointSpawnParams = new EntitySpawnParams();
+            waypointSpawnParams.TransformMode = ETransformMode.WORLD;
+            waypointSpawnParams.Transform[3] = waypointPosition;
+
+            AIWaypoint waypoint = AIWaypoint.Cast(GetGame().SpawnEntityPrefab(waypointResource, null, waypointSpawnParams));
+            if (!waypoint)
+            {
+                Print("[OnGameStart] Unable to create waypoint!", LogLevel.ERROR);
+                continue;
+            }
+
+            // Add the waypoint to the group
+            group.AddWaypoint(waypoint);
+
+            // Store group and vehicle for potential future use
+            groupArray.Insert(group);
+            vehicleArray.Insert(carID);
+        }
+    }
+
+class S105_darkblue6_Class: Vehicle 
+{
+	override void EOnPhysicsMove(IEntity owner)
+	{
+		super.EOnPhysicsMove(owner);
+
+        Physics physics = owner.GetPhysics();
+
+        if (physics)
+        {
+            vector velocity = physics.GetVelocity();
+            float speed = velocity.Length();
+
+            Print("[S105_darkblue6_Class] Vehicle Velocity: " + velocity.ToString() + ", Speed: " + speed.ToString(), LogLevel.NORMAL);
+        }
+        else
+        {
+            Print("[S105_darkblue6_Class] No Physics component found on vehicle.", LogLevel.ERROR);
+        }
+	}
+
+};

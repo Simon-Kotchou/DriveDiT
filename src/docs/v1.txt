@@ -1,0 +1,81 @@
+class GameMode_Plain1_Class: SCR_BaseGameMode 
+{
+	override void OnGameStart()
+	{
+		super.OnGameStart();
+		
+		string spawnGroup = "{35681BE27C302FF5}Prefabs/Groups/BLUFOR/GreenBerets/Group_US_GreenBeret_SentryTeam.et";
+		string waypointType = "{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_ForcedMove.et";
+		
+		IEntity spawnPosition = GetGame().GetWorld().FindEntityByName("US_AI_Spawn_Point_1");
+		IEntity waypointPosition = GetGame().GetWorld().FindEntityByName("US_AI_Waypoint_1");
+		
+		GetGame().GetCallqueue().CallLater(AISpawner, 1000, false, spawnGroup, spawnPosition.GetOrigin(), waypointType, waypointPosition.GetOrigin());
+	}
+	
+	protected void AISpawner(string spawnGroup, vector spawnPosition, string waypointType, vector waypointPosition){
+		Resource resource = GenerateAndValidateResource(spawnGroup);
+		
+		if(!resource){
+			Print(("[AI Spawner] Unable to load resource for the spaw group: " + spawnGroup), LogLevel.ERROR);
+			return;
+		}
+		
+		SCR_AIGroup group = SCR_AIGroup.Cast(GetGame().SpawnEntityPrefab(resource, null, GenerateSpawnParameters(spawnPosition)));
+		
+		if(!group){
+			Print("[AI Spawner] Unable to spawn group!", LogLevel.ERROR);
+			return;
+		}
+		
+		IEntity carID = GetGame().GetWorld().FindEntityByName("S105_darkblue1");
+	
+		if(!carID){
+			Print("[AI Spawner] Unable to load vehicle resource!", LogLevel.ERROR);
+			return;
+		}
+		group.AddUsableVehicle(carID);
+		
+		CreateWaypoint(group, waypointType, waypointPosition);
+	}
+	
+	protected void CreateWaypoint(SCR_AIGroup group, string waypointType, vector waypointPosition){
+		Resource resource = GenerateAndValidateResource(waypointType);
+		
+		if(!resource){
+			Print(("[Create Waypoint] Unable to load resource for waypoint: " + waypointType), LogLevel.ERROR);
+			return;
+		}	
+		
+		AIWaypoint waypoint = AIWaypoint.Cast(GetGame().SpawnEntityPrefab(resource, null, GenerateSpawnParameters(waypointPosition)));
+		
+		if(!waypoint)
+		{
+			Print("[Create Waypoint] Unable to create waypoint!", LogLevel.ERROR);
+			return;
+		}
+		
+		group.AddWaypoint(waypoint);
+	}
+	
+	protected Resource GenerateAndValidateResource(string resourceToLoad){
+		Resource resource = Resource.Load(resourceToLoad);
+		
+		if(!resource.IsValid()){
+			Print(("[Generate and Validate Resource] Resource is invalid: " + resourceToLoad), LogLevel.ERROR);
+			return null;
+		}
+		
+		return resource;
+	}
+	
+	protected EntitySpawnParams GenerateSpawnParameters(vector position){
+		EntitySpawnParams params = EntitySpawnParams();
+		params.TransformMode = ETransformMode.WORLD;
+		
+		params.Transform[3] = position;
+		
+		return params;
+	}
+
+};

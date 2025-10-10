@@ -1,0 +1,2264 @@
+// Advanced Road Path Generator - Component for extracting road networks from the game's navmesh
+[EntityEditorProps(category: "GameScripted/Navigation", description: "Advanced Road Path Generator - Extracts road networks and creates waypoints")]
+class SCR_RoadPathGeneratorClass: GenericEntityClass
+{
+}
+
+class SCR_RoadPathGenerator: GenericEntity
+{
+    //------------------------------------------------------------------------------------------------
+    // Configuration Attributes
+    //------------------------------------------------------------------------------------------------
+    [Attribute("1", UIWidgets.CheckBox, "Auto-generate path when script initializes")]
+    protected bool m_bAutoGenerate;
+    
+    [Attribute(defvalue: "1000", UIWidgets.EditBox, "Total path length to generate (meters)")]
+    protected float m_fPathLength;
+    
+    [Attribute(defvalue: "50", UIWidgets.EditBox, "Maximum distance between waypoints (meters)")]
+    protected float m_fWaypointSpacing;
+    
+    [Attribute(defvalue: "0 0 0", UIWidgets.EditBox, "Start position (or use entity position if zero)")]
+    protected vector m_vStartPosition;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Find the nearest road for starting point")]
+    protected bool m_bSnapToRoad;
+    
+    [Attribute(defvalue: "100", UIWidgets.EditBox, "Maximum search radius for nearest road (meters)")]
+    protected float m_fRoadSearchRadius;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Create waypoints at road intersections")]
+    protected bool m_bWaypointAtIntersections;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Generate branch paths from intersections")]
+    protected bool m_bGenerateBranches;
+    
+    [Attribute(defvalue: "3", UIWidgets.EditBox, "Maximum number of branch paths")]
+    protected int m_iMaxBranches;
+    
+    [Attribute(defvalue: "200", UIWidgets.EditBox, "Minimum branch path length (meters)")]
+    protected float m_fMinBranchLength;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Create waypoint entities when path is ready")]
+    protected bool m_bSpawnWaypoints;
+    
+    [Attribute(defvalue: "0", UIWidgets.CheckBox, "Mark waypoints with debug spheres")]
+    protected bool m_bDebugVisualize;
+    
+    [Attribute(defvalue: "{750A8D1695BD6998}AI/Entities/Waypoints/AIWaypoint.et", UIWidgets.ResourceNamePicker, "Waypoint prefab to spawn", params: "et")]
+    protected ResourceName m_WaypointPrefab;
+    
+    [Attribute("$profile:RoadPaths.log", UIWidgets.EditBox, "Output file path (use $profile: or $logs: prefix)")]
+    protected string m_sOutputFilePath;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Save path data to output file")]
+    protected bool m_bSaveToFile;
+    
+    //------------------------------------------------------------------------------------------------
+    // Internal variables
+    //------------------------------------------------------------------------------------------------
+    protected AIWorld m_AIWorld;
+    protected RoadNetworkManager m_RoadNetworkManager;
+    protected NavmeshWorldComponent m_NavmeshComponent;
+    
+    // Containers for generated data
+    protected ref array<vector> m_MainPath = {};
+    protected ref array<vector> m_JunctionPoints = {};
+    protected ref array<ref array<vector>> m_BranchPaths = {};
+    protected ref array<IEntity> m_SpawnedWaypoints = {};
+    
+    // Status flags
+    protected bool m_bIsInitialized = false;
+    protected bool m_bPathGenerated = false;
+    
+    // Event system
+    protected ref ScriptInvoker<array<vector>> m_OnPathGenerated = new ScriptInvoker<array<vector>>();
+    protected ref ScriptInvoker<IEntity, vector> m_OnWaypointCreated = new ScriptInvoker<IEntity, vector>();
+    
+    //------------------------------------------------------------------------------------------------
+    void SCR_RoadPathGenerator(IEntitySource src, IEntity parent)
+    {
+        SetEventMask(EntityEvent.INIT);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    override void EOnInit(IEntity owner)
+    {
+        super.EOnInit(owner);
+        
+        Print("SCR_RoadPathGenerator: Initializing...", LogLevel.NORMAL);
+        
+        // Initialize the navigation system
+        if (!InitializeNavmesh())
+        {
+            Print("SCR_RoadPathGenerator: ERROR - Failed to initialize navmesh! Road path generation disabled.", LogLevel.ERROR);
+            return;
+        }
+        
+        m_bIsInitialized = true;
+        
+        // Generate path automatically if requested
+        if (m_bAutoGenerate)
+        {
+            // Use callqueue to ensure world is fully loaded
+            GetGame().GetCallqueue().CallLater(GenerateRoadPath, 1000, false);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Initialize the navmesh and road network systems
+    //------------------------------------------------------------------------------------------------
+    bool InitializeNavmesh()
+    {
+        // Get the AI world
+        m_AIWorld = GetGame().GetAIWorld();
+        if (!m_AIWorld)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - AIWorld not found!", LogLevel.ERROR);
+            return false;
+        }
+        
+        // Get the road network manager from AI world
+        m_RoadNetworkManager = m_AIWorld.GetRoadNetworkManager();
+        if (!m_RoadNetworkManager)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - RoadNetworkManager not available.", LogLevel.ERROR);
+            return false;
+        }
+        
+        // Get navmesh component for path validation and snapping
+        AIPathfindingComponent pathfindingComponent = AIPathfindingComponent.Cast(GetGame().GetWorld().FindComponent(AIPathfindingComponent));
+        if (!pathfindingComponent)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - AIPathfindingComponent not found!", LogLevel.ERROR);
+            return false;
+        }
+        
+        m_NavmeshComponent = pathfindingComponent.GetNavmeshComponent();
+        if (!m_NavmeshComponent)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - NavmeshWorldComponent not found!", LogLevel.ERROR);
+            return false;
+        }
+        
+        Print("SCR_RoadPathGenerator: Navigation systems initialized successfully");
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Main path generation entry point - can be called from external scripts
+    //------------------------------------------------------------------------------------------------
+    bool GenerateRoadPath()
+    {
+        if (!m_bIsInitialized)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - Cannot generate path, system not initialized!", LogLevel.ERROR);
+            return false;
+        }
+        
+        Print("SCR_RoadPathGenerator: Starting road path generation...");
+        
+        // Clear previous data
+        ClearGeneratedData();
+        
+        // Get starting position
+        vector startPos = DetermineStartPosition();
+        if (startPos == vector.Zero)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - Failed to find valid start position!", LogLevel.ERROR);
+            return false;
+        }
+        
+        // Extract road data from navmesh
+        if (ExtractRoadNetwork(startPos))
+        {
+            m_bPathGenerated = true;
+            Print("SCR_RoadPathGenerator: Main path generated with " + m_MainPath.Count() + " points, length: " + CalculatePathLength(m_MainPath) + "m");
+            
+            // Generate branch paths if enabled
+            if (m_bGenerateBranches && m_iMaxBranches > 0)
+            {
+                GenerateBranchPaths();
+            }
+            
+            // Save path to file if requested
+            if (m_bSaveToFile)
+            {
+                SavePathToFile();
+            }
+            
+            // Generate waypoints if enabled
+            if (m_bSpawnWaypoints)
+            {
+                SpawnWaypoints();
+            }
+            
+            // Notify listeners that path is ready
+            m_OnPathGenerated.Invoke(m_MainPath);
+            return true;
+        }
+        
+        Print("SCR_RoadPathGenerator: ERROR - Failed to generate road path!", LogLevel.ERROR);
+        return false;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Determine the starting position for path generation
+    //------------------------------------------------------------------------------------------------
+    vector DetermineStartPosition()
+    {
+        vector startPos;
+        
+        // Use specified start position if provided
+        if (m_vStartPosition != vector.Zero)
+        {
+            startPos = m_vStartPosition;
+        }
+        else
+        {
+            // Otherwise use this entity's position
+            startPos = GetOrigin();
+        }
+        
+        // Ensure position is on navmesh
+        vector navmeshPoint;
+        if (!m_NavmeshComponent.GetClosestPoint(startPos, navmeshPoint))
+        {
+            Print("SCR_RoadPathGenerator: WARNING - Start position is not on navmesh! Attempting to find nearby point...", LogLevel.WARNING);
+            navmeshPoint = FindNearestNavmeshPoint(startPos, 100.0);
+            
+            if (navmeshPoint == vector.Zero)
+            {
+                Print("SCR_RoadPathGenerator: ERROR - Could not find navmesh near starting position!", LogLevel.ERROR);
+                return vector.Zero;
+            }
+        }
+        
+        startPos = navmeshPoint;
+        
+        // If requested, find the nearest road point
+        if (m_bSnapToRoad)
+        {
+            vector roadPoint = FindNearestRoadPoint(startPos, m_fRoadSearchRadius);
+            if (roadPoint != vector.Zero)
+            {
+                float distance = vector.Distance(startPos, roadPoint);
+                Print("SCR_RoadPathGenerator: Found road at distance " + distance + "m from start point");
+                startPos = roadPoint;
+            }
+            else
+            {
+                Print("SCR_RoadPathGenerator: WARNING - Could not find road near starting position! Using navmesh point instead.", LogLevel.WARNING);
+            }
+        }
+        
+        Print("SCR_RoadPathGenerator: Using start position " + startPos.ToString());
+        return startPos;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Extract road network from navmesh using RoadNetworkManager
+    //------------------------------------------------------------------------------------------------
+    bool ExtractRoadNetwork(vector startPos)
+    {
+        // Method 1: If RoadNetworkManager provides direct road access
+        if (!TryExtractWithRoadNetwork(startPos))
+        {
+            // Method 2: Fallback to navmesh-based road detection
+            return GeneratePathFromNavmesh(startPos);
+        }
+        
+        return !m_MainPath.IsEmpty();
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Try to extract roads using the RoadNetworkManager if available
+    //------------------------------------------------------------------------------------------------
+    bool TryExtractWithRoadNetwork(vector startPos)
+    {
+        if (!m_RoadNetworkManager)
+            return false;
+        
+        Print("SCR_RoadPathGenerator: Attempting to extract roads using RoadNetworkManager...");
+        
+        // Define an AABB that covers the entire terrain (or a large area around start)
+        vector aabbMin = startPos - Vector(m_fPathLength * 2, 1000, m_fPathLength * 2);
+        vector aabbMax = startPos + Vector(m_fPathLength * 2, 1000, m_fPathLength * 2);
+        
+        // Get all roads in the AABB
+        array<BaseRoad> roads = {};
+        int roadCount = m_RoadNetworkManager.GetRoadsInAABB(aabbMin, aabbMax, roads);
+        
+        if (roadCount <= 0)
+        {
+            Print("SCR_RoadPathGenerator: No roads found in AABB. Falling back to navmesh analysis.", LogLevel.WARNING);
+            return false;
+        }
+        
+        Print("SCR_RoadPathGenerator: Found " + roadCount + " roads in navmesh");
+        
+        // Find the closest road to our start position
+        BaseRoad closestRoad = null;
+        float closestDistance = float.MAX;
+        int closestPointIndex = -1;
+        
+        foreach (BaseRoad road : roads)
+        {
+            array<vector> roadPoints = {};
+            road.GetPoints(roadPoints);
+            
+            if (roadPoints.IsEmpty())
+                continue;
+                
+            // Find the closest point on this road
+            for (int i = 0; i < roadPoints.Count(); i++)
+            {
+                float dist = vector.Distance(startPos, roadPoints[i]);
+                if (dist < closestDistance)
+                {
+                    closestDistance = dist;
+                    closestRoad = road;
+                    closestPointIndex = i;
+                }
+            }
+        }
+        
+        // If we found a road, build a path along it
+        if (closestRoad && closestPointIndex >= 0)
+        {
+            array<vector> roadPoints = {};
+            closestRoad.GetPoints(roadPoints);
+            
+            // Start the path from the closest point
+            float currentPathLength = 0;
+            m_MainPath.Insert(roadPoints[closestPointIndex]);
+            
+            // Add points in forward direction
+            for (int i = closestPointIndex + 1; i < roadPoints.Count(); i++)
+            {
+                float segmentLength = vector.Distance(roadPoints[i-1], roadPoints[i]);
+                currentPathLength += segmentLength;
+                
+                m_MainPath.Insert(roadPoints[i]);
+                
+                // Check if we've reached the target path length
+                if (currentPathLength >= m_fPathLength / 2)
+                    break;
+            }
+            
+            // Add points in backward direction
+            currentPathLength = 0;
+            array<vector> backwardPoints = {};
+            
+            for (int i = closestPointIndex - 1; i >= 0; i--)
+            {
+                float segmentLength = vector.Distance(roadPoints[i+1], roadPoints[i]);
+                currentPathLength += segmentLength;
+                
+                backwardPoints.Insert(roadPoints[i]);
+                
+                // Check if we've reached the target path length
+                if (currentPathLength >= m_fPathLength / 2)
+                    break;
+            }
+            
+            // Insert backward points at the beginning of the path
+            for (int i = backwardPoints.Count() - 1; i >= 0; i--)
+            {
+                m_MainPath.InsertAt(backwardPoints[i], 0);
+            }
+            
+            // Identify junctions
+            IdentifyRoadJunctions(roads);
+            
+            Print("SCR_RoadPathGenerator: Successfully extracted road path using RoadNetworkManager");
+            return true;
+        }
+        
+        Print("SCR_RoadPathGenerator: Failed to find closest road. Falling back to navmesh analysis.", LogLevel.WARNING);
+        return false;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Identify junction points in the road network
+    //------------------------------------------------------------------------------------------------
+    void IdentifyRoadJunctions(array<BaseRoad> roads)
+    {
+        // Create a map of positions to number of connecting roads
+        ref map<vector, int> roadNodeConnections = new map<vector, int>();
+        
+        // Count connections for all road points
+        foreach (BaseRoad road : roads)
+        {
+            array<vector> roadPoints = {};
+            road.GetPoints(roadPoints);
+            
+            if (roadPoints.Count() < 2)
+                continue;
+                
+            // Add start and end points
+            vector startPoint = roadPoints[0];
+            vector endPoint = roadPoints[roadPoints.Count() - 1];
+            
+            if (!roadNodeConnections.Contains(startPoint))
+                roadNodeConnections.Insert(startPoint, 0);
+            
+            if (!roadNodeConnections.Contains(endPoint))
+                roadNodeConnections.Insert(endPoint, 0);
+                
+            roadNodeConnections.Set(startPoint, roadNodeConnections.Get(startPoint) + 1);
+            roadNodeConnections.Set(endPoint, roadNodeConnections.Get(endPoint) + 1);
+        }
+        
+        // Identify junctions (points with more than 2 connections)
+        foreach (vector point, int connections : roadNodeConnections)
+        {
+            if (connections > 2)
+            {
+                m_JunctionPoints.Insert(point);
+                
+                // Check if this junction is on our main path
+                bool onMainPath = false;
+                foreach (vector pathPoint : m_MainPath)
+                {
+                    if (vector.Distance(pathPoint, point) < 5.0)
+                    {
+                        onMainPath = true;
+                        break;
+                    }
+                }
+                
+                if (onMainPath)
+                    Print("SCR_RoadPathGenerator: Identified junction with " + connections + " connections on main path");
+            }
+        }
+        
+        Print("SCR_RoadPathGenerator: Identified " + m_JunctionPoints.Count() + " road junctions");
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Generate path from navmesh analysis (fallback method)
+    //------------------------------------------------------------------------------------------------
+    bool GeneratePathFromNavmesh(vector startPos)
+    {
+        Print("SCR_RoadPathGenerator: Using navmesh analysis to find roads...");
+        
+        // Start path with starting position
+        m_MainPath.Clear();
+        m_MainPath.Insert(startPos);
+        
+        // Keep track of path length
+        float currentPathLength = 0;
+        vector currentPos = startPos;
+        
+        // Keep track of visited points to avoid loops
+        ref array<vector> visitedPoints = new array<vector>();
+        
+        // Generate path until we reach target length
+        int attempts = 0;
+        int maxAttempts = 1000; // Safety limit
+        
+        while (currentPathLength < m_fPathLength && attempts < maxAttempts)
+        {
+            attempts++;
+            
+            // Find next road direction
+            vector nextDirection;
+            float roadLength;
+            bool isJunction;
+            
+            if (FindRoadDirection(currentPos, visitedPoints, nextDirection, roadLength, isJunction))
+            {
+                // Calculate next point
+                float stepSize = Math.Min(roadLength, m_fWaypointSpacing);
+                vector nextPos = currentPos + nextDirection * stepSize;
+                
+                // Ensure point is on navmesh
+                vector navmeshPoint;
+                if (!m_NavmeshComponent.GetClosestPoint(nextPos, navmeshPoint))
+                {
+                    // Try half the distance
+                    nextPos = currentPos + nextDirection * (stepSize * 0.5);
+                    if (!m_NavmeshComponent.GetClosestPoint(nextPos, navmeshPoint))
+                        break; // Couldn't find valid point
+                }
+                else
+                {
+                    nextPos = navmeshPoint;
+                }
+                
+                // Add to path
+                m_MainPath.Insert(nextPos);
+                visitedPoints.Insert(nextPos);
+                
+                // If junction, add to junction list
+                if (isJunction)
+                {
+                    m_JunctionPoints.Insert(nextPos);
+                }
+                
+                // Update path length and current position
+                float segmentLength = vector.Distance(currentPos, nextPos);
+                currentPathLength += segmentLength;
+                currentPos = nextPos;
+                
+                // If we have a long road segment, add intermediate points
+                if (roadLength > m_fWaypointSpacing)
+                {
+                    float remainingRoad = roadLength - stepSize;
+                    
+                    while (remainingRoad > 0 && currentPathLength < m_fPathLength)
+                    {
+                        float nextStep = Math.Min(remainingRoad, m_fWaypointSpacing);
+                        vector stepPos = currentPos + nextDirection * nextStep;
+                        
+                        // Ensure on navmesh
+                        if (!m_NavmeshComponent.GetClosestPoint(stepPos, navmeshPoint))
+                            break;
+                            
+                        stepPos = navmeshPoint;
+                        
+                        m_MainPath.Insert(stepPos);
+                        visitedPoints.Insert(stepPos);
+                        
+                        float stepLength = vector.Distance(currentPos, stepPos);
+                        currentPathLength += stepLength;
+                        currentPos = stepPos;
+                        remainingRoad -= nextStep;
+                    }
+                }
+            }
+            else
+            {
+                // Could not find valid road continuation
+                Print("SCR_RoadPathGenerator: WARNING - Path generation terminated - could not find valid road continuation", LogLevel.WARNING);
+                break;
+            }
+        }
+        
+        return m_MainPath.Count() > 1;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Find road-like direction from current position
+    //------------------------------------------------------------------------------------------------
+    bool FindRoadDirection(vector currentPos, array<vector> visitedPoints, out vector nextDirection, out float roadLength, out bool isJunction)
+    {
+        // Sample multiple directions and find those that stay on navmesh the longest
+        array<vector> candidateDirections = new array<vector>();
+        array<float> candidateDistances = new array<float>();
+        
+        // Sample directions evenly around the circle
+        for (int i = 0; i < 16; i++)
+        {
+            float angle = i * 22.5 * Math.DEG2RAD;
+            vector testDir = Vector(Math.Cos(angle), 0, Math.Sin(angle));
+            
+            // Check how far we can go in this direction
+            float distance = TestNavmeshDirection(currentPos, testDir, 200.0);
+            
+            if (distance > 5.0) // Minimum threshold to consider
+            {
+                candidateDirections.Insert(testDir);
+                candidateDistances.Insert(distance);
+            }
+        }
+        
+        // If we have no candidates, return failure
+        if (candidateDirections.IsEmpty())
+            return false;
+        
+        // Sort candidates by distance (best first)
+        for (int i = 0; i < candidateDistances.Count() - 1; i++)
+        {
+            for (int j = i + 1; j < candidateDistances.Count(); j++)
+            {
+                if (candidateDistances[j] > candidateDistances[i])
+                {
+                    // Swap values
+                    float tempDist = candidateDistances[i];
+                    candidateDistances[i] = candidateDistances[j];
+                    candidateDistances[j] = tempDist;
+                    
+                    vector tempDir = candidateDirections[i];
+                    candidateDirections[i] = candidateDirections[j];
+                    candidateDirections[j] = tempDir;
+                }
+            }
+        }
+        
+        // Detect if this is a junction
+        int significantDirections = 0;
+        for (int i = 0; i < candidateDistances.Count(); i++)
+        {
+            if (candidateDistances[i] > 20.0) // Consider directions with at least 20m navigable
+            {
+                significantDirections++;
+            }
+        }
+        
+        isJunction = significantDirections >= 3;
+        
+        // Avoid going back the way we came if possible
+        if (m_MainPath.Count() >= 2)
+        {
+            // Get previous direction
+            vector prevPos = m_MainPath[m_MainPath.Count() - 2];
+            vector prevDir = currentPos - prevPos;
+            prevDir[1] = 0;
+            prevDir.Normalize();
+            
+            // Filter directions that would take us back
+            array<int> forwardCandidates = new array<int>();
+            
+            for (int i = 0; i < candidateDirections.Count(); i++)
+            {
+                float dot = prevDir.Dot(candidateDirections[i]);
+                
+                // Avoid directions too similar to where we came from
+                if (dot > -0.7) // Less than ~135 degree turn back
+                {
+                    forwardCandidates.Insert(i);
+                }
+            }
+            
+            // Also check for previously visited points
+            for (int i = forwardCandidates.Count() - 1; i >= 0; i--)
+            {
+                int candidateIdx = forwardCandidates[i];
+                vector testPos = currentPos + candidateDirections[candidateIdx] * 20.0;
+                
+                foreach (vector visitedPoint : visitedPoints)
+                {
+                    if (vector.Distance(testPos, visitedPoint) < 10.0)
+                    {
+                        // Direction would take us too close to a visited point
+                        forwardCandidates.RemoveOrdered(i);
+                        break;
+                    }
+                }
+            }
+            
+            // Select the best candidate that doesn't go back
+            if (!forwardCandidates.IsEmpty())
+            {
+                // At junctions, prefer turning
+                if (isJunction)
+                {
+                    // Look for directions that represent turns
+                    array<int> turnCandidates = new array<int>();
+                    
+                    for (int i = 0; i < forwardCandidates.Count(); i++)
+                    {
+                        int idx = forwardCandidates[i];
+                        float dot = prevDir.Dot(candidateDirections[idx]);
+                        
+                        if (dot < 0.7) // Less than ~45 degree similarity (i.e., a turn)
+                        {
+                            turnCandidates.Insert(idx);
+                        }
+                    }
+                    
+                    // If we have turn candidates, select randomly among them
+                    if (!turnCandidates.IsEmpty())
+                    {
+                        int randomIndex = Math.RandomInt(0, turnCandidates.Count());
+                        int selectedIdx = turnCandidates[randomIndex];
+                        
+                        nextDirection = candidateDirections[selectedIdx];
+                        roadLength = candidateDistances[selectedIdx];
+                        return true;
+                    }
+                }
+                
+                // Otherwise just select the best non-backtracking direction
+                int bestIdx = forwardCandidates[0];
+                nextDirection = candidateDirections[bestIdx];
+                roadLength = candidateDistances[bestIdx];
+                return true;
+            }
+        }
+        
+        // Default: use the best direction
+        nextDirection = candidateDirections[0];
+        roadLength = candidateDistances[0];
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Test how far we can travel in a direction while staying on navmesh
+    //------------------------------------------------------------------------------------------------
+    float TestNavmeshDirection(vector startPos, vector direction, float maxDistance)
+    {
+        float distance = 0;
+        float step = 5.0; // 5m steps
+        
+        vector testPos = startPos;
+        vector navmeshPoint;
+        
+        while (distance < maxDistance)
+        {
+            testPos = testPos + direction * step;
+            testPos[1] = GetGame().GetWorld().GetSurfaceY(testPos[0], testPos[2]);
+            
+            if (!m_NavmeshComponent.GetClosestPoint(testPos, navmeshPoint))
+                break;
+            
+            // Check if navmesh point is still close to our test line
+            if (vector.Distance(testPos, navmeshPoint) > 2.0)
+                break;
+            
+            distance += step;
+        }
+        
+        return distance;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Find the nearest point on the navmesh within given radius
+    //------------------------------------------------------------------------------------------------
+    vector FindNearestNavmeshPoint(vector position, float maxRadius)
+    {
+        // Try to find the nearest navmesh point within a radius
+        for (float radius = 5.0; radius <= maxRadius; radius += 5.0)
+        {
+            for (float angle = 0; angle < 360; angle += 45)
+            {
+                float rad = angle * Math.DEG2RAD;
+                vector testPos = position;
+                testPos[0] += radius * Math.Cos(rad);
+                testPos[2] += radius * Math.Sin(rad);
+                testPos[1] = GetGame().GetWorld().GetSurfaceY(testPos[0], testPos[2]);
+                
+                vector navmeshPoint;
+                if (m_NavmeshComponent.GetClosestPoint(testPos, navmeshPoint))
+                {
+                    return navmeshPoint;
+                }
+            }
+        }
+        
+        return vector.Zero;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Find the nearest road point from a given position
+    //------------------------------------------------------------------------------------------------
+    vector FindNearestRoadPoint(vector position, float maxRadius)
+    {
+        // If RoadNetworkManager is available, use it to find closest road
+        if (m_RoadNetworkManager)
+        {
+            // Define an AABB around the position
+            vector aabbMin = position - Vector(maxRadius, 1000, maxRadius);
+            vector aabbMax = position + Vector(maxRadius, 1000, maxRadius);
+            
+            // Get all roads in the AABB
+            array<BaseRoad> roads = {};
+            int roadCount = m_RoadNetworkManager.GetRoadsInAABB(aabbMin, aabbMax, roads);
+            
+            if (roadCount > 0)
+            {
+                // Find the closest point on any road
+                vector closestPoint = vector.Zero;
+                float closestDistance = maxRadius;
+                
+                foreach (BaseRoad road : roads)
+                {
+                    array<vector> roadPoints = {};
+                    road.GetPoints(roadPoints);
+                    
+                    foreach (vector point : roadPoints)
+                    {
+                        float dist = vector.Distance(position, point);
+                        if (dist < closestDistance)
+                        {
+                            closestDistance = dist;
+                            closestPoint = point;
+                        }
+                    }
+                }
+                
+                if (closestPoint != vector.Zero)
+                    return closestPoint;
+            }
+        }
+        
+        // Fallback to navmesh-based detection
+        return FindRoadLikeFeature(position, maxRadius);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Find road-like features using navmesh analysis
+    //------------------------------------------------------------------------------------------------
+    vector FindRoadLikeFeature(vector position, float maxRadius)
+    {
+        // Start with the closest navmesh point
+        vector startPoint;
+        if (!m_NavmeshComponent.GetClosestPoint(position, startPoint))
+            return vector.Zero;
+        
+        // Sample in an expanding spiral to find road-like features
+        vector bestPoint = vector.Zero;
+        float bestRoadness = 0;
+        
+        float spiralStep = 10.0;
+        float spiralAngle = 0;
+        float spiralRadius = 0;
+        
+        while (spiralRadius < maxRadius)
+        {
+            // Calculate point on spiral
+            vector testPos = position;
+            testPos[0] += spiralRadius * Math.Cos(spiralAngle);
+            testPos[2] += spiralRadius * Math.Sin(spiralAngle);
+            testPos[1] = GetGame().GetWorld().GetSurfaceY(testPos[0], testPos[2]);
+            
+            // Ensure position is on navmesh
+            vector navmeshPoint;
+            if (m_NavmeshComponent.GetClosestPoint(testPos, navmeshPoint))
+            {
+                // Check "roadness" by testing how far we can go in opposite directions
+                float roadness = EvaluateRoadness(navmeshPoint);
+                
+                if (roadness > bestRoadness)
+                {
+                    bestRoadness = roadness;
+                    bestPoint = navmeshPoint;
+                    
+                    // If we found a very good road point, return it
+                    if (roadness > 0.8)
+                        return bestPoint;
+                }
+            }
+            
+            // Update spiral parameters
+            spiralAngle += 0.5; // Radians
+            spiralRadius = spiralStep * spiralAngle / (2 * Math.PI);
+        }
+        
+        // Return best point found, or zero if none
+        return bestRoadness > 0.5 ? bestPoint : vector.Zero;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Evaluate how "road-like" a position is based on navmesh analysis
+    //------------------------------------------------------------------------------------------------
+    float EvaluateRoadness(vector position)
+    {
+        // Evaluate how "road-like" a position is
+        // Roads typically have two long, opposite directions where you can travel
+        // and limited options in other directions
+        
+        // Test 8 directions
+        array<float> directionDistances = new array<float>();
+        
+        for (int i = 0; i < 8; i++)
+        {
+            float angle = i * 45 * Math.DEG2RAD;
+            vector direction = Vector(Math.Cos(angle), 0, Math.Sin(angle));
+            
+            float distance = TestNavmeshDirection(position, direction, 100.0);
+            directionDistances.Insert(distance);
+        }
+        
+        // Find the two longest directions
+        float longest = 0;
+        float secondLongest = 0;
+        int longestIndex = -1;
+        
+        for (int i = 0; i < directionDistances.Count(); i++)
+        {
+            if (directionDistances[i] > longest)
+            {
+                secondLongest = longest;
+                longest = directionDistances[i];
+                longestIndex = i;
+            }
+            else if (directionDistances[i] > secondLongest)
+            {
+                secondLongest = directionDistances[i];
+            }
+        }
+        
+        // Check if the longest direction has an opposite direction that's also long
+        // (would indicate a road going through)
+        int oppositeIndex = (longestIndex + 4) % 8;
+        float oppositeLength = directionDistances[oppositeIndex];
+        
+        // Calculate roadness score
+        float roadness = 0;
+        
+        if (longest > 50 && oppositeLength > 30)
+        {
+            // This is very likely a road - two long opposite directions
+            roadness = 0.8 + (Math.Min(longest, 100) / 500); // Max 1.0
+        }
+        else if (longest > 50 && secondLongest > 30)
+        {
+            // Could be a road or intersection
+            roadness = 0.6 + (Math.Min(longest, 100) / 500);
+        }
+        else if (longest > 30)
+        {
+            // Might be a road endpoint or small path
+            roadness = 0.4 + (Math.Min(longest, 100) / 500);
+        }
+        else
+        {
+            // Probably not a road
+            roadness = Math.Min(longest, 100) / 250; // Max 0.4
+        }
+        
+        return roadness;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Generate branch paths from junction points
+    //------------------------------------------------------------------------------------------------
+    void GenerateBranchPaths()
+    {
+        // If we don't have any junctions, we can't create branches
+        if (m_JunctionPoints.IsEmpty())
+        {
+            Print("SCR_RoadPathGenerator: WARNING - No junctions found, cannot create branch paths", LogLevel.WARNING);
+            return;
+        }
+        
+        Print("SCR_RoadPathGenerator: Generating branch paths from " + m_JunctionPoints.Count() + " junctions");
+        
+        // Randomize junction list for variety
+        array<vector> junctionCandidates = new array<vector>();
+        junctionCandidates.Copy(m_JunctionPoints);
+        
+        // Randomize junction order
+        for (int i = junctionCandidates.Count() - 1; i > 0; i--)
+        {
+            int j = Math.RandomInt(0, i + 1);
+            vector temp = junctionCandidates[i];
+            junctionCandidates[i] = junctionCandidates[j];
+            junctionCandidates[j] = temp;
+        }
+        
+        // Limit to max branches
+        int branchesToCreate = Math.Min(m_iMaxBranches, junctionCandidates.Count());
+        
+        // Create branches
+        for (int i = 0; i < branchesToCreate; i++)
+        {
+            vector junctionPoint = junctionCandidates[i];
+            
+            // Create a new array for this branch
+            ref array<vector> branchPath = new array<vector>();
+            
+            // Start branch at junction point
+            branchPath.Insert(junctionPoint);
+            
+            // Generate branch path
+            // For branch paths, we use navmesh-based generation since branch roads
+            // might not be in the main road network
+            bool success = GeneratePathFromNavmesh(junctionPoint);
+            
+            // Use resulting main path as the branch path
+            if (success && m_MainPath.Count() > 2)
+            {
+                ref array<vector> newBranch = new array<vector>();
+                newBranch.Copy(m_MainPath);
+                
+                // Calculate branch length
+                float branchLength = CalculatePathLength(newBranch);
+                
+                if (branchLength >= m_fMinBranchLength)
+                {
+                    // Add to branch list
+                    m_BranchPaths.Insert(newBranch);
+                    Print("SCR_RoadPathGenerator: Generated branch " + i + " from junction, length: " + branchLength + "m, points: " + newBranch.Count());
+                }
+                else
+                {
+                    Print("SCR_RoadPathGenerator: Branch " + i + " too short, discarding: " + branchLength + "m < " + m_fMinBranchLength + "m", LogLevel.WARNING);
+                }
+            }
+            else
+            {
+                Print("SCR_RoadPathGenerator: Failed to generate branch " + i + " from junction", LogLevel.WARNING);
+            }
+            
+            // Restore main path
+            GenerateRoadPath();
+        }
+        
+        Print("SCR_RoadPathGenerator: Generated " + m_BranchPaths.Count() + " branch paths");
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Spawn waypoint entities along the generated paths
+    //------------------------------------------------------------------------------------------------
+    void SpawnWaypoints()
+    {
+        // Clean up any previously spawned waypoints
+        foreach (IEntity waypoint in m_SpawnedWaypoints)
+        {
+            if (waypoint)
+                delete waypoint;
+        }
+        m_SpawnedWaypoints.Clear();
+        
+        Print("SCR_RoadPathGenerator: Spawning waypoints for generated paths...");
+        
+        // Create waypoints along main path
+        for (int i = 0; i < m_MainPath.Count(); i++)
+        {
+            vector waypointPos = m_MainPath[i];
+            
+            // Skip points that are too close together
+            if (i > 0 && vector.Distance(m_MainPath[i-1], waypointPos) < 5.0)
+                continue;
+                
+            bool isJunction = IsPositionJunction(waypointPos);
+            
+            // Skip junction point if we don't want waypoints at intersections
+            if (!m_bWaypointAtIntersections && isJunction)
+                continue;
+                
+            // Spawn waypoint
+            IEntity waypointEntity = SpawnWaypoint(waypointPos, "RoadWP_Main_" + i.ToString(), isJunction);
+            
+            if (waypointEntity)
+            {
+                m_SpawnedWaypoints.Insert(waypointEntity);
+                
+                // Notify listeners
+                m_OnWaypointCreated.Invoke(waypointEntity, waypointPos);
+            }
+        }
+        
+        // Create waypoints for branch paths if any
+        for (int branchIdx = 0; branchIdx < m_BranchPaths.Count(); branchIdx++)
+        {
+            array<vector> branch = m_BranchPaths[branchIdx];
+            
+            // Skip the first point as it's a junction already in the main path
+            for (int i = 1; i < branch.Count(); i++)
+            {
+                vector waypointPos = branch[i];
+                
+                // Skip points that are too close together
+                if (i > 1 && vector.Distance(branch[i-1], waypointPos) < 5.0)
+                    continue;
+                    
+                // Spawn waypoint
+                IEntity waypointEntity = SpawnWaypoint(waypointPos, "RoadWP_Branch" + branchIdx + "_" + i.ToString(), false);
+                
+                if (waypointEntity)
+                {
+                    m_SpawnedWaypoints.Insert(waypointEntity);
+                    
+                    // Notify listeners
+                    m_OnWaypointCreated.Invoke(waypointEntity, waypointPos);
+                }
+            }
+        }
+        
+        Print("SCR_RoadPathGenerator: Spawned " + m_SpawnedWaypoints.Count() + " waypoints");
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Spawn a single waypoint entity
+    //------------------------------------------------------------------------------------------------
+    protected IEntity SpawnWaypoint(vector position, string name, bool isJunction)
+    {
+        // Create spawn parameters
+        EntitySpawnParams params = new EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+        Math3D.MatrixIdentity4(params.Transform);
+        params.Transform[3] = position;
+        
+        // Spawn waypoint
+        IEntity waypointEntity = GetGame().SpawnEntityPrefab(Resource.Load(m_WaypointPrefab), GetGame().GetWorld(), params);
+        
+        if (waypointEntity)
+        {
+            AIWaypoint waypoint = AIWaypoint.Cast(waypointEntity);
+            if (waypoint)
+            {
+                // Set waypoint properties
+                waypoint.SetName(name);
+                waypoint.SetCompletionRadius(5.0); // Adjust as needed
+                
+                // For junction waypoints, add special properties
+                if (isJunction)
+                {
+                    // For example, set a hold time for timed waypoints
+                    SCR_TimedWaypoint timedWP = SCR_TimedWaypoint.Cast(waypoint);
+                    if (timedWP)
+                    {
+                        timedWP.SetHoldingTime(2.0);
+                    }
+                    
+                    // Add "Junction" to the name for clarity
+                    waypoint.SetName(name + "_Junction");
+                }
+                
+                // Add debug visualization if enabled
+                if (m_bDebugVisualize)
+                {
+                    Shape sphere = Shape.CreateSphere(
+                        COLOR_RED, 
+                        ShapeFlags.VISIBLE | ShapeFlags.NOOUTLINE, 
+                        position, 
+                        isJunction ? 2.0 : 1.0
+                    );
+                }
+            }
+            
+            return waypointEntity;
+        }
+        
+        return null;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Save the generated path data to a file
+    //------------------------------------------------------------------------------------------------
+    void SavePathToFile()
+    {
+        if (m_sOutputFilePath.IsEmpty())
+        {
+            Print("SCR_RoadPathGenerator: WARNING - Cannot save path, no output file specified", LogLevel.WARNING);
+            return;
+        }
+        
+        FileHandle file = FileIO.OpenFile(m_sOutputFilePath, FileMode.WRITE);
+        if (!file)
+        {
+            Print("SCR_RoadPathGenerator: ERROR - Failed to open output file: " + m_sOutputFilePath, LogLevel.ERROR);
+            return;
+        }
+        
+        // Write header
+        file.WriteLine("SCR_RoadPathGenerator Output - " + GetGame().GetWorld().GetWorldTime().ToString());
+        file.WriteLine("Main Path Length: " + CalculatePathLength(m_MainPath) + "m, Points: " + m_MainPath.Count());
+        file.WriteLine("Number of Junctions: " + m_JunctionPoints.Count());
+        file.WriteLine("Number of Branches: " + m_BranchPaths.Count());
+        file.WriteLine("-----------------------------------");
+        
+        // Write main path
+        file.WriteLine("MAIN PATH:");
+        for (int i = 0; i < m_MainPath.Count(); i++)
+        {
+            vector point = m_MainPath[i];
+            string isJunction = IsPositionJunction(point) ? " [JUNCTION]" : "";
+            file.WriteLine(i.ToString() + ": " + point.ToString() + isJunction);
+        }
+        
+        // Write branches
+        for (int branchIdx = 0; branchIdx < m_BranchPaths.Count(); branchIdx++)
+        {
+            array<vector> branch = m_BranchPaths[branchIdx];
+            file.WriteLine("-----------------------------------");
+            file.WriteLine("BRANCH " + branchIdx + " (Length: " + CalculatePathLength(branch) + "m, Points: " + branch.Count() + "):");
+            
+            for (int i = 0; i < branch.Count(); i++)
+            {
+                vector point = branch[i];
+                file.WriteLine(i.ToString() + ": " + point.ToString());
+            }
+        }
+        
+        file.Close();
+        Print("SCR_RoadPathGenerator: Path data saved to " + m_sOutputFilePath);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Helper functions
+    //------------------------------------------------------------------------------------------------
+    bool IsPositionJunction(vector position)
+    {
+        foreach (vector junction in m_JunctionPoints)
+        {
+            if (vector.Distance(position, junction) < 5.0)
+                return true;
+        }
+        return false;
+    }
+    
+    float CalculatePathLength(array<vector> path)
+    {
+        float length = 0;
+        
+        for (int i = 1; i < path.Count(); i++)
+        {
+            length += vector.Distance(path[i-1], path[i]);
+        }
+        
+        return length;
+    }
+    
+    void ClearGeneratedData()
+    {
+        m_MainPath.Clear();
+        m_JunctionPoints.Clear();
+        
+        // Clear branch paths
+        foreach (array<vector> branch : m_BranchPaths)
+        {
+            branch.Clear();
+        }
+        m_BranchPaths.Clear();
+        
+        m_bPathGenerated = false;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Public API for other components
+    //------------------------------------------------------------------------------------------------
+    array<vector> GetMainPath()
+    {
+        return m_MainPath;
+    }
+    
+    array<array<vector>> GetBranchPaths()
+    {
+        return m_BranchPaths;
+    }
+    
+    array<vector> GetJunctions()
+    {
+        return m_JunctionPoints;
+    }
+    
+    array<IEntity> GetWaypoints()
+    {
+        return m_SpawnedWaypoints;
+    }
+    
+    bool IsPathGenerated()
+    {
+        return m_bPathGenerated;
+    }
+    
+    ScriptInvoker<array<vector>> GetOnPathGenerated()
+    {
+        return m_OnPathGenerated;
+    }
+    
+    ScriptInvoker<IEntity, vector> GetOnWaypointCreated()
+    {
+        return m_OnWaypointCreated;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    // Cleanup when entity is deleted
+    //------------------------------------------------------------------------------------------------
+    override void OnDelete(IEntity owner)
+    {
+        // Clean up spawned waypoints
+        foreach (IEntity waypoint in m_SpawnedWaypoints)
+        {
+            if (waypoint)
+                delete waypoint;
+        }
+        
+        m_SpawnedWaypoints.Clear();
+        super.OnDelete(owner);
+    }
+}
+
+
+
+
+
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
+
+// Automated Road Physics Test Mission using the Road Path Generator
+[EntityEditorProps(category: "GameScripted/Missions", description: "Road Physics Test Mission with automatic path generation")]
+class SCR_RoadPhysicsTestMissionClass: SCR_BaseGameModeClass
+{
+}
+
+class SCR_RoadPhysicsTestMission: SCR_BaseGameMode
+{
+    [Attribute("$logs:PhysicsTest", UIWidgets.EditBox, "Output directory for recorded data")]
+    private string m_OutputDirectory;
+    
+    [Attribute("", UIWidgets.ResourceNamePicker, "Vehicle prefab to test", params: "et")]
+    private ResourceName m_VehiclePrefab;
+    
+    // Road Generation Settings
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Generate road path automatically")]
+    protected bool m_bAutoGeneratePath;
+    
+    [Attribute(defvalue: "1000", UIWidgets.EditBox, "Length of road path to generate (meters)")]
+    protected float m_fPathLength;
+    
+    [Attribute(defvalue: "50", UIWidgets.EditBox, "Waypoint spacing (meters)")]
+    protected float m_fWaypointSpacing;
+    
+    [Attribute(defvalue: "0 0 0", UIWidgets.EditBox, "Start position for path (or use entity position if zero)")]
+    protected vector m_vPathStartPosition;
+    
+    // Test Settings
+    [Attribute(defvalue: "30", UIWidgets.Slider, "Target speed (km/h)", "5 200 5")]
+    protected float m_fTargetSpeed;
+    
+    [Attribute(defvalue: "0", UIWidgets.CheckBox, "Use AI driver instead of physics driver")]
+    protected bool m_bUseAIDriver;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Follow vehicle with camera")]
+    protected bool m_bFollowVehicle;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Record physics data")]
+    protected bool m_bRecordPhysics;
+    
+    [Attribute(defvalue: "30", UIWidgets.EditBox, "Recording frequency (Hz)")]
+    protected float m_fRecordingFrequency;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Capture screenshots")]
+    protected bool m_bCaptureScreenshots;
+    
+    [Attribute(defvalue: "5", UIWidgets.EditBox, "Screenshot interval (seconds)")]
+    protected float m_fScreenshotInterval;
+    
+    [Attribute(defvalue: "1", UIWidgets.CheckBox, "Record terrain data")]
+    protected bool m_bRecordTerrainData;
+    
+    // Internal variables
+    private IEntity m_MainCamera;
+    private Vehicle m_Vehicle;
+    private SCR_AIGroup m_AIGroup;
+    private ref array<AIWaypoint> m_Waypoints = {};
+    private ref array<IEntity> m_SpawnedEntities = {};
+    private ref array<vector> m_RoadPath = {};
+    
+    // Physics recording variables
+    private FileHandle m_PhysicsDataFile;
+    private FileHandle m_TerrainDataFile;
+    private FileHandle m_ScreenshotLogFile;
+    private float m_PhysicsRecordTimer = 0;
+    private float m_ScreenshotTimer = 0;
+    private int m_ScreenshotCounter = 0;
+    private int m_CurrentWaypointIndex = 0;
+    private float m_AverageSpeed = 0;
+    private float m_MaxSpeed = 0;
+    private float m_TestDuration = 0;
+    private float m_TotalDistance = 0;
+    
+    // Road generator reference
+    private SCR_RoadPathGenerator m_RoadGenerator;
+    
+    //------------------------------------------------------------------------------------------------
+    void SCR_RoadPhysicsTestMission(IEntitySource src, IEntity parent)
+    {
+        SetEventMask(EntityEvent.INIT);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    override void OnGameStart()
+    {
+        super.OnGameStart();
+        
+        Print("SCR_RoadPhysicsTestMission: Initializing...");
+        
+        // Create output directories
+        FileIO.MakeDirectory(m_OutputDirectory);
+        FileIO.MakeDirectory(m_OutputDirectory + "/screenshots");
+        FileIO.MakeDirectory(m_OutputDirectory + "/data");
+        
+        // Use callqueue to allow the world to fully load
+        GetGame().GetCallqueue().CallLater(InitializeTest, 2000, false);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void InitializeTest()
+    {
+        // Set up camera
+        CreateCamera();
+        
+        if (m_bAutoGeneratePath)
+        {
+            // Create and configure road path generator
+            CreateRoadPathGenerator();
+        }
+        else
+        {
+            // Directly proceed to vehicle spawning
+            SpawnTestVehicle();
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void CreateCamera()
+    {
+        // Create a script camera
+        EntitySpawnParams params = new EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+        Math3D.MatrixIdentity4(params.Transform);
+        
+        Resource cameraRes = Resource.Load("{917BDCEF4C2CD325}Prefabs/Cameras/Camera.et");
+        m_MainCamera = GetGame().SpawnEntityPrefab(cameraRes, GetGame().GetWorld(), params);
+        
+        if (m_MainCamera)
+        {
+            m_MainCamera.SetName("PhysicsTestCamera");
+            
+            // Configure camera
+            ScriptCamera scriptCam = ScriptCamera.Cast(m_MainCamera);
+            if (scriptCam)
+            {
+                scriptCam.FOV = 60;
+                scriptCam.NearPlane = 0.1;
+                scriptCam.FarPlane = 1000;
+                
+                if (!m_bFollowVehicle)
+                {
+                    // Static camera at elevated position for overview
+                    vector position = m_vPathStartPosition;
+                    if (position == vector.Zero)
+                    {
+                        position = GetOrigin();
+                    }
+                    
+                    position[1] += 50.0; // Elevate camera
+                    scriptCam.SetOrigin(position);
+                    
+                    // Look down
+                    vector direction = Vector(0, -1, 0.2);
+                    direction.Normalize();
+                    scriptCam.SetAngles(direction);
+                }
+            }
+            
+            m_SpawnedEntities.Insert(m_MainCamera);
+            Print("SCR_RoadPhysicsTestMission: Camera created");
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void CreateRoadPathGenerator()
+    {
+        Print("SCR_RoadPhysicsTestMission: Creating road path generator...");
+        
+        // Create entity for road generator
+        EntitySpawnParams params = new EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+        Math3D.MatrixIdentity4(params.Transform);
+        
+        if (m_vPathStartPosition != vector.Zero)
+        {
+            params.Transform[3] = m_vPathStartPosition;
+        }
+        else
+        {
+            params.Transform[3] = GetOrigin();
+        }
+        
+        // Create generic entity
+        IEntity generatorEntity = GetGame().SpawnEntity(GenericEntity, GetGame().GetWorld(), params);
+        
+        if (generatorEntity)
+        {
+            generatorEntity.SetName("RoadPathGenerator");
+            m_SpawnedEntities.Insert(generatorEntity);
+            
+            // Create road generator component
+            m_RoadGenerator = SCR_RoadPathGenerator.Cast(generatorEntity.AddComponent(SCR_RoadPathGenerator));
+            
+            if (m_RoadGenerator)
+            {
+                // Configure generator
+                m_RoadGenerator.m_fPathLength = m_fPathLength;
+                m_RoadGenerator.m_fWaypointSpacing = m_fWaypointSpacing;
+                m_RoadGenerator.m_vStartPosition = m_vPathStartPosition;
+                m_RoadGenerator.m_bSnapToRoad = true;
+                m_RoadGenerator.m_bSpawnWaypoints = true;
+                m_RoadGenerator.m_bAutoGenerate = false; // We will manually call generation
+                
+                // Subscribe to path generated event
+                m_RoadGenerator.GetOnPathGenerated().Insert(OnRoadPathGenerated);
+                
+                // Generate road path
+                if (m_RoadGenerator.InitializeNavmesh())
+                {
+                    Print("SCR_RoadPhysicsTestMission: Starting road path generation...");
+                    m_RoadGenerator.GenerateRoadPath();
+                }
+                else
+                {
+                    Print("SCR_RoadPhysicsTestMission: ERROR - Failed to initialize road generator navmesh!", LogLevel.ERROR);
+                    SpawnTestVehicle(); // Proceed without road path
+                }
+            }
+            else
+            {
+                Print("SCR_RoadPhysicsTestMission: ERROR - Failed to create road generator component!", LogLevel.ERROR);
+                SpawnTestVehicle(); // Proceed without road path
+            }
+        }
+        else
+        {
+            Print("SCR_RoadPhysicsTestMission: ERROR - Failed to create road generator entity!", LogLevel.ERROR);
+            SpawnTestVehicle(); // Proceed without road path
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void OnRoadPathGenerated(array<vector> roadPath)
+    {
+        Print("SCR_RoadPhysicsTestMission: Road path generation complete!");
+        m_RoadPath = roadPath;
+        
+        // Get generated waypoints
+        array<IEntity> waypoints = m_RoadGenerator.GetWaypoints();
+        
+        foreach (IEntity wpEntity : waypoints)
+        {
+            AIWaypoint waypoint = AIWaypoint.Cast(wpEntity);
+            if (waypoint)
+            {
+                m_Waypoints.Insert(waypoint);
+            }
+        }
+        
+        Print("SCR_RoadPhysicsTestMission: Retrieved " + m_Waypoints.Count() + " waypoints");
+        
+        // Proceed with vehicle spawning
+        SpawnTestVehicle();
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void SpawnTestVehicle()
+    {
+        Print("SCR_RoadPhysicsTestMission: Spawning test vehicle...");
+        
+        // Determine spawn position
+        vector spawnPosition;
+        if (!m_RoadPath.IsEmpty())
+        {
+            spawnPosition = m_RoadPath[0]; // Use first point of generated path
+        }
+        else if (m_vPathStartPosition != vector.Zero)
+        {
+            spawnPosition = m_vPathStartPosition;
+        }
+        else
+        {
+            spawnPosition = GetOrigin();
+        }
+        
+        // Ensure vehicle spawns above terrain
+        float surfaceY = GetGame().GetWorld().GetSurfaceY(spawnPosition[0], spawnPosition[2]);
+        spawnPosition[1] = surfaceY + 0.5;
+        
+        // Calculate spawn rotation
+        vector spawnDir = vector.Forward;
+        
+        // If we have a path with at least 2 points, align vehicle with path direction
+        if (m_RoadPath.Count() > 1)
+        {
+            spawnDir = m_RoadPath[1] - m_RoadPath[0];
+            spawnDir[1] = 0;
+            spawnDir.Normalize();
+        }
+        
+        // Create spawn transform
+        vector mat[4];
+        Math3D.DirectionAndUpMatrix(spawnDir, vector.Up, mat);
+        
+        // Create spawn parameters
+        EntitySpawnParams params = new EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+        params.Transform = mat;
+        params.Transform[3] = spawnPosition;
+        
+        // Spawn the vehicle
+        IEntity vehicleEntity;
+        
+        if (m_VehiclePrefab.IsEmpty())
+        {
+            // Use a default vehicle if none specified
+            Print("SCR_RoadPhysicsTestMission: No vehicle prefab specified, using default");
+            Resource defaultVehicle = Resource.Load("{5436629450D8387A}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et");
+            vehicleEntity = GetGame().SpawnEntityPrefab(defaultVehicle, GetGame().GetWorld(), params);
+        }
+        else
+        {
+            vehicleEntity = GetGame().SpawnEntityPrefab(Resource.Load(m_VehiclePrefab), GetGame().GetWorld(), params);
+        }
+        
+        m_Vehicle = Vehicle.Cast(vehicleEntity);
+        
+        if (m_Vehicle)
+        {
+            m_Vehicle.SetName("TestVehicle");
+            Print("SCR_RoadPhysicsTestMission: Vehicle spawned successfully at " + spawnPosition.ToString());
+            m_SpawnedEntities.Insert(m_Vehicle);
+            
+            // Set up recording files
+            InitializeRecordingFiles();
+            
+            // Setup driver based on configuration
+            if (m_bUseAIDriver)
+            {
+                SetupAIDriver();
+            }
+            
+            // Start frame updates
+            SetEventMask(EntityEvent.FRAME);
+            
+            Print("SCR_RoadPhysicsTestMission: Test setup complete - starting test");
+        }
+        else
+        {
+            Print("SCR_RoadPhysicsTestMission: ERROR - Failed to spawn vehicle!", LogLevel.ERROR);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void InitializeRecordingFiles()
+    {
+        // Create physics data file if enabled
+        if (m_bRecordPhysics)
+        {
+            string physicsFilename = m_OutputDirectory + "/data/physics_data.csv";
+            m_PhysicsDataFile = FileIO.OpenFile(physicsFilename, FileMode.WRITE);
+            
+            if (m_PhysicsDataFile)
+            {
+                // Write CSV header
+                m_PhysicsDataFile.WriteLine("Time,WaypointIndex,PosX,PosY,PosZ,VelX,VelY,VelZ,SpeedKmh,RotX,RotY,RotZ,AngVelX,AngVelY,AngVelZ,DistanceFromStart");
+                Print("SCR_RoadPhysicsTestMission: Physics data recording enabled: " + physicsFilename);
+            }
+            else
+            {
+                Print("SCR_RoadPhysicsTestMission: ERROR - Failed to create physics data file!", LogLevel.ERROR);
+            }
+        }
+        
+        // Create terrain data file if enabled
+        if (m_bRecordTerrainData)
+        {
+            string terrainFilename = m_OutputDirectory + "/data/terrain_data.csv";
+            m_TerrainDataFile = FileIO.OpenFile(terrainFilename, FileMode.WRITE);
+            
+            if (m_TerrainDataFile)
+            {
+                // Write CSV header
+                m_TerrainDataFile.WriteLine("Time,PosX,PosY,PosZ,SurfaceType,Slope,WaypointIndex");
+                Print("SCR_RoadPhysicsTestMission: Terrain data recording enabled: " + terrainFilename);
+            }
+            else
+            {
+                Print("SCR_RoadPhysicsTestMission: ERROR - Failed to create terrain data file!", LogLevel.ERROR);
+            }
+        }
+        
+        // Create screenshot log file if enabled
+        if (m_bCaptureScreenshots)
+        {
+            string screenshotLogFilename = m_OutputDirectory + "/screenshot_log.csv";
+            m_ScreenshotLogFile = FileIO.OpenFile(screenshotLogFilename, FileMode.WRITE);
+            
+            if (m_ScreenshotLogFile)
+            {
+                // Write CSV header
+                m_ScreenshotLogFile.WriteLine("Index,Time,Filename,PosX,PosY,PosZ,Speed,WaypointIndex");
+                Print("SCR_RoadPhysicsTestMission: Screenshot logging enabled: " + screenshotLogFilename);
+            }
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void SetupAIDriver()
+    {
+        Print("SCR_RoadPhysicsTestMission: Setting up AI driver...");
+        
+        if (!m_Vehicle || m_Waypoints.IsEmpty())
+        {
+            Print("SCR_RoadPhysicsTestMission: ERROR - Cannot set up AI driver - vehicle or waypoints missing", LogLevel.ERROR);
+            return;
+        }
+        
+        // Create AI Group
+        EntitySpawnParams groupParams = new EntitySpawnParams();
+        groupParams.TransformMode = ETransformMode.WORLD;
+        Math3D.MatrixIdentity4(groupParams.Transform);
+        groupParams.Transform[3] = m_Vehicle.GetOrigin();
+        
+        Resource groupRes = Resource.Load("{0EDA6A41B05D1898}Prefabs/Groups/OPFOR/Group_OPFOR_Base.et");
+        IEntity groupEntity = GetGame().SpawnEntityPrefab(groupRes, GetGame().GetWorld(), groupParams);
+        
+        m_AIGroup = SCR_AIGroup.Cast(groupEntity);
+        if (!m_AIGroup)
+        {
+            Print("SCR_RoadPhysicsTestMission: ERROR - Failed to create AI Group!", LogLevel.ERROR);
+            return;
+        }
+        
+        m_SpawnedEntities.Insert(groupEntity);
+        
+        // Add waypoints to group
+        foreach (AIWaypoint waypoint : m_Waypoints)
+        {
+            m_AIGroup.AddWaypoint(waypoint);
+        }
+        
+        // Create AI driver character
+        EntitySpawnParams driverParams = new EntitySpawnParams();
+        driverParams.TransformMode = ETransformMode.WORLD;
+        Math3D.MatrixIdentity4(driverParams.Transform);
+        driverParams.Transform[3] = m_Vehicle.GetOrigin();
+        
+        Resource driverRes = Resource.Load("{26B782C61D96731A}Prefabs/Characters/Factions/OPFOR/USSR_Army/Character_USSR_Rifleman.et");
+        IEntity driverEntity = GetGame().SpawnEntityPrefab(driverRes, GetGame().GetWorld(), driverParams);
+        
+        if (!driverEntity)
+        {
+            Print("SCR_RoadPhysicsTestMission: ERROR - Failed to spawn AI driver!", LogLevel.ERROR);
+            return;
+        }
+        
+        m_SpawnedEntities.Insert(driverEntity);
+        
+        // Configure and add character to group
+        AIControlComponent aiControl = AIControlComponent.Cast(driverEntity.FindComponent(AIControlComponent));
+        if (aiControl)
+        {
+            AIAgent agent = aiControl.GetAIAgent();
+            if (agent)
+            {
+                m_AIGroup.AddAgent(agent);
+                
+                // Assign driver to vehicle using a task
+                SCR_AIExecuteTaskScripted enterVehicleTask = new SCR_AIExecuteTaskScripted(agent, "SCR_AIUseVehicleTask");
+                enterVehicleTask.SetParameterEntity("Vehicle", m_Vehicle);
+                enterVehicleTask.SetParameterEnum("TargetCompartment", ECompartmentType.PILOT);
+                
+                // Set AI movement speed (limited by target speed)
+                m_AIGroup.SetSpeedLimit(m_fTargetSpeed / 3.6);
+                
+                Print("SCR_RoadPhysicsTestMission: AI driver created and assigned to vehicle");
+                
+                // Activate AI
+                m_AIGroup.ActivateAI();
+            }
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    override void EOnFrame(IEntity owner, float timeSlice)
+    {
+        super.EOnFrame(owner, timeSlice);
+        
+        if (!m_Vehicle)
+            return;
+            
+        // Update test duration
+        m_TestDuration += timeSlice;
+        
+        // Update camera position if following vehicle
+        if (m_bFollowVehicle && m_MainCamera)
+        {
+            UpdateCameraPosition();
+        }
+        
+        // Update physics recording
+        if (m_bRecordPhysics && m_PhysicsDataFile)
+        {
+            m_PhysicsRecordTimer += timeSlice;
+            
+            if (m_PhysicsRecordTimer >= 1.0 / m_fRecordingFrequency)
+            {
+                RecordPhysicsData();
+                m_PhysicsRecordTimer = 0;
+            }
+        }
+        
+        // Update terrain data recording
+        if (m_bRecordTerrainData && m_TerrainDataFile)
+        {
+            RecordTerrainData();
+        }
+        
+        // Update screenshot capture
+        if (m_bCaptureScreenshots)
+        {
+            m_ScreenshotTimer += timeSlice;
+            
+            if (m_ScreenshotTimer >= m_fScreenshotInterval)
+            {
+                CaptureScreenshot();
+                m_ScreenshotTimer = 0;
+            }
+        }
+        
+        // If not using AI driver, update physics driving
+        if (!m_bUseAIDriver)
+        {
+            UpdateAutomaticDriving(timeSlice);
+        }
+        
+        // Check if test is complete (reached end of path or timeout)
+        CheckTestCompletion();
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void UpdateCameraPosition()
+    {
+        ScriptCamera camera = ScriptCamera.Cast(m_MainCamera);
+        if (!camera)
+            return;
+            
+        vector vehiclePos = m_Vehicle.GetOrigin();
+        vector vehicleDir = GetVehicleDirection();
+        
+        // Position camera behind and above vehicle
+        vector cameraOffset = vehicleDir * -10.0; // 10m behind
+        cameraOffset[1] = 3.0; // 3m above
+        
+        vector cameraPos = vehiclePos + cameraOffset;
+        
+        // Ensure camera doesn't go below terrain
+        float terrainY = GetGame().GetWorld().GetSurfaceY(cameraPos[0], cameraPos[2]);
+        if (cameraPos[1] < terrainY + 1.0)
+        {
+            cameraPos[1] = terrainY + 1.0;
+        }
+        
+        camera.SetOrigin(cameraPos);
+        
+        // Point camera at vehicle, slightly above it
+        vector targetPos = vehiclePos;
+        targetPos[1] += 1.0; // Look at point 1m above vehicle
+        
+        vector lookDir = targetPos - cameraPos;
+        lookDir.Normalize();
+        
+        camera.SetAngles(lookDir);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    vector GetVehicleDirection()
+    {
+        vector mat[4];
+        m_Vehicle.GetTransform(mat);
+        
+        vector dir = mat[2]; // Forward direction in vehicle space
+        dir[1] = 0; // Zero out vertical component
+        dir.Normalize();
+        
+        return dir;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void RecordPhysicsData()
+    {
+        if (!m_PhysicsDataFile || !m_Vehicle)
+            return;
+            
+        Physics physics = m_Vehicle.GetPhysics();
+        if (!physics)
+            return;
+            
+        // Get current time
+        float currentTime = GetGame().GetWorld().GetWorldTime();
+        
+        // Get vehicle data
+        vector position = m_Vehicle.GetOrigin();
+        vector velocity = physics.GetVelocity();
+        vector angularVel = physics.GetAngularVelocity();
+        vector rotation = m_Vehicle.GetYawPitchRoll();
+        float speed = velocity.Length() * Physics.MS2KMH; // Convert m/s to km/h
+        
+        // Update statistics
+        if (speed > m_MaxSpeed)
+            m_MaxSpeed = speed;
+            
+        // Calculate exponential moving average for speed
+        m_AverageSpeed = m_AverageSpeed * 0.95 + speed * 0.05;
+        
+        // Calculate distance from start
+        float distanceFromStart = 0;
+        if (!m_RoadPath.IsEmpty())
+        {
+            distanceFromStart = vector.Distance(position, m_RoadPath[0]);
+        }
+        
+        // Format data as CSV line
+        string line = string.Format("%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",
+            currentTime,
+            m_CurrentWaypointIndex,
+            position[0], position[1], position[2],
+            velocity[0], velocity[1], velocity[2],
+            speed,
+            rotation[0], rotation[1], rotation[2],
+            angularVel[0], angularVel[1], angularVel[2],
+            distanceFromStart
+        );
+        
+        m_PhysicsDataFile.WriteLine(line);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void RecordTerrainData()
+    {
+        if (!m_TerrainDataFile || !m_Vehicle)
+            return;
+            
+        // Get current time
+        float currentTime = GetGame().GetWorld().GetWorldTime();
+        
+        // Get vehicle position
+        vector position = m_Vehicle.GetOrigin();
+        
+        // Get surface information at vehicle position
+        float surfaceY = GetGame().GetWorld().GetSurfaceY(position[0], position[2]);
+        
+        // Get surface type (may need to be implemented based on game's terrain system)
+        string surfaceType = "Default";
+        
+        // Calculate slope (approximate based on nearby points)
+        vector p1 = Vector(position[0] - 1, GetGame().GetWorld().GetSurfaceY(position[0] - 1, position[2]), position[2]);
+        vector p2 = Vector(position[0] + 1, GetGame().GetWorld().GetSurfaceY(position[0] + 1, position[2]), position[2]);
+        vector p3 = Vector(position[0], GetGame().GetWorld().GetSurfaceY(position[0], position[2] - 1), position[2] - 1);
+        vector p4 = Vector(position[0], GetGame().GetWorld().GetSurfaceY(position[0], position[2] + 1), position[2] + 1);
+        
+        // Calculate normal
+        vector v1 = p2 - p1;
+        vector v2 = p4 - p3;
+        vector normal = v1.Cross(v2);
+        normal.Normalize();
+        
+        // Calculate slope angle in degrees
+        float slope = Math.Acos(normal.Dot(vector.Up)) * Math.RAD2DEG;
+        
+        // Format data as CSV line
+        string line = string.Format("%.3f,%.3f,%.3f,%.3f,%s,%.3f,%d",
+            currentTime,
+            position[0], position[1], position[2],
+            surfaceType,
+            slope,
+            m_CurrentWaypointIndex
+        );
+        
+        m_TerrainDataFile.WriteLine(line);
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void CaptureScreenshot()
+    {
+        // Generate filename
+        string filename = string.Format("%1/screenshots/frame_%2.jpg", 
+            m_OutputDirectory, 
+            m_ScreenshotCounter.ToString().PadLeft(6, "0"));
+            
+        // Take screenshot
+        System.MakeScreenshot(filename);
+        
+        // Log screenshot details
+        if (m_ScreenshotLogFile)
+        {
+            // Get current time
+            float currentTime = GetGame().GetWorld().GetWorldTime();
+            
+            // Get vehicle data
+            vector position = m_Vehicle.GetOrigin();
+            float speed = 0;
+            
+            Physics physics = m_Vehicle.GetPhysics();
+            if (physics)
+            {
+                speed = physics.GetVelocity().Length() * Physics.MS2KMH;
+            }
+            
+            // Format data as CSV line
+            string line = string.Format("%d,%.3f,%s,%.3f,%.3f,%.3f,%.3f,%d",
+                m_ScreenshotCounter,
+                currentTime,
+                filename,
+                position[0], position[1], position[2],
+                speed,
+                m_CurrentWaypointIndex
+            );
+            
+            m_ScreenshotLogFile.WriteLine(line);
+        }
+        
+        m_ScreenshotCounter++;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void UpdateAutomaticDriving(float timeSlice)
+    {
+        if (!m_Vehicle || m_Waypoints.IsEmpty())
+            return;
+            
+        // Check if we've reached the current waypoint
+        if (m_CurrentWaypointIndex >= m_Waypoints.Count())
+        {
+            // End of path, stop vehicle
+            StopVehicle();
+            return;
+        }
+        
+        // Get current waypoint
+        AIWaypoint currentWaypoint = m_Waypoints[m_CurrentWaypointIndex];
+        
+        // Calculate distance to waypoint
+        vector waypointPos = currentWaypoint.GetOrigin();
+        vector vehiclePos = m_Vehicle.GetOrigin();
+        vector direction = waypointPos - vehiclePos;
+        direction[1] = 0; // Ignore height for distance calculation
+        float distance = direction.Length();
+        
+        // Check if we've reached the waypoint
+        float completionRadius = currentWaypoint.GetCompletionRadius();
+        if (distance <= completionRadius)
+        {
+            // Move to next waypoint
+            m_CurrentWaypointIndex++;
+            Print("SCR_RoadPhysicsTestMission: Reached waypoint " + (m_CurrentWaypointIndex - 1));
+            
+            // Check if we've reached the end of the path
+            if (m_CurrentWaypointIndex >= m_Waypoints.Count())
+            {
+                Print("SCR_RoadPhysicsTestMission: Reached final waypoint - test complete");
+                StopVehicle();
+                return;
+            }
+            
+            // Update to next waypoint
+            currentWaypoint = m_Waypoints[m_CurrentWaypointIndex];
+            waypointPos = currentWaypoint.GetOrigin();
+            direction = waypointPos - vehiclePos;
+            direction[1] = 0;
+            distance = direction.Length();
+        }
+        
+        // Calculate desired steering direction
+        direction.Normalize();
+        
+        // Get vehicle physics
+        Physics physics = m_Vehicle.GetPhysics();
+        if (!physics)
+            return;
+            
+        // Calculate target speed based on distance to waypoint
+        float targetSpeed = m_fTargetSpeed / 3.6; // Convert km/h to m/s
+        
+        // Reduce speed when approaching waypoint or for sharp turns
+        if (distance < completionRadius * 2)
+        {
+            // Slow down as we approach waypoint
+            targetSpeed *= Math.Clamp(distance / (completionRadius * 2), 0.3, 1.0);
+        }
+        
+        // Calculate current forward direction of vehicle
+        vector vehicleMat[4];
+        m_Vehicle.GetTransform(vehicleMat);
+        vector vehicleForward = vehicleMat[2];
+        vehicleForward[1] = 0;
+        vehicleForward.Normalize();
+        
+        // Calculate angle between vehicle forward and target direction
+        float dot = vehicleForward.Dot(direction);
+        float angle = Math.Acos(Math.Clamp(dot, -1, 1)) * Math.RAD2DEG;
+        
+        // Adjust speed based on turning angle
+        if (angle > 30)
+        {
+            targetSpeed *= Math.Clamp(1.0 - (angle - 30) / 60, 0.2, 1.0);
+        }
+        
+        // Get current velocity
+        vector currentVelocity = physics.GetVelocity();
+        float currentSpeed = currentVelocity.Length();
+        
+        // Calculate desired velocity
+        vector desiredVelocity = direction * targetSpeed;
+        
+        // Calculate steering force (simplified physics steering)
+        vector steeringForce = desiredVelocity - currentVelocity;
+        float steeringFactor = 5.0; // Adjust based on vehicle responsiveness
+        steeringForce *= steeringFactor;
+        
+        // Apply force to vehicle
+        physics.ApplyForce(steeringForce);
+        
+        // Calculate torque to align vehicle with direction of travel
+        vector cross = vehicleForward.Cross(direction);
+        float torqueMagnitude = cross[1] * 500.0 * Math.Clamp(currentSpeed, 1.0, 10.0);
+        vector torque = Vector(0, torqueMagnitude, 0);
+        
+        // Apply torque for steering
+        physics.ApplyTorque(torque);
+        
+        // Update total distance traveled
+        m_TotalDistance += currentSpeed * timeSlice;
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void CheckTestCompletion()
+    {
+        // Check if we've reached the end of the waypoints
+        if (m_bUseAIDriver && m_CurrentWaypointIndex >= m_Waypoints.Count())
+        {
+            // Test complete - AI reached end of path
+            Print("SCR_RoadPhysicsTestMission: AI driver reached end of path - Test complete");
+            FinishTest();
+            return;
+        }
+        
+        // Check if test has timed out (e.g., vehicle stuck or test running too long)
+        float maxTestDuration = 600.0; // 10 minutes timeout
+        if (m_TestDuration > maxTestDuration)
+        {
+            Print("SCR_RoadPhysicsTestMission: Test timeout reached - Test complete");
+            FinishTest();
+            return;
+        }
+        
+        // Check if vehicle is stuck (no movement for a period)
+        Physics physics = m_Vehicle.GetPhysics();
+        if (physics)
+        {
+            float speed = physics.GetVelocity().Length();
+            
+            // If vehicle is stopped for too long and not at end of path
+            static float stuckTimer = 0;
+            if (speed < 0.1 && m_CurrentWaypointIndex < m_Waypoints.Count() - 1)
+            {
+                stuckTimer += 0.1; // Increment stuck timer
+                
+                if (stuckTimer > 10.0) // 10 seconds stuck timeout
+                {
+                    Print("SCR_RoadPhysicsTestMission: Vehicle appears to be stuck - Test complete");
+                    FinishTest();
+                    return;
+                }
+            }
+            else
+            {
+                stuckTimer = 0; // Reset stuck timer if moving
+            }
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void StopVehicle()
+    {
+        if (!m_Vehicle)
+            return;
+            
+        // Stop the vehicle by zeroing velocity
+        Physics physics = m_Vehicle.GetPhysics();
+        if (physics)
+        {
+            physics.SetVelocity(vector.Zero);
+            physics.SetAngularVelocity(vector.Zero);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void FinishTest()
+    {
+        // Stop vehicle
+        StopVehicle();
+        
+        // Write summary data
+        WriteSummaryReport();
+        
+        // Clean up resources
+        CloseDataFiles();
+        
+        // Remove frame update
+        ClearEventMask(EntityEvent.FRAME);
+        
+        Print("SCR_RoadPhysicsTestMission: Physics test completed successfully!");
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void WriteSummaryReport()
+    {
+        // Create summary report file
+        string summaryFilename = m_OutputDirectory + "/test_summary.txt";
+        FileHandle summaryFile = FileIO.OpenFile(summaryFilename, FileMode.WRITE);
+        
+        if (summaryFile)
+        {
+            summaryFile.WriteLine("ROAD PHYSICS TEST SUMMARY");
+            summaryFile.WriteLine("------------------------");
+            summaryFile.WriteLine("Test Date: " + System.GetLocalDateTime());
+            summaryFile.WriteLine("Test Duration: " + m_TestDuration.ToString() + " seconds");
+            summaryFile.WriteLine("Vehicle: " + m_VehiclePrefab);
+            summaryFile.WriteLine("Target Speed: " + m_fTargetSpeed.ToString() + " km/h");
+            summaryFile.WriteLine("Average Speed: " + m_AverageSpeed.ToString() + " km/h");
+            summaryFile.WriteLine("Maximum Speed: " + m_MaxSpeed.ToString() + " km/h");
+            summaryFile.WriteLine("Total Distance: " + m_TotalDistance.ToString() + " meters");
+            summaryFile.WriteLine("Waypoints Reached: " + m_CurrentWaypointIndex.ToString() + " / " + m_Waypoints.Count().ToString());
+            
+            if (m_CurrentWaypointIndex >= m_Waypoints.Count())
+            {
+                summaryFile.WriteLine("Test Result: COMPLETED (All waypoints reached)");
+            }
+            else if (m_TestDuration >= 600.0)
+            {
+                summaryFile.WriteLine("Test Result: TIMEOUT (Test exceeded 10 minute limit)");
+            }
+            else
+            {
+                summaryFile.WriteLine("Test Result: INCOMPLETE (Vehicle may be stuck)");
+            }
+            
+            summaryFile.Close();
+            Print("SCR_RoadPhysicsTestMission: Test summary written to " + summaryFilename);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    void CloseDataFiles()
+    {
+        if (m_PhysicsDataFile)
+        {
+            m_PhysicsDataFile.Close();
+            m_PhysicsDataFile = null;
+        }
+        
+        if (m_TerrainDataFile)
+        {
+            m_TerrainDataFile.Close();
+            m_TerrainDataFile = null;
+        }
+        
+        if (m_ScreenshotLogFile)
+        {
+            m_ScreenshotLogFile.Close();
+            m_ScreenshotLogFile = null;
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------
+    override void OnGameEnd()
+	{
+	    // Clean up resources
+	    CloseDataFiles();
+	    
+	    // Clean up spawned entities
+	    foreach (IEntity entity : m_SpawnedEntities)
+	    {
+	        if (entity)
+	        {
+	            delete entity;
+	        }
+	    }
+	    
+	    m_SpawnedEntities.Clear();
+	    
+	    super.OnGameEnd();
+	}
+}

@@ -1,0 +1,150 @@
+class GameMode_Plain1_Class: SCR_BaseGameMode 
+{
+	// user script
+    protected ref array<AIWaypoint> m_aCreatedWaypoints = {}; // Store created waypoints
+    protected SCR_AIGroup m_CurrentGroup; // Reference to the current group
+    
+    // user script
+    override void OnGameStart()
+    {
+        super.OnGameStart();
+
+        string spawnGroup = "{35681BE27C302FF5}Prefabs/Groups/BLUFOR/GreenBerets/Group_US_GreenBeret_SentryTeam.et";
+        string waypointType = "{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_ForcedMove.et";
+
+        IEntity spawnPosition = GetGame().GetWorld().FindEntityByName("AI_Spawn_1");
+
+        GetGame().GetCallqueue().CallLater(AISpawner, 1000, false, spawnGroup, spawnPosition.GetOrigin(), waypointType);
+    }
+
+    protected void AISpawner(string spawnGroup, vector spawnPosition, string waypointType){
+        Resource resource = GenerateAndValidateResource(spawnGroup);
+
+        if(!resource){
+            Print(("[AI Spawner] Unable to load resource for the spawn group: " + spawnGroup), LogLevel.ERROR);
+            return;
+        }
+
+        SCR_AIGroup group = SCR_AIGroup.Cast(GetGame().SpawnEntityPrefab(resource, null, GenerateSpawnParameters(spawnPosition)));
+
+        if(!group){
+            Print("[AI Spawner] Unable to spawn group!", LogLevel.ERROR);
+            return;
+        }
+
+        // Store reference to the group
+        m_CurrentGroup = group;
+
+        IEntity carID = GetGame().GetWorld().FindEntityByName("AI_Car_1");
+
+        if(!carID){
+            Print("[AI Spawner] Unable to load vehicle resource!", LogLevel.ERROR);
+            return;
+        }
+
+        ref array<string> aiStaticVehicles = new array<string>();
+        aiStaticVehicles.Insert("AI_Car_1");
+        group.AddVehiclesStatic(aiStaticVehicles);
+
+        // First, create all waypoints at the placeholder locations
+        CreateAllWaypoints(waypointType);
+
+        // Listen for waypoint completion events
+        group.GetOnWaypointCompleted().Insert(OnWaypointCompleted);
+
+        // Add the first random waypoint
+        AddRandomWaypoint();
+    }
+
+    protected void CreateAllWaypoints(string waypointType)
+    {
+        // Create waypoints at all 20 placeholder locations and store them
+        for (int i = 1; i <= 20; i++)
+        {
+            string placeholderName = "AI_Drive_Target_" + i;
+            IEntity placeholderPosition = GetGame().GetWorld().FindEntityByName(placeholderName);
+            
+            if (placeholderPosition)
+            {
+                AIWaypoint waypoint = CreateWaypoint(waypointType, placeholderPosition.GetOrigin());
+                if (waypoint)
+                {
+                    m_aCreatedWaypoints.Insert(waypoint);
+                }
+            }
+            else
+            {
+                Print(("[Create All Waypoints] Unable to find placeholder: " + placeholderName), LogLevel.ERROR);
+            }
+        }
+    }
+
+    protected AIWaypoint CreateWaypoint(string waypointType, vector waypointPosition){
+        Resource resource = GenerateAndValidateResource(waypointType);
+
+        if(!resource){
+            Print(("[Create Waypoint] Unable to load resource for waypoint: " + waypointType), LogLevel.ERROR);
+            return null;
+        }
+
+        AIWaypoint waypoint = AIWaypoint.Cast(GetGame().SpawnEntityPrefab(resource, null, GenerateSpawnParameters(waypointPosition)));
+
+        if(!waypoint)
+        {
+            Print("[Create Waypoint] Unable to create waypoint!", LogLevel.ERROR);
+            return null;
+        }
+
+        return waypoint;
+    }
+
+    protected void AddRandomWaypoint()
+    {
+        if (!m_CurrentGroup || m_aCreatedWaypoints.IsEmpty())
+            return;
+
+        // Select a random waypoint from the created waypoints
+        int randomIndex = Math.RandomIntInclusive(0, m_aCreatedWaypoints.Count() - 1);
+        AIWaypoint randomWaypoint = m_aCreatedWaypoints[randomIndex];
+
+        // Add the waypoint to the group
+        m_CurrentGroup.AddWaypoint(randomWaypoint);
+        
+        Print("[Random Waypoint] Added waypoint at index: " + randomIndex, LogLevel.NORMAL);
+    }
+
+    protected void OnWaypointCompleted(AIWaypoint completedWaypoint)
+    {
+        Print("[Waypoint Completed] Waypoint completed, selecting new random waypoint", LogLevel.NORMAL);
+        
+        if (!m_CurrentGroup)
+            return;
+
+        // Remove the completed waypoint from the group
+        m_CurrentGroup.RemoveWaypoint(completedWaypoint);
+        
+        // Add a small delay before adding the next waypoint to ensure smooth transition
+        GetGame().GetCallqueue().CallLater(AddRandomWaypoint, 500, false);
+    }
+
+    protected Resource GenerateAndValidateResource(string resourceToLoad){
+        Resource resource = Resource.Load(resourceToLoad);
+
+        if(!resource.IsValid()){
+            Print(("[Generate and Validate Resource] Resource is invalid: " + resourceToLoad), LogLevel.ERROR);
+            return null;
+        }
+
+        return resource;
+    }
+
+    protected EntitySpawnParams GenerateSpawnParameters(vector position){
+        EntitySpawnParams params = EntitySpawnParams();
+        params.TransformMode = ETransformMode.WORLD;
+
+        params.Transform[3] = position;
+
+        return params;
+    }
+
+};

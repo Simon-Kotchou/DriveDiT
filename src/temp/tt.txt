@@ -1,0 +1,16 @@
+scr faction mamager us ussr
+gamemode plain 1
+
+s105 darkblue
+manualcamerabase
+
+US ai Spawn Point 1 
+
+US AI Waypoint 1
+
+SCR AIWORLD eden1
+campaignmpchatentitiy
+radiomanager
+spawnpointussr1
+spawnpointus1
+loadoutmanaer us ussr

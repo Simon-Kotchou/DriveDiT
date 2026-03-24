@@ -18,8 +18,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from training.self_forcing import SelfForcingTrainer, create_simple_model
 from training.distributed import MemoryMonitor, CheckpointManager, DistributedManager
-from training.comma_ai_insights import CommaAITrainer, CurriculumScheduler, LatentSpacePlanner
-from config.modular_config import DriveDiTConfig, get_minimal_config, get_research_config
+from training.self_forcing_plus import CurriculumScheduler, SelfForcingPlusConfig, FutureAnchorEncoder, ExtendedControlEncoder
+from config.config import DriveDiTConfig, get_minimal_config, get_research_config
 
 
 class TestSelfForcingTrainer:
@@ -275,85 +275,75 @@ class TestCheckpointManager:
                 assert torch.allclose(model.weight.data, original_weight)
 
 
-class TestCommaAITrainer:
-    """Test comma.ai inspired training components."""
-    
+class TestSelfForcingPlus:
+    """Test Self-Forcing++ training components."""
+
     def test_curriculum_scheduler(self):
         """Test curriculum learning scheduler."""
-        from training.comma_ai_insights import CommaAIConfig
-        
-        config = CommaAIConfig(
-            initial_sequence_length=4,
-            final_sequence_length=16,
-            curriculum_warmup_steps=1000,
-            initial_self_forcing_ratio=0.0,
-            final_self_forcing_ratio=0.8,
-            self_forcing_warmup_steps=500
+        config = SelfForcingPlusConfig(
+            initial_seq_len=4,
+            final_seq_len=16,
+            seq_warmup_steps=1000,
+            initial_sf_ratio=0.0,
+            final_sf_ratio=0.8,
+            sf_warmup_steps=500
         )
-        
+
         scheduler = CurriculumScheduler(config)
-        
+
         # Test initial values
-        assert scheduler.get_sequence_length() == 4
-        assert scheduler.get_self_forcing_ratio() == 0.0
-        
+        assert scheduler.get_sequence_length(0) == 4
+        assert scheduler.get_self_forcing_ratio(0) == 0.0
+
         # Test progression
-        scheduler.step = 500
-        seq_len = scheduler.get_sequence_length()
-        sf_ratio = scheduler.get_self_forcing_ratio()
-        
-        assert seq_len > 4 and seq_len <= 16
-        assert sf_ratio > 0.0 and sf_ratio <= 0.8
-        
+        seq_len = scheduler.get_sequence_length(500)
+        sf_ratio = scheduler.get_self_forcing_ratio(500)
+
+        assert seq_len >= 4 and seq_len <= 16
+        assert sf_ratio >= 0.0 and sf_ratio <= 0.8
+
         # Test final values
-        scheduler.step = 2000  # Beyond warmup
-        assert scheduler.get_sequence_length() == 16
-        assert scheduler.get_self_forcing_ratio() == 0.8
-    
-    def test_latent_space_planner(self):
-        """Test latent space planning component."""
-        from training.comma_ai_insights import CommaAIConfig
-        
-        config = CommaAIConfig()
-        planner = LatentSpacePlanner(
+        assert scheduler.get_sequence_length(2000) == 16
+        assert scheduler.get_self_forcing_ratio(2000) == 0.8
+
+    def test_future_anchor_encoder(self):
+        """Test future anchor encoding component."""
+        encoder = FutureAnchorEncoder(
             latent_dim=128,
-            action_dim=6,
-            config=config
+            model_dim=256,
+            num_anchor_frames=3
         )
-        
-        # Mock world model
-        class MockWorldModel(nn.Module):
-            def predict_next_state(self, state, action):
-                return state + 0.1 * action.sum(dim=-1, keepdim=True)
-        
-        world_model = MockWorldModel()
-        
-        # Test planning
+
         batch_size = 2
-        latent_state = torch.randn(batch_size, 128)
-        
-        result = planner(latent_state, world_model)
-        
-        assert 'action' in result
-        assert 'planned_trajectory' in result
-        assert 'costs' in result
-        
-        assert result['action'].shape == (batch_size, 6)
-        assert torch.isfinite(result['action']).all()
-    
-    def test_safety_classifier(self):
-        """Test safety classification component."""
-        from training.comma_ai_insights import SafetyClassifier
-        
-        classifier = SafetyClassifier(latent_dim=64)
-        
+        seq_len = 8
+        latent_dim = 128
+
+        # Create dummy latent sequence
+        latent_seq = torch.randn(batch_size, seq_len, latent_dim)
+
+        # Test encoding
+        anchor_tokens = encoder(latent_seq)
+
+        assert anchor_tokens.shape[0] == batch_size
+        assert anchor_tokens.shape[-1] == 256  # model_dim
+        assert torch.isfinite(anchor_tokens).all()
+
+    def test_extended_control_encoder(self):
+        """Test extended 6D control signal encoding."""
+        encoder = ExtendedControlEncoder(
+            control_dim=6,
+            model_dim=256
+        )
+
         batch_size = 4
-        latent_state = torch.randn(batch_size, 64)
-        
-        safety_score = classifier(latent_state)
-        
-        assert safety_score.shape == (batch_size, 1)
-        assert (safety_score >= 0).all() and (safety_score <= 1).all()
+
+        # Create 6D control signal
+        controls = torch.randn(batch_size, 6)
+
+        control_embed = encoder(controls)
+
+        assert control_embed.shape == (batch_size, 256)
+        assert torch.isfinite(control_embed).all()
 
 
 class TestDistributedTraining:

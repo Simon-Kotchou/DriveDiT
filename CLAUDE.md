@@ -42,6 +42,7 @@ drivedit/
 │
 ├── training/        # Training loops
 │   ├─ unified_trainer.py  # Complete unified training pipeline
+│   ├─ self_forcing_plus.py # Self-Forcing++ training (rolling KV, curriculum, etc.)
 │   ├─ distributed.py      # Distributed training and memory management
 │   └─ losses.py           # Unified loss functions (all types)
 │
@@ -96,6 +97,9 @@ python models/world_model.py
 # Run comprehensive tests
 python tests/test_math_components.py
 python tests/test_training_pipeline.py
+
+# Test Self-Forcing++ components
+python training/self_forcing_plus.py
 
 # Large-scale data processing
 python data/large_scale_processing.py
@@ -216,6 +220,41 @@ def causal_conv3d(cin, cout, k=(3,3,3), s=1):
 - **Flow matching integration**: Seamless integration with self-forcing training
 - **Comprehensive loss system**: All loss types unified in single framework
 
+### Self-Forcing++ Training (Extended Generation)
+Based on Self-Forcing++ paper and comma.ai insights for 5s to 4+ minute rollouts:
+
+```python
+from training.self_forcing_plus import (
+    SelfForcingPlusTrainer,
+    get_default_config,
+    RollingKVCache,
+    CurriculumScheduler,
+    FutureAnchorEncoder,
+    ExtendedControlEncoder
+)
+
+# Initialize trainer with all components
+config = get_default_config()
+trainer = SelfForcingPlusTrainer(model, config)
+
+# Training loop with automatic curriculum progression
+for batch in dataloader:
+    losses = trainer.train_step(batch, optimizer)
+    # Curriculum automatically advances sequence length and self-forcing ratio
+```
+
+**Key Components:**
+1. **Rolling KV Cache**: Sliding window cache with auto-truncation and gradient detachment
+2. **Curriculum Scheduler**: Progressive sequence length (8->64) and self-forcing ratio (0->1)
+3. **Future Anchor Conditioning**: Goal states at 2s, 4s, 6s horizons (comma.ai)
+4. **Extended 6D Control**: steering, accel, goal_x, goal_y, speed, heading_rate
+5. **Stability Improvements**: EMA, uncertainty weighting (Kendall), per-layer gradient clipping
+
+**Curriculum Schedule:**
+- Sequence length grows from `initial_sequence_length` to `final_sequence_length`
+- Self-forcing ratio increases via cosine/linear/exponential schedule
+- Loss weights introduced gradually (temporal after warmup, anchors after 30%)
+
 ### Critical Implementation Notes
 - Teacher runs in `eval()` mode with `torch.no_grad()`
 - Student uses own predictions (not ground truth) during rollout
@@ -248,10 +287,20 @@ for t in range(30):
 
 ### Model Inputs/Outputs
 - **RGB frames**: `[B, T, 3, H, W]` (float16, normalized 0-1)
-- **Control signals**: `[B, 4]` (steer, accel, goal_x, goal_y)
+- **Control signals**: `[B, 6]` (steering, accel, goal_x, goal_y, speed, heading_rate)
+- **Ego states**: `[B, T, 5]` (x, y, heading, speed, heading_rate)
 - **Latent representations**: `[B, T, C, H//8, W//8]`
 - **Attention tokens**: `[B, T, D]` where D=model_dim
 - **KV cache**: `{'k': [B, past_T, H, D], 'v': [B, past_T, H, D]}`
+
+### Control Signal Normalization
+Extended 6D control with per-dimension ranges:
+- **steering**: [-1, 1] (normalized)
+- **acceleration**: [-5, 5] m/s^2
+- **goal_x**: [-50, 50] m (relative position)
+- **goal_y**: [-50, 50] m (relative position)
+- **speed**: [0, 40] m/s
+- **heading_rate**: [-1, 1] rad/s
 
 ### Memory Management
 - KV-cache detachment after each step to prevent gradient accumulation

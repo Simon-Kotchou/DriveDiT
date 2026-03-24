@@ -957,8 +957,15 @@ class WorldModel(nn.Module):
         context_tokens = []
 
         if self.control_encoder is not None and controls is not None:
-            control_tokens = self.control_encoder(controls.reshape(-1, controls.size(-1)))
-            control_tokens = rearrange(control_tokens, '(b t) d -> b t d', b=B, t=T)
+            # Handle both [B, control_dim] and [B, T, control_dim] formats
+            if controls.dim() == 2:
+                # Broadcast single control to all frames
+                control_tokens = self.control_encoder(controls)  # [B, D]
+                control_tokens = control_tokens.unsqueeze(1).expand(-1, T, -1)  # [B, T, D]
+            else:
+                # Per-frame controls [B, T, control_dim]
+                control_tokens = self.control_encoder(controls.reshape(-1, controls.size(-1)))
+                control_tokens = rearrange(control_tokens, '(b t) d -> b t d', b=B, t=T)
             context_tokens.append(control_tokens)
 
         if self.depth_encoder is not None and depth is not None:
@@ -1080,7 +1087,14 @@ class WorldModel(nn.Module):
         target_frames = frames[:, context_length:]
 
         # Slice controls and depth to match context
-        context_controls = controls[:, :context_length] if controls is not None else None
+        # Handle both [B, T, control_dim] and [B, control_dim] formats
+        if controls is not None:
+            if controls.dim() == 3:
+                context_controls = controls[:, :context_length]
+            else:
+                context_controls = controls  # Broadcast in _forward_train
+        else:
+            context_controls = None
         context_depth = depth[:, :context_length] if depth is not None else None
 
         # Process context normally
@@ -1114,7 +1128,14 @@ class WorldModel(nn.Module):
             seq_len = input_sequence.size(1)
 
             # Slice controls and depth to match input sequence length
-            seq_controls = controls[:, :seq_len] if controls is not None else None
+            # Handle both [B, T, control_dim] and [B, control_dim] formats
+            if controls is not None:
+                if controls.dim() == 3:
+                    seq_controls = controls[:, :seq_len]
+                else:
+                    seq_controls = controls  # Broadcast in _forward_train
+            else:
+                seq_controls = None
             seq_depth = depth[:, :seq_len] if depth is not None else None
 
             # Forward pass

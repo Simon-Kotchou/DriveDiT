@@ -105,21 +105,29 @@ class UnifiedLoss:
     ) -> Dict[str, torch.Tensor]:
         """Compute reconstruction losses."""
         losses = {}
-        
+
+        # Handle shape mismatch: predictions may only contain target portion
+        # (e.g., from self-forcing where only second half is predicted)
+        pred_T = pred_frames.size(1)
+        target_T = target_frames.size(1)
+        if pred_T != target_T:
+            # Slice target frames to match prediction length (from the end)
+            target_frames = target_frames[:, -pred_T:]
+
         # L2 loss (MSE)
         l2_loss = F.mse_loss(pred_frames, target_frames)
         losses['reconstruction'] = l2_loss * self.weights['reconstruction']
-        
+
         # L1 loss
         l1_loss = F.l1_loss(pred_frames, target_frames)
         losses['l1'] = l1_loss * self.weights['l1']
-        
+
         # Perceptual loss (simplified - grayscale comparison)
         pred_gray = pred_frames.mean(dim=2, keepdim=True)
         target_gray = target_frames.mean(dim=2, keepdim=True)
         perceptual_loss = F.l1_loss(pred_gray, target_gray)
         losses['perceptual'] = perceptual_loss * self.weights['perceptual']
-        
+
         return losses
     
     def _flow_matching_loss(
@@ -157,17 +165,24 @@ class UnifiedLoss:
         target_sequence: torch.Tensor
     ) -> torch.Tensor:
         """Temporal consistency loss."""
+        # Handle shape mismatch: predictions may only contain target portion
+        pred_T = pred_sequence.size(1)
+        target_T = target_sequence.size(1)
+        if pred_T != target_T:
+            # Slice target sequence to match prediction length (from the end)
+            target_sequence = target_sequence[:, -pred_T:]
+
         B, T = pred_sequence.shape[:2]
-        
+
         if T <= 1:
             return torch.tensor(0.0, device=pred_sequence.device)
-        
+
         # Frame-to-frame differences
         pred_diffs = pred_sequence[:, 1:] - pred_sequence[:, :-1]
         target_diffs = target_sequence[:, 1:] - target_sequence[:, :-1]
-        
+
         temporal_loss = F.mse_loss(pred_diffs, target_diffs)
-        
+
         return temporal_loss * self.weights['temporal_consistency']
     
     def _jepa_loss(

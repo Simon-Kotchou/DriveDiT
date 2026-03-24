@@ -14,9 +14,9 @@ import asyncio
 from dataclasses import dataclass
 
 from .rollout import StreamingRollout, InferenceConfig
-from ..models.vae3d import VAE3D
-from ..models.dit_student import DiTStudent
-from ..data.preprocessing import VideoPreprocessor
+from models.vae3d import VAE3D
+from models.dit_student import DiTStudent
+from data.preprocessing import VideoPreprocessor
 
 
 @dataclass

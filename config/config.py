@@ -26,6 +26,9 @@ class ComponentType(Enum):
     REPA = "repa"  # Representation Alignment with V-JEPA 2.1 - 17.5× speedup
     CAUSAL_JEPA = "causal_jepa"  # Object-level C-JEPA - 20% counterfactual improvement
 
+    # Conditioning components
+    RICH_CONDITIONING = "rich_conditioning"  # GAIA-2 style rich conditioning
+
     # Evaluation components
     CLOSED_LOOP_EVAL = "closed_loop_eval"  # World-in-World benchmark
 

@@ -906,6 +906,11 @@ class UnifiedTrainer:
         # Checkpoint management
         self.checkpoint_manager = CheckpointManager("./checkpoints")
 
+        # Create internal component configs (used throughout trainer)
+        self._repa_config = REPAConfig() if self.config.is_component_enabled(ComponentType.REPA) else None
+        self._cjepa_config = CJEPAConfig() if self.config.is_component_enabled(ComponentType.CAUSAL_JEPA) else None
+        self._moe_config = MoEConfig() if self.config.is_component_enabled(ComponentType.MOE) else None
+
         # Initialize REPA components
         self._init_repa_components()
 
@@ -948,19 +953,19 @@ class UnifiedTrainer:
 
     def _init_repa_components(self) -> None:
         """Initialize REPA (Representation Alignment) components."""
-        if self.config.repa.enabled:
+        if self._repa_config is not None:
             # REPA backbone (frozen pre-trained encoder)
-            self.repa_backbone = REPABackbone(self.config.repa).to(self.device)
+            self.repa_backbone = REPABackbone(self._repa_config).to(self.device)
 
             # Projector for model representations
             self.repa_projector = REPAProjector(
-                input_dim=self.model.config.model_dim,
-                hidden_dim=self.config.repa.projection_hidden_dim,
-                output_dim=self.config.repa.projection_output_dim
+                input_dim=self.config.model_dim,
+                hidden_dim=self._repa_config.projection_hidden_dim,
+                output_dim=self._repa_config.projection_output_dim
             ).to(self.device)
 
             # HASTE controller
-            self.haste_controller = HASTEController(self.config.repa)
+            self.haste_controller = HASTEController(self._repa_config)
 
             # Add default callback
             self.haste_controller.add_callback(OnREPADisabledCallback())
@@ -973,22 +978,22 @@ class UnifiedTrainer:
 
     def _init_cjepa_components(self) -> None:
         """Initialize C-JEPA (Contextual JEPA) components."""
-        if self.config.cjepa.enabled:
+        if self._cjepa_config is not None:
             self.cjepa_predictor = CJEPAPredictor(
-                self.config.cjepa,
-                self.model.config.model_dim
+                self._cjepa_config,
+                self.config.model_dim
             ).to(self.device)
 
             self.logger.info(
-                f"C-JEPA initialized with {self.config.cjepa.num_object_queries} object slots"
+                f"C-JEPA initialized with {self._cjepa_config.num_object_queries} object slots"
             )
         else:
             self.cjepa_predictor = None
 
     def _init_moe_monitoring(self) -> None:
         """Initialize MoE monitoring."""
-        if self.config.moe.enabled:
-            self.moe_monitor = MoEMonitor(self.config.moe)
+        if self._moe_config is not None:
+            self.moe_monitor = MoEMonitor(self._moe_config)
 
             # Add default callback
             self.moe_monitor.add_callback(OnExpertImbalanceCallback())
@@ -1000,9 +1005,9 @@ class UnifiedTrainer:
     def _log_component_status(self) -> None:
         """Log status of all training components."""
         status = []
-        status.append(f"REPA: {'enabled' if self.config.repa.enabled else 'disabled'}")
-        status.append(f"C-JEPA: {'enabled' if self.config.cjepa.enabled else 'disabled'}")
-        status.append(f"MoE: {'enabled' if self.config.moe.enabled else 'disabled'}")
+        status.append(f"REPA: {'enabled' if self.config.is_component_enabled(ComponentType.REPA) else 'disabled'}")
+        status.append(f"C-JEPA: {'enabled' if self.config.is_component_enabled(ComponentType.CAUSAL_JEPA) else 'disabled'}")
+        status.append(f"MoE: {'enabled' if self.config.is_component_enabled(ComponentType.MOE) else 'disabled'}")
         status.append(f"Flow Matching: {'enabled' if self.config.enable_flow_matching else 'disabled'}")
         status.append(f"Curriculum: {'enabled' if self.config.enable_curriculum else 'disabled'}")
 
@@ -1140,8 +1145,8 @@ class UnifiedTrainer:
         self._update_metrics(losses, seq_len, sf_ratio)
 
         # Check MoE balance (if applicable)
-        if self.moe_monitor is not None:
-            if self.global_step % self.config.moe.utilization_log_frequency == 0:
+        if self.moe_monitor is not None and self._moe_config is not None:
+            if self.global_step % self._moe_config.utilization_log_frequency == 0:
                 self.moe_monitor.check_imbalance(self.global_step)
 
         return {k: v.item() if torch.is_tensor(v) else v for k, v in losses.items()}
@@ -1280,7 +1285,8 @@ class UnifiedTrainer:
         target_norm = F.normalize(target_flat, dim=-1)
 
         # Compute similarity matrix
-        similarity = torch.matmul(proj_norm, target_norm.T) / self.config.repa.temperature
+        temperature = self._repa_config.temperature if self._repa_config else 0.07
+        similarity = torch.matmul(proj_norm, target_norm.T) / temperature
 
         # InfoNCE loss: diagonal elements are positives
         labels = torch.arange(B * T, device=frames.device)
@@ -1309,7 +1315,7 @@ class UnifiedTrainer:
             return torch.tensor(0.0, device=frames.device)
 
         B, T, D = hidden_states.shape
-        horizon = self.config.cjepa.prediction_horizon
+        horizon = self._cjepa_config.prediction_horizon if self._cjepa_config else 4
 
         if T <= horizon:
             return torch.tensor(0.0, device=frames.device)
@@ -1338,16 +1344,18 @@ class UnifiedTrainer:
 
         # Compute similarity
         similarity = torch.bmm(pred_norm, target_norm.transpose(1, 2))
-        similarity = similarity / self.config.cjepa.contrastive_temperature
+        cjepa_temp = self._cjepa_config.contrastive_temperature if self._cjepa_config else 0.1
+        similarity = similarity / cjepa_temp
 
         # Contrastive loss: each slot should match its corresponding target
+        num_queries = self._cjepa_config.num_object_queries if self._cjepa_config else 64
         labels = torch.arange(
-            self.config.cjepa.num_object_queries,
+            num_queries,
             device=frames.device
         ).unsqueeze(0).expand(B, -1)
 
         loss = F.cross_entropy(
-            similarity.reshape(-1, self.config.cjepa.num_object_queries),
+            similarity.reshape(-1, num_queries),
             labels.reshape(-1)
         )
 
@@ -1378,7 +1386,8 @@ class UnifiedTrainer:
         total_moe_loss = balance_loss + z_loss
 
         # Log metrics periodically
-        if self.global_step % self.config.moe.utilization_log_frequency == 0:
+        log_freq = self._moe_config.utilization_log_frequency if self._moe_config else 100
+        if self.global_step % log_freq == 0:
             utilization = self.moe_monitor.get_expert_utilization()
             self.logger.info(f"MoE utilization at step {self.global_step}: {utilization}")
 
@@ -1404,6 +1413,15 @@ class UnifiedTrainer:
         if 'predictions' in predictions and 'frames' in targets:
             pred_frames = predictions['predictions']
             target_frames = targets['frames']
+
+            # Handle shape mismatch: predictions may only contain target portion
+            # (e.g., from self-forcing where only second half is predicted)
+            pred_T = pred_frames.size(1)
+            target_T = target_frames.size(1)
+
+            if pred_T != target_T:
+                # Slice target frames to match prediction length (from the end)
+                target_frames = target_frames[:, -pred_T:]
 
             # Simple flow target: difference between prediction and target
             return target_frames - pred_frames

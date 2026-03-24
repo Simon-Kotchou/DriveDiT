@@ -1,57 +1,234 @@
 """
-Multi-Head Attention implementation using einsum operations.
-Pure mathematical components with explicit tensor operations.
+Multi-Head Attention implementation with FlashAttention3 support.
+
+Backend hierarchy (automatic selection):
+1. FlashAttention3 via flash_attn package (fastest, Hopper GPUs)
+2. FlashAttention2 via PyTorch's F.scaled_dot_product_attention
+3. Pure einsum implementation (reference, always works)
+
+Install flash-attn for FA3: pip install flash-attn --no-build-isolation
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
+from enum import Enum
 import math
+import warnings
+
+# =============================================================================
+# FlashAttention Backend Detection
+# =============================================================================
+
+class AttentionBackend(Enum):
+    """Available attention backends."""
+    FLASH_ATTN_3 = "flash_attn_3"  # FlashAttention3 (Hopper)
+    FLASH_ATTN_2 = "flash_attn_2"  # PyTorch's SDPA with FA2
+    EINSUM = "einsum"              # Pure PyTorch reference
+
+# Try to import FlashAttention3
+_FA3_AVAILABLE = False
+_FA3_FUNC = None
+try:
+    from flash_attn import flash_attn_func
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func
+    _FA3_AVAILABLE = True
+    _FA3_FUNC = flash_attn_func
+except ImportError:
+    pass
+
+# Check for PyTorch's SDPA (FlashAttention2)
+_FA2_AVAILABLE = hasattr(F, 'scaled_dot_product_attention')
+
+# Global backend selection
+_ATTENTION_BACKEND = None  # None = auto-select
 
 
-def mha(
-    q: torch.Tensor, 
-    k: torch.Tensor, 
-    v: torch.Tensor, 
+def get_available_backends() -> list:
+    """Get list of available attention backends."""
+    backends = [AttentionBackend.EINSUM]  # Always available
+    if _FA2_AVAILABLE:
+        backends.insert(0, AttentionBackend.FLASH_ATTN_2)
+    if _FA3_AVAILABLE:
+        backends.insert(0, AttentionBackend.FLASH_ATTN_3)
+    return backends
+
+
+def get_attention_backend() -> AttentionBackend:
+    """Get the current attention backend (auto-selects fastest available)."""
+    global _ATTENTION_BACKEND
+    if _ATTENTION_BACKEND is not None:
+        return _ATTENTION_BACKEND
+
+    # Auto-select fastest available
+    if _FA3_AVAILABLE:
+        return AttentionBackend.FLASH_ATTN_3
+    elif _FA2_AVAILABLE:
+        return AttentionBackend.FLASH_ATTN_2
+    else:
+        return AttentionBackend.EINSUM
+
+
+def set_attention_backend(backend: AttentionBackend):
+    """Set the attention backend globally."""
+    global _ATTENTION_BACKEND
+    available = get_available_backends()
+    if backend not in available:
+        warnings.warn(f"Backend {backend} not available. Available: {available}")
+        return False
+    _ATTENTION_BACKEND = backend
+    return True
+
+
+# =============================================================================
+# Attention Implementations
+# =============================================================================
+
+def _mha_einsum(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     dropout_p: float = 0.0,
     training: bool = True
 ) -> torch.Tensor:
+    """Pure einsum attention (reference implementation)."""
+    d = q.size(-1)
+
+    # Compute attention scores: Q @ K^T
+    scores = torch.einsum('bthd,bshd->bhts', q, k) / math.sqrt(d)
+
+    # Apply mask if provided
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, -1e4)
+
+    # Softmax in float32 for numerical stability
+    attn_weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+
+    # Apply dropout
+    if dropout_p > 0.0 and training:
+        attn_weights = F.dropout(attn_weights, p=dropout_p, training=training)
+
+    # Apply attention to values: P @ V
+    output = torch.einsum('bhts,bshd->bthd', attn_weights, v)
+
+    return output
+
+
+def _mha_flash2(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    training: bool = True,
+    is_causal: bool = False
+) -> torch.Tensor:
+    """FlashAttention2 via PyTorch's scaled_dot_product_attention."""
+    # Transpose for SDPA: [B, T, H, D] -> [B, H, T, D]
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    # Convert mask format if provided (SDPA uses additive mask or bool)
+    attn_mask = None
+    if mask is not None and not is_causal:
+        # Convert [B, H, T, S] binary mask to additive mask
+        attn_mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, 0.0)
+
+    # Use SDPA with FlashAttention
+    output = F.scaled_dot_product_attention(
+        q, k, v,
+        attn_mask=attn_mask,
+        dropout_p=dropout_p if training else 0.0,
+        is_causal=is_causal and mask is None
+    )
+
+    # Transpose back: [B, H, T, D] -> [B, T, H, D]
+    output = output.transpose(1, 2)
+
+    return output
+
+
+def _mha_flash3(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    training: bool = True,
+    is_causal: bool = False
+) -> torch.Tensor:
+    """FlashAttention3 via flash_attn package."""
+    # flash_attn_func expects [B, T, H, D] format (same as our format)
+    # Ensure contiguous for optimal performance
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+
+    # FlashAttention3 requires half precision
+    orig_dtype = q.dtype
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        q = q.half()
+        k = k.half()
+        v = v.half()
+
+    output = _FA3_FUNC(
+        q, k, v,
+        dropout_p=dropout_p if training else 0.0,
+        causal=is_causal
+    )
+
+    # Convert back to original dtype
+    if output.dtype != orig_dtype:
+        output = output.to(orig_dtype)
+
+    return output
+
+
+def mha(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    training: bool = True,
+    is_causal: bool = False,
+    backend: Optional[AttentionBackend] = None
+) -> torch.Tensor:
     """
-    Multi-head attention using einsum operations.
-    
+    Multi-head attention with automatic backend selection.
+
     Args:
         q: Query tensor [B, T, H, D]
-        k: Key tensor [B, S, H, D] 
+        k: Key tensor [B, S, H, D]
         v: Value tensor [B, S, H, D]
         mask: Attention mask [B, H, T, S] or broadcastable. 1 for valid, 0 for masked
         dropout_p: Dropout probability
         training: Training mode flag
-    
+        is_causal: Use causal masking (more efficient than explicit mask)
+        backend: Force specific backend (None = auto-select)
+
     Returns:
         Attention output [B, T, H, D]
     """
-    d = q.size(-1)
-    
-    # Compute attention scores: Q @ K^T
-    scores = torch.einsum('bthd,bshd->bhts', q, k) / math.sqrt(d)
-    
-    # Apply mask if provided
-    if mask is not None:
-        scores = scores.masked_fill(mask == 0, -1e4)
-    
-    # Softmax in float32 for numerical stability
-    attn_weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
-    
-    # Apply dropout
-    if dropout_p > 0.0 and training:
-        attn_weights = F.dropout(attn_weights, p=dropout_p, training=training)
-    
-    # Apply attention to values: P @ V
-    output = torch.einsum('bhts,bshd->bthd', attn_weights, v)
-    
-    return output
+    # Select backend
+    if backend is None:
+        backend = get_attention_backend()
+
+    # Route to appropriate implementation
+    if backend == AttentionBackend.FLASH_ATTN_3 and _FA3_AVAILABLE:
+        return _mha_flash3(q, k, v, mask, dropout_p, training, is_causal)
+    elif backend == AttentionBackend.FLASH_ATTN_2 and _FA2_AVAILABLE:
+        return _mha_flash2(q, k, v, mask, dropout_p, training, is_causal)
+    else:
+        # Fall back to einsum (handles all cases)
+        if is_causal and mask is None:
+            T, S = q.size(1), k.size(1)
+            mask = torch.tril(torch.ones(T, S, device=q.device, dtype=torch.bool))
+            mask = mask.unsqueeze(0).unsqueeze(0)
+        return _mha_einsum(q, k, v, mask, dropout_p, training)
 
 
 def create_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:

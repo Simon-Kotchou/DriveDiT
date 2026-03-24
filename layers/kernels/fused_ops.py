@@ -182,8 +182,9 @@ if FUSED_OPS_AVAILABLE:
         """
         Fused rotary position embedding for Q and K.
 
-        Applies rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
-        to pairs of dimensions.
+        Applies rotation using concatenation format (matching rope.py):
+        Input:  [x0, x2, x4, ..., x1, x3, x5, ...] (even indices | odd indices)
+        Output: [x0*cos - x1*sin, ..., x0*sin + x1*cos, ...] (real | imaginary)
         """
         pid_b = tl.program_id(0)
         pid_t = tl.program_id(1)
@@ -199,19 +200,24 @@ if FUSED_OPS_AVAILABLE:
         cos_vals = tl.load(cos_base + d_offsets * stride_cd, mask=d_mask, other=1.0)
         sin_vals = tl.load(sin_base + d_offsets * stride_cd, mask=d_mask, other=0.0)
 
-        # Process Q
+        # Process Q - load from interleaved positions (even/odd indices)
         q_base = Q_ptr + pid_b * stride_qb + pid_t * stride_qt + pid_h * stride_qh
+        # q1 = q[..., 0::2] -> read from positions 0, 2, 4, ... (even indices)
+        # q2 = q[..., 1::2] -> read from positions 1, 3, 5, ... (odd indices)
         q1 = tl.load(q_base + (d_offsets * 2) * stride_qd, mask=d_mask, other=0.0)
         q2 = tl.load(q_base + (d_offsets * 2 + 1) * stride_qd, mask=d_mask, other=0.0)
 
         q1_out = q1.to(tl.float32) * cos_vals.to(tl.float32) - q2.to(tl.float32) * sin_vals.to(tl.float32)
         q2_out = q1.to(tl.float32) * sin_vals.to(tl.float32) + q2.to(tl.float32) * cos_vals.to(tl.float32)
 
+        # Store in concatenation format: [real parts | imaginary parts]
+        # First half (0 to D/2-1) = q1*cos - q2*sin (real)
+        # Second half (D/2 to D-1) = q1*sin + q2*cos (imaginary)
         qo_base = Q_out_ptr + pid_b * stride_qob + pid_t * stride_qot + pid_h * stride_qoh
-        tl.store(qo_base + (d_offsets * 2) * stride_qod, q1_out.to(tl.float16), mask=d_mask)
-        tl.store(qo_base + (d_offsets * 2 + 1) * stride_qod, q2_out.to(tl.float16), mask=d_mask)
+        tl.store(qo_base + d_offsets * stride_qod, q1_out.to(tl.float16), mask=d_mask)
+        tl.store(qo_base + (d_offsets + half_d) * stride_qod, q2_out.to(tl.float16), mask=d_mask)
 
-        # Process K
+        # Process K - same pattern
         k_base = K_ptr + pid_b * stride_kb + pid_t * stride_kt + pid_h * stride_kh
         k1 = tl.load(k_base + (d_offsets * 2) * stride_kd, mask=d_mask, other=0.0)
         k2 = tl.load(k_base + (d_offsets * 2 + 1) * stride_kd, mask=d_mask, other=0.0)
@@ -220,8 +226,8 @@ if FUSED_OPS_AVAILABLE:
         k2_out = k1.to(tl.float32) * sin_vals.to(tl.float32) + k2.to(tl.float32) * cos_vals.to(tl.float32)
 
         ko_base = K_out_ptr + pid_b * stride_kob + pid_t * stride_kot + pid_h * stride_koh
-        tl.store(ko_base + (d_offsets * 2) * stride_kod, k1_out.to(tl.float16), mask=d_mask)
-        tl.store(ko_base + (d_offsets * 2 + 1) * stride_kod, k2_out.to(tl.float16), mask=d_mask)
+        tl.store(ko_base + d_offsets * stride_kod, k1_out.to(tl.float16), mask=d_mask)
+        tl.store(ko_base + (d_offsets + half_d) * stride_kod, k2_out.to(tl.float16), mask=d_mask)
 
 
 # =============================================================================

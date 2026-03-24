@@ -4,6 +4,7 @@ Self-Forcing++ Training Implementation for DriveDiT.
 Components:
 1. Rolling KV Cache - Sliding window KV management
 2. Curriculum Learning Scheduler - Progressive training
+3. Future Anchor Conditioning - Goal state conditioning (comma.ai)
 
 Based on Self-Forcing++ paper and comma.ai insights for extended
 sequence generation and stable training.
@@ -11,7 +12,7 @@ sequence generation and stable training.
 References:
 - Self-Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion
 - Self-Forcing++: Extended sequence generation with rolling KV cache
-- comma.ai: Curriculum learning for world models
+- comma.ai: Curriculum learning and future anchor conditioning
 """
 
 import torch
@@ -299,6 +300,106 @@ class CurriculumScheduler:
 
 
 # =============================================================================
+# Component 3: Future Anchor Conditioning (comma.ai)
+# =============================================================================
+
+class FutureAnchorEncoder(nn.Module):
+    """
+    Encodes future goal states for conditioning.
+
+    Based on comma.ai's future anchor methodology:
+    - Prevents drift by conditioning on goal states
+    - Multiple horizons (2s, 4s, 6s) for multi-scale planning
+    - Includes position, heading, and velocity information
+
+    This enables the model to "know where it's going" which prevents
+    the common issue of trajectory drift in long autoregressive rollouts.
+
+    Args:
+        config: SelfForcingPlusConfig with anchor parameters
+    """
+
+    def __init__(self, config: SelfForcingPlusConfig):
+        super().__init__()
+        self.config = config
+        self.horizons = config.future_anchor_horizons
+        self.anchor_dim = config.future_anchor_dim
+
+        # Each horizon encodes: [x, y, heading, speed, heading_rate]
+        self.anchor_input_dim = 5
+
+        # Per-horizon encoders
+        self.horizon_encoders = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.anchor_input_dim, config.future_anchor_dim),
+                nn.SiLU(),
+                nn.Linear(config.future_anchor_dim, config.future_anchor_dim),
+                nn.LayerNorm(config.future_anchor_dim)
+            )
+            for _ in self.horizons
+        ])
+
+        # Fusion layer for multi-horizon features
+        self.fusion = nn.Sequential(
+            nn.Linear(len(self.horizons) * config.future_anchor_dim, config.model_dim),
+            nn.SiLU(),
+            nn.Linear(config.model_dim, config.model_dim),
+            nn.LayerNorm(config.model_dim)
+        )
+
+    def forward(
+        self,
+        future_states: torch.Tensor,
+        current_time: int = 0
+    ) -> torch.Tensor:
+        """
+        Encode future anchor states.
+
+        Args:
+            future_states: [B, T, 5] tensor of [x, y, heading, speed, heading_rate]
+            current_time: Current timestep in sequence
+
+        Returns:
+            [B, D] anchor embedding for conditioning
+        """
+        B, T, _ = future_states.shape
+        device = future_states.device
+
+        horizon_features = []
+
+        for i, horizon_sec in enumerate(self.horizons):
+            # Convert horizon to frame index
+            horizon_frames = int(horizon_sec * self.config.fps)
+            target_idx = min(current_time + horizon_frames, T - 1)
+
+            # Extract future state at this horizon
+            future_state = future_states[:, target_idx]  # [B, 5]
+
+            # Compute relative state (relative to current position)
+            current_state = future_states[:, min(current_time, T - 1)]
+            relative_state = future_state - current_state
+
+            # Encode
+            horizon_feat = self.horizon_encoders[i](relative_state)
+            horizon_features.append(horizon_feat)
+
+        # Concatenate and fuse
+        combined = torch.cat(horizon_features, dim=-1)  # [B, num_horizons * anchor_dim]
+        anchor_embedding = self.fusion(combined)  # [B, model_dim]
+
+        return anchor_embedding
+
+    def get_anchor_indices(self, current_time: int, max_time: int) -> List[int]:
+        """Get frame indices for each anchor horizon."""
+        indices = []
+        for horizon_sec in self.horizons:
+            horizon_frames = int(horizon_sec * self.config.fps)
+            target_idx = min(current_time + horizon_frames, max_time - 1)
+            indices.append(target_idx)
+        return indices
+
+
+# =============================================================================
 # Factory Functions
 # =============================================================================
 
@@ -351,6 +452,17 @@ if __name__ == "__main__":
         stats = scheduler.get_stats()
         print(f"  Step {step}: seq_len={stats['sequence_length']}, "
               f"sf_ratio={stats['self_forcing_ratio']:.3f}")
+
+    # Test 3: Future Anchor Encoder
+    print("\n3. Future Anchor Encoder Test")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    anchor_encoder = FutureAnchorEncoder(config).to(device)
+
+    ego_states = torch.randn(2, 64, 5, device=device)  # [B, T, 5]
+    anchor_emb = anchor_encoder(ego_states, current_time=0)
+    print(f"  Ego states shape: {ego_states.shape}")
+    print(f"  Anchor embedding shape: {anchor_emb.shape}")
+    print(f"  Anchor indices for t=0: {anchor_encoder.get_anchor_indices(0, 64)}")
 
     print("\n" + "=" * 60)
     print("All component tests completed!")

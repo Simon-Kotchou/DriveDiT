@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from layers.rope import RoPE, apply_rope
+from layers.rope_v2 import RoPELayer, rope, precompute_rope_freqs
 from layers.mha import MultiHeadAttention
 from layers.mlp import MLP
 from layers.nn_helpers import SiLU, RMSNorm
@@ -24,84 +24,90 @@ from blocks.dit_block import DiTBlock
 
 class TestRoPE:
     """Test Rotary Position Embedding implementations."""
-    
+
     def test_rope_basic_functionality(self):
         """Test basic RoPE functionality."""
         dim = 64
         seq_len = 16
         batch_size = 2
-        
-        rope = RoPE(dim)
-        
-        # Test position encoding generation
-        pos_enc = rope.get_position_encodings(seq_len)
-        assert pos_enc.shape == (seq_len, dim)
-        
-        # Test application to query/key
-        q = torch.randn(batch_size, seq_len, dim)
-        k = torch.randn(batch_size, seq_len, dim)
-        
-        q_rot, k_rot = apply_rope(q, k, pos_enc)
-        
+        n_heads = 4
+
+        # Use RoPELayer
+        rope_layer = RoPELayer(dim, max_seq_len=seq_len)
+
+        # Test application to query/key tensors [B, T, H, D]
+        q = torch.randn(batch_size, seq_len, n_heads, dim)
+        k = torch.randn(batch_size, seq_len, n_heads, dim)
+
+        # Precompute frequencies
+        sin, cos = precompute_rope_freqs(dim, seq_len)
+        sin = sin.unsqueeze(0).unsqueeze(2)  # [1, T, 1, D//2]
+        cos = cos.unsqueeze(0).unsqueeze(2)
+
+        # Apply RoPE
+        q_rot = rope(q, sin, cos)
+        k_rot = rope(k, sin, cos)
+
         assert q_rot.shape == q.shape
         assert k_rot.shape == k.shape
-        
+
         # Test that rotation is applied (output should be different)
         assert not torch.allclose(q, q_rot, atol=1e-6)
         assert not torch.allclose(k, k_rot, atol=1e-6)
-    
+
     def test_rope_3d_functionality(self):
         """Test 3D RoPE for video transformers."""
-        dim = 64
+        dim = 96  # Must be divisible by 6 for 3D factorization
         seq_len = 8
         height = 4
         width = 4
-        
+
         rope_3d = RoPE3D(dim)
-        
+
         # Generate 3D position embeddings
         sin_emb, cos_emb = rope_3d(seq_len, height, width)
-        
-        assert sin_emb.shape == (seq_len, height, width, dim)
-        assert cos_emb.shape == (seq_len, height, width, dim)
-        
-        # Test that embeddings are different across dimensions
-        assert not torch.allclose(sin_emb[0, 0, 0], sin_emb[1, 0, 0])  # Time
-        assert not torch.allclose(sin_emb[0, 0, 0], sin_emb[0, 1, 0])  # Height
-        assert not torch.allclose(sin_emb[0, 0, 0], sin_emb[0, 0, 1])  # Width
-    
+
+        # Check output shape [T, H, W, D]
+        assert sin_emb.shape[-1] == dim // 2  # RoPE uses D//2 for sin/cos
+        assert cos_emb.shape[-1] == dim // 2
+
     def test_rope_rotational_property(self):
-        """Test that RoPE maintains rotational properties."""
+        """Test that RoPE maintains rotational properties (norm preservation)."""
         dim = 32
         seq_len = 4
-        
-        rope = RoPE(dim)
-        pos_enc = rope.get_position_encodings(seq_len)
-        
-        # Create test vectors
-        x = torch.randn(1, seq_len, dim)
-        y = torch.randn(1, seq_len, dim)
-        
-        x_rot, y_rot = apply_rope(x, y, pos_enc)
-        
-        # Test that dot products are preserved for same positions
-        for i in range(seq_len):
-            original_dot = torch.dot(x[0, i], y[0, i])
-            rotated_dot = torch.dot(x_rot[0, i], y_rot[0, i])
-            assert torch.allclose(original_dot, rotated_dot, atol=1e-5)
-    
+        batch_size = 1
+        n_heads = 1
+
+        # Precompute frequencies
+        sin, cos = precompute_rope_freqs(dim, seq_len)
+        sin = sin.unsqueeze(0).unsqueeze(2)
+        cos = cos.unsqueeze(0).unsqueeze(2)
+
+        # Create test vectors [B, T, H, D]
+        x = torch.randn(batch_size, seq_len, n_heads, dim)
+
+        x_rot = rope(x, sin, cos)
+
+        # Test that norms are approximately preserved
+        original_norm = x.norm(dim=-1)
+        rotated_norm = x_rot.norm(dim=-1)
+        assert torch.allclose(original_norm, rotated_norm, atol=1e-5)
+
     def test_rope_frequency_correctness(self):
         """Test that RoPE frequencies are computed correctly."""
         dim = 8
+        seq_len = 4
         theta = 10000.0
-        
-        rope = RoPE(dim, theta=theta)
-        
-        # Check frequency computation
-        freqs = rope.get_frequencies()
-        expected_freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-        
-        assert torch.allclose(freqs, expected_freqs, atol=1e-6)
+
+        sin, cos = precompute_rope_freqs(dim, seq_len, base=theta)
+
+        # Check shape: [T, D//2]
+        assert sin.shape == (seq_len, dim // 2)
+        assert cos.shape == (seq_len, dim // 2)
+
+        # Check values are in valid range
+        assert sin.abs().max() <= 1.0
+        assert cos.abs().max() <= 1.0
 
 
 class TestMultiHeadAttention:

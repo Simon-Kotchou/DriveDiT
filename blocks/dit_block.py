@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from layers.mha import CausalMultiHeadAttention, BidirectionalMultiHeadAttention
 from layers.mlp import create_mlp
 from layers.nn_helpers import AdaLN, RMSNorm
-from layers.rope import RoPELayer
+from layers.rope_v2 import RoPELayer
 
 
 class DiTBlock(nn.Module):

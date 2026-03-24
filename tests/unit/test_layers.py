@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from layers.rope import RoPELayer, precompute_rope_freqs, precompute_rope_3d_freqs, rope
+from layers.rope_v2 import RoPELayer, precompute_rope_freqs, precompute_rope_3d_freqs, rope
 from layers.mha import MultiHeadAttention, CausalMultiHeadAttention, BidirectionalMultiHeadAttention, mha, create_causal_mask
 from layers.mlp import MLP, SwiGLU, GeGLU, create_mlp
 from layers.nn_helpers import RMSNorm, LayerNorm, AdaLN, silu, gelu_tanh

@@ -5,6 +5,7 @@ Components:
 1. Rolling KV Cache - Sliding window KV management
 2. Curriculum Learning Scheduler - Progressive training
 3. Future Anchor Conditioning - Goal state conditioning (comma.ai)
+4. Extended 6D Control Signal - Full control encoding with inverse dynamics
 
 Based on Self-Forcing++ paper and comma.ai insights for extended
 sequence generation and stable training.
@@ -400,6 +401,256 @@ class FutureAnchorEncoder(nn.Module):
 
 
 # =============================================================================
+# Component 4: Extended 6D Control Signal
+# =============================================================================
+
+class ExtendedControlEncoder(nn.Module):
+    """
+    Encodes extended 6D control signals with proper normalization.
+
+    Control dimensions:
+    0: steering (-1 to 1, normalized)
+    1: acceleration (-5 to 5 m/s^2)
+    2: goal_x (relative position in meters)
+    3: goal_y (relative position in meters)
+    4: speed (0 to 40 m/s)
+    5: heading_rate (-1 to 1 rad/s)
+
+    Features:
+    - Per-dimension normalization with configurable ranges
+    - Temporal encoding for control sequences
+    - Control prediction head for inverse dynamics
+
+    Args:
+        config: SelfForcingPlusConfig with control parameters
+    """
+
+    # Default normalization ranges for each control dimension
+    DEFAULT_RANGES = {
+        'steering': (-1.0, 1.0),
+        'acceleration': (-5.0, 5.0),
+        'goal_x': (-50.0, 50.0),
+        'goal_y': (-50.0, 50.0),
+        'speed': (0.0, 40.0),
+        'heading_rate': (-1.0, 1.0)
+    }
+
+    def __init__(
+        self,
+        config: SelfForcingPlusConfig,
+        custom_ranges: Optional[Dict[str, Tuple[float, float]]] = None
+    ):
+        super().__init__()
+        self.config = config
+        self.control_dim = config.control_dim
+        self.hidden_dim = config.control_hidden_dim
+        self.model_dim = config.model_dim
+
+        # Merge default ranges with custom ranges
+        self.ranges = {**self.DEFAULT_RANGES}
+        if custom_ranges:
+            self.ranges.update(custom_ranges)
+
+        # Register normalization parameters as buffers (non-trainable)
+        range_keys = ['steering', 'acceleration', 'goal_x', 'goal_y', 'speed', 'heading_rate']
+        mins = torch.tensor([self.ranges[k][0] for k in range_keys])
+        maxs = torch.tensor([self.ranges[k][1] for k in range_keys])
+        self.register_buffer('norm_min', mins)
+        self.register_buffer('norm_max', maxs)
+
+        # Control encoder network
+        self.encoder = nn.Sequential(
+            nn.Linear(self.control_dim, self.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.model_dim),
+            nn.LayerNorm(self.model_dim)
+        )
+
+        # Temporal control encoder for sequences
+        self.temporal_encoder = nn.Sequential(
+            nn.Linear(self.model_dim, self.model_dim),
+            nn.SiLU(),
+            nn.Linear(self.model_dim, self.model_dim)
+        )
+
+        # Control prediction head for inverse dynamics
+        self.control_predictor = nn.Sequential(
+            nn.Linear(self.model_dim * 2, self.hidden_dim),  # Takes current + next state
+            nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.control_dim)
+        )
+
+    def normalize(self, controls: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize control signals to [-1, 1] range.
+
+        Args:
+            controls: [B, T, 6] or [B, 6] raw control values
+
+        Returns:
+            Normalized controls in [-1, 1] range
+        """
+        # Expand dimensions for broadcasting
+        norm_min = self.norm_min.view(1, -1) if controls.dim() == 2 else self.norm_min.view(1, 1, -1)
+        norm_max = self.norm_max.view(1, -1) if controls.dim() == 2 else self.norm_max.view(1, 1, -1)
+
+        # Clamp to valid range
+        controls = controls.clamp(norm_min, norm_max)
+
+        # Normalize to [-1, 1]
+        normalized = 2 * (controls - norm_min) / (norm_max - norm_min + 1e-8) - 1
+
+        return normalized
+
+    def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
+        """
+        Denormalize control signals from [-1, 1] to original range.
+
+        Args:
+            normalized: [B, T, 6] or [B, 6] normalized control values
+
+        Returns:
+            Denormalized controls in original ranges
+        """
+        norm_min = self.norm_min.view(1, -1) if normalized.dim() == 2 else self.norm_min.view(1, 1, -1)
+        norm_max = self.norm_max.view(1, -1) if normalized.dim() == 2 else self.norm_max.view(1, 1, -1)
+
+        # Denormalize from [-1, 1]
+        denormalized = (normalized + 1) / 2 * (norm_max - norm_min) + norm_min
+
+        return denormalized
+
+    def forward(
+        self,
+        controls: torch.Tensor,
+        normalize: bool = True
+    ) -> torch.Tensor:
+        """
+        Encode control signals.
+
+        Args:
+            controls: [B, T, 6] or [B, 6] control signals
+            normalize: Whether to normalize inputs (set False if pre-normalized)
+
+        Returns:
+            [B, T, D] or [B, D] control embeddings
+        """
+        if normalize:
+            controls = self.normalize(controls)
+
+        # Encode controls
+        embeddings = self.encoder(controls)
+
+        # Apply temporal encoding for sequences
+        if controls.dim() == 3:
+            embeddings = embeddings + self.temporal_encoder(embeddings)
+
+        return embeddings
+
+    def predict_control(
+        self,
+        current_state: torch.Tensor,
+        next_state: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Predict control signal from state transition (inverse dynamics).
+
+        Args:
+            current_state: [B, D] current latent state
+            next_state: [B, D] next latent state
+
+        Returns:
+            [B, 6] predicted control signals (normalized)
+        """
+        combined = torch.cat([current_state, next_state], dim=-1)
+        predicted = self.control_predictor(combined)
+        # Clamp to valid normalized range
+        return predicted.clamp(-1, 1)
+
+    def get_control_loss(
+        self,
+        predicted: torch.Tensor,
+        target: torch.Tensor,
+        normalize_target: bool = True
+    ) -> torch.Tensor:
+        """
+        Compute control prediction loss.
+
+        Args:
+            predicted: [B, 6] predicted normalized controls
+            target: [B, 6] target controls (raw or normalized)
+            normalize_target: Whether to normalize target
+
+        Returns:
+            Scalar loss value
+        """
+        if normalize_target:
+            target = self.normalize(target)
+
+        # L2 loss for continuous controls
+        return ((predicted - target) ** 2).mean()
+
+
+class ControlConditioner(nn.Module):
+    """
+    Applies control conditioning to model hidden states.
+
+    Uses FiLM (Feature-wise Linear Modulation) for conditioning:
+    output = gamma * hidden + beta
+
+    Args:
+        config: SelfForcingPlusConfig with model dimensions
+    """
+
+    def __init__(self, config: SelfForcingPlusConfig):
+        super().__init__()
+        self.config = config
+
+        # FiLM parameter generators
+        self.gamma_net = nn.Sequential(
+            nn.Linear(config.model_dim, config.model_dim),
+            nn.SiLU(),
+            nn.Linear(config.model_dim, config.model_dim)
+        )
+
+        self.beta_net = nn.Sequential(
+            nn.Linear(config.model_dim, config.model_dim),
+            nn.SiLU(),
+            nn.Linear(config.model_dim, config.model_dim)
+        )
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        control_embedding: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Apply control conditioning via FiLM.
+
+        Args:
+            hidden: [B, T, D] model hidden states
+            control_embedding: [B, D] or [B, T, D] control embeddings
+
+        Returns:
+            [B, T, D] conditioned hidden states
+        """
+        # Expand control embedding if needed
+        if control_embedding.dim() == 2 and hidden.dim() == 3:
+            control_embedding = control_embedding.unsqueeze(1).expand(-1, hidden.size(1), -1)
+
+        # Compute FiLM parameters
+        gamma = self.gamma_net(control_embedding)
+        beta = self.beta_net(control_embedding)
+
+        # Apply FiLM modulation
+        return gamma * hidden + beta
+
+
+# =============================================================================
 # Factory Functions
 # =============================================================================
 
@@ -463,6 +714,55 @@ if __name__ == "__main__":
     print(f"  Ego states shape: {ego_states.shape}")
     print(f"  Anchor embedding shape: {anchor_emb.shape}")
     print(f"  Anchor indices for t=0: {anchor_encoder.get_anchor_indices(0, 64)}")
+
+    # Test 4: Extended Control Encoder
+    print("\n4. Extended Control Encoder Test")
+    control_encoder = ExtendedControlEncoder(config).to(device)
+
+    # Create sample control signals [B, T, 6]
+    # steering, accel, goal_x, goal_y, speed, heading_rate
+    raw_controls = torch.tensor([
+        [0.5, 2.0, 10.0, 5.0, 25.0, 0.3],  # Sample control 1
+        [-0.3, -1.0, -5.0, 2.0, 15.0, -0.2]  # Sample control 2
+    ], device=device)
+
+    print(f"  Raw controls shape: {raw_controls.shape}")
+    print(f"  Raw controls: {raw_controls[0].tolist()}")
+
+    # Test normalization
+    normalized = control_encoder.normalize(raw_controls)
+    print(f"  Normalized controls: {normalized[0].tolist()}")
+
+    # Test denormalization (should match original)
+    denormalized = control_encoder.denormalize(normalized)
+    print(f"  Denormalized controls: {denormalized[0].tolist()}")
+    print(f"  Reconstruction error: {(raw_controls - denormalized).abs().max().item():.6f}")
+
+    # Test encoding
+    control_emb = control_encoder(raw_controls)
+    print(f"  Control embedding shape: {control_emb.shape}")
+
+    # Test control prediction (inverse dynamics)
+    current_state = torch.randn(2, config.model_dim, device=device)
+    next_state = torch.randn(2, config.model_dim, device=device)
+    predicted_control = control_encoder.predict_control(current_state, next_state)
+    print(f"  Predicted control shape: {predicted_control.shape}")
+
+    # Test control loss
+    loss = control_encoder.get_control_loss(predicted_control, raw_controls)
+    print(f"  Control loss: {loss.item():.4f}")
+
+    # Test 5: Control Conditioner (FiLM)
+    print("\n5. Control Conditioner Test")
+    conditioner = ControlConditioner(config).to(device)
+
+    hidden = torch.randn(2, 8, config.model_dim, device=device)  # [B, T, D]
+    control_emb_single = torch.randn(2, config.model_dim, device=device)  # [B, D]
+
+    conditioned = conditioner(hidden, control_emb_single)
+    print(f"  Hidden shape: {hidden.shape}")
+    print(f"  Control embedding shape: {control_emb_single.shape}")
+    print(f"  Conditioned output shape: {conditioned.shape}")
 
     print("\n" + "=" * 60)
     print("All component tests completed!")

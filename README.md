@@ -2,7 +2,7 @@
 
 A minimal, production-ready implementation of a diffusion transformer for autonomous driving world modeling. Built with zero external dependencies beyond PyTorch, einops, and OpenCV.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Using Docker (Recommended)
 
@@ -21,52 +21,193 @@ docker-compose up drivedit-inference
 
 ```bash
 # Install minimal dependencies
-pip install torch>=2.2.0 einops>=0.7.0 opencv-python==4.10.0.82
+pip install torch>=2.2.0 einops>=0.7.0 opencv-python==4.10.0 torchmetrics
+
+# Development tools (optional)
+pip install jupyter black ruff
 
 # Clone and run
 git clone <repository>
 cd drivedit
-python scripts/train.py --data_dir ./data/videos
+python training/unified_trainer.py
 ```
 
-## 📁 Architecture
+### Rust Data Pipeline (Optional)
+
+```bash
+cd rust/drivedit-data
+pip install maturin
+maturin develop --release
+```
+
+## Architecture
 
 ```
 drivedit/
-├── layers/          # Mathematical primitives (RoPE, MHA, MLP)
-├── blocks/          # Composite components (DiT blocks, Flow matching)
-├── models/          # Complete architectures (VAE, Student/Teacher DiT)
-├── training/        # Self-forcing training with distributed support
-├── data/            # Efficient video pipeline with memory mapping
-├── inference/       # Real-time generation and serving
-└── docs/            # Mathematical foundations and best practices
+├── layers/              # Mathematical primitives
+│   ├── rope.py                # Rotary positional embedding
+│   ├── rope_v2.py             # Extended RoPE with 3D support
+│   ├── mha.py                 # Multi-head attention (causal/bidirectional)
+│   ├── mlp.py                 # Feed-forward networks
+│   └── nn_helpers.py          # SiLU, RMSNorm, fused operations
+│
+├── blocks/              # Composite components
+│   ├── dit_block.py           # Attention + MLP + AdaLN
+│   └── flow_matching.py       # Complete flow matching implementation
+│
+├── core/                # Advanced components
+│   ├── base.py                # Core base classes and utilities
+│   └── components.py          # RoPE3D, SAM2 tracker, flow predictor
+│
+├── models/              # Complete architectures
+│   ├── world_model.py         # Unified world model with all components
+│   ├── vae3d.py               # 3D causal VAE (WAN distilled)
+│   ├── vae3d_v2.py            # Extended VAE with improvements
+│   ├── dit_student.py         # Causal world model (student)
+│   ├── dit_teacher.py         # Bidirectional teacher
+│   └── conditioning.py        # Conditioning modules
+│
+├── config/              # Configuration system
+│   ├── config.py              # Unified DriveDiTConfig
+│   ├── base_config.py         # Base configuration classes
+│   └── model_config.py        # Model-specific configurations
+│
+├── data/                # Data pipeline
+│   ├── pipeline.py            # Memory-mapped video processing
+│   ├── video_chunking.py      # Intelligent video chunking
+│   ├── large_scale_processing.py  # 100k+ hour dataset processing
+│   ├── enfusion_loader.py     # Enfusion ENFCAP format loader
+│   ├── rust_loader.py         # Rust-accelerated data loading
+│   ├── hybrid_loader.py       # Multi-source hybrid loader
+│   ├── transforms.py          # Video augmentations
+│   └── preprocessing.py       # Data preprocessing utilities
+│
+├── training/            # Training loops
+│   ├── unified_trainer.py     # Complete unified training pipeline
+│   ├── self_forcing.py        # Self-forcing training
+│   ├── self_forcing_plus.py   # Self-Forcing++ (extended generation)
+│   ├── distill.py             # Flow-matching distillation
+│   ├── distributed.py         # Multi-GPU training support
+│   ├── losses.py              # Loss functions
+│   ├── losses_v2.py           # Extended loss implementations
+│   ├── cuda_optimized.py      # CUDA-optimized training
+│   └── kernels/               # Custom CUDA kernels
+│       ├── fused_augment.py   # Fused augmentation kernels
+│       └── fused_normalize.py # Fused normalization kernels
+│
+├── inference/           # Generation
+│   ├── rollout.py             # Single-GPU streaming inference
+│   ├── pipeline.py            # Inference pipeline
+│   ├── server.py              # Inference server
+│   └── optimization.py        # Inference optimization utilities
+│
+├── evaluation/          # Metrics and benchmarks
+│   ├── metrics.py             # FVD, LPIPS, depth metrics
+│   ├── evaluators.py          # Evaluation utilities
+│   ├── benchmarks.py          # Performance benchmarks
+│   └── visualization.py       # Result visualization
+│
+├── tests/               # Comprehensive test suite
+│   ├── test_math_components.py    # Mathematical component tests
+│   ├── test_training_pipeline.py  # Training pipeline tests
+│   ├── test_self_forcing_plus.py  # Self-Forcing++ tests
+│   ├── test_rust_loader.py        # Rust data loader tests
+│   └── conftest.py                # Test fixtures
+│
+├── rust/                # Rust data pipeline
+│   └── drivedit-data/         # PyO3-based data loader
+│       ├── src/               # Rust source code
+│       ├── python/            # Python bindings
+│       └── benches/           # Performance benchmarks
+│
+├── DriveDiT_DataCapture/    # Arma Reforger mod (synthetic data)
+│   ├── Scripts/Game/DataCapture/  # Enfusion capture scripts
+│   ├── Prefabs/               # Vehicle and camera prefabs
+│   ├── Configs/               # Mod configurations
+│   └── README.md              # Mod documentation
+│
+├── src/enfusion/        # Enfusion script library
+│   ├── datacapture/           # Data capture components
+│   │   ├── core/              # Orchestrator, buffers, serializers
+│   │   ├── modules/           # Telemetry, depth, road, scene modules
+│   │   ├── SCR_MLDataCollector.c
+│   │   ├── SCR_AnchorFrameSelector.c
+│   │   ├── SCR_BinarySerializer.c
+│   │   ├── SCR_MultiCameraRig.c
+│   │   └── ...
+│   └── navigation/            # Road extraction utilities
+│       ├── extractors/        # Road topology extractors
+│       └── visualizers/       # Debug visualizers
+│
+├── scripts/             # Utility scripts
+│   ├── train.py               # Training entry point
+│   └── process_data.py        # Data processing script
+│
+└── docs/                # Documentation
+    └── REFERENCES.md          # Mathematical foundations
 ```
 
-## 🔬 Core Features
+## Core Features
 
 ### Zero-Dependency Design
 - **Pure PyTorch**: Only `torch >= 2.2`, `einops`, and `opencv`
 - **Mathematical transparency**: Every operation implemented explicitly
 - **No external model libraries**: Self-contained implementations
 
-### Efficient Data Pipeline
-- **Memory-mapped videos**: Zero-copy access for 100GB+ datasets
-- **Distributed loading**: Multi-GPU support with optimal data distribution
-- **Temporal augmentations**: Consistent transformations across video sequences
+### Self-Forcing++ Training
+Extended generation from 5 seconds to 4+ minutes using:
+- **Rolling KV Cache**: Sliding window with auto-truncation and gradient detachment
+- **Curriculum Scheduler**: Progressive sequence length (8→64) and self-forcing ratio (0→1)
+- **Future Anchor Conditioning**: Goal states at 2s, 4s, 6s horizons
+- **Extended 6D Control**: steering, accel, goal_x, goal_y, speed, heading_rate
+- **Stability Improvements**: EMA, uncertainty weighting, per-layer gradient clipping
 
-### Self-Forcing Training
-- **Autoregressive rollout**: Model trains on its own predictions
-- **Mixed precision**: Automatic loss scaling for stability
-- **Memory optimization**: Automatic cleanup at 80% GPU usage
-- **Distributed training**: Multi-GPU with gradient synchronization
+```python
+from training.self_forcing_plus import SelfForcingPlusTrainer, get_default_config
 
-### Production Ready
-- **Multi-stage Docker**: Development, training, inference, data processing
-- **Checkpoint management**: Automatic saving with configurable retention
-- **Performance monitoring**: Real-time memory and throughput tracking
-- **Health checks**: Automatic restart and error recovery
+config = get_default_config()
+trainer = SelfForcingPlusTrainer(model, config)
 
-## 🎯 Mathematical Foundations
+for batch in dataloader:
+    losses = trainer.train_step(batch, optimizer)
+    # Curriculum automatically advances
+```
+
+### Unified World Model
+Modular architecture with configurable components:
+```python
+from config.config import get_research_config, ComponentType
+from models.world_model import WorldModel
+
+config = get_research_config()
+config.enable_component(ComponentType.CONTROL)
+config.enable_component(ComponentType.MEMORY)
+config.disable_component(ComponentType.DEPTH)
+
+model = WorldModel(config)
+```
+
+### Rust Data Pipeline
+High-performance data loading with PyO3 bindings:
+```python
+from data.rust_loader import RustVideoLoader
+
+loader = RustVideoLoader(
+    data_dir="/path/to/videos",
+    batch_size=4,
+    num_workers=8
+)
+```
+
+### Enfusion Integration (Synthetic Data)
+Arma Reforger mod for generating synthetic driving data:
+- **Multi-camera capture**: Configurable camera rigs
+- **Anchor frame selection**: For Self-Forcing++ training
+- **Binary serialization**: ENFCAP format for efficient storage
+- **Depth raycasting**: Ground-truth depth maps
+- **Scene enumeration**: Entity tracking and labeling
+
+## Mathematical Foundations
 
 ### Diffusion Transformer (DiT)
 ```python
@@ -83,66 +224,118 @@ Loss = ||f_θ(z_t) - (z_t - z_{t+1}^teacher)/Δσ_t||²
 ### Rotary Positional Embedding (3D extension)
 ```python
 # Factorized (time, height, width) embeddings
-Q_rot = RoPE_3D(Q, pos_t, pos_h, pos_w)
-K_rot = RoPE_3D(K, pos_t, pos_h, pos_w)
+def rope(x, sin, cos):
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    return torch.cat([x1*cos - x2*sin, x1*sin + x2*cos], dim=-1)
 ```
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for complete mathematical formulations.
 
-## 🚗 Training Pipeline
+## Running the Code
+
+### Training
+
+```bash
+# Unified training pipeline
+python training/unified_trainer.py
+
+# Self-Forcing++ training
+python training/self_forcing_plus.py
+
+# Flow-matching distillation
+python training/distill.py
+```
+
+### Testing
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Mathematical component tests
+python tests/test_math_components.py
+
+# Training pipeline tests
+python tests/test_training_pipeline.py
+
+# Self-Forcing++ tests
+python tests/test_self_forcing_plus.py
+
+# Rust loader tests
+python tests/test_rust_loader.py
+```
+
+### Models
+
+```bash
+# Test individual models
+python models/dit_student.py
+python models/vae3d.py
+python models/world_model.py
+```
+
+### Inference
+
+```bash
+# Real-time rollout
+python inference/rollout.py
+
+# Start inference server
+python -m inference.server --checkpoint checkpoints/best_model.pt
+```
 
 ### Data Processing
+
 ```bash
-# Convert videos to memory-mapped format
+# Large-scale data processing
+python data/large_scale_processing.py
+
+# Process videos to memory-mapped format
 python scripts/process_data.py \
   --input_dir /path/to/videos \
   --output_dir /data/processed \
   --num_workers 8
 ```
 
-### Single GPU Training
-```bash
-python scripts/train.py \
-  --data_dir /data/processed \
-  --batch_size 4 \
-  --sequence_length 16 \
-  --mixed_precision
-```
+## Tensor Contracts
 
-### Multi-GPU Training
-```bash
-python scripts/train.py \
-  --distributed \
-  --world_size 4 \
-  --batch_size 2  # Per GPU
-```
+### Model Inputs/Outputs
+- **RGB frames**: `[B, T, 3, H, W]` (float16, normalized 0-1)
+- **Control signals**: `[B, 6]` (steering, accel, goal_x, goal_y, speed, heading_rate)
+- **Ego states**: `[B, T, 5]` (x, y, heading, speed, heading_rate)
+- **Latent representations**: `[B, T, C, H//8, W//8]`
+- **Attention tokens**: `[B, T, D]` where D=model_dim
+- **KV cache**: `{'k': [B, past_T, H, D], 'v': [B, past_T, H, D]}`
 
-### Docker Training
-```bash
-# Multi-GPU with docker-compose
-docker-compose up drivedit-train-multi
-```
+### Control Signal Normalization
+- **steering**: [-1, 1] (normalized)
+- **acceleration**: [-5, 5] m/s²
+- **goal_x/goal_y**: [-50, 50] m (relative position)
+- **speed**: [0, 40] m/s
+- **heading_rate**: [-1, 1] rad/s
 
-## 📊 Performance
+## Performance Optimization
 
-### Memory Efficiency
+### Compilation and Acceleration
+- `torch.compile(model, mode='reduce-overhead')` for 2x+ speedup
+- Mixed precision training/inference
+- Efficient einsum operations
+- Custom CUDA kernels for fused operations
+
+### Memory Optimization
+- Chunked VAE processing for large sequences
+- Gradient checkpointing for deep networks
+- Rolling KV-cache with auto-truncation
+- `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256`
+
+### Benchmarks
 - **16GB GPU**: Batch size 4, sequence length 32, 256px resolution
 - **Memory mapping**: 10x reduction in RAM usage for large datasets
-- **Gradient checkpointing**: 50% memory reduction for training
+- **Rust loader**: 3x faster data loading compared to pure Python
 
-### Training Speed
-- **Single A100**: ~100 samples/sec with mixed precision
-- **Multi-GPU scaling**: 90%+ efficiency up to 8 GPUs
-- **Data loading**: Zero-copy transfers with persistent workers
+## Configuration
 
-### Generation Quality
-- **Target FVD**: <100 on driving datasets
-- **Inference speed**: 30+ FPS for real-time applications
-- **Temporal consistency**: Stable long-horizon rollouts
-
-## 🔧 Configuration
-
-### Model Configuration
+### Model Sizes
 ```python
 # Compact model (research)
 model_dim=256, num_layers=8, num_heads=8
@@ -154,124 +347,80 @@ model_dim=512, num_layers=12, num_heads=16
 model_dim=768, num_layers=24, num_heads=24
 ```
 
-### Training Configuration
-```bash
-# Fast prototyping
---batch_size 8 --sequence_length 8 --image_size 128
-
-# Production training  
---batch_size 4 --sequence_length 16 --image_size 256
-
-# High quality
---batch_size 2 --sequence_length 32 --image_size 512
-```
-
-## 🎮 Inference
-
-### Real-time Generation
+### Training Presets
 ```python
-from inference.rollout import DriveDiTInference
+from config.config import get_minimal_config, get_research_config, get_production_config
 
-# Initialize model
-model = DriveDiTInference.load_checkpoint("checkpoints/best_model.pt")
-
-# Generate sequence
-context = load_context_frames()  # [1, 8, 3, 256, 256]
-controls = load_control_sequence()  # [1, 16, 6]
-
-generated = model.generate(
-    context_frames=context,
-    control_sequence=controls,
-    length=16
-)
+config = get_research_config()  # Balanced for experimentation
+config = get_minimal_config()   # Fast iteration
+config = get_production_config() # Full quality
 ```
 
-### Inference Server
-```bash
-# Start server
-python -m inference.server --checkpoint checkpoints/best_model.pt
+## Enfusion Data Capture
 
-# Or with Docker
-docker-compose up drivedit-inference
-```
+The `DriveDiT_DataCapture/` directory contains an Arma Reforger mod for synthetic data generation:
 
-## 📈 Monitoring
+### Components
+- **SCR_MLDataCollector**: Main telemetry capture (CSV/binary)
+- **SCR_AnchorFrameSelector**: Anchor frame selection for Self-Forcing++
+- **SCR_BinarySerializer**: High-performance ENFCAP format
+- **SCR_MultiCameraRig**: Configurable multi-view capture
+- **SCR_DepthRaycaster**: Ground-truth depth generation
+- **SCR_SceneEnumerator**: Entity tracking and labeling
 
-### Training Metrics
-- **Loss curves**: Reconstruction, temporal consistency, flow matching
-- **Performance**: Steps/sec, memory usage, GPU utilization
-- **Quality**: FVD, LPIPS, depth consistency
+### Anchor Frame Triggers
+- `PERIODIC`: Regular interval anchors (default: every 30 seconds)
+- `ROAD_CHANGE`: Road type transitions
+- `JUNCTION`: Intersection approach/exit
+- `STOP/START`: Vehicle stop and restart events
+- `STEERING`: Large steering angle changes
+- `SPEED_CHANGE`: Significant acceleration/deceleration
 
-### System Monitoring
-- **Memory tracking**: Real-time GPU memory with automatic cleanup
-- **Throughput**: Samples processed per second
-- **Error detection**: Gradient explosions, NaN detection
+### Binary Format (ENFCAP v1)
+- **Header**: 64 bytes (magic, version, frame count, timestamp, flags)
+- **Index Table**: Frame offsets for O(1) random access
+- **Frame Records**: Variable-length binary with ego transform, vehicle state, scene entities
 
-## 🔬 Research Integration
-
-### Ablation Studies
-```bash
-# Disable self-forcing (teacher forcing baseline)
---loss_weights '{"reconstruction": 1.0, "temporal_consistency": 0}'
-
-# Flow matching ablation
---loss_weights '{"flow_matching": 0}'
-
-# Different sequence lengths
---sequence_length 8,16,32
-```
-
-### Paper Integration
-- **Mathematical formulations** documented alongside code
-- **Reproducible experiments** with deterministic seeding
-- **Benchmark comparisons** on standard datasets
-
-## 🛠️ Development
+## Development
 
 ### Code Structure
 - **Pure mathematics**: Explicit tensor operations with shape comments
 - **Modular design**: Swappable components for research
 - **Type hints**: Full typing for IDE support
-- **Documentation**: Mathematical explanations in docstrings
+- **Comprehensive tests**: Unit, integration, and performance tests
 
 ### Testing
 ```bash
 # Unit tests
-python -m pytest tests/unit/
+python -m pytest tests/unit/ -v
 
-# Integration tests  
-python -m pytest tests/integration/
+# Integration tests
+python -m pytest tests/integration/ -v
 
-# Performance benchmarks
-python -m pytest tests/benchmarks/
+# All tests with coverage
+python -m pytest tests/ --tb=short -v
 ```
 
-## 📚 Documentation
+## Documentation
 
-- [Mathematical Foundations](docs/REFERENCES.md): Complete paper references and formulations
-- [Best Practices](docs/BEST_PRACTICES.md): Lessons from successful ML systems
-- [API Documentation](docs/API.md): Detailed API reference
-- [Examples](docs/EXAMPLES.md): Complete usage examples
+- [Mathematical Foundations](docs/REFERENCES.md): Paper references and formulations
+- [CLAUDE.md](CLAUDE.md): Development instructions for Claude Code
+- [DriveDiT_DataCapture/README.md](DriveDiT_DataCapture/README.md): Enfusion mod documentation
 
-## 🤝 Contributing
-
-1. **Mathematical accuracy**: All implementations must match paper formulations
-2. **Zero dependencies**: No external model libraries
-3. **Performance**: Maintain or improve training/inference speed
-4. **Documentation**: Update mathematical formulations and examples
-
-## 📄 License
-
-See [LICENSE](LICENSE) for details.
-
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Built on insights from:
 - **DiT**: Scalable Diffusion Models with Transformers
-- **Self-Forcing**: Bridging Train-Test Gap in Video Generation  
+- **Self-Forcing**: Bridging Train-Test Gap in Video Generation
+- **Self-Forcing++**: Extended stable video generation
 - **V-JEPA**: Video Joint Embedding Predictive Architecture
 - **Flow Matching**: Continuous Normalizing Flows
 - **RoPE**: Rotary Position Embedding
+- **comma.ai**: Extended control and curriculum learning
+
+## License
+
+See [LICENSE](LICENSE) for details.
 
 ---
 

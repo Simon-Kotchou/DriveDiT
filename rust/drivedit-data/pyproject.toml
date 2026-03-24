@@ -1,0 +1,72 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "drivedit-data"
+version = "0.1.0"
+description = "High-performance data loading library for DriveDiT autonomous driving world model"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "DriveDiT Team" }]
+keywords = ["autonomous-driving", "data-loading", "machine-learning", "pytorch", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-benchmark>=4.0",
+    "torch>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/drivedit/drivedit"
+Documentation = "https://github.com/drivedit/drivedit#readme"
+Repository = "https://github.com/drivedit/drivedit"
+
+[tool.maturin]
+# Build settings
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "drivedit_data"
+strip = true
+
+# Compatibility
+compatibility = "manylinux2014"
+
+# Build for multiple Python versions via abi3
+bindings = "pyo3"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]

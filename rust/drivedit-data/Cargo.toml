@@ -1,0 +1,75 @@
+[package]
+name = "drivedit-data"
+version = "0.1.0"
+edition = "2021"
+authors = ["DriveDiT Team"]
+description = "High-performance data loading for DriveDiT autonomous driving world model"
+license = "MIT"
+repository = "https://github.com/drivedit/drivedit"
+keywords = ["machine-learning", "autonomous-driving", "data-loading", "image-processing"]
+categories = ["science", "multimedia::images"]
+
+[lib]
+name = "drivedit_data"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+fast_image_resize = { version = "4.0", features = ["image"] }
+turbojpeg = { version = "1.0", optional = true }
+
+# Numerical computing
+ndarray = "0.15"
+ndarray-npy = "0.8"
+nalgebra = "0.32"
+
+# Parallelism
+rayon = "1.10"
+
+# JSON parsing
+simd-json = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Memory and performance
+memmap2 = "0.9"
+bytemuck = { version = "1.14", features = ["derive"] }
+aligned-vec = "0.5"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Python bindings (optional)
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"], optional = true }
+numpy = { version = "0.21", optional = true }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.10"
+rand = "0.8"
+
+[features]
+default = ["simd"]
+simd = []
+turbo = ["turbojpeg"]
+python = ["pyo3", "numpy"]
+
+[[bench]]
+name = "frame_loading"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[profile.bench]
+lto = true
+codegen-units = 1

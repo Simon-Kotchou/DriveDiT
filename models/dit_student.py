@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from blocks.dit_block import DiTBlock
 from layers.rope import RoPELayer, precompute_rope_3d_freqs
 from layers.nn_helpers import AdaLN, RMSNorm, PositionalEncoding
-from blocks.flow_match import FlowMatchingSampler
+from blocks import FlowMatchingSampler
 
 
 class TokenEmbedding(nn.Module):

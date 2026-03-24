@@ -13,14 +13,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
 import math
+import sys
+import os
 from einops import rearrange, repeat
 
-from ..config.config import DriveDiTConfig, ComponentType
-from ..layers.rope import RoPE
-from ..layers.mha import MultiHeadAttention
-from ..layers.mlp import MLP
-from ..layers.nn_helpers import SiLU, RMSNorm
-from ..blocks.dit_block import DiTBlock
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config.config import DriveDiTConfig, ComponentType
+from layers.mha import MultiHeadAttention
+from layers.mlp import MLP
+from layers.nn_helpers import RMSNorm
+from blocks.dit_block import DiTBlock
+
+# Use torch's built-in SiLU
+SiLU = nn.SiLU
 
 
 class PatchEmbed(nn.Module):
@@ -237,12 +244,18 @@ class WorldModel(nn.Module):
         self.config = config
         self.enabled_components = config.get_enabled_components()
         
+        # Calculate max sequence length based on config
+        patches_per_frame = (config.image_size // config.patch_size) ** 2
+        max_seq_len = patches_per_frame * config.final_sequence_length + 512  # Extra for context
+
         # Core transformer backbone
         self.backbone = nn.ModuleList([
             DiTBlock(
-                dim=config.model_dim,
-                num_heads=config.num_heads,
-                mlp_ratio=config.mlp_ratio
+                d_model=config.model_dim,
+                n_heads=config.num_heads,
+                d_ff=config.model_dim * config.mlp_ratio,
+                causal=True,
+                max_seq_len=max_seq_len
             )
             for _ in range(config.num_layers)
         ])
@@ -254,18 +267,14 @@ class WorldModel(nn.Module):
             in_chans=config.in_channels,
             embed_dim=config.model_dim
         )
-        
-        # Positional encoding
-        self.rope = RoPE(config.model_dim // config.num_heads)
-        
+
+        # Note: RoPE is handled internally by DiTBlock when use_rope=True
+
         # Optional components based on config
         self._init_optional_components()
         
-        # Output heads
-        self.frame_head = nn.Linear(
-            config.model_dim, 
-            config.vae_latent_dim * (config.image_size // config.patch_size) ** 2
-        )
+        # Output heads - each token predicts its own patch latent
+        self.frame_head = nn.Linear(config.model_dim, config.vae_latent_dim)
         
         # Self-forcing scheduler
         self.self_forcing_scheduler = SelfForcingScheduler(config)
@@ -365,19 +374,19 @@ class WorldModel(nn.Module):
         B, T, C, H, W = frames.shape
         
         # Patch embedding
-        frame_tokens = self.patch_embed(frames.view(-1, C, H, W))
+        frame_tokens = self.patch_embed(frames.reshape(-1, C, H, W))
         frame_tokens = rearrange(frame_tokens, '(b t) n d -> b (t n) d', b=B, t=T)
         
         # Add optional modalities
         context_tokens = []
         
         if self.control_encoder is not None and controls is not None:
-            control_tokens = self.control_encoder(controls.view(-1, controls.size(-1)))
+            control_tokens = self.control_encoder(controls.reshape(-1, controls.size(-1)))
             control_tokens = rearrange(control_tokens, '(b t) d -> b t d', b=B, t=T)
             context_tokens.append(control_tokens)
         
         if self.depth_encoder is not None and depth is not None:
-            depth_tokens = self.depth_encoder(depth.view(-1, *depth.shape[-3:]))
+            depth_tokens = self.depth_encoder(depth.reshape(-1, *depth.shape[-3:]))
             depth_tokens = rearrange(depth_tokens, '(b t) n d -> b t n d', b=B, t=T)
             depth_tokens = rearrange(depth_tokens, 'b t n d -> b (t n) d')
             context_tokens.append(depth_tokens)
@@ -389,14 +398,10 @@ class WorldModel(nn.Module):
         else:
             all_tokens = frame_tokens
         
-        # Add positional encoding
-        seq_len = all_tokens.size(1)
-        pos_enc = self.rope.get_position_encodings(seq_len)
-        
-        # Transformer forward
+        # Transformer forward (DiTBlock handles RoPE internally)
         hidden_states = all_tokens
         for layer in self.backbone:
-            hidden_states, _ = layer(hidden_states, pos=pos_enc)
+            hidden_states, _ = layer(hidden_states)
         
         # Extract frame tokens
         num_frame_tokens = frame_tokens.size(1)
@@ -477,9 +482,13 @@ class WorldModel(nn.Module):
         context_length = T // 2
         context_frames = frames[:, :context_length]
         target_frames = frames[:, context_length:]
-        
+
+        # Slice controls and depth to match context
+        context_controls = controls[:, :context_length] if controls is not None else None
+        context_depth = depth[:, :context_length] if depth is not None else None
+
         # Process context normally
-        context_outputs = self._forward_train(context_frames, controls, depth)
+        context_outputs = self._forward_train(context_frames, context_controls, context_depth)
         
         # Autoregressive generation with self-forcing
         predictions = []
@@ -498,9 +507,14 @@ class WorldModel(nn.Module):
             
             # Create input sequence (context + current)
             input_sequence = torch.cat([context_frames, input_frame], dim=1)
-            
+            seq_len = input_sequence.size(1)
+
+            # Slice controls and depth to match input sequence length
+            seq_controls = controls[:, :seq_len] if controls is not None else None
+            seq_depth = depth[:, :seq_len] if depth is not None else None
+
             # Forward pass
-            outputs = self._forward_train(input_sequence, controls, depth)
+            outputs = self._forward_train(input_sequence, seq_controls, seq_depth)
             
             # Get prediction for next frame
             frame_pred = outputs['predictions'][:, -1:]  # Last frame
@@ -520,26 +534,23 @@ class WorldModel(nn.Module):
     def _decode_frame_tokens(self, frame_tokens: torch.Tensor, B: int, T: int) -> torch.Tensor:
         """Decode frame tokens to actual frames."""
         # Reshape frame tokens back to spatial format
+        # Input: [B, T * num_patches², vae_latent_dim]
+        # Output: [B, T, vae_latent_dim, num_patches, num_patches]
         num_patches = self.config.image_size // self.config.patch_size
-        frame_tokens = rearrange(
-            frame_tokens, 
-            'b (t n) d -> b t (d n)', 
-            t=T, 
-            n=num_patches**2
-        )
-        
-        # Reshape to frame format
+
+        # Reshape to [B, T, num_patches, num_patches, vae_latent_dim]
         frames = rearrange(
             frame_tokens,
-            'b t (c h w) -> b t c h w',
-            c=self.config.vae_latent_dim,
+            'b (t h w) c -> b t c h w',
+            t=T,
             h=num_patches,
-            w=num_patches
+            w=num_patches,
+            c=self.config.vae_latent_dim
         )
         
         # Upsample to original resolution (simplified)
         frames = F.interpolate(
-            frames.view(-1, *frames.shape[-3:]),
+            frames.reshape(-1, *frames.shape[-3:]),
             size=(self.config.image_size, self.config.image_size),
             mode='bilinear',
             align_corners=False
@@ -574,29 +585,36 @@ def create_world_model(config: DriveDiTConfig) -> WorldModel:
 
 if __name__ == "__main__":
     # Test unified world model
-    from ..config.config import get_research_config
-    
-    config = get_research_config()
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from config.config import get_minimal_config
+
+    # Use minimal config for faster testing
+    config = get_minimal_config()
     model = create_world_model(config)
-    
-    # Test inputs
-    B, T, C, H, W = 2, 8, 3, 256, 256
+
+    # Test inputs (smaller dimensions for faster testing)
+    B, T = 2, 4
+    C, H, W = config.in_channels, config.image_size, config.image_size
     frames = torch.randn(B, T, C, H, W)
-    controls = torch.randn(B, T, 6) if config.is_component_enabled(ComponentType.CONTROL) else None
-    depth = torch.randn(B, T, 1, H, W) if config.is_component_enabled(ComponentType.DEPTH) else None
-    
+    controls = torch.randn(B, T, config.control_input_dim) if config.is_component_enabled(ComponentType.CONTROL) else None
+    depth = torch.randn(B, T, config.depth_channels, H, W) if config.is_component_enabled(ComponentType.DEPTH) else None
+
     # Test different modes
     print("Testing training mode...")
     train_outputs = model(frames, controls, depth, mode="train")
     print(f"Training outputs: {list(train_outputs.keys())}")
-    
+
     print("Testing self-forcing mode...")
     sf_outputs = model(frames, controls, depth, mode="self_forcing", self_forcing_ratio=0.5)
     print(f"Self-forcing outputs: {list(sf_outputs.keys())}")
-    
+
     print("Testing inference mode...")
-    context_frames = frames[:, :4]  # Use first 4 frames as context
-    inf_outputs = model(context_frames, controls, depth, mode="inference", num_steps=4)
+    context_frames = frames[:, :2]  # Use first 2 frames as context
+    context_controls = controls[:, :2] if controls is not None else None
+    context_depth = depth[:, :2] if depth is not None else None
+    inf_outputs = model(context_frames, context_controls, context_depth, mode="inference", num_steps=2)
     print(f"Inference outputs: {list(inf_outputs.keys())}")
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")

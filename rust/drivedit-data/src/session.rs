@@ -146,7 +146,7 @@ impl EnfusionSession {
         sample_idx: usize,
     ) -> PyResult<Bound<'py, PyArray4<f32>>> {
         let frames = self.load_sample_frames(sample_idx)?;
-        Ok(frames.to_pyarray(py))
+        Ok(frames.to_pyarray_bound(py))
     }
 
     /// Get control signals for a sample at the given index.
@@ -156,7 +156,7 @@ impl EnfusionSession {
         sample_idx: usize,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let controls = self.load_sample_controls(sample_idx)?;
-        Ok(controls.to_pyarray(py))
+        Ok(controls.to_pyarray_bound(py))
     }
 
     /// Get depth data for a sample (if available).
@@ -170,7 +170,7 @@ impl EnfusionSession {
         }
 
         let depth = self.load_sample_depth(sample_idx)?;
-        Ok(Some(depth.to_pyarray(py)))
+        Ok(Some(depth.to_pyarray_bound(py)))
     }
 
     /// Get a complete sample (frames + controls + optional depth).
@@ -192,9 +192,9 @@ impl EnfusionSession {
         };
 
         Ok((
-            frames.to_pyarray(py),
-            controls.to_pyarray(py),
-            depth.map(|d| d.to_pyarray(py)),
+            frames.to_pyarray_bound(py),
+            controls.to_pyarray_bound(py),
+            depth.map(|d| d.to_pyarray_bound(py)),
         ))
     }
 
@@ -239,7 +239,7 @@ impl EnfusionSession {
 
 impl EnfusionSession {
     /// Create a session from a directory path.
-    fn from_path(
+    pub fn from_path(
         path: &Path,
         config: DatasetConfig,
         telemetry_config: TelemetryConfig,
@@ -274,7 +274,7 @@ impl EnfusionSession {
             } else {
                 return Err(DataError::Session("No frames found".to_string()));
             };
-            (frame_paths.len(), w, h, 30.0) // Assume 30fps for images
+            (frame_paths.len(), w as usize, h as usize, 30.0_f32) // Assume 30fps for images
         };
 
         let duration_seconds = num_frames as f64 / fps as f64;
@@ -284,8 +284,8 @@ impl EnfusionSession {
             num_frames,
             duration_seconds,
             fps,
-            width,
-            height,
+            width: width as u32,
+            height: height as u32,
             has_telemetry,
             has_depth,
             path: path.to_string_lossy().to_string(),
@@ -298,7 +298,7 @@ impl EnfusionSession {
             None
         };
 
-        let telemetry_parser = TelemetryParser::new(Some(telemetry_config));
+        let telemetry_parser = TelemetryParser::new();
 
         Ok(Self {
             config,
@@ -322,8 +322,8 @@ impl EnfusionSession {
         // Check for ENFCAP files first
         let enfcap_path = path.join("video.enfcap");
         if enfcap_path.exists() {
-            let mut reader = ENFCAPReader::new(None, 512);
-            reader.open(&enfcap_path.to_string_lossy())?;
+            let reader = ENFCAPReader::open(&enfcap_path)
+                .map_err(|e| DataError::Session(format!("Failed to open ENFCAP: {}", e)))?;
             return Ok((Vec::new(), Some(reader), true));
         }
 
@@ -435,22 +435,23 @@ impl EnfusionSession {
     }
 
     /// Load frames for a sample.
-    fn load_sample_frames(&mut self, sample_idx: usize) -> DataResult<Array4<f32>> {
+    pub fn load_sample_frames(&mut self, sample_idx: usize) -> DataResult<Array4<f32>> {
         let indices = self.sample_frame_indices(sample_idx)?;
 
-        if let Some(ref reader) = self.enfcap_reader {
-            reader.read_frames_inner(&indices)
-        } else {
-            let paths: Vec<String> = indices
-                .iter()
-                .map(|&i| self.frame_paths[i].to_string_lossy().to_string())
-                .collect();
-            self.frame_loader.load_frames_inner(&paths)
+        if self.enfcap_reader.is_some() {
+            // TODO: Implement ENFCAP frame reading
+            return Err(DataError::Frame("ENFCAP reading not yet implemented".to_string()));
         }
+
+        let paths: Vec<String> = indices
+            .iter()
+            .map(|&i| self.frame_paths[i].to_string_lossy().to_string())
+            .collect();
+        self.frame_loader.load_frames_inner(&paths)
     }
 
     /// Load controls for a sample.
-    fn load_sample_controls(&mut self, sample_idx: usize) -> DataResult<Array2<f32>> {
+    pub fn load_sample_controls(&mut self, sample_idx: usize) -> DataResult<Array2<f32>> {
         let telemetry = self.load_telemetry()?;
         let indices = self.sample_frame_indices(sample_idx)?;
 
@@ -469,7 +470,7 @@ impl EnfusionSession {
     }
 
     /// Load depth data for a sample.
-    fn load_sample_depth(&mut self, sample_idx: usize) -> DataResult<Array4<f32>> {
+    pub fn load_sample_depth(&mut self, sample_idx: usize) -> DataResult<Array4<f32>> {
         let depth_loader = self
             .depth_loader
             .as_ref()
@@ -504,15 +505,20 @@ impl EnfusionSession {
         let telemetry_path = Self::find_telemetry_file(&self.path)
             .ok_or_else(|| DataError::Telemetry("No telemetry file found".to_string()))?;
 
-        let path_str = telemetry_path.to_string_lossy();
-        let telemetry = if path_str.ends_with(".json") {
-            self.telemetry_parser.parse_json_inner(&path_str)?
-        } else {
-            self.telemetry_parser.parse_csv_inner(&path_str)?
-        };
+        // Parse telemetry file
+        let telemetry = self.telemetry_parser.parse_file(&telemetry_path)
+            .map_err(|e| DataError::Telemetry(format!("Failed to parse telemetry: {}", e)))?;
 
-        // Convert to array
-        let controls = self.telemetry_parser.records_to_controls(&telemetry);
+        // Convert records to control array [steering, throttle, brake, speed]
+        let control_dim = self.config.control_dim.min(4);
+        let num_records = telemetry.len();
+        let mut controls = Array2::zeros((num_records, control_dim));
+        for (i, record) in telemetry.iter().enumerate() {
+            if control_dim > 0 { controls[[i, 0]] = record.steering; }
+            if control_dim > 1 { controls[[i, 1]] = record.throttle; }
+            if control_dim > 2 { controls[[i, 2]] = record.brake; }
+            if control_dim > 3 { controls[[i, 3]] = record.speed_ms; }
+        }
 
         // Cache
         {

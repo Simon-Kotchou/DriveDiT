@@ -46,9 +46,7 @@ Repository = "https://github.com/drivedit/drivedit"
 [tool.maturin]
 # Build settings
 features = ["pyo3/extension-module"]
-python-source = "python"
 module-name = "drivedit_data"
-strip = true
 
 # Compatibility
 compatibility = "manylinux2014"

@@ -26,24 +26,30 @@ nalgebra = "0.32"
 
 # Parallelism
 rayon = "1.10"
+parking_lot = "0.12"
 
-# JSON parsing
+# JSON/CSV parsing
 simd-json = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+csv = "1.3"
 
 # Memory and performance
 memmap2 = "0.9"
-bytemuck = { version = "1.14", features = ["derive"] }
+bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
 aligned-vec = "0.5"
 
 # Error handling
 thiserror = "1.0"
 anyhow = "1.0"
 
-# Python bindings (optional)
-pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"], optional = true }
-numpy = { version = "0.21", optional = true }
+# Utilities
+bitflags = "2.0"
+glob = "0.3"
+
+# Python bindings
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"] }
+numpy = "0.21"
 
 # Logging
 log = "0.4"
@@ -58,10 +64,9 @@ rand = "0.8"
 default = ["simd"]
 simd = []
 turbo = ["turbojpeg"]
-python = ["pyo3", "numpy"]
 
 [[bench]]
-name = "frame_loading"
+name = "data_loading"
 harness = false
 
 [profile.release]

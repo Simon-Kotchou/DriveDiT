@@ -44,6 +44,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use memmap2::{Mmap, MmapMut, MmapOptions};
+use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -731,6 +732,7 @@ impl FrameData {
 /// High-performance ENFCAP file reader with memory-mapped access
 ///
 /// Provides O(1) random frame access and parallel frame decoding.
+#[pyclass]
 pub struct ENFCAPReader {
     /// Memory-mapped file data
     mmap: Mmap,
@@ -799,6 +801,24 @@ impl ENFCAPReader {
     /// Get header flags
     pub fn flags(&self) -> HeaderFlags {
         self.header.header_flags()
+    }
+
+    /// Get number of frames (alias for frame_count)
+    pub fn num_frames(&self) -> usize {
+        self.header.frame_count as usize
+    }
+
+    /// Get frame dimensions (width, height)
+    /// Note: ENFCAP format doesn't store dimensions in header, returns default
+    pub fn dimensions(&self) -> (usize, usize) {
+        // TODO: Read from first frame or store in header
+        (1920, 1080)
+    }
+
+    /// Get frames per second
+    /// Note: ENFCAP format doesn't store FPS in header, returns default
+    pub fn fps(&self) -> f32 {
+        30.0
     }
 
     /// Read a single frame by index (O(1) random access)
@@ -1069,10 +1089,14 @@ impl ENFCAPWriter {
         self.writer.flush()?;
 
         // Update header with final values
+        let frame_count = self.frame_count();
+        let start_timestamp = self.start_timestamp;
+        let flags = self.flags;
+
         let file = self.writer.get_mut();
         file.seek(SeekFrom::Start(0))?;
 
-        let header = ENFCAPHeader::new(self.frame_count(), self.start_timestamp, self.flags);
+        let header = ENFCAPHeader::new(frame_count, start_timestamp, flags);
         file.write_all(bytemuck::bytes_of(&header))?;
 
         file.flush()?;

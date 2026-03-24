@@ -123,9 +123,9 @@ impl EnfusionDataset {
         let sample = self.get_sample(actual_idx)?;
 
         Ok((
-            sample.0.to_pyarray(py),
-            sample.1.to_pyarray(py),
-            sample.2.map(|d| d.to_pyarray(py)),
+            sample.0.to_pyarray_bound(py),
+            sample.1.to_pyarray_bound(py),
+            sample.2.map(|d| d.to_pyarray_bound(py)),
         ))
     }
 
@@ -141,9 +141,9 @@ impl EnfusionDataset {
     )> {
         let samples = self.get_batch_inner(&indices)?;
         Ok((
-            samples.0.to_pyarray(py),
-            samples.1.to_pyarray(py),
-            samples.2.map(|d| d.to_pyarray(py)),
+            samples.0.to_pyarray_bound(py),
+            samples.1.to_pyarray_bound(py),
+            samples.2.map(|d| d.to_pyarray_bound(py)),
         ))
     }
 
@@ -387,12 +387,14 @@ impl EnfusionDataset {
 
         // Combine into batched arrays
         let batch_size = indices.len();
-        let first_sample = samples.first().ok_or_else(|| {
-            DataError::Config("No samples loaded".to_string())
-        })?.as_ref().map_err(|e| DataError::Frame(e.to_string()))?;
 
-        let frame_shape = first_sample.0.shape();
-        let control_shape = first_sample.1.shape();
+        // Get shapes from first sample (clone shape info to avoid borrow)
+        let (frame_shape, control_shape) = {
+            let first_sample = samples.first().ok_or_else(|| {
+                DataError::Config("No samples loaded".to_string())
+            })?.as_ref().map_err(|e| DataError::Frame(e.to_string()))?;
+            (first_sample.0.shape().to_vec(), first_sample.1.shape().to_vec())
+        };
 
         // Create output arrays
         let mut frames = Array4::zeros((
@@ -489,7 +491,8 @@ impl DataLoaderIterator {
     #[new]
     pub fn new(dataset: Py<EnfusionDataset>, batch_size: usize, drop_last: bool) -> Self {
         Python::with_gil(|py| {
-            let ds = dataset.borrow(py);
+            let binding = dataset.clone_ref(py);
+            let ds = binding.borrow(py);
             let total = ds.total_samples;
             let num_batches = if drop_last {
                 total / batch_size
@@ -524,16 +527,22 @@ impl DataLoaderIterator {
         }
 
         let start = slf.current_idx * slf.batch_size;
-        let ds = slf.dataset.borrow(py);
-        let end = (start + slf.batch_size).min(ds.total_samples);
+        let batch_size = slf.batch_size;
+        let drop_last = slf.drop_last;
 
-        if slf.drop_last && end - start < slf.batch_size {
+        // Get total_samples from a separate borrow
+        let total_samples = slf.dataset.borrow(py).total_samples;
+        let end = (start + batch_size).min(total_samples);
+
+        if drop_last && end - start < batch_size {
             return Ok(None);
         }
 
         let indices: Vec<usize> = (start..end).collect();
         slf.current_idx += 1;
 
+        // Get batch with a new borrow
+        let ds = slf.dataset.borrow(py);
         let batch = ds.get_batch(py, indices)?;
         Ok(Some(batch))
     }

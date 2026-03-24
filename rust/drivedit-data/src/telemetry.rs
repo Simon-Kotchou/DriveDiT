@@ -26,6 +26,7 @@
 
 use csv::ReaderBuilder;
 use nalgebra::{Matrix3, Matrix4, Rotation3, Unit, Vector3};
+use pyo3::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -249,6 +250,7 @@ impl ColumnMapping {
 }
 
 /// High-performance CSV telemetry parser
+#[pyclass]
 pub struct TelemetryParser {
     /// Column mapping configuration
     column_mapping: ColumnMapping,

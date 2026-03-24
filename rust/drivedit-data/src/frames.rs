@@ -102,7 +102,7 @@ impl FrameLoader {
         path: &str,
     ) -> PyResult<Bound<'py, PyArray3<f32>>> {
         let image = self.load_frame_inner(Path::new(path))?;
-        Ok(image.to_pyarray(py))
+        Ok(image.to_pyarray_bound(py))
     }
 
     /// Load multiple frames in parallel and return as numpy array [T, C, H, W].
@@ -112,7 +112,7 @@ impl FrameLoader {
         paths: Vec<String>,
     ) -> PyResult<Bound<'py, PyArray4<f32>>> {
         let frames = self.load_frames_inner(&paths)?;
-        Ok(frames.to_pyarray(py))
+        Ok(frames.to_pyarray_bound(py))
     }
 
     /// Load a sequence of frames from a directory.
@@ -124,7 +124,7 @@ impl FrameLoader {
         num_frames: usize,
     ) -> PyResult<Bound<'py, PyArray4<f32>>> {
         let frames = self.load_sequence_inner(Path::new(dir_path), start_idx, num_frames)?;
-        Ok(frames.to_pyarray(py))
+        Ok(frames.to_pyarray_bound(py))
     }
 
     /// Load frames matching a glob pattern.
@@ -219,7 +219,7 @@ impl FrameLoader {
     }
 
     /// Load multiple frames in parallel.
-    fn load_frames_inner(&self, paths: &[String]) -> DataResult<Array4<f32>> {
+    pub fn load_frames_inner(&self, paths: &[String]) -> DataResult<Array4<f32>> {
         let num_frames = paths.len();
         if num_frames == 0 {
             return Err(DataError::Frame("Empty path list".to_string()));
@@ -479,7 +479,7 @@ impl DepthLoader {
         path: &str,
     ) -> PyResult<Bound<'py, PyArray3<f32>>> {
         let depth = self.load_depth_inner(Path::new(path))?;
-        Ok(depth.to_pyarray(py))
+        Ok(depth.to_pyarray_bound(py))
     }
 
     /// Load multiple depth maps in parallel.
@@ -489,7 +489,7 @@ impl DepthLoader {
         paths: Vec<String>,
     ) -> PyResult<Bound<'py, PyArray4<f32>>> {
         let depths = self.load_depths_inner(&paths)?;
-        Ok(depths.to_pyarray(py))
+        Ok(depths.to_pyarray_bound(py))
     }
 
     /// Clear the depth cache.
@@ -530,7 +530,7 @@ impl DepthLoader {
         // Resize if needed
         let (target_w, target_h) = (self.config.image_width, self.config.image_height);
         let resized = if w as usize != target_w || h as usize != target_h {
-            image::imageops::resize(&gray, target_w as u32, target_h as u32, FilterType::Bilinear)
+            image::imageops::resize(&gray, target_w as u32, target_h as u32, FilterType::Triangle)
         } else {
             gray
         };
@@ -556,7 +556,7 @@ impl DepthLoader {
     }
 
     /// Load multiple depth maps in parallel.
-    fn load_depths_inner(&self, paths: &[String]) -> DataResult<Array4<f32>> {
+    pub fn load_depths_inner(&self, paths: &[String]) -> DataResult<Array4<f32>> {
         let num_frames = paths.len();
         if num_frames == 0 {
             return Err(DataError::Depth("Empty path list".to_string()));

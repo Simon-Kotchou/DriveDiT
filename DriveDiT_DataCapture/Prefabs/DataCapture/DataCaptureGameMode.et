@@ -1,0 +1,63 @@
+GenericEntity {
+ ID "45E80320CF950629"
+ components {
+  SCR_BaseGameMode "{26666EE9C4A2A7C9}" {
+  }
+  SCR_RespawnSystemComponent "{07B9AD7485BA22FF}" {
+  }
+  SCR_EditableEntityComponent "{2A7D7D20C4750D33}" {
+   m_sDisplayName "DriveDiT Data Capture Game Mode"
+  }
+  SCR_CaptureOrchestrator "{B8C9D0E1F2A3B4C5}" {
+   m_eCaptureProfile "RESEARCH"
+   m_bAutoStartCapture 1
+   m_bEnableHealthMonitoring 1
+   m_iHealthCheckIntervalMs 5000
+  }
+  SCR_MLDataCollector "{C9D0E1F2A3B4C5D6}" {
+   m_bEnableDataCapture 1
+   m_iCaptureIntervalMs 100
+   m_bCaptureScreenshots 0
+   m_bVerboseLogging 1
+   m_iProgressLogInterval 500
+  }
+  SCR_AIDrivingSimulator "{D0E1F2A3B4C5D6E7}" {
+   m_iMaxAIGroups 3
+   m_fWaypointRadius 30.0
+   m_iWaypointDelay 3000
+   m_bDetailedTelemetry 1
+   m_bMonitorAIInputs 1
+   m_sInitialWeather "Clear"
+   m_fInitialTime 12.0
+   m_bEnableDataCapture 1
+   m_iCaptureIntervalMs 100
+  }
+  SCR_DepthRaycaster "{E1F2A3B4C5D6E7F8}" {
+   m_iHorizontalResolution 64
+   m_iVerticalResolution 48
+   m_fMaxDepth 500.0
+   m_fMinDepth 0.5
+   m_fHorizontalFOV 90.0
+   m_fVerticalFOV 70.0
+   m_bEnabled 1
+   m_bWriteRawFiles 1
+   m_bNormalizeDepth 1
+  }
+  SCR_SceneEnumerator "{F2A3B4C5D6E7F8A9}" {
+   m_fMaxDistance 200.0
+   m_bTrackVehicles 1
+   m_bTrackCharacters 1
+   m_bTrackStaticObjects 0
+   m_bTrackVegetation 0
+   m_iMaxObjectsPerFrame 50
+   m_bEnabled 1
+  }
+  SCR_BinarySerializer "{A3B4C5D6E7F8A9B0}" {
+   m_eOutputFormat "STRUCTURED"
+   m_bEnableCompression 0
+   m_bIncludeHeaders 1
+  }
+  SCR_DrivingSimDebugUI "{B4C5D6E7F8A9B0C1}" {
+  }
+ }
+}

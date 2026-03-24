@@ -1,0 +1,51 @@
+{
+    "guid": "6D7E8F9A-1B2C-3D4E-5F6A-7B8C9D0E1F2A",
+    "name": "DriveDiT_DataCapture",
+    "title": "DriveDiT Data Capture",
+    "description": "ML Training Data Capture System for Autonomous Driving World Models. Captures synchronized vehicle telemetry, camera frames, depth data, and scene information for training diffusion transformer models.",
+    "version": "1.0.0",
+    "author": "DriveDiT Team",
+    "dependencies": [
+        {
+            "guid": "{E0F0D05A-4A27-4BAE-9E52-02E02B0DED97}",
+            "name": "ArmaReforger",
+            "version": "1.0.0",
+            "type": "game"
+        }
+    ],
+    "scenarios": [
+        {
+            "guid": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+            "name": "DataCapture_TestScenario",
+            "description": "Test scenario for ML data capture validation",
+            "world": "{00000000-0000-0000-0000-000000000000}Worlds/DataCapture/DataCaptureWorld.ent",
+            "header": "{00000000-0000-0000-0000-000000000000}Configs/Scenarios/DataCapture_Mission.conf"
+        }
+    ],
+    "configs": [
+        {
+            "name": "minimal",
+            "description": "Minimal capture configuration - telemetry only",
+            "path": "Configs/CaptureProfiles/minimal.conf"
+        },
+        {
+            "name": "research",
+            "description": "Research configuration - telemetry + depth + segmentation",
+            "path": "Configs/CaptureProfiles/research.conf"
+        },
+        {
+            "name": "production",
+            "description": "Full production capture - all data streams",
+            "path": "Configs/CaptureProfiles/production.conf"
+        }
+    ],
+    "resourceDatabases": [
+        "resources.rdb"
+    ],
+    "workbench": {
+        "scriptModule": "workbench",
+        "scripts": [
+            "scripts/DataCaptureValidation.c"
+        ]
+    }
+}

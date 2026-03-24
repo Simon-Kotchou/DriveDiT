@@ -281,48 +281,53 @@ class TestSelfForcingPlus:
     def test_curriculum_scheduler(self):
         """Test curriculum learning scheduler."""
         config = SelfForcingPlusConfig(
-            initial_seq_len=4,
-            final_seq_len=16,
-            seq_warmup_steps=1000,
-            initial_sf_ratio=0.0,
-            final_sf_ratio=0.8,
-            sf_warmup_steps=500
+            initial_sequence_length=4,
+            final_sequence_length=16,
+            sequence_curriculum_steps=1000,
+            initial_self_forcing_ratio=0.0,
+            final_self_forcing_ratio=0.8,
+            self_forcing_warmup_steps=500
         )
 
         scheduler = CurriculumScheduler(config)
 
-        # Test initial values
-        assert scheduler.get_sequence_length(0) == 4
-        assert scheduler.get_self_forcing_ratio(0) == 0.0
+        # Test initial values (step 0)
+        scheduler.update(0)
+        assert scheduler.get_sequence_length() == 4
+        assert scheduler.get_self_forcing_ratio() == 0.0
 
-        # Test progression
-        seq_len = scheduler.get_sequence_length(500)
-        sf_ratio = scheduler.get_self_forcing_ratio(500)
+        # Test progression (step 500)
+        scheduler.update(500)
+        seq_len = scheduler.get_sequence_length()
+        sf_ratio = scheduler.get_self_forcing_ratio()
 
         assert seq_len >= 4 and seq_len <= 16
         assert sf_ratio >= 0.0 and sf_ratio <= 0.8
 
-        # Test final values
-        assert scheduler.get_sequence_length(2000) == 16
-        assert scheduler.get_self_forcing_ratio(2000) == 0.8
+        # Test final values (step 2000 - beyond warmup)
+        scheduler.update(2000)
+        assert scheduler.get_sequence_length() == 16
+        assert scheduler.get_self_forcing_ratio() == 0.8
 
     def test_future_anchor_encoder(self):
         """Test future anchor encoding component."""
-        encoder = FutureAnchorEncoder(
-            latent_dim=128,
+        config = SelfForcingPlusConfig(
             model_dim=256,
-            num_anchor_frames=3
+            future_anchor_dim=64,
+            future_anchor_horizons=[2.0, 4.0, 6.0],
+            fps=10.0
         )
+        encoder = FutureAnchorEncoder(config)
 
         batch_size = 2
-        seq_len = 8
-        latent_dim = 128
+        seq_len = 80  # 8 seconds at 10 fps
+        state_dim = 5  # [x, y, heading, speed, heading_rate]
 
-        # Create dummy latent sequence
-        latent_seq = torch.randn(batch_size, seq_len, latent_dim)
+        # Create dummy future states sequence
+        future_states = torch.randn(batch_size, seq_len, state_dim)
 
         # Test encoding
-        anchor_tokens = encoder(latent_seq)
+        anchor_tokens = encoder(future_states, current_time=0)
 
         assert anchor_tokens.shape[0] == batch_size
         assert anchor_tokens.shape[-1] == 256  # model_dim
@@ -330,10 +335,12 @@ class TestSelfForcingPlus:
 
     def test_extended_control_encoder(self):
         """Test extended 6D control signal encoding."""
-        encoder = ExtendedControlEncoder(
+        config = SelfForcingPlusConfig(
             control_dim=6,
+            control_hidden_dim=128,
             model_dim=256
         )
+        encoder = ExtendedControlEncoder(config)
 
         batch_size = 4
 
@@ -522,35 +529,35 @@ class TestTrainingStability:
 
 class TestModelConfiguration:
     """Test model configuration and initialization."""
-    
+
     def test_config_validation(self):
         """Test configuration validation."""
         config = get_minimal_config()
-        
-        # Test that config has required fields
-        assert hasattr(config, 'model')
-        assert hasattr(config, 'training')
-        assert hasattr(config, 'data')
-        assert hasattr(config.model, 'model_dim')
-        assert hasattr(config.model, 'num_layers')
-    
+
+        # Test that config has required fields (flat structure)
+        assert hasattr(config, 'model_dim')
+        assert hasattr(config, 'num_layers')
+        assert hasattr(config, 'num_heads')
+        assert hasattr(config, 'batch_size')
+        assert hasattr(config, 'learning_rate')
+
     def test_different_config_presets(self):
         """Test different configuration presets."""
         configs = {
             'minimal': get_minimal_config(),
             'research': get_research_config()
         }
-        
+
         for name, config in configs.items():
-            assert config.model.model_dim > 0
-            assert config.model.num_layers > 0
-            assert config.model.num_heads > 0
-            
+            assert config.model_dim > 0
+            assert config.num_layers > 0
+            assert config.num_heads > 0
+
             # Research config should be larger than minimal
             if name == 'research':
                 minimal = configs['minimal']
-                assert config.model.model_dim >= minimal.model.model_dim
-                assert config.model.num_layers >= minimal.model.num_layers
+                assert config.model_dim >= minimal.model_dim
+                assert config.num_layers >= minimal.num_layers
 
 
 def test_end_to_end_training_step():

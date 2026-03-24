@@ -6,6 +6,7 @@ Components:
 2. Curriculum Learning Scheduler - Progressive training
 3. Future Anchor Conditioning - Goal state conditioning (comma.ai)
 4. Extended 6D Control Signal - Full control encoding with inverse dynamics
+5. Stability Improvements - EMA, uncertainty weighting, per-layer gradient clipping
 
 Based on Self-Forcing++ paper and comma.ai insights for extended
 sequence generation and stable training.
@@ -14,6 +15,7 @@ References:
 - Self-Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion
 - Self-Forcing++: Extended sequence generation with rolling KV cache
 - comma.ai: Curriculum learning and future anchor conditioning
+- Kendall et al.: Multi-task learning using uncertainty
 """
 
 import torch
@@ -651,6 +653,293 @@ class ControlConditioner(nn.Module):
 
 
 # =============================================================================
+# Component 5: Stability Improvements
+# =============================================================================
+
+class EMAModel:
+    """
+    Exponential Moving Average model for stable training targets.
+
+    Maintains a shadow copy of model weights that are updated with
+    exponential moving average. Used for:
+    - Stable teacher targets during distillation
+    - Evaluation and inference
+    - Reducing variance in training
+
+    Args:
+        model: The model to track
+        decay: EMA decay rate (higher = slower update, default 0.9999)
+        device: Device for EMA parameters
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        decay: float = 0.9999,
+        device: Optional[torch.device] = None
+    ):
+        self.decay = decay
+        self.device = device
+
+        # Create shadow parameters
+        self.shadow = {}
+        self.backup = {}
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+                if device:
+                    self.shadow[name] = self.shadow[name].to(device)
+
+    def update(self, model: nn.Module):
+        """Update EMA parameters with current model weights."""
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad and name in self.shadow:
+                    new_value = param.data
+                    if self.device:
+                        new_value = new_value.to(self.device)
+                    self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * new_value
+
+    def apply_shadow(self, model: nn.Module):
+        """Apply EMA weights to model (save current weights as backup)."""
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name].clone()
+                if param.device != self.shadow[name].device:
+                    param.data = param.data.to(param.device)
+
+    def restore(self, model: nn.Module):
+        """Restore original weights from backup."""
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.backup:
+                param.data = self.backup[name]
+        self.backup = {}
+
+    def state_dict(self) -> Dict[str, torch.Tensor]:
+        """Get EMA state for checkpointing."""
+        return {
+            'shadow': self.shadow.copy(),
+            'decay': self.decay
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        """Load EMA state from checkpoint."""
+        self.shadow = state_dict['shadow']
+        self.decay = state_dict.get('decay', self.decay)
+
+
+class UncertaintyWeighting(nn.Module):
+    """
+    Automatic uncertainty-based loss weighting (Kendall et al., 2018).
+
+    Learns per-task uncertainty (log variance) and uses it to weight
+    losses automatically. Tasks with higher uncertainty get lower weight.
+
+    Loss = sum_i (1/(2*sigma_i^2)) * L_i + log(sigma_i)
+
+    This allows the model to automatically balance multiple loss terms
+    during training without manual tuning.
+
+    Args:
+        loss_names: List of loss names to weight
+        initial_log_var: Initial log variance (default 0 = sigma=1)
+    """
+
+    def __init__(
+        self,
+        loss_names: List[str],
+        initial_log_var: float = 0.0
+    ):
+        super().__init__()
+        self.loss_names = loss_names
+        self.num_losses = len(loss_names)
+
+        # Learnable log variances (one per loss)
+        self.log_vars = nn.Parameter(
+            torch.full((self.num_losses,), initial_log_var)
+        )
+
+    def forward(self, losses: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute weighted total loss with uncertainty weighting.
+
+        Args:
+            losses: Dict of loss_name -> loss_value
+
+        Returns:
+            Tuple of (weighted_total_loss, weights_dict)
+        """
+        total_loss = torch.tensor(0.0, device=self.log_vars.device)
+        weights = {}
+
+        for i, name in enumerate(self.loss_names):
+            if name in losses:
+                loss_val = losses[name]
+                log_var = self.log_vars[i]
+
+                # Precision weighting: (1/(2*sigma^2)) * loss
+                precision = torch.exp(-log_var)
+                weighted_loss = 0.5 * precision * loss_val
+
+                # Regularization term: log(sigma) = 0.5 * log_var
+                regularization = 0.5 * log_var
+
+                total_loss = total_loss + weighted_loss + regularization
+
+                # Record effective weight
+                weights[name] = precision.item()
+
+        return total_loss, weights
+
+    def get_weights(self) -> Dict[str, float]:
+        """Get current loss weights (precisions)."""
+        weights = {}
+        with torch.no_grad():
+            for i, name in enumerate(self.loss_names):
+                weights[name] = torch.exp(-self.log_vars[i]).item()
+        return weights
+
+    def get_uncertainties(self) -> Dict[str, float]:
+        """Get current uncertainties (standard deviations)."""
+        uncertainties = {}
+        with torch.no_grad():
+            for i, name in enumerate(self.loss_names):
+                # sigma = exp(0.5 * log_var)
+                uncertainties[name] = torch.exp(0.5 * self.log_vars[i]).item()
+        return uncertainties
+
+
+class PerLayerGradientClipper:
+    """
+    Per-layer gradient clipping for fine-grained control.
+
+    Different layers may need different clipping thresholds:
+    - Early layers: More sensitive, need tighter clipping
+    - Deep layers: More stable, can use looser clipping
+    - Attention layers: May need special handling
+
+    Supports adaptive clipping based on gradient history.
+
+    Args:
+        model: Model to clip gradients for
+        default_max_norm: Default maximum gradient norm
+        layer_configs: Dict of layer_name_pattern -> max_norm
+        adaptive: Whether to use adaptive clipping
+        adaptive_factor: Factor for adaptive threshold update
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        default_max_norm: float = 1.0,
+        layer_configs: Optional[Dict[str, float]] = None,
+        adaptive: bool = False,
+        adaptive_factor: float = 0.99
+    ):
+        self.model = model
+        self.default_max_norm = default_max_norm
+        self.layer_configs = layer_configs or {}
+        self.adaptive = adaptive
+        self.adaptive_factor = adaptive_factor
+
+        # Track gradient norms for adaptive clipping
+        self.grad_norm_history: Dict[str, List[float]] = {}
+        self.adaptive_thresholds: Dict[str, float] = {}
+
+        # Precompute layer max norms
+        self.layer_max_norms = self._compute_layer_norms()
+
+    def _compute_layer_norms(self) -> Dict[str, float]:
+        """Compute max norm for each parameter group."""
+        layer_norms = {}
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                max_norm = self.default_max_norm
+                # Check for pattern matches
+                for pattern, norm in self.layer_configs.items():
+                    if pattern in name:
+                        max_norm = norm
+                        break
+                layer_norms[name] = max_norm
+        return layer_norms
+
+    def clip_gradients(self) -> Dict[str, float]:
+        """
+        Clip gradients per-layer and return gradient statistics.
+
+        Returns:
+            Dict of layer_name -> gradient_norm (before clipping)
+        """
+        grad_norms = {}
+
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                # Compute gradient norm
+                grad_norm = param.grad.data.norm(2).item()
+                grad_norms[name] = grad_norm
+
+                # Get max norm for this layer
+                if self.adaptive and name in self.adaptive_thresholds:
+                    max_norm = self.adaptive_thresholds[name]
+                else:
+                    max_norm = self.layer_max_norms.get(name, self.default_max_norm)
+
+                # Clip if necessary
+                if grad_norm > max_norm:
+                    clip_coef = max_norm / (grad_norm + 1e-8)
+                    param.grad.data.mul_(clip_coef)
+
+                # Update adaptive threshold
+                if self.adaptive:
+                    if name not in self.grad_norm_history:
+                        self.grad_norm_history[name] = []
+                    self.grad_norm_history[name].append(grad_norm)
+
+                    # Keep limited history
+                    if len(self.grad_norm_history[name]) > 100:
+                        self.grad_norm_history[name] = self.grad_norm_history[name][-100:]
+
+                    # Update adaptive threshold (percentile-based)
+                    if len(self.grad_norm_history[name]) >= 10:
+                        sorted_norms = sorted(self.grad_norm_history[name])
+                        percentile_95 = sorted_norms[int(0.95 * len(sorted_norms))]
+                        self.adaptive_thresholds[name] = (
+                            self.adaptive_factor * self.adaptive_thresholds.get(name, percentile_95) +
+                            (1 - self.adaptive_factor) * percentile_95
+                        )
+
+        return grad_norms
+
+    def get_total_grad_norm(self) -> float:
+        """Compute total gradient norm across all parameters."""
+        total_norm = 0.0
+        for param in self.model.parameters():
+            if param.requires_grad and param.grad is not None:
+                total_norm += param.grad.data.norm(2).item() ** 2
+        return math.sqrt(total_norm)
+
+    def get_gradient_stats(self) -> Dict[str, Any]:
+        """Get gradient statistics for monitoring."""
+        stats = {
+            'total_norm': self.get_total_grad_norm(),
+            'layer_norms': {},
+            'clipped_layers': []
+        }
+
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                norm = param.grad.data.norm(2).item()
+                stats['layer_norms'][name] = norm
+                max_norm = self.layer_max_norms.get(name, self.default_max_norm)
+                if norm > max_norm:
+                    stats['clipped_layers'].append(name)
+
+        return stats
+
+
+# =============================================================================
 # Factory Functions
 # =============================================================================
 
@@ -763,6 +1052,87 @@ if __name__ == "__main__":
     print(f"  Hidden shape: {hidden.shape}")
     print(f"  Control embedding shape: {control_emb_single.shape}")
     print(f"  Conditioned output shape: {conditioned.shape}")
+
+    # Test 6: EMA Model
+    print("\n6. EMA Model Test")
+    # Create a simple test model
+    test_model = nn.Sequential(
+        nn.Linear(64, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64)
+    ).to(device)
+
+    ema = EMAModel(test_model, decay=0.99)
+    print(f"  EMA initialized with {len(ema.shadow)} parameters")
+
+    # Simulate training updates
+    original_param = list(test_model.parameters())[0].data.clone()
+    for i in range(10):
+        # Simulate parameter update
+        with torch.no_grad():
+            for param in test_model.parameters():
+                param.add_(torch.randn_like(param) * 0.1)
+        ema.update(test_model)
+
+    print(f"  After 10 updates, EMA tracking active")
+
+    # Test apply/restore
+    ema.apply_shadow(test_model)
+    print(f"  Applied EMA shadow weights")
+    ema.restore(test_model)
+    print(f"  Restored original weights")
+
+    # Test 7: Uncertainty Weighting
+    print("\n7. Uncertainty Weighting Test")
+    loss_names = ['reconstruction', 'temporal', 'flow_matching', 'control']
+    uncertainty_weighter = UncertaintyWeighting(loss_names).to(device)
+
+    # Simulate losses
+    test_losses = {
+        'reconstruction': torch.tensor(1.0, device=device),
+        'temporal': torch.tensor(0.5, device=device),
+        'flow_matching': torch.tensor(2.0, device=device),
+        'control': torch.tensor(0.3, device=device)
+    }
+
+    weighted_loss, weights = uncertainty_weighter(test_losses)
+    print(f"  Input losses: {[f'{k}={v.item():.2f}' for k, v in test_losses.items()]}")
+    print(f"  Weighted total: {weighted_loss.item():.4f}")
+    print(f"  Learned weights: {uncertainty_weighter.get_weights()}")
+    print(f"  Uncertainties: {uncertainty_weighter.get_uncertainties()}")
+
+    # Test 8: Per-Layer Gradient Clipper
+    print("\n8. Per-Layer Gradient Clipper Test")
+    # Create test model with gradients
+    clip_model = nn.Sequential(
+        nn.Linear(32, 64),
+        nn.Linear(64, 32)
+    ).to(device)
+
+    # Forward and backward to create gradients
+    x = torch.randn(4, 32, device=device)
+    y = clip_model(x)
+    loss = y.sum()
+    loss.backward()
+
+    # Configure per-layer clipping
+    layer_configs = {
+        '0': 0.5,  # Tighter clipping for first layer
+        '1': 1.0   # Normal clipping for second layer
+    }
+
+    clipper = PerLayerGradientClipper(
+        clip_model,
+        default_max_norm=1.0,
+        layer_configs=layer_configs,
+        adaptive=False
+    )
+
+    print(f"  Initial total grad norm: {clipper.get_total_grad_norm():.4f}")
+    grad_norms = clipper.clip_gradients()
+    print(f"  After clipping, grad norms: {list(grad_norms.values())[:4]}")
+    stats = clipper.get_gradient_stats()
+    print(f"  Clipped layers: {len(stats['clipped_layers'])}")
 
     print("\n" + "=" * 60)
     print("All component tests completed!")

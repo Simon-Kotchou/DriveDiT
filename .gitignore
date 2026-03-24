@@ -50,3 +50,16 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.pytest_cache/

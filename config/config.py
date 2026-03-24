@@ -11,11 +11,76 @@ from enum import Enum
 
 class ComponentType(Enum):
     """Types of optional components."""
+    # Core components
     CONTROL = "control"
-    DEPTH = "depth" 
+    DEPTH = "depth"
     MEMORY = "memory"
     JEPA = "jepa"
     FLOW_MATCHING = "flow_matching"
+
+    # New efficiency components (v2)
+    SLA = "sla"  # Sparse-Linear Attention - 20× attention reduction
+    MOE = "moe"  # Mixture of Experts - 2B active params matches 14B dense
+
+    # New alignment components (v2)
+    REPA = "repa"  # Representation Alignment with V-JEPA 2.1 - 17.5× speedup
+    CAUSAL_JEPA = "causal_jepa"  # Object-level C-JEPA - 20% counterfactual improvement
+
+    # Evaluation components
+    CLOSED_LOOP_EVAL = "closed_loop_eval"  # World-in-World benchmark
+
+
+@dataclass
+class SLAConfig:
+    """Configuration for Sparse-Linear Attention."""
+    block_size: int = 64
+    critical_threshold: float = 0.5
+    negligible_threshold: float = 0.01
+    use_flash_attention: bool = True
+
+
+@dataclass
+class MoEConfig:
+    """Configuration for Mixture of Experts."""
+    num_experts: int = 8
+    top_k: int = 2
+    expert_dim: Optional[int] = None  # Auto-computed if None
+    num_shared_experts: int = 2
+    jitter_noise: float = 0.0
+    bias_update_speed: float = 0.001
+
+
+@dataclass
+class REPAConfig:
+    """Configuration for REPA (Representation Alignment)."""
+    backbone: str = "vjepa2.1"  # V-JEPA 2.1 for video-native features
+    alignment_layers: List[int] = field(default_factory=lambda: [6, 12, 18, 24])
+    loss_weight: float = 0.1
+    haste_enabled: bool = True  # Early-stop at 40% of training
+    haste_stop_ratio: float = 0.4
+    warmup_steps: int = 2000
+
+
+@dataclass
+class CausalJEPAConfig:
+    """Configuration for Causal JEPA (Object-level)."""
+    max_objects: int = 32
+    slot_dim: int = 256
+    trajectory_length: int = 8
+    mask_ratio: float = 0.75
+    counterfactual_enabled: bool = True
+    num_counterfactuals: int = 4
+
+
+@dataclass
+class ClosedLoopEvalConfig:
+    """Configuration for Closed-Loop Evaluation."""
+    num_planning_iterations: int = 10
+    physics_check_enabled: bool = True
+    task_types: List[str] = field(default_factory=lambda: [
+        'lane_keeping', 'collision_avoidance', 'navigation'
+    ])
+    rollout_horizon: int = 30
 
 
 @dataclass
@@ -113,6 +178,13 @@ class DriveDiTConfig:
     jepa_weight: float = 0.1
     perceptual_weight: float = 0.1
     l1_weight: float = 0.1
+
+    # New component configurations (v2)
+    sla_config: SLAConfig = field(default_factory=SLAConfig)
+    moe_config: MoEConfig = field(default_factory=MoEConfig)
+    repa_config: REPAConfig = field(default_factory=REPAConfig)
+    causal_jepa_config: CausalJEPAConfig = field(default_factory=CausalJEPAConfig)
+    closed_loop_eval_config: ClosedLoopEvalConfig = field(default_factory=ClosedLoopEvalConfig)
     
     def get_enabled_components(self) -> List[ComponentType]:
         """Get list of enabled components."""
@@ -226,13 +298,20 @@ def get_research_config() -> DriveDiTConfig:
         max_steps=200000,
         learning_rate=5e-5,
         
-        # All components enabled
+        # All components enabled (including v2)
         enabled_components=[
             ComponentType.CONTROL,
             ComponentType.DEPTH,
             ComponentType.MEMORY,
             ComponentType.JEPA,
-            ComponentType.FLOW_MATCHING
+            ComponentType.FLOW_MATCHING,
+            # v2 efficiency components
+            ComponentType.SLA,
+            # v2 alignment components
+            ComponentType.REPA,
+            ComponentType.CAUSAL_JEPA,
+            # v2 evaluation
+            ComponentType.CLOSED_LOOP_EVAL
         ],
         
         # Full curriculum

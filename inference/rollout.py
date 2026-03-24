@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.dit_student import DiTStudent
 from models.vae3d import VAE3D
-from blocks.flow_match import FlowMatchingSampler
+from blocks import FlowMatchingSampler
 
 
 class MemoryBank:

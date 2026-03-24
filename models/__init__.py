@@ -5,15 +5,26 @@ Zero-dependency implementations of world modeling components.
 
 from .dit_student import DiTStudent, MemoryBank, TokenEmbedding
 from .dit_teacher import DiTTeacher, TeacherEmbedding
-from .vae3d import VAE3D, Encoder3D, Decoder3D, ResidualBlock3D, AttentionBlock3D
-from .vae3d_v2 import (
-    VAE3Dv2,
+# VAE3D (v2 is now the default, with v1 backward compatibility aliases)
+from .vae3d import (
+    VAE3D,              # Alias for VAE3Dv2
+    VAE3Dv2,            # Full v2 implementation
     VAE3DConfig,
+    Encoder3D,
+    Decoder3D,
+    ResidualBlock3D,
+    AttentionBlock3D,
     KLAnnealer,
     VectorQuantizer,
     LearnablePrior,
     CausalConv3d,
-    CausalConvTranspose3d
+    CausalConvTranspose3d,
+    causal_conv3d,      # Factory function for backward compatibility
+    # Config factories
+    get_default_config,
+    get_minimal_config,
+    get_high_quality_config,
+    get_vqvae_config,
 )
 from .world_model import (
     WorldModel,
@@ -47,20 +58,24 @@ __all__ = [
     # DiT Teacher
     'DiTTeacher',
     'TeacherEmbedding',
-    # VAE3D v1
-    'VAE3D',
+    # VAE3D (v2 with v1 compatibility)
+    'VAE3D',           # Alias for VAE3Dv2
+    'VAE3Dv2',         # Explicit v2 reference
     'Encoder3D',
     'Decoder3D',
     'ResidualBlock3D',
     'AttentionBlock3D',
-    # VAE3D v2 (enhanced)
-    'VAE3Dv2',
     'VAE3DConfig',
     'KLAnnealer',
     'VectorQuantizer',
     'LearnablePrior',
     'CausalConv3d',
     'CausalConvTranspose3d',
+    'causal_conv3d',
+    'get_default_config',
+    'get_minimal_config',
+    'get_high_quality_config',
+    'get_vqvae_config',
     # World Model
     'WorldModel',
     'PatchEmbed',

@@ -51,7 +51,7 @@ WORKDIR /home/drivedit/drivedit
 ENV PYTHONPATH=/home/drivedit/drivedit:$PYTHONPATH
 
 # Development entrypoint
-CMD ["python3", "-m", "training.self_forcing"]
+CMD ["python3", "-m", "training.unified_trainer"]
 
 # ============================
 # Production training stage
@@ -64,13 +64,18 @@ RUN python3 -m pip install --user --no-cache-dir \
     torchvision==0.17.1 \
     einops==0.7.0 \
     opencv-python==4.10.0.82 \
-    numpy==1.24.3
+    torchmetrics==1.2.0 \
+    numpy==1.24.3 \
+    tqdm==4.65.0
 
 # Copy only necessary source files
 COPY --chown=drivedit:drivedit layers/ ./drivedit/layers/
 COPY --chown=drivedit:drivedit blocks/ ./drivedit/blocks/
+COPY --chown=drivedit:drivedit core/ ./drivedit/core/
+COPY --chown=drivedit:drivedit config/ ./drivedit/config/
 COPY --chown=drivedit:drivedit models/ ./drivedit/models/
 COPY --chown=drivedit:drivedit training/ ./drivedit/training/
+COPY --chown=drivedit:drivedit inference/ ./drivedit/inference/
 COPY --chown=drivedit:drivedit data/ ./drivedit/data/
 COPY --chown=drivedit:drivedit utils/ ./drivedit/utils/
 COPY --chown=drivedit:drivedit __init__.py ./drivedit/
@@ -86,7 +91,7 @@ RUN mkdir -p /home/drivedit/data /home/drivedit/checkpoints /home/drivedit/logs
 
 # Production entrypoint
 ENTRYPOINT ["python3", "-m"]
-CMD ["training.self_forcing"]
+CMD ["training.unified_trainer"]
 
 # ============================
 # Inference stage (minimal)
@@ -103,6 +108,8 @@ RUN python3 -m pip install --user --no-cache-dir \
 # Copy only inference components
 COPY --chown=drivedit:drivedit layers/ ./drivedit/layers/
 COPY --chown=drivedit:drivedit blocks/ ./drivedit/blocks/
+COPY --chown=drivedit:drivedit core/ ./drivedit/core/
+COPY --chown=drivedit:drivedit config/ ./drivedit/config/
 COPY --chown=drivedit:drivedit models/ ./drivedit/models/
 COPY --chown=drivedit:drivedit inference/ ./drivedit/inference/
 COPY --chown=drivedit:drivedit utils/ ./drivedit/utils/
@@ -146,4 +153,4 @@ ENV PYTHONPATH=/home/drivedit/drivedit:$PYTHONPATH
 RUN mkdir -p /home/drivedit/raw_data /home/drivedit/processed_data /home/drivedit/cache
 
 # Data processing entrypoint
-CMD ["python3", "-m", "data.pipeline"]
+CMD ["python3", "-m", "data.large_scale_processing"]

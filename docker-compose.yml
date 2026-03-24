@@ -45,7 +45,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: ["training.self_forcing"]
+    command: ["training.unified_trainer"]
 
   # Multi-GPU training (if available)
   drivedit-train-multi:
@@ -68,7 +68,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ["training.self_forcing", "--distributed"]
+    command: ["training.unified_trainer", "--distributed"]
 
   # Inference server
   drivedit-inference:
@@ -103,7 +103,7 @@ services:
       - drivedit-cache:/home/drivedit/cache
     environment:
       - PYTHONPATH=/home/drivedit/drivedit
-    command: ["data.pipeline"]
+    command: ["data.large_scale_processing"]
 
   # Jupyter notebook for development
   drivedit-notebook:

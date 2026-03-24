@@ -1,14 +1,25 @@
-# Core dependencies (minimal)
+# Core dependencies (minimal, zero external model libraries)
 torch>=2.2.0
 einops>=0.7.0
 opencv-python==4.10.0.82
+
+# Training dependencies
+torchmetrics>=1.2.0
+tqdm>=4.65.0
+numpy>=1.24.0
+
+# Optional: torchvision for some image transforms
+# torchvision>=0.17.0
 
 # Development dependencies
 jupyter>=1.0.0
 black>=23.0.0
 ruff>=0.0.280
-torchmetrics>=0.11.0
+pytest>=7.0.0
 
 # Optional for enhanced performance
-# triton>=2.1.0  # For custom CUDA kernels (NVIDIA GPUs only)
+# triton>=2.1.0  # For custom Triton kernels (NVIDIA GPUs only)
 # flash-attn>=2.0.0  # For Flash Attention (if available)
+
+# Optional Rust data loader (build from rust/drivedit-data/)
+# maturin>=1.0.0  # For building Rust extension

@@ -455,7 +455,7 @@ class MoEDiTBlock(nn.Module):
 
         from layers.mha import CausalMultiHeadAttention, BidirectionalMultiHeadAttention
         from layers.nn_helpers import AdaLN, RMSNorm
-        from layers.rope import RoPELayer
+        from layers.rope_v2 import RoPELayer
 
         self.d_model = d_model
         self.n_heads = n_heads

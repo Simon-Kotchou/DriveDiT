@@ -91,7 +91,7 @@ class LayerTests:
 
     def test_rope_basic(self) -> bool:
         """Test basic RoPE rotation properties."""
-        from layers.rope import rope, precompute_rope_freqs
+        from layers.rope_v2 import rope, precompute_rope_freqs
 
         B, T, H, D = 2, 16, 4, 64
         x = torch.randn(B, T, H, D, device=device)
@@ -122,7 +122,7 @@ class LayerTests:
 
     def test_rope_3d(self) -> bool:
         """Test 3D RoPE for video data."""
-        from layers.rope import precompute_rope_3d_freqs
+        from layers.rope_v2 import precompute_rope_3d_freqs
 
         D = 96  # Must be divisible by 6 for 3D
         max_t, max_h, max_w = 8, 16, 16

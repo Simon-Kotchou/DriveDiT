@@ -1317,7 +1317,8 @@ def precompute_rope_3d_freqs(
     Returns full 3D grid for compatibility with original interface.
     """
     return compute_rope_3d_freqs(
-        dim, max_time, max_height, max_width, base, device,
+        dim, max_time, max_height, max_width,
+        base=base, device=device,
         efficient_mode=False  # Full grid for compatibility
     )
 

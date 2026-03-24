@@ -3,8 +3,10 @@ Core layer implementations for DriveDiT.
 Mathematical primitives with explicit tensor operations.
 """
 
-from .rope import RoPELayer, rope, precompute_rope_freqs, precompute_rope_3d_freqs
 from .rope_v2 import (
+    # Backward compatible exports (previously from rope.py)
+    RoPELayer, rope, precompute_rope_freqs, precompute_rope_3d_freqs,
+    # Enhanced v2 exports
     RoPEConfig,
     RoPELayerV2,
     RoPEFrequencyCache,
@@ -36,12 +38,11 @@ from .nn_helpers import (
 )
 
 __all__ = [
-    # RoPE v1
+    # RoPE (unified - v2 with backward compat)
     'RoPELayer',
     'rope',
     'precompute_rope_freqs',
     'precompute_rope_3d_freqs',
-    # RoPE v2 (enhanced)
     'RoPEConfig',
     'RoPELayerV2',
     'RoPEFrequencyCache',

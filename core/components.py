@@ -8,10 +8,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
 import math
+import sys
+import os
 import numpy as np
 from einops import rearrange, repeat
 
-from ..config.modular_config import DriveDiTConfig
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config.config import DriveDiTConfig
 
 
 class RoPE3D(nn.Module):

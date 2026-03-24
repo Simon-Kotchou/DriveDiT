@@ -16,9 +16,19 @@ from typing import Dict, List, Optional, Tuple, Callable
 from dataclasses import dataclass
 from einops import rearrange, repeat
 
-from ..layers.nn_helpers import SiLU, RMSNorm
-from ..layers.mha import MultiHeadAttention
-from ..layers.mlp import MLP
+import torch.nn as nn
+
+# Use torch's built-in SiLU
+SiLU = nn.SiLU
+
+try:
+    from ..layers.nn_helpers import RMSNorm
+    from ..layers.mha import MultiHeadAttention
+    from ..layers.mlp import MLP
+except ImportError:
+    from layers.nn_helpers import RMSNorm
+    from layers.mha import MultiHeadAttention
+    from layers.mlp import MLP
 
 
 @dataclass
@@ -101,7 +111,7 @@ class FlowMatchingBlock(nn.Module):
         
         # Attention and MLP
         self.attention = MultiHeadAttention(dim, num_heads)
-        self.mlp = MLP(dim, dim * mlp_ratio, dim)
+        self.mlp = MLP(dim, dim * mlp_ratio)
     
     def forward(
         self, 
@@ -124,7 +134,7 @@ class FlowMatchingBlock(nn.Module):
         # Self-attention with time conditioning
         h = self.norm1(x)
         h = h * (1 + gamma1.unsqueeze(1)) + beta1.unsqueeze(1)
-        h = self.attention(h, mask=mask)
+        h, _ = self.attention(h, mask=mask)  # Unpack tuple (output, kv_cache)
         x = x + alpha1.unsqueeze(1) * h
         
         # MLP with time conditioning
@@ -455,9 +465,14 @@ class FlowMatchingTrainer:
         # Additional losses
         losses = {'flow_matching': loss_fm}
         
-        # Consistency loss (optional)
+        # Consistency loss (optional) - computed directly in trainer
         if step % 10 == 0:  # Every 10 steps
-            loss_consistency = self.loss_fn.consistency_loss(flow_pred, z_t, t)
+            with torch.no_grad():
+                dt = 0.01
+                t_eps = torch.clamp(t + dt, 0, 1)
+                z_t_eps = z_t + dt * flow_pred.detach()
+            flow_eps = self.flow_predictor(z_t_eps, t_eps, mask=None, context=context)
+            loss_consistency = F.mse_loss(flow_pred, flow_eps)
             losses['consistency'] = loss_consistency * 0.1
         
         # Total loss

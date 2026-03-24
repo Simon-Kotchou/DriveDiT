@@ -31,6 +31,27 @@ from .enfusion_loader import (
     create_enfusion_dataloaders
 )
 
+# High-performance Rust-based data loading (optional)
+try:
+    from .rust_loader import (
+        RustDataLoader,
+        RustVideoDecoder,
+        RustTelemetryParser,
+        RustFrameBuffer,
+        check_rust_available
+    )
+    RUST_AVAILABLE = True
+except ImportError:
+    RUST_AVAILABLE = False
+
+# Hybrid Python/Rust loader with automatic fallback
+from .hybrid_loader import (
+    HybridDataLoader,
+    HybridLoaderConfig,
+    create_hybrid_dataloaders,
+    get_best_loader
+)
+
 __all__ = [
     # Core video utilities
     'VideoDataset', 'VideoLoader', 'FrameBuffer',
@@ -55,5 +76,21 @@ __all__ = [
     'EnfusionCollator',
     'EnfusionDataLoader',
     'EnfusionToDriveDiTAdapter',
-    'create_enfusion_dataloaders'
+    'create_enfusion_dataloaders',
+    # Hybrid loader (Python/Rust)
+    'HybridDataLoader',
+    'HybridLoaderConfig',
+    'create_hybrid_dataloaders',
+    'get_best_loader',
+    'RUST_AVAILABLE',
 ]
+
+# Conditionally export Rust loader components
+if RUST_AVAILABLE:
+    __all__.extend([
+        'RustDataLoader',
+        'RustVideoDecoder',
+        'RustTelemetryParser',
+        'RustFrameBuffer',
+        'check_rust_available',
+    ])

@@ -26,6 +26,34 @@ from .losses import (
     UnifiedLoss
 )
 
+# Enhanced losses v2
+from .losses_v2 import (
+    LossType,
+    LossConfig,
+    LatentMSELoss,
+    TeacherStudentFlowLoss,
+    InfoNCELoss,
+    ConditionalFlowMatchingLoss,
+    ScaleInvariantDepthLoss,
+    LPIPSLoss,
+    TemporalConsistencyLoss as TemporalConsistencyLossV2
+)
+
+# CUDA-optimized training utilities
+from .cuda_optimized import (
+    CUDAOptimizedConfig,
+    AsyncPrefetcher,
+    CUDADataPipeline,
+    GradientAccumulator,
+    MemoryOptimizer,
+    OptimizedTrainer,
+    create_optimized_optimizer
+)
+
+# Fused CUDA kernels
+from .kernels.fused_normalize import FusedNormalize, FusedRMSNorm, fused_normalize_kernel
+from .kernels.fused_augment import FusedAugmentation, VideoAugmentation, fused_augment_kernel
+
 __all__ = [
     # Self-Forcing v1
     'SelfForcingTrainer',
@@ -49,9 +77,34 @@ __all__ = [
     'MemoryMonitor',
     'CheckpointManager',
     'DistributedManager',
-    # Losses
+    # Losses v1
     'ReconstructionLoss',
     'TemporalConsistencyLoss',
     'FlowMatchingLoss',
     'UnifiedLoss',
+    # Losses v2 (enhanced)
+    'LossType',
+    'LossConfig',
+    'LatentMSELoss',
+    'TeacherStudentFlowLoss',
+    'InfoNCELoss',
+    'ConditionalFlowMatchingLoss',
+    'ScaleInvariantDepthLoss',
+    'LPIPSLoss',
+    'TemporalConsistencyLossV2',
+    # CUDA optimized
+    'CUDAOptimizedConfig',
+    'AsyncPrefetcher',
+    'CUDADataPipeline',
+    'GradientAccumulator',
+    'MemoryOptimizer',
+    'OptimizedTrainer',
+    'create_optimized_optimizer',
+    # Fused kernels
+    'FusedNormalize',
+    'FusedRMSNorm',
+    'fused_normalize_kernel',
+    'FusedAugmentation',
+    'VideoAugmentation',
+    'fused_augment_kernel',
 ]

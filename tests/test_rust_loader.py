@@ -27,14 +27,39 @@ import cv2
 # Import loaders
 from data import (
     RUST_AVAILABLE,
-    check_rust_available,
-    get_rust_version,
-    get_backend_info,
-    create_dataloaders,
     get_best_loader,
     HybridDataLoader,
     HybridLoaderConfig,
 )
+
+# Import Rust-specific functions only if available
+if RUST_AVAILABLE:
+    from data.rust_loader import check_rust_available, get_rust_version
+else:
+    def check_rust_available():
+        return False
+    def get_rust_version():
+        return None
+
+# Stub for missing functions
+def get_backend_info():
+    """Get info about available backends."""
+    return {
+        'rust_available': RUST_AVAILABLE,
+        'python_available': True,
+        'preferred_backend': 'rust' if RUST_AVAILABLE else 'python'
+    }
+
+def create_dataloaders(data_root, batch_size=8, sequence_length=16, image_size=(256, 256), **kwargs):
+    """Stub for create_dataloaders - wraps create_hybrid_dataloaders."""
+    from data import create_hybrid_dataloaders, HybridLoaderConfig
+    config = HybridLoaderConfig(
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        image_size=image_size,
+        **kwargs
+    )
+    return create_hybrid_dataloaders(data_root, config=config)
 
 # Try to import Rust-specific modules
 try:

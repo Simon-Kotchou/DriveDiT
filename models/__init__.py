@@ -26,6 +26,19 @@ from .world_model import (
     SelfForcingScheduler
 )
 
+# Advanced conditioning modules
+from .conditioning import (
+    ConditioningConfig,
+    CameraEncoder,
+    RoadTopologyEncoder,
+    BoundingBox3DEncoder,
+    EgoStateEncoder,
+    TemporalEnvironmentalEncoder,
+    AdaLNModulation,
+    ConditioningIntegration,
+    create_conditioning_module
+)
+
 __all__ = [
     # DiT Student
     'DiTStudent',
@@ -57,4 +70,14 @@ __all__ = [
     'JEPAPredictor',
     'FlowMatchingPredictor',
     'SelfForcingScheduler',
+    # Conditioning modules
+    'ConditioningConfig',
+    'CameraEncoder',
+    'RoadTopologyEncoder',
+    'BoundingBox3DEncoder',
+    'EgoStateEncoder',
+    'TemporalEnvironmentalEncoder',
+    'AdaLNModulation',
+    'ConditioningIntegration',
+    'create_conditioning_module',
 ]

@@ -16,13 +16,18 @@ import math
 import random
 import time
 import logging
+import sys
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .losses import UnifiedLoss
-from .distributed import MemoryMonitor, CheckpointManager, DistributedManager
-from ..config.config import DriveDiTConfig
-from ..models.world_model import WorldModel
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from training.losses import UnifiedLoss
+from training.distributed import MemoryMonitor, CheckpointManager, DistributedManager
+from config.config import DriveDiTConfig
+from models.world_model import WorldModel
 
 
 @dataclass

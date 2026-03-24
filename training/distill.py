@@ -11,7 +11,12 @@ from torch.utils.data import DataLoader
 from typing import Dict, List, Tuple, Optional, Union
 import numpy as np
 from tqdm import tqdm
-import wandb
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    WANDB_AVAILABLE = False
 from collections import defaultdict
 import sys
 import os
@@ -22,7 +27,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.dit_teacher import DiTTeacher
 from models.dit_student import DiTStudent
 from models.vae3d import VAE3D
-from blocks.flow_match import FlowMatchingSampler, FlowLoss, ConsistencyTraining
+from blocks import FlowMatchingSampler, FlowLoss
 
 
 class DistillationTrainer:
@@ -496,7 +501,7 @@ class DistillationTrainer:
     
     def _log_metrics(self, losses: Dict, total_loss: torch.Tensor) -> None:
         """Log training metrics to wandb."""
-        if not self.use_wandb:
+        if not self.use_wandb or not WANDB_AVAILABLE:
             return
         
         log_dict = {
@@ -543,8 +548,8 @@ class DistillationTrainer:
         # Average metrics
         avg_metrics = {k: np.mean(v) for k, v in val_metrics.items()}
         
-        if self.use_wandb:
-            wandb.log({f'val_distill/{k}': v for k, v in avg_metrics.items()}, 
+        if self.use_wandb and WANDB_AVAILABLE:
+            wandb.log({f'val_distill/{k}': v for k, v in avg_metrics.items()},
                      step=self.global_step)
         
         self.student_model.train()

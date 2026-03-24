@@ -100,13 +100,22 @@ class TestSelfForcingTrainer:
             mixed_precision=False
         )
         
-        # Create dummy dataloader
-        dataset = torch.utils.data.TensorDataset(
-            torch.randn(10, 4, 3, 32, 32),
-            torch.randn(10, 4, 6)
-        )
+        # Create dummy dataloader that returns dicts
+        class DictDataset(torch.utils.data.Dataset):
+            def __init__(self, size=10):
+                self.size = size
+                self.frames = torch.randn(size, 4, 3, 32, 32)
+                self.controls = torch.randn(size, 4, 6)
+
+            def __len__(self):
+                return self.size
+
+            def __getitem__(self, idx):
+                return {'frames': self.frames[idx], 'controls': self.controls[idx]}
+
+        dataset = DictDataset(10)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=2)
-        
+
         # Test that training doesn't crash with memory management
         try:
             trainer.train_epoch(dataloader)
@@ -397,41 +406,41 @@ class TestLossFunction:
     
     def test_reconstruction_loss(self):
         """Test reconstruction loss computation."""
-        pred = torch.randn(2, 4, 3, 32, 32)
+        pred = torch.randn(2, 4, 3, 32, 32, requires_grad=True)
         target = torch.randn(2, 4, 3, 32, 32)
-        
+
         loss = nn.MSELoss()(pred, target)
-        
+
         assert loss.item() >= 0
         assert loss.requires_grad
-    
+
     def test_temporal_consistency_loss(self):
         """Test temporal consistency loss."""
         # Simulate frame predictions
-        pred_frames = torch.randn(2, 8, 3, 32, 32)
+        pred_frames = torch.randn(2, 8, 3, 32, 32, requires_grad=True)
         target_frames = torch.randn(2, 8, 3, 32, 32)
-        
+
         # Compute temporal differences
         pred_diffs = pred_frames[:, 1:] - pred_frames[:, :-1]
         target_diffs = target_frames[:, 1:] - target_frames[:, :-1]
-        
+
         temporal_loss = nn.MSELoss()(pred_diffs, target_diffs)
-        
+
         assert temporal_loss.item() >= 0
         assert temporal_loss.requires_grad
-    
+
     def test_perceptual_loss_properties(self):
         """Test perceptual loss properties."""
         # Simple perceptual loss (mean difference)
-        pred = torch.randn(2, 4, 3, 32, 32)
+        pred = torch.randn(2, 4, 3, 32, 32, requires_grad=True)
         target = torch.randn(2, 4, 3, 32, 32)
-        
+
         # Convert to grayscale for simple perceptual comparison
         pred_gray = pred.mean(dim=2, keepdim=True)
         target_gray = target.mean(dim=2, keepdim=True)
-        
+
         perceptual_loss = nn.L1Loss()(pred_gray, target_gray)
-        
+
         assert perceptual_loss.item() >= 0
         assert perceptual_loss.requires_grad
     
@@ -461,11 +470,12 @@ class TestTrainingStability:
     def test_gradient_clipping(self):
         """Test gradient clipping functionality."""
         model = create_simple_model(hidden_dim=32)
-        
+
         # Create loss that might cause large gradients
-        x = torch.randn(1, 4, 3, 32, 32, requires_grad=True)
-        target = torch.randn(1, 4, 3, 32, 32)
-        
+        # Conv2d expects 4D input [B, C, H, W]
+        x = torch.randn(1, 3, 32, 32, requires_grad=True)
+        target = torch.randn(1, 3, 32, 32)
+
         output = model(x)
         loss = nn.MSELoss()(output, target) * 1000  # Scale up for large gradients
         loss.backward()
@@ -506,22 +516,22 @@ class TestTrainingStability:
     def test_mixed_precision_stability(self):
         """Test mixed precision training stability."""
         model = create_simple_model(hidden_dim=32)
-        scaler = torch.cuda.amp.GradScaler()
         optimizer = torch.optim.Adam(model.parameters())
-        
-        x = torch.randn(1, 2, 3, 32, 32)
-        target = torch.randn(1, 2, 3, 32, 32)
-        
-        # Mixed precision forward pass
-        with torch.cuda.amp.autocast(enabled=True):
+
+        # Conv2d expects 4D input [B, C, H, W]
+        x = torch.randn(1, 3, 32, 32)
+        target = torch.randn(1, 3, 32, 32)
+
+        # Mixed precision forward pass (CPU-compatible)
+        with torch.amp.autocast(device_type='cpu', enabled=True, dtype=torch.bfloat16):
             output = model(x)
             loss = nn.MSELoss()(output, target)
-        
-        # Backward pass with scaling
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        
+
+        # Backward pass without scaler (not needed for CPU)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
         # Check that no parameters became NaN
         for param in model.parameters():
             assert torch.isfinite(param).all()

@@ -250,10 +250,9 @@ class SelfForcingTrainer:
     
     def _predict_next_frame(self, current_frame: torch.Tensor) -> torch.Tensor:
         """Predict next frame using model."""
-        # Placeholder: replace with actual model forward pass
-        # For now, add small noise to simulate prediction
-        noise = torch.randn_like(current_frame) * 0.01
-        return torch.clamp(current_frame + noise, 0, 1)
+        # current_frame: [B, C, H, W]
+        # Use the model for forward pass to enable gradient flow
+        return self.model(current_frame)
     
     def _compute_perceptual_loss(
         self, 
@@ -333,13 +332,23 @@ class SelfForcingTrainer:
     
     def _compute_total_loss(self, losses: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Combine all losses with appropriate weights."""
-        total_loss = torch.tensor(0.0, device=next(iter(losses.values())).device)
-        
+        # Start with the first weighted loss to maintain gradient graph
+        total_loss = None
+
         for loss_name, loss_value in losses.items():
-            if loss_name in self.loss_weights:
-                weight = self.loss_weights[loss_name]
-                total_loss = total_loss + weight * loss_value
-        
+            weight = self.loss_weights.get(loss_name, 1.0)
+            weighted_loss = weight * loss_value
+
+            if total_loss is None:
+                total_loss = weighted_loss
+            else:
+                total_loss = total_loss + weighted_loss
+
+        # If no losses, return zero tensor with requires_grad
+        if total_loss is None:
+            device = next(iter(losses.values())).device if losses else 'cpu'
+            total_loss = torch.zeros(1, device=device, requires_grad=True)
+
         return total_loss
     
     def log_metrics(self, metrics: Dict[str, float]) -> None:

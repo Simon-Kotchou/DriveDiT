@@ -76,7 +76,7 @@ if SLA_KERNELS_AVAILABLE:
             k_rep = k_sum / block_size
 
             # Compute importance score (dot product)
-            score = tl.sum(q_rep * k_rep) / tl.sqrt(head_dim.to(tl.float32))
+            score = tl.sum(q_rep * k_rep) / tl.sqrt(float(head_dim))
 
             # Store score
             out_ptr = Out_ptr + pid_b * stride_ob + pid_h * stride_oh + pid_qb * stride_oqb + kb * stride_okb
@@ -93,138 +93,13 @@ if SLA_KERNELS_AVAILABLE:
         return tl.where(x > 0, x + 1.0, tl.exp(x))
 
 
-    @triton.jit
-    def _linear_attention_fwd_kernel(
-        Q_ptr, K_ptr, V_ptr, Out_ptr,
-        stride_qb, stride_qt, stride_qh, stride_qd,
-        stride_kb, stride_ks, stride_kh, stride_kd,
-        stride_vb, stride_vs, stride_vh, stride_vd,
-        stride_ob, stride_ot, stride_oh, stride_od,
-        seq_len, head_dim: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        """
-        Linear attention forward pass using ELU feature map.
-
-        Computes: out = phi(Q) @ (phi(K)^T @ V) / (phi(Q) @ phi(K)^T @ 1)
-
-        This is O(N * d^2) instead of O(N^2 * d).
-        """
-        # Program ID
-        pid_b = tl.program_id(0)  # batch
-        pid_h = tl.program_id(1)  # head
-        pid_t = tl.program_id(2)  # time block
-
-        t_start = pid_t * BLOCK_SIZE
-        t_offsets = t_start + tl.arange(0, BLOCK_SIZE)
-        t_mask = t_offsets < seq_len
-
-        # First pass: Accumulate KV and K_sum for normalization
-        # We compute sum_s phi(K_s) @ V_s^T and sum_s phi(K_s)
-        kv_acc = tl.zeros([head_dim, head_dim], dtype=tl.float32)
-        k_sum = tl.zeros([head_dim], dtype=tl.float32)
-
-        for s in range(seq_len):
-            # Load K[s]
-            k_ptr = K_ptr + pid_b * stride_kb + s * stride_ks + pid_h * stride_kh
-            k_vec = tl.load(k_ptr + tl.arange(0, head_dim) * stride_kd)
-            phi_k = _elu_feature_map(k_vec.to(tl.float32))
-
-            # Load V[s]
-            v_ptr = V_ptr + pid_b * stride_vb + s * stride_vs + pid_h * stride_vh
-            v_vec = tl.load(v_ptr + tl.arange(0, head_dim) * stride_vd)
-
-            # Accumulate phi(K) @ V^T (outer product)
-            for d1 in range(head_dim):
-                for d2 in range(head_dim):
-                    kv_acc[d1, d2] += phi_k[d1] * v_vec[d2]
-
-            k_sum += phi_k
-
-        # Second pass: Compute output for this time block
-        for t in range(BLOCK_SIZE):
-            t_idx = t_start + t
-            if t_idx >= seq_len:
-                break
-
-            # Load Q[t]
-            q_ptr = Q_ptr + pid_b * stride_qb + t_idx * stride_qt + pid_h * stride_qh
-            q_vec = tl.load(q_ptr + tl.arange(0, head_dim) * stride_qd)
-            phi_q = _elu_feature_map(q_vec.to(tl.float32))
-
-            # Compute phi(Q) @ KV_acc
-            out_vec = tl.zeros([head_dim], dtype=tl.float32)
-            for d1 in range(head_dim):
-                for d2 in range(head_dim):
-                    out_vec[d2] += phi_q[d1] * kv_acc[d1, d2]
-
-            # Normalize by phi(Q) @ K_sum
-            norm = tl.sum(phi_q * k_sum) + 1e-6
-            out_vec = out_vec / norm
-
-            # Store output
-            out_ptr = Out_ptr + pid_b * stride_ob + t_idx * stride_ot + pid_h * stride_oh
-            tl.store(out_ptr + tl.arange(0, head_dim) * stride_od, out_vec.to(tl.float16))
+    # Note: Complex linear attention kernel requires matrix ops not well-supported
+    # in basic Triton. Using optimized PyTorch fallback instead.
+    # The fused_ops kernels (RMSNorm, SiLU, RoPE) provide the main speedups.
 
 
-    # =========================================================================
-    # Causal Linear Attention Kernel
-    # =========================================================================
-
-    @triton.jit
-    def _causal_linear_attention_kernel(
-        Q_ptr, K_ptr, V_ptr, Out_ptr,
-        stride_qb, stride_qt, stride_qh, stride_qd,
-        stride_kb, stride_ks, stride_kh, stride_kd,
-        stride_vb, stride_vs, stride_vh, stride_vd,
-        stride_ob, stride_ot, stride_oh, stride_od,
-        seq_len, head_dim: tl.constexpr,
-    ):
-        """
-        Causal linear attention using cumulative sums.
-
-        For each position t: out[t] = phi(Q[t]) @ sum_{s<=t}(phi(K[s]) @ V[s]^T)
-        """
-        pid_b = tl.program_id(0)
-        pid_h = tl.program_id(1)
-
-        # Running accumulator for KV
-        kv_acc = tl.zeros([head_dim, head_dim], dtype=tl.float32)
-        k_sum = tl.zeros([head_dim], dtype=tl.float32)
-
-        for t in range(seq_len):
-            # Load K[t] and V[t], update accumulators
-            k_ptr = K_ptr + pid_b * stride_kb + t * stride_ks + pid_h * stride_kh
-            k_vec = tl.load(k_ptr + tl.arange(0, head_dim) * stride_kd)
-            phi_k = _elu_feature_map(k_vec.to(tl.float32))
-
-            v_ptr = V_ptr + pid_b * stride_vb + t * stride_vs + pid_h * stride_vh
-            v_vec = tl.load(v_ptr + tl.arange(0, head_dim) * stride_vd)
-
-            # Update KV accumulator (include current position for causal)
-            for d1 in range(head_dim):
-                for d2 in range(head_dim):
-                    kv_acc[d1, d2] += phi_k[d1] * v_vec[d2]
-            k_sum += phi_k
-
-            # Load Q[t] and compute output
-            q_ptr = Q_ptr + pid_b * stride_qb + t * stride_qt + pid_h * stride_qh
-            q_vec = tl.load(q_ptr + tl.arange(0, head_dim) * stride_qd)
-            phi_q = _elu_feature_map(q_vec.to(tl.float32))
-
-            # Compute phi(Q) @ KV_acc
-            out_vec = tl.zeros([head_dim], dtype=tl.float32)
-            for d1 in range(head_dim):
-                for d2 in range(head_dim):
-                    out_vec[d2] += phi_q[d1] * kv_acc[d1, d2]
-
-            # Normalize
-            norm = tl.sum(phi_q * k_sum) + 1e-6
-            out_vec = out_vec / norm
-
-            # Store
-            out_ptr = Out_ptr + pid_b * stride_ob + t * stride_ot + pid_h * stride_oh
-            tl.store(out_ptr + tl.arange(0, head_dim) * stride_od, out_vec.to(tl.float16))
+    # Causal linear attention also uses matrix accumulation patterns
+    # that require outer products - using optimized PyTorch fallback.
 
 
 # =============================================================================
@@ -282,7 +157,10 @@ def triton_linear_attention(
     causal: bool = False
 ) -> torch.Tensor:
     """
-    Linear attention using Triton kernel with ELU feature map.
+    Linear attention with ELU feature map.
+
+    Uses optimized PyTorch implementation with potential for future
+    Triton kernel when outer product accumulation is better supported.
 
     Args:
         q: Query tensor [B, T, H, D]
@@ -293,46 +171,64 @@ def triton_linear_attention(
     Returns:
         Output tensor [B, T, H, D]
     """
-    if not SLA_KERNELS_AVAILABLE:
-        raise RuntimeError("Triton not available. Install with: pip install triton>=2.1.0")
+    # Use optimized PyTorch implementation
+    # (Triton kernel for matrix accumulation requires advanced patterns)
+    def elu_feature(x):
+        return torch.where(x > 0, x + 1, torch.exp(x))
 
-    B, T, H, D = q.shape
-    S = k.shape[1]
-
-    # Ensure contiguous and half precision
-    q = q.contiguous().half()
-    k = k.contiguous().half()
-    v = v.contiguous().half()
-
-    # Output tensor
-    out = torch.empty_like(q)
+    phi_q = elu_feature(q.float())
+    phi_k = elu_feature(k.float())
+    v_float = v.float()
 
     if causal:
-        # Use causal kernel
-        grid = (B, H)
-        _causal_linear_attention_kernel[grid](
-            q, k, v, out,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-            T, D,
-        )
-    else:
-        # Use non-causal kernel with time blocking
-        BLOCK_SIZE = 64
-        grid = (B, H, (T + BLOCK_SIZE - 1) // BLOCK_SIZE)
-        _linear_attention_fwd_kernel[grid](
-            q, k, v, out,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-            T, D,
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
+        B, T, H, D = q.shape
+        out = torch.zeros_like(q, dtype=torch.float32)
 
-    return out
+        # Optimized cumulative sum approach
+        # Reshape for batch matmul: [B, H, T, D]
+        phi_k_t = phi_k.transpose(1, 2)  # [B, H, T, D]
+        v_t = v_float.transpose(1, 2)    # [B, H, T, D]
+        phi_q_t = phi_q.transpose(1, 2)  # [B, H, T, D]
+
+        # Compute KV and K cumsum efficiently
+        # For each position, we need cumsum up to that point
+        kv_cumsum = torch.zeros(B, H, D, D, device=q.device, dtype=torch.float32)
+        k_cumsum = torch.zeros(B, H, D, device=q.device, dtype=torch.float32)
+
+        out_t = torch.zeros(B, H, T, D, device=q.device, dtype=torch.float32)
+
+        for t in range(T):
+            # Update cumulative sums
+            phi_k_slice = phi_k_t[:, :, t, :]  # [B, H, D]
+            v_slice = v_t[:, :, t, :]          # [B, H, D]
+
+            # Outer product: [B, H, D, 1] @ [B, H, 1, D] -> [B, H, D, D]
+            kv_cumsum = kv_cumsum + torch.einsum('bhd,bhe->bhde', phi_k_slice, v_slice)
+            k_cumsum = k_cumsum + phi_k_slice
+
+            # Compute output for position t
+            phi_q_slice = phi_q_t[:, :, t, :]  # [B, H, D]
+            num = torch.einsum('bhd,bhde->bhe', phi_q_slice, kv_cumsum)
+            denom = (phi_q_slice * k_cumsum).sum(dim=-1, keepdim=True) + 1e-6
+            out_t[:, :, t, :] = num / denom
+
+        out = out_t.transpose(1, 2)  # [B, T, H, D]
+        return out.to(q.dtype)
+    else:
+        # Non-causal: full KV computation (more efficient)
+        # [B, H, D, D] = einsum([B, H, S, D], [B, H, S, D])
+        phi_k_t = phi_k.transpose(1, 2)  # [B, H, S, D]
+        v_t = v_float.transpose(1, 2)    # [B, H, S, D]
+        phi_q_t = phi_q.transpose(1, 2)  # [B, H, T, D]
+
+        kv = torch.einsum('bhsd,bhse->bhde', phi_k_t, v_t)  # [B, H, D, D]
+        k_sum = phi_k_t.sum(dim=2)  # [B, H, D]
+
+        num = torch.einsum('bhtd,bhde->bhte', phi_q_t, kv)  # [B, H, T, D]
+        denom = torch.einsum('bhtd,bhd->bht', phi_q_t, k_sum).unsqueeze(-1) + 1e-6
+
+        out = (num / denom).transpose(1, 2)  # [B, T, H, D]
+        return out.to(q.dtype)
 
 
 class TritonSLA(nn.Module):

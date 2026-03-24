@@ -31,65 +31,11 @@ except ImportError:
 
 if MOE_KERNELS_AVAILABLE:
     # =========================================================================
-    # Top-K Softmax Kernel (Fused)
+    # Top-K Softmax - Using PyTorch (Triton has scalar indexing limitations)
     # =========================================================================
-
-    @triton.jit
-    def _topk_softmax_kernel(
-        logits_ptr, indices_ptr, weights_ptr,
-        stride_lb, stride_lt, stride_le,
-        stride_ib, stride_it, stride_ik,
-        stride_wb, stride_wt, stride_wk,
-        num_tokens, num_experts, top_k: tl.constexpr,
-        BLOCK_E: tl.constexpr,
-    ):
-        """
-        Fused top-k selection and softmax normalization.
-
-        For each token:
-        1. Find top-k experts by logit score
-        2. Apply softmax over selected experts only
-        """
-        pid_b = tl.program_id(0)  # batch
-        pid_t = tl.program_id(1)  # token
-
-        # Load logits for this token
-        logits_base = logits_ptr + pid_b * stride_lb + pid_t * stride_lt
-        expert_offsets = tl.arange(0, BLOCK_E)
-        expert_mask = expert_offsets < num_experts
-
-        logits = tl.load(logits_base + expert_offsets * stride_le, mask=expert_mask, other=-float('inf'))
-
-        # Find top-k (simple bubble sort for small k)
-        top_indices = tl.zeros([top_k], dtype=tl.int32) - 1
-        top_values = tl.full([top_k], -float('inf'), dtype=tl.float32)
-
-        for e in range(num_experts):
-            val = logits[e]
-            # Insert into sorted top-k
-            for k in range(top_k - 1, -1, -1):
-                if val > top_values[k]:
-                    if k < top_k - 1:
-                        top_values[k + 1] = top_values[k]
-                        top_indices[k + 1] = top_indices[k]
-                    top_values[k] = val
-                    top_indices[k] = e
-                else:
-                    break
-
-        # Softmax over top-k
-        max_val = tl.max(top_values, axis=0)
-        exp_vals = tl.exp(top_values - max_val)
-        sum_exp = tl.sum(exp_vals, axis=0)
-        softmax_vals = exp_vals / (sum_exp + 1e-6)
-
-        # Store results
-        indices_base = indices_ptr + pid_b * stride_ib + pid_t * stride_it
-        weights_base = weights_ptr + pid_b * stride_wb + pid_t * stride_wt
-
-        for k in range(top_k):
-            tl.store(indices_base + k * stride_ik, top_indices[k])
-            tl.store(weights_base + k * stride_wk, softmax_vals[k])
+    # Note: Triton kernel for top-k requires scalar loop indexing into tensors
+    # which is not well-supported. PyTorch's fused top-k + softmax is efficient.
+    pass
 
 
     # =========================================================================
@@ -177,21 +123,25 @@ if MOE_KERNELS_AVAILABLE:
             idx_ptr = indices_ptr + pid_b * stride_xb + pid_t * stride_xt + k * stride_xk
             expert_idx = tl.load(idx_ptr)
 
-            if expert_idx < 0:
-                continue
+            # Use conditional execution instead of continue (not supported in Triton)
+            valid_expert = expert_idx >= 0
 
             weight_ptr = weights_ptr + pid_b * stride_wb + pid_t * stride_wt + k * stride_wk
             weight = tl.load(weight_ptr)
 
             # Get this token's position in the expert buffer
-            pos_ptr = position_ptr + pid_b * stride_pb + pid_t * num_experts + expert_idx
+            # Use 0 as default position when expert_idx is invalid
+            safe_expert_idx = tl.where(valid_expert, expert_idx, 0)
+            pos_ptr = position_ptr + pid_b * stride_pb + pid_t * num_experts + safe_expert_idx
             pos = tl.load(pos_ptr)
 
             # Load expert output
-            exp_ptr = expert_output_ptr + pid_b * stride_eb + expert_idx * stride_ee + pos * stride_et
+            exp_ptr = expert_output_ptr + pid_b * stride_eb + safe_expert_idx * stride_ee + pos * stride_et
             exp_out = tl.load(exp_ptr + d_offsets * stride_ed, mask=d_mask, other=0.0)
 
-            output_acc += weight * exp_out.to(tl.float32)
+            # Zero out contribution if expert is invalid
+            masked_weight = tl.where(valid_expert, weight, 0.0)
+            output_acc += masked_weight * exp_out.to(tl.float32)
 
         # Store combined output
         out_ptr = output_ptr + pid_b * stride_ob + pid_t * stride_ot
@@ -207,7 +157,10 @@ def triton_topk_softmax(
     top_k: int = 2
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Fused top-k selection and softmax using Triton.
+    Fused top-k selection and softmax.
+
+    Uses optimized PyTorch implementation (Triton kernel has scalar indexing
+    limitations that make it impractical for top-k operations).
 
     Args:
         logits: Router logits [B, T, num_experts]
@@ -217,28 +170,11 @@ def triton_topk_softmax(
         indices: Selected expert indices [B, T, top_k]
         weights: Softmax weights for selected experts [B, T, top_k]
     """
-    if not MOE_KERNELS_AVAILABLE:
-        raise RuntimeError("Triton not available")
-
-    B, T, E = logits.shape
-
-    indices = torch.empty(B, T, top_k, device=logits.device, dtype=torch.int32)
-    weights = torch.empty(B, T, top_k, device=logits.device, dtype=torch.float32)
-
-    # Ensure power of 2 for BLOCK_E
-    BLOCK_E = triton.next_power_of_2(E)
-
-    grid = (B, T)
-    _topk_softmax_kernel[grid](
-        logits, indices, weights,
-        logits.stride(0), logits.stride(1), logits.stride(2),
-        indices.stride(0), indices.stride(1), indices.stride(2),
-        weights.stride(0), weights.stride(1), weights.stride(2),
-        T, E, top_k,
-        BLOCK_E=BLOCK_E,
-    )
-
-    return indices, weights
+    # Use PyTorch's efficient top-k and softmax
+    # This is already quite fast on GPU and avoids Triton's scalar indexing issues
+    top_weights, indices = torch.topk(logits.float(), top_k, dim=-1)
+    weights = F.softmax(top_weights, dim=-1)
+    return indices.to(torch.int32), weights
 
 
 def triton_expert_scatter(
@@ -478,12 +414,6 @@ class TritonMoEDispatch(nn.Module):
 # =============================================================================
 
 if not MOE_KERNELS_AVAILABLE:
-    def triton_topk_softmax(logits, top_k=2):
-        """Fallback: PyTorch top-k softmax."""
-        weights, indices = torch.topk(logits, top_k, dim=-1)
-        weights = F.softmax(weights, dim=-1)
-        return indices.int(), weights
-
     def triton_expert_scatter(x, indices, num_experts, max_tokens_per_expert=None):
         """Fallback: PyTorch scatter."""
         B, T, D = x.shape

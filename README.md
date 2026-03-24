@@ -81,12 +81,16 @@ maturin develop --release
 ```
 drivedit/
 ├── layers/              # Mathematical primitives
-│   ├── rope.py                # Rotary positional embedding (3D)
+│   ├── rope_v2.py             # Rotary positional embedding (3D, NTK, YaRN)
 │   ├── mha.py                 # Multi-head attention (causal/bidirectional)
-│   ├── sla.py                 # Sparse-Linear Attention (NEW)
-│   ├── moe.py                 # Mixture of Experts FFN (NEW)
-│   ├── mlp.py                 # Feed-forward networks
-│   └── nn_helpers.py          # SiLU, RMSNorm, AdaLN
+│   ├── sla.py                 # Sparse-Linear Attention
+│   ├── moe.py                 # Mixture of Experts FFN (DeepSeek-style)
+│   ├── mlp.py                 # Feed-forward networks (SwiGLU, GeGLU)
+│   ├── nn_helpers.py          # SiLU, RMSNorm, AdaLN, fused ops
+│   └── kernels/               # Triton GPU kernels
+│       ├── fused_ops.py           # Fused RMSNorm, SiLU, RoPE
+│       ├── moe_kernels.py         # MoE dispatch kernels
+│       └── sla_kernels.py         # SLA routing kernels
 │
 ├── blocks/              # Composite components
 │   ├── dit_block.py           # Attention + MLP + AdaLN
@@ -95,49 +99,75 @@ drivedit/
 ├── core/                # Advanced components
 │   ├── base.py                # Core base classes and utilities
 │   ├── components.py          # RoPE3D, SAM2 tracker, flow predictor
-│   ├── vjepa_backbone.py      # V-JEPA 2.1 feature extraction (NEW)
-│   └── causal_jepa.py         # C-JEPA object-level predictor (NEW)
+│   ├── vjepa_backbone.py      # V-JEPA 2.1 feature extraction
+│   └── causal_jepa.py         # C-JEPA object-level predictor
 │
 ├── models/              # Complete architectures
 │   ├── world_model.py         # Unified world model with all components
 │   ├── vae3d.py               # 3D causal VAE (WAN distilled)
 │   ├── dit_student.py         # Causal world model (student)
 │   ├── dit_teacher.py         # Bidirectional teacher
-│   └── conditioning.py        # GAIA-2 style rich conditioning (NEW)
+│   └── conditioning.py        # GAIA-2 style rich conditioning
 │
 ├── config/              # Configuration system
-│   └── config.py              # Unified DriveDiTConfig with all components
+│   ├── config.py              # Unified DriveDiTConfig with all components
+│   ├── base_config.py         # Base configuration classes
+│   └── model_config.py        # Model-specific configs
 │
 ├── data/                # Data pipeline
 │   ├── pipeline.py            # Memory-mapped video processing
 │   ├── video_chunking.py      # Intelligent video chunking
+│   ├── video_loader.py        # Video dataset loader
 │   ├── large_scale_processing.py  # 100k+ hour dataset processing
-│   └── enfusion_loader.py     # Enfusion ENFCAP format loader
+│   ├── enfusion_loader.py     # Enfusion ENFCAP format loader
+│   ├── rust_loader.py         # High-performance Rust data loader
+│   ├── transforms.py          # Video augmentations
+│   └── collate.py             # Batch collation utilities
 │
 ├── training/            # Training loops
 │   ├── unified_trainer.py     # Complete unified training pipeline
 │   ├── self_forcing_plus.py   # Self-Forcing++ (extended generation)
-│   ├── repa_loss.py           # REPA alignment loss (NEW)
+│   ├── self_forcing.py        # Base self-forcing implementation
+│   ├── repa_loss.py           # REPA alignment loss
+│   ├── losses.py              # Unified loss functions
+│   ├── losses_v2.py           # Extended loss library (38 loss types)
+│   ├── distill.py             # Flow-matching distillation
 │   ├── distributed.py         # Multi-GPU training support
-│   └── losses.py              # Unified loss functions
+│   ├── cuda_optimized.py      # CUDA optimization utilities
+│   └── kernels/               # Training-specific kernels
+│       ├── fused_normalize.py     # Fused normalization
+│       └── fused_augment.py       # Fused augmentation
 │
 ├── inference/           # Generation
 │   ├── rollout.py             # Single-GPU streaming inference
-│   ├── optimization.py        # torch.compile, streaming (NEW)
+│   ├── optimization.py        # torch.compile, streaming
+│   ├── pipeline.py            # Inference pipeline
 │   └── server.py              # Inference server
 │
-├── evaluation/          # Closed-loop evaluation (NEW)
+├── evaluation/          # Closed-loop evaluation
 │   ├── closed_loop.py         # World-in-World style evaluation
-│   ├── physics_metrics.py     # Physics violation detection
-│   └── driving_metrics.py     # Task success metrics
+│   ├── metrics.py             # Evaluation metrics
+│   ├── benchmarks.py          # Benchmark suites
+│   ├── evaluators.py          # Evaluator classes
+│   └── visualization.py       # Result visualization
 │
 ├── tests/               # Comprehensive test suite
-│   ├── test_math_components.py
-│   ├── test_training_pipeline.py
-│   ├── test_sla.py            # SLA attention tests (NEW)
-│   ├── test_moe.py            # MoE tests (NEW)
-│   ├── test_repa.py           # REPA tests (NEW)
-│   └── test_closed_loop.py    # Closed-loop eval tests (NEW)
+│   ├── test_pipeline_math.py      # Full pipeline tensor math (21 tests)
+│   ├── test_math_components.py    # Mathematical component tests
+│   ├── test_training_pipeline.py  # Training pipeline tests
+│   ├── test_self_forcing_plus.py  # Self-Forcing++ tests
+│   ├── test_kernels.py            # Triton kernel tests
+│   ├── unit/                      # Unit tests
+│   │   ├── test_layers.py
+│   │   └── test_models.py
+│   └── integration/               # Integration tests
+│       ├── test_training.py
+│       └── test_inference.py
+│
+├── scripts/             # Utility scripts
+│   ├── train.py               # Training entry point
+│   ├── process_data.py        # Data processing
+│   └── profile_codebase.py    # Dead code detection & throughput profiling
 │
 └── src/enfusion/        # Enfusion script library (synthetic data)
     ├── datacapture/           # Data capture components
@@ -154,6 +184,7 @@ drivedit/
 - **Pure PyTorch**: Only `torch >= 2.2`, `einops`, and `opencv`
 - **Mathematical transparency**: Every operation implemented explicitly
 - **No external model libraries**: Self-contained implementations
+- **Optional Triton**: GPU kernels for 2-3x speedup (graceful fallback to PyTorch)
 
 ### Efficiency Stack
 
@@ -170,14 +201,22 @@ Based on [arxiv:2509.24006](https://arxiv.org/abs/2509.24006):
 #### MoE (Mixture of Experts)
 Based on [DeepSeekMoE](https://arxiv.org/abs/2401.06066) and [GigaWorld-0](https://arxiv.org/abs/2024.00000):
 ```python
-from layers.moe import MoEFFN
+from layers.moe import MoEFFN, MoEDiTBlock
 
 # Replace dense FFN with MoE
 ffn = MoEFFN(
-    dim=512,
-    num_experts=8,      # DeepSeek-style fine-grained experts
-    top_k=2,            # Activate top-2 per token
-    num_shared=1        # Always-on shared expert for common knowledge
+    d_model=512,
+    num_experts=8,          # DeepSeek-style fine-grained experts
+    top_k=2,                # Activate top-2 per token
+    num_shared_experts=1    # Always-on shared expert for common knowledge
+)
+
+# Or use the complete MoE DiT block (drop-in replacement)
+block = MoEDiTBlock(
+    d_model=512,
+    n_heads=8,
+    num_experts=8,
+    top_k=2
 )
 # Result: 2B active params matches 14B dense performance
 ```
@@ -342,14 +381,32 @@ python training/distill.py
 ### Testing
 
 ```bash
-# Run all tests
+# Run full pipeline math tests (21 tests covering all components)
+python tests/test_pipeline_math.py
+
+# Run all pytest tests
 python -m pytest tests/ -v
 
-# Specific component tests
-python -m pytest tests/test_sla.py -v        # SLA attention
-python -m pytest tests/test_moe.py -v        # MoE FFN
-python -m pytest tests/test_repa.py -v       # REPA alignment
-python -m pytest tests/test_closed_loop.py -v # Closed-loop eval
+# Specific test suites
+python -m pytest tests/test_math_components.py -v    # Mathematical correctness
+python -m pytest tests/test_training_pipeline.py -v  # Training pipeline
+python -m pytest tests/test_self_forcing_plus.py -v  # Self-Forcing++
+python -m pytest tests/test_kernels.py -v            # Triton kernels
+python -m pytest tests/unit/ -v                      # Unit tests
+python -m pytest tests/integration/ -v               # Integration tests
+```
+
+### Profiling
+
+```bash
+# Profile codebase for dead code and throughput
+python scripts/profile_codebase.py --all
+
+# Dead code detection only
+python scripts/profile_codebase.py --dead-code
+
+# Throughput benchmarks only
+python scripts/profile_codebase.py --throughput
 ```
 
 ### Inference

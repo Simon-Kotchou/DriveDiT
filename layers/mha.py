@@ -195,7 +195,7 @@ class MultiHeadAttention(nn.Module):
         output = mha(q, k, v, mask=mask, dropout_p=self.dropout, training=self.training)
         
         # Reshape and project
-        output = output.view(B, T, D)  # [B, T, D]
+        output = output.reshape(B, T, D)  # [B, T, D]
         output = self.proj(output)
         
         return output, new_kv_cache

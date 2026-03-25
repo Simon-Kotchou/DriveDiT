@@ -878,14 +878,22 @@ class SCR_AnchorFrameSelector: ScriptComponent
 
             case SCR_AnchorTriggerType.STEERING:
                 float steerChange = m_fCurrentSteering - m_fPreviousSteering;
-                string direction = steerChange > 0 ? "right" : "left";
+                string direction;
+                if (steerChange > 0)
+                    direction = "right";
+                else
+                    direction = "left";
                 desc = "Large steering change (" + direction + ") delta=" +
                        Math.AbsFloat(steerChange).ToString(4, 2);
                 break;
 
             case SCR_AnchorTriggerType.SPEED_CHANGE:
                 float speedChange = m_fCurrentSpeed - m_fPreviousSpeed;
-                string accelType = speedChange > 0 ? "acceleration" : "deceleration";
+                string accelType;
+                if (speedChange > 0)
+                    accelType = "acceleration";
+                else
+                    accelType = "deceleration";
                 desc = "Significant " + accelType + " delta=" +
                        Math.AbsFloat(speedChange).ToString(5, 1) + " km/h";
                 break;
@@ -905,14 +913,16 @@ class SCR_AnchorFrameSelector: ScriptComponent
     //------------------------------------------------------------------------
     protected string GetRoadTypeName(int roadType)
     {
-        switch (roadType)
-        {
-            case 0: return "City";
-            case 1: return "Highway";
-            case 2: return "Rural";
-            case 3: return "Offroad";
-            default: return "Unknown";
-        }
+        string name = "Unknown";
+        if (roadType == 0)
+            name = "City";
+        else if (roadType == 1)
+            name = "Highway";
+        else if (roadType == 2)
+            name = "Rural";
+        else if (roadType == 3)
+            name = "Offroad";
+        return name;
     }
 
     //------------------------------------------------------------------------

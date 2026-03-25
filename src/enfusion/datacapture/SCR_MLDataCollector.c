@@ -5,13 +5,15 @@
 // Captures synchronized telemetry data for world model training.
 // Outputs CSV format compatible with comma.ai/Open-Oasis training pipelines.
 //
-// INTEGRATIONS:
-//   - SCR_AnchorFrameSelector: Anchor frame selection for Self-Forcing++ training
-//
 // OUTPUT:
 //   $profile:DrivingData/session_XXXX/telemetry.csv
 //   $profile:DrivingData/session_XXXX/session_info.txt
 //   $profile:DrivingData/session_XXXX/anchors.csv (when anchor selection enabled)
+//   $profile:DrivingData/session_XXXX/frames/frame_XXXXXX.bmp (when screenshot capture enabled)
+//
+// INTEGRATIONS:
+//   - SCR_AnchorFrameSelector: Anchor frame selection for Self-Forcing++ training
+//   - SCR_MLScreenshotCapture: Synchronized frame capture for visual data
 //
 // ============================================================================
 
@@ -69,6 +71,10 @@ class SCR_MLDataCollector: ScriptComponent
     protected bool m_bAnchorSelectorInitialized;
     protected int m_iAnchorFrameCount;
 
+    // === SCREENSHOT CAPTURE ===
+    protected SCR_MLScreenshotCapture m_ScreenshotCapture;
+    protected bool m_bScreenshotCaptureInitialized;
+
     // Waypoint type constants
     static const int WAYPOINT_TYPE_CITY = 0;
     static const int WAYPOINT_TYPE_HIGHWAY = 1;
@@ -96,6 +102,7 @@ class SCR_MLDataCollector: ScriptComponent
         m_iFrameCounter = 0;
         m_bAnchorSelectorInitialized = false;
         m_iAnchorFrameCount = 0;
+        m_bScreenshotCaptureInitialized = false;
 
         // Find or create anchor frame selector
         if (m_bEnableAnchorSelection)
@@ -107,7 +114,79 @@ class SCR_MLDataCollector: ScriptComponent
             }
         }
 
+        // Find screenshot capture component
+        if (m_bCaptureScreenshots)
+        {
+            m_ScreenshotCapture = SCR_MLScreenshotCapture.Cast(owner.FindComponent(SCR_MLScreenshotCapture));
+            if (!m_ScreenshotCapture)
+            {
+                Print("[MLDataCollector] WARNING: SCR_MLScreenshotCapture not found. Add the component to enable screenshot capture.", LogLevel.WARNING);
+            }
+        }
+
+        // Auto-initialize session after a short delay (allow world to load)
+        GetGame().GetCallqueue().CallLater(AutoInitialize, 3000, false);
+
         Print("[MLDataCollector] Component initialized", LogLevel.NORMAL);
+    }
+
+    //------------------------------------------------------------------------
+    // Auto-initialize session and find vehicles
+    protected void AutoInitialize()
+    {
+        Print("[MLDataCollector] Auto-initializing session...", LogLevel.NORMAL);
+
+        // Initialize session
+        if (!InitializeSession())
+        {
+            Print("[MLDataCollector] ERROR: Failed to auto-initialize session", LogLevel.ERROR);
+            return;
+        }
+
+        // Auto-discover vehicles in the world
+        AutoDiscoverVehicles();
+
+        Print("[MLDataCollector] Auto-initialization complete. Tracking " + m_aTrackedVehicles.Count().ToString() + " vehicles.", LogLevel.NORMAL);
+
+        // Start periodic capture using CallLater (more reliable than EOnFrame)
+        GetGame().GetCallqueue().CallLater(PeriodicCapture, m_iCaptureIntervalMs, true);
+        Print("[MLDataCollector] Started periodic capture every " + m_iCaptureIntervalMs.ToString() + "ms", LogLevel.NORMAL);
+    }
+
+    //------------------------------------------------------------------------
+    // Auto-discover vehicles named AI_Car_X in the world
+    protected void AutoDiscoverVehicles()
+    {
+        BaseWorld world = GetGame().GetWorld();
+        if (!world)
+            return;
+
+        // Look for AI_Car_1 through AI_Car_10
+        for (int i = 1; i <= 10; i++)
+        {
+            string vehicleName = "AI_Car_" + i.ToString();
+            IEntity vehicle = world.FindEntityByName(vehicleName);
+            if (vehicle)
+            {
+                RegisterVehicle(vehicle);
+            }
+        }
+    }
+
+    //------------------------------------------------------------------------
+    // Periodic capture function called by CallLater
+    protected void PeriodicCapture()
+    {
+        if (!m_bSessionInitialized || !m_bEnableDataCapture)
+            return;
+
+        CaptureFrame();
+
+        // Log progress periodically
+        if (m_bVerboseLogging && m_iFrameCounter % m_iProgressLogInterval == 0)
+        {
+            Print("[MLDataCollector] Captured " + m_iFrameCounter.ToString() + " frames", LogLevel.NORMAL);
+        }
     }
 
     //------------------------------------------------------------------------
@@ -170,6 +249,21 @@ class SCR_MLDataCollector: ScriptComponent
             {
                 Print("[MLDataCollector] WARNING: Failed to initialize anchor selector", LogLevel.WARNING);
                 m_bAnchorSelectorInitialized = false;
+            }
+        }
+
+        // Initialize screenshot capture if enabled
+        if (m_bCaptureScreenshots && m_ScreenshotCapture)
+        {
+            if (m_ScreenshotCapture.InitializeSession(m_sSessionPath))
+            {
+                m_bScreenshotCaptureInitialized = true;
+                Print("[MLDataCollector] Screenshot capture enabled", LogLevel.NORMAL);
+            }
+            else
+            {
+                Print("[MLDataCollector] WARNING: Failed to initialize screenshot capture", LogLevel.WARNING);
+                m_bScreenshotCaptureInitialized = false;
             }
         }
 
@@ -289,6 +383,12 @@ class SCR_MLDataCollector: ScriptComponent
         m_aDistances.Insert(0);
         m_aAccelerations.Insert(0);
         m_aCurrentWaypointIndices.Insert(waypointIndex);
+
+        // Tell screenshot capture about the first tracked vehicle
+        if (m_aTrackedVehicles.Count() == 1 && m_ScreenshotCapture)
+        {
+            m_ScreenshotCapture.SetTrackedVehicle(vehicle);
+        }
 
         Print("[MLDataCollector] Registered vehicle: " + vehicle.GetName() + " (index " + (m_aTrackedVehicles.Count() - 1).ToString() + ")", LogLevel.NORMAL);
     }
@@ -571,26 +671,39 @@ class SCR_MLDataCollector: ScriptComponent
     }
 
     //------------------------------------------------------------------------
-    // Attempt screenshot capture
+    // Capture screenshot using SCR_MLScreenshotCapture component
     protected void CaptureScreenshot()
     {
-        // Build filename with zero-padded frame counter
-        string frameNum = m_iFrameCounter.ToString();
-        while (frameNum.Length() < 6)
+        if (m_bScreenshotCaptureInitialized && m_ScreenshotCapture)
         {
-            frameNum = "0" + frameNum;
+            // Delegate to the screenshot capture component
+            m_ScreenshotCapture.CaptureFrame(m_iFrameCounter);
         }
+        else
+        {
+            // Fallback: Try direct System.MakeScreenshot
+            string frameNum = m_iFrameCounter.ToString();
+            while (frameNum.Length() < 6)
+            {
+                frameNum = "0" + frameNum;
+            }
 
-        string framePath = m_sSessionPath + "/frames/frame_" + frameNum + ".png";
+            string framePath = m_sSessionPath + "/frames/frame_" + frameNum + ".bmp";
 
-        // NOTE: Direct screenshot API may not be available in all Enfusion builds
-        // Options:
-        // 1. GetGame().TakeScreenshot(framePath) - if available
-        // 2. Console command: GetGame().GetInputManager().SimulateAction("Screenshot")
-        // 3. External capture tool (OBS, ShadowPlay) synchronized via CSV timestamps
+            // Ensure frames directory exists
+            if (m_iFrameCounter == 0)
+            {
+                FileIO.MakeDirectory(m_sSessionPath + "/frames");
+            }
 
-        // For now, we log the frame path for external synchronization
-        // Print("[MLDataCollector] Frame " + frameNum + " at " + GetGame().GetWorld().GetWorldTime().ToString(12, 1), LogLevel.VERBOSE);
+            // Attempt direct screenshot capture
+            bool success = System.MakeScreenshot(framePath);
+
+            if (!success && m_iFrameCounter == 0)
+            {
+                Print("[MLDataCollector] WARNING: Screenshot capture failed. Consider adding SCR_MLScreenshotCapture component.", LogLevel.WARNING);
+            }
+        }
     }
 
     //------------------------------------------------------------------------
@@ -628,6 +741,15 @@ class SCR_MLDataCollector: ScriptComponent
             m_bAnchorSelectorInitialized = false;
         }
 
+        // Finalize screenshot capture
+        int screenshotCount = 0;
+        if (m_bScreenshotCaptureInitialized && m_ScreenshotCapture)
+        {
+            screenshotCount = m_ScreenshotCapture.GetFramesCaptured();
+            m_ScreenshotCapture.FinalizeSession();
+            m_bScreenshotCaptureInitialized = false;
+        }
+
         // Write summary file
         string summaryPath = m_sSessionPath + "/summary.txt";
         FileHandle file = FileIO.OpenFile(summaryPath, FileMode.WRITE);
@@ -649,6 +771,15 @@ class SCR_MLDataCollector: ScriptComponent
                 file.WriteLine("anchor_density_percent=" + (m_iAnchorFrameCount * 100.0 / Math.Max(1, frameCount)).ToString(6, 2));
             }
 
+            // Add screenshot statistics if enabled
+            if (m_bCaptureScreenshots && screenshotCount > 0)
+            {
+                file.WriteLine("");
+                file.WriteLine("=== SCREENSHOT STATISTICS ===");
+                file.WriteLine("screenshots_captured=" + screenshotCount.ToString());
+                file.WriteLine("screenshot_capture_rate=" + (screenshotCount * 100.0 / Math.Max(1, frameCount)).ToString(6, 2) + "%");
+            }
+
             file.Close();
         }
 
@@ -657,6 +788,10 @@ class SCR_MLDataCollector: ScriptComponent
         {
             Print("[MLDataCollector] Anchor frames: " + m_iAnchorFrameCount.ToString() + " (" +
                   (m_iAnchorFrameCount * 100.0 / Math.Max(1, frameCount)).ToString(4, 1) + "%)", LogLevel.NORMAL);
+        }
+        if (m_bCaptureScreenshots && screenshotCount > 0)
+        {
+            Print("[MLDataCollector] Screenshots: " + screenshotCount.ToString() + " frames captured", LogLevel.NORMAL);
         }
         Print("[MLDataCollector] Data saved to: " + m_sSessionPath, LogLevel.NORMAL);
 
@@ -703,6 +838,20 @@ class SCR_MLDataCollector: ScriptComponent
     SCR_AnchorFrameSelector GetAnchorSelector()
     {
         return m_AnchorSelector;
+    }
+
+    //------------------------------------------------------------------------
+    // Public API: Get screenshot capture component
+    SCR_MLScreenshotCapture GetScreenshotCapture()
+    {
+        return m_ScreenshotCapture;
+    }
+
+    //------------------------------------------------------------------------
+    // Public API: Check if screenshot capture is enabled
+    bool IsScreenshotCaptureEnabled()
+    {
+        return m_bCaptureScreenshots && m_bScreenshotCaptureInitialized;
     }
 
     //------------------------------------------------------------------------

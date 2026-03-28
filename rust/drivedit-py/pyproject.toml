@@ -1,0 +1,86 @@
+# DriveDiT Python bindings - maturin build configuration
+#
+# Build with: maturin build --release
+# Develop with: maturin develop
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "drivedit"
+version = "0.2.0"
+description = "High-performance data pipeline for DriveDiT autonomous driving world model"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "DriveDiT Team" }]
+keywords = [
+    "machine-learning",
+    "autonomous-driving",
+    "data-loading",
+    "streaming",
+    "pytorch",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "numpy>=1.24",
+    "torch>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/drivedit/drivedit"
+Repository = "https://github.com/drivedit/drivedit"
+Documentation = "https://drivedit.readthedocs.io"
+
+[tool.maturin]
+# Build with extension-module feature for Python extension compatibility
+features = ["pyo3/extension-module"]
+
+# Python source directory (for hybrid Rust/Python packages)
+# python-source = "python"
+
+# Include these files in the sdist
+include = [
+    "README.md",
+    "LICENSE",
+    "py.typed",
+]
+
+# Compatibility settings
+compatibility = "linux"
+
+# Strip symbols for smaller binaries
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "drivedit.*"
+ignore_missing_imports = true

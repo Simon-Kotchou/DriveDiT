@@ -1,0 +1,58 @@
+# Unified Python bindings for DriveDiT data pipeline
+#
+# Provides both batch and streaming APIs for training data loading.
+
+[package]
+name = "drivedit-py"
+version.workspace = true
+edition.workspace = true
+description = "Python bindings for DriveDiT data pipeline - batch and streaming"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["python", "pyo3", "machine-learning", "autonomous-driving"]
+categories = ["science", "api-bindings"]
+
+[lib]
+name = "drivedit"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Workspace crates (optional - enable when integrating with full pipeline)
+drivedit-types = { path = "../drivedit-types", optional = true }
+drivedit-io = { path = "../drivedit-io", optional = true }
+drivedit-batch = { path = "../drivedit-batch", optional = true }
+drivedit-streaming = { path = "../drivedit-streaming", optional = true }
+
+# Python bindings
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+
+# Synchronization
+parking_lot = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Numerical arrays (for internal implementations)
+ndarray = { workspace = true }
+
+# Async runtime (for streaming)
+tokio = { workspace = true }
+
+[features]
+default = ["batch", "streaming"]
+
+# Feature flags for API modules
+batch = []
+streaming = []
+
+# Enable full integration with workspace crates
+full = ["dep:drivedit-types", "dep:drivedit-io", "dep:drivedit-batch", "dep:drivedit-streaming"]
+
+# Enable extension-module for building Python extensions
+extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

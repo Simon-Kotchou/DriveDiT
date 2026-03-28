@@ -1,0 +1,44 @@
+[package]
+name = "drivedit-bench"
+version.workspace = true
+edition.workspace = true
+description = "Benchmarks for DriveDiT data pipeline"
+publish = false
+
+[dependencies]
+drivedit-types = { path = "../drivedit-types" }
+# drivedit-io = { path = "../drivedit-io" }
+# drivedit-batch = { path = "../drivedit-batch" }
+# drivedit-streaming = { path = "../drivedit-streaming" }
+
+# Benchmarking
+criterion = { workspace = true }
+
+# Test utilities
+tempfile = { workspace = true }
+rand = { workspace = true }
+
+# Image processing (for generating test fixtures)
+image = { workspace = true, features = ["bmp", "jpeg", "png"] }
+
+# Parallelism (for batch benchmarks)
+rayon = { workspace = true }
+
+# Ring buffer (for streaming benchmarks)
+ringbuf = { workspace = true }
+parking_lot = { workspace = true }
+
+# Byte manipulation
+bytemuck = { workspace = true }
+
+[[bench]]
+name = "io_throughput"
+harness = false
+
+[[bench]]
+name = "batch_loading"
+harness = false
+
+[[bench]]
+name = "streaming_latency"
+harness = false

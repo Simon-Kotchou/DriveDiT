@@ -1,0 +1,31 @@
+[package]
+name = "drivedit-batch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Batch data loading for DriveDiT training"
+keywords = ["autonomous-driving", "machine-learning", "data-loading", "batch"]
+categories = ["science"]
+
+[dependencies]
+drivedit-types = { path = "../drivedit-types" }
+drivedit-io = { path = "../drivedit-io" }
+rayon = { workspace = true }
+parking_lot = { workspace = true }
+fast_image_resize = { workspace = true }
+aligned-vec = "0.5"
+ndarray = { workspace = true }
+glob = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []
+# Enable SIMD optimizations (requires nightly for portable_simd)
+simd = []

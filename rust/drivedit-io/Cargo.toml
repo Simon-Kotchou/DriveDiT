@@ -1,0 +1,27 @@
+[package]
+name = "drivedit-io"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Low-level I/O operations for DriveDiT data pipeline"
+keywords = ["autonomous-driving", "machine-learning", "image-decoding"]
+categories = ["multimedia::images"]
+
+[dependencies]
+drivedit-types = { path = "../drivedit-types" }
+image = { workspace = true, features = ["bmp", "jpeg", "png"] }
+csv = { workspace = true }
+memmap2 = { workspace = true }
+bytemuck = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+# Enable parallel decoding support (requires rayon)
+parallel = []

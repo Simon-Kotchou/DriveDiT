@@ -1,0 +1,24 @@
+[package]
+name = "drivedit-streaming"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Real-time streaming data pipeline for DriveDiT"
+keywords = ["autonomous-driving", "machine-learning", "streaming"]
+categories = ["multimedia::video"]
+
+[dependencies]
+drivedit-types = { path = "../drivedit-types" }
+drivedit-io = { path = "../drivedit-io" }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "fs", "time", "rt"] }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+ringbuf = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

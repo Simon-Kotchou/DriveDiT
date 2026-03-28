@@ -56,8 +56,16 @@ drivedit/
 ├── docs/            # Documentation
 │   └─ REFERENCES.md       # Mathematical foundations and paper sources
 │
-└── src/            # Enfusion C scripts
-    └─ SCR_*.c             # Road extraction/visualization
+├── src/             # Enfusion C scripts
+│   └─ SCR_*.c             # Road extraction/visualization
+│
+└── rust/            # High-performance data pipeline
+    ├─ drivedit-types/     # Shared types (Frame, Telemetry)
+    ├─ drivedit-io/        # I/O (BMP, JPEG, CSV, ENFCAP)
+    ├─ drivedit-batch/     # Batch dataset loading
+    ├─ drivedit-streaming/ # Real-time streaming
+    ├─ drivedit-py/        # Python bindings (PyO3)
+    └─ drivedit-bench/     # Benchmarks
 ```
 
 ## Development Commands
@@ -504,6 +512,133 @@ Extended 6D control with per-dimension ranges:
 - **Intelligent chunking**: Scene-aware video segmentation with temporal overlap
 - **Distributed processing**: Multi-GPU/multi-node training with gradient synchronization
 - **Quality filtering**: Automated video quality assessment and filtering
+
+## Rust Data Pipeline (`rust/`)
+
+High-performance Rust workspace for data loading with Python bindings. Provides both batch training and real-time streaming from Enfusion captures.
+
+### Workspace Structure
+```
+rust/
+├── Cargo.toml              # Workspace root
+├── drivedit-types/         # Shared types (Frame, Telemetry, Config)
+├── drivedit-io/            # I/O operations (BMP, JPEG, CSV, ENFCAP)
+├── drivedit-batch/         # Batch dataset loading
+├── drivedit-streaming/     # Real-time frame streaming
+├── drivedit-py/            # Python bindings (PyO3)
+└── drivedit-bench/         # Criterion benchmarks
+```
+
+### Python Installation
+```bash
+cd rust/drivedit-py
+pip install maturin
+maturin develop --release  # Development install
+# or
+maturin build --release    # Build wheel
+pip install target/wheels/drivedit-*.whl
+```
+
+### Python API - Batch Loading
+```python
+import drivedit
+
+# Load Enfusion session
+session = drivedit.EnfusionSession("/path/to/session")
+print(f"Frames: {len(session)}, Telemetry entries: {session.telemetry_count()}")
+
+# Get synchronized frame + telemetry
+frame, telemetry = session.get_synchronized(idx=100)
+# frame: dict with 'data' (numpy array), 'width', 'height', 'timestamp'
+# telemetry: dict with 'position', 'velocity', 'steering', etc.
+
+# Dataset with transforms
+dataset = drivedit.EnfusionDataset(
+    session_paths=["/path/to/session1", "/path/to/session2"],
+    config=drivedit.DatasetConfig(
+        target_width=640,
+        target_height=360,
+        normalize=True,        # [0,1] float32
+        hwc_to_chw=True,       # PyTorch layout
+    )
+)
+
+# Get batch as numpy arrays
+frames, telemetry = dataset.get_batch([0, 1, 2, 3], num_workers=4)
+# frames: [B, C, H, W] float32
+# telemetry: [B, 12] float32
+```
+
+### Python API - Real-Time Streaming
+```python
+import drivedit
+
+# Create streaming pipeline (watches directory for new BMPs)
+stream = drivedit.StreamingPipeline(
+    watch_dir="/path/to/enfusion/output",
+    buffer_size=32,          # Frame ring buffer
+    telemetry_sync=True,     # Synchronize with CSV telemetry
+)
+
+# Start watching (non-blocking)
+stream.start()
+
+# Get latest frame (blocks until available)
+frame = stream.get_frame(timeout_ms=1000)
+if frame is not None:
+    data = frame['data']     # numpy array [H, W, 3] uint8
+    ts = frame['timestamp']
+
+# Get batch of recent frames
+batch = stream.get_batch(count=8)  # List of frame dicts
+
+# Cleanup
+stream.stop()
+```
+
+### Benchmark Results
+| Operation | Time | Throughput |
+|-----------|------|------------|
+| BMP decode 640×360 | 491µs | 1.3 GiB/s |
+| BMP decode 1280×720 | 3.8ms | 687 MiB/s |
+| Full pipeline (single frame) | 620µs | - |
+| Parallel batch (8 frames) | 1.24ms | 6.5K fps |
+| Ring buffer push | 7µs | - |
+| Ring buffer pop | 50µs | - |
+
+### Crate Dependencies
+```toml
+# rust/Cargo.toml workspace dependencies
+[workspace.dependencies]
+pyo3 = { version = "0.23", features = ["abi3-py310"] }
+numpy = "0.23"
+tokio = { version = "1", features = ["full"] }
+rayon = "1.10"
+image = "0.25"
+notify = "7"
+ringbuf = "0.4"
+parking_lot = "0.12"
+ndarray = "0.16"
+tracing = "0.1"
+```
+
+### Development Commands
+```bash
+# Build all crates
+cargo build --workspace --release
+
+# Run tests (excludes Python bindings)
+cargo test --workspace --exclude drivedit-py
+
+# Run benchmarks
+cargo bench --package drivedit-bench
+
+# Check for issues
+cargo clippy --workspace
+
+# Build Python wheel
+cd drivedit-py && maturin build --release
+```
 
 ## Enfusion Integration
 

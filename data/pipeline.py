@@ -1,6 +1,11 @@
 """
 Efficient data pipeline for large-scale video processing.
 Zero-dependency implementation using only torch, einops, and cv2.
+
+Supports multiple data loading modes:
+- File-based: Traditional video loading with memory-mapped caching
+- Streaming: Real-time loading from Enfusion game capture via Rust module
+- Hybrid: Automatic fallback between streaming and file-based
 """
 
 import torch
@@ -11,10 +16,27 @@ import numpy as np
 from pathlib import Path
 import mmap
 import struct
-from typing import Dict, List, Tuple, Optional, Iterator
+from typing import Dict, List, Tuple, Optional, Iterator, Union
 from einops import rearrange
 import gc
 import os
+import warnings
+
+# Streaming data support (optional - requires drivedit_streaming Rust module)
+try:
+    from .streaming import (
+        StreamingDataLoader as _StreamingDataLoader,
+        StreamingEnfusionDataset,
+        StreamingConfig,
+        check_streaming_available,
+        create_streaming_loader as _create_streaming_loader,
+    )
+    STREAMING_AVAILABLE = True
+except ImportError:
+    STREAMING_AVAILABLE = False
+    _StreamingDataLoader = None
+    StreamingEnfusionDataset = None
+    StreamingConfig = None
 
 
 class VideoMemoryMap:
@@ -371,11 +393,206 @@ def create_efficient_pipeline(
     return train_loader, val_loader, test_loader
 
 
+def create_streaming_loader(
+    watch_path: Optional[str] = None,
+    session_dir: Optional[str] = None,
+    batch_size: int = 8,
+    sequence_length: int = 16,
+    image_size: Tuple[int, int] = (256, 256),
+    buffer_size: int = 256,
+    use_float16: bool = True,
+    pin_memory: bool = True,
+    device: Optional[torch.device] = None,
+    fallback_to_file: bool = True,
+    **kwargs
+) -> Union['_StreamingDataLoader', 'StreamingDataLoader']:
+    """
+    Create a streaming data loader for real-time Enfusion capture data.
+
+    Supports two modes:
+    1. Rust streaming (high-performance): When drivedit_streaming module is available
+    2. File-based fallback: When Rust module unavailable or fallback requested
+
+    Args:
+        watch_path: Path to watch for new frames (for Rust streaming)
+            - Absolute path to frames directory
+            - Can use $profile: prefix for Enfusion profile directory
+        session_dir: Session directory for file-based loading
+        batch_size: Number of sequences per batch
+        sequence_length: Frames per training sequence (8-32 recommended)
+        image_size: Target image size (H, W)
+        buffer_size: Ring buffer capacity for streaming (frames)
+        use_float16: Use half precision for frames (recommended)
+        pin_memory: Pin memory for faster GPU transfer
+        device: Target device (default: cuda if available)
+        fallback_to_file: Fall back to file-based if streaming unavailable
+        **kwargs: Additional arguments passed to StreamingDataLoader
+
+    Returns:
+        StreamingDataLoader instance (either Rust-backed or file-based)
+
+    Raises:
+        RuntimeError: If streaming unavailable and fallback disabled
+        ValueError: If neither watch_path nor session_dir provided
+
+    Example:
+        # Real-time streaming from game capture
+        loader = create_streaming_loader(
+            watch_path="$profile:DrivingData/session_12345",
+            batch_size=8,
+            sequence_length=16
+        )
+
+        # File-based loading from existing session
+        loader = create_streaming_loader(
+            session_dir="/path/to/session_12345",
+            batch_size=8,
+            sequence_length=16
+        )
+
+        # Training loop
+        for batch in loader:
+            frames = batch['frames']  # [B, T, C, H, W]
+            controls = batch['controls']  # [B, T, 6]
+            loss = trainer.train_step(batch, optimizer)
+    """
+    if not STREAMING_AVAILABLE:
+        if fallback_to_file and session_dir:
+            warnings.warn(
+                "Streaming module not available. Using file-based fallback. "
+                "Install drivedit_streaming for real-time streaming support."
+            )
+            # Return a wrapped file-based loader that mimics streaming interface
+            return _create_fallback_streaming_loader(
+                session_dir=session_dir,
+                batch_size=batch_size,
+                sequence_length=sequence_length,
+                image_size=image_size,
+                **kwargs
+            )
+        else:
+            raise RuntimeError(
+                "Streaming module 'drivedit_streaming' not available. "
+                "Install with: cd streaming && maturin develop --release\n"
+                "Or provide session_dir with fallback_to_file=True"
+            )
+
+    # Use the streaming module
+    return _create_streaming_loader(
+        watch_path=watch_path,
+        session_dir=session_dir,
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        image_size=image_size,
+        buffer_size=buffer_size,
+        use_float16=use_float16,
+        pin_memory=pin_memory,
+        device=device,
+        **kwargs
+    )
+
+
+def _create_fallback_streaming_loader(
+    session_dir: str,
+    batch_size: int = 8,
+    sequence_length: int = 16,
+    image_size: Tuple[int, int] = (256, 256),
+    **kwargs
+) -> 'StreamingDataLoader':
+    """
+    Create a file-based loader that mimics the streaming interface.
+
+    Used as fallback when Rust streaming module is unavailable.
+    """
+    # Import enfusion loader for file-based loading
+    from .enfusion_loader import (
+        EnfusionDataset,
+        EnfusionDatasetConfig,
+        EnfusionDataLoader,
+    )
+
+    config = EnfusionDatasetConfig(
+        sequence_length=sequence_length,
+        image_size=image_size,
+        **{k: v for k, v in kwargs.items() if hasattr(EnfusionDatasetConfig, k)}
+    )
+
+    dataset = EnfusionDataset(session_dir, config)
+    loader = EnfusionDataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+    )
+
+    # Wrap to provide consistent interface
+    return _StreamingLoaderWrapper(loader, sequence_length, image_size)
+
+
+class _StreamingLoaderWrapper:
+    """
+    Wrapper to make EnfusionDataLoader compatible with StreamingDataLoader interface.
+    """
+
+    def __init__(
+        self,
+        loader,
+        sequence_length: int,
+        image_size: Tuple[int, int]
+    ):
+        self._loader = loader
+        self.sequence_length = sequence_length
+        self.image_size = image_size
+        self._mode = "file_fallback"
+        self._batches_yielded = 0
+
+    def __iter__(self):
+        self._batches_yielded = 0
+        for batch in self._loader:
+            self._batches_yielded += 1
+            yield batch
+
+    def __len__(self):
+        return len(self._loader)
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def buffer_fill(self) -> float:
+        return 1.0  # File-based always has data available
+
+    @property
+    def batches_yielded(self) -> int:
+        return self._batches_yielded
+
+    @property
+    def frames_per_second(self) -> float:
+        return 0.0  # Not tracked in file mode
+
+    def stats(self) -> Dict:
+        return {
+            'mode': self._mode,
+            'buffer_fill': self.buffer_fill,
+            'batches_yielded': self._batches_yielded,
+            'rust_available': STREAMING_AVAILABLE,
+        }
+
+
+def is_streaming_available() -> bool:
+    """Check if streaming data loading is available."""
+    return STREAMING_AVAILABLE
+
+
 if __name__ == "__main__":
     # Example usage
     video_dir = "/path/to/driving/videos"
     cache_dir = "/path/to/cache"
-    
+
+    print(f"Streaming available: {is_streaming_available()}")
+
+    # File-based pipeline
     train_loader, val_loader, test_loader = create_efficient_pipeline(
         video_dir=video_dir,
         batch_size=16,
@@ -384,19 +601,29 @@ if __name__ == "__main__":
         cache_dir=cache_dir,
         num_workers=8
     )
-    
+
     # Memory monitoring
     memory_monitor = MemoryMonitor()
-    
+
     # Test iteration
     for i, batch in enumerate(train_loader):
         frames = batch['frames']  # [B, T, C, H, W]
         print(f"Batch {i}: {frames.shape}")
-        
+
         memory_monitor.update()
         print(memory_monitor)
-        
+
         if i >= 5:  # Test first few batches
             break
-    
+
     memory_monitor.cleanup()
+
+    # Streaming pipeline example (if available)
+    if is_streaming_available():
+        print("\nTesting streaming loader...")
+        streaming_loader = create_streaming_loader(
+            session_dir="/path/to/session",
+            batch_size=8,
+            sequence_length=16,
+        )
+        print(f"Streaming mode: {streaming_loader.mode}")

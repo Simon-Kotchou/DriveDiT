@@ -1,6 +1,12 @@
 """
 Data loading and preprocessing utilities for DriveDiT.
 Zero-dependency data pipeline components.
+
+Supports multiple loading modes:
+- File-based: Traditional video/image loading with caching
+- Enfusion: Session-based loading from Enfusion game captures
+- Streaming: Real-time loading via Rust drivedit_streaming module
+- Hybrid: Automatic fallback between streaming and file-based
 """
 
 from .video_loader import VideoDataset, VideoLoader, FrameBuffer
@@ -30,6 +36,28 @@ from .enfusion_loader import (
     EnfusionToDriveDiTAdapter,
     create_enfusion_dataloaders
 )
+
+# Streaming data support (real-time Enfusion capture via Rust)
+from .pipeline import create_streaming_loader, is_streaming_available
+try:
+    from .streaming import (
+        StreamingDataLoader,
+        StreamingEnfusionDataset,
+        StreamingConfig,
+        check_streaming_available,
+    )
+    from .streaming_utils import (
+        TelemetryMapping,
+        telemetry_to_control_tensor,
+        normalize_frames,
+        batch_telemetry_to_controls,
+        SequenceWindower,
+        StreamingBatcher,
+        validate_batch,
+    )
+    STREAMING_AVAILABLE = True
+except ImportError:
+    STREAMING_AVAILABLE = False
 
 # High-performance Rust-based data loading (optional)
 try:
@@ -77,6 +105,10 @@ __all__ = [
     'EnfusionDataLoader',
     'EnfusionToDriveDiTAdapter',
     'create_enfusion_dataloaders',
+    # Streaming data loading (real-time Enfusion capture)
+    'create_streaming_loader',
+    'is_streaming_available',
+    'STREAMING_AVAILABLE',
     # Hybrid loader (Python/Rust)
     'HybridDataLoader',
     'HybridLoaderConfig',
@@ -84,6 +116,23 @@ __all__ = [
     'get_best_loader',
     'RUST_AVAILABLE',
 ]
+
+# Conditionally export streaming components
+if STREAMING_AVAILABLE:
+    __all__.extend([
+        'StreamingDataLoader',
+        'StreamingEnfusionDataset',
+        'StreamingConfig',
+        'check_streaming_available',
+        # Streaming utilities
+        'TelemetryMapping',
+        'telemetry_to_control_tensor',
+        'normalize_frames',
+        'batch_telemetry_to_controls',
+        'SequenceWindower',
+        'StreamingBatcher',
+        'validate_batch',
+    ])
 
 # Conditionally export Rust loader components
 if RUST_AVAILABLE:

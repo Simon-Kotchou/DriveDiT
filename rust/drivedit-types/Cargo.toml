@@ -1,0 +1,21 @@
+[package]
+name = "drivedit-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shared types for DriveDiT data pipeline"
+keywords = ["autonomous-driving", "machine-learning", "types"]
+categories = ["data-structures"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+# notify types needed for error conversion (lightweight)
+notify = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dev-dependencies]

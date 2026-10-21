@@ -26,7 +26,7 @@ SCR_AIWorld : "{E0A05C76552E7F58}Prefabs/AI/SCR_AIWorld.et" {
  "Accepted Road Types" 79
  "Collision detection layers" 9437888
 }
-SCR_BaseGameMode GameMode_DataCapture : "{C1F9B6BAE0BADD20}Prefabs/MP/Modes/GameMaster/GameMode_GameMaster.et" {
+SCR_BaseGameMode GameMode_DataCapture {
  components {
   SCR_MLDataCollector "{AAAABBBBCCCCDDDD}" {
    m_bEnableDataCapture 1
@@ -41,7 +41,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{C1F9B6BAE0BADD20}Prefabs/MP/Modes/Game
    m_iCaptureWidth 320
    m_iCaptureHeight 180
    m_fCameraFOV 90
-   m_vHoodOffset "2.2 0.95 0"
+   m_vHoodOffset 2.2 0.95 0
   }
  }
  coords 2759.086 80.111 1664.452
@@ -620,7 +620,7 @@ SCR_FactionManager FactionManager : "{589540B35EBA8CDC}Prefabs/MP/Managers/Facti
   }
  }
 }
-RadioManagerEntity : "{B8E09FAB91C4ECCD}Prefabs/Radio/RadioManager.et" {
+RadioManagerEntity : "{B8E09FAB91C4ECCD}Prefabs/Systems/Radio/RadioManager.et" {
  coords 2761.461 79.788 1706.195
 }
 SCR_SpawnPoint : "{4FEA25583D0975F7}Prefabs/MP/Spawning/SpawnPoint_USSR.et" {
@@ -632,7 +632,7 @@ SCR_SpawnPoint : "{5A2220DD0C16958B}Prefabs/MP/Spawning/SpawnPoint_US.et" {
 SCR_LoadoutManager : "{AA4E7419A1FF65B0}Prefabs/MP/Managers/Loadouts/LoadoutManager_Base.et" {
  coords 2746.328 77.526 1618.818
 }
-SCR_ManualCamera ManualCamera : "{D7A968EF71B93BD6}Prefabs/Editor/Camera/ManualCamera.et" {
+SCR_ManualCamera ManualCamera {
  coords 2750 85 1665
  angleY 0
 }

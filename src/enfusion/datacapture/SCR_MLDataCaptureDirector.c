@@ -13,9 +13,9 @@
 //     <m_sDriveTargetPrefix>N marker; each waypoint keeps its original marker id N;
 //   - after each completed waypoint assigns a different one, never the current one and never one within 2x the
 //     completion radius of the vehicle or of the current target;
-//   - logs when a living driver sits in each vehicle's pilot seat and when every configured group has one; on
-//     timeout, or if a group failed to start, it logs an ERROR (this readiness is what the collector start is
-//     gated on; until then SCR_MLDataCollector still starts on its own timer, as in March);
+//   - registers each vehicle with SCR_MLDataCollector once a living driver sits in its pilot seat (in group-id
+//     order, so vehicle_id = k - 1) and calls SCR_MLDataCollector.StartSession() once every configured group has a
+//     seated driver; on timeout, or if a group failed to start, it logs an ERROR and starts no session;
 //   - teleports a seated vehicle back to its own group's spawn point when it has not moved for m_fStuckTimeS.
 //
 // LIFECYCLE (vanilla 1.8.0.13 Game/GameMode/SCR_BaseGameMode.c:428-458 and :499-521): the authority's first
@@ -74,6 +74,7 @@ class SCR_MLDataCaptureGroupState
 
 	bool m_bDriverSeated;			//!< a living character sits in the pilot seat (latest readiness check)
 	bool m_bDriverSeatedOnce;		//!< the "driver seated" line was logged
+	bool m_bRegistered;				//!< registered with SCR_MLDataCollector
 
 	int m_iWaypointsCompleted;
 	int m_iStuckResets;
@@ -128,7 +129,7 @@ class SCR_MLDataCaptureGroupState
 }
 
 //------------------------------------------------------------------------------------------------
-[ComponentEditorProps(category: "GameScripted/DataCapture", description: "Spawns AI drivers into the placed capture vehicles and drives them between drive-target markers")]
+[ComponentEditorProps(category: "GameScripted/DataCapture", description: "Spawns AI drivers into the placed capture vehicles, drives them between drive-target markers and starts the SCR_MLDataCollector session once every driver is seated")]
 class SCR_MLDataCaptureDirectorClass : SCR_BaseGameModeComponentClass
 {
 }
@@ -197,7 +198,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	[Attribute("500", UIWidgets.Slider, "Driver readiness check interval [ms]", "100 5000 100", category: "Start")]
 	protected int m_iReadinessPollMs;
 
-	[Attribute("120000", UIWidgets.Slider, "Give up waiting for seated drivers after this long [ms]", "10000 600000 1000", category: "Start")]
+	[Attribute("120000", UIWidgets.Slider, "Give up waiting for seated drivers after this long [ms]; no collector session is started then", "10000 600000 1000", category: "Start")]
 	protected int m_iReadinessTimeoutMs;
 
 	// === STATE ===
@@ -208,6 +209,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	protected int m_iGroupsAttempted;
 	protected int m_iGroupsFailed;
 	protected int m_iTotalWaypointsCompleted;
+	protected SCR_MLDataCollector m_Collector;
 	protected ref array<ref SCR_MLDataCaptureWaypoint> m_aDriveTargets = {};	//!< marker records, m_Waypoint = null
 	protected ref array<ref SCR_MLDataCaptureGroupState> m_aGroups = {};		//!< successfully started groups, ascending group id
 
@@ -274,13 +276,17 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		m_fStartTimeMs = GetGame().GetWorld().GetWorldTime();
 		Print("[DataCapture] Director started (" + reason + ")", LogLevel.NORMAL);
 
+		m_Collector = SCR_MLDataCollector.Cast(GetOwner().FindComponent(SCR_MLDataCollector));
+		if (!m_Collector)
+			Print("[DataCapture] WARNING: no SCR_MLDataCollector on the game mode entity - driving only, no capture session", LogLevel.WARNING);
+
 		RegisterDebugMenus();
 		InitializeEnvironment();
 		CollectDriveTargets();
 
 		if (m_aDriveTargets.IsEmpty())
 		{
-			Print(string.Format("[DataCapture] ERROR: no drive-target markers %1<1..%2> found - no groups spawned", m_sDriveTargetPrefix, m_iMaxDriveTargets), LogLevel.ERROR);
+			Print(string.Format("[DataCapture] ERROR: no drive-target markers %1<1..%2> found - no groups spawned, no collector session", m_sDriveTargetPrefix, m_iMaxDriveTargets), LogLevel.ERROR);
 			m_bReadinessDone = true;
 			return;
 		}
@@ -626,6 +632,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		state.m_Group.AddWaypoint(record.m_Waypoint);
 		state.m_iCurrentWaypoint = next;
 
+		if (state.m_bRegistered && m_Collector)
+			m_Collector.SetVehicleWaypoint(state.m_Vehicle, record.m_iTargetId, record.m_vPosition);
+
 		string previous = "none";
 		if (previousTargetId > 0)
 			previous = previousTargetId.ToString();
@@ -674,7 +683,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Repeating until done: logs each group's first seated driver and when every configured group has one.
+	//! Repeating until done: logs seated drivers, registers vehicles with the collector in group-id order and starts
+	//! the collector session once every configured group has a seated driver.
 	protected void CheckReadiness()
 	{
 		if (!m_bActive || m_bReadinessDone)
@@ -685,6 +695,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		float elapsedS = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 1000.0;
 		int seated;
+		bool registerInOrder = true;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
 			state.m_bDriverSeated = HasLivingDriver(state.m_Vehicle);
@@ -697,11 +708,25 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 					Print(string.Format("[DataCapture] Group %1: driver seated in %2 after %3 s", state.m_iGroupId, state.m_Vehicle.GetName(), elapsedS.ToString(-1, 1)), LogLevel.NORMAL);
 				}
 			}
+
+			// Register in group-id order only, so the collector's vehicle_id is k - 1 for group k.
+			if (!state.m_bDriverSeated)
+				registerInOrder = false;
+
+			if (registerInOrder && !state.m_bRegistered && m_Collector)
+			{
+				m_Collector.RegisterVehicle(state.m_Vehicle);
+				state.m_bRegistered = true;
+
+				int targetId = state.GetCurrentTargetId();
+				if (targetId > 0)
+					m_Collector.SetVehicleWaypoint(state.m_Vehicle, targetId, state.m_aWaypoints[state.m_iCurrentWaypoint].m_vPosition);
+			}
 		}
 
 		if (m_iGroupsAttempted >= m_iMaxAIGroups && m_iGroupsFailed > 0)
 		{
-			FinishReadiness(string.Format("[DataCapture] ERROR: %1 of %2 configured groups failed to start", m_iGroupsFailed, m_iMaxAIGroups));
+			FinishReadiness(string.Format("[DataCapture] ERROR: %1 of %2 configured groups failed to start - collector session NOT started", m_iGroupsFailed, m_iMaxAIGroups));
 			return;
 		}
 
@@ -709,7 +734,17 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		{
 			m_bReadinessDone = true;
 			GetGame().GetCallqueue().Remove(CheckReadiness);
-			Print(string.Format("[DataCapture] All %1 drivers seated after %2 s", seated, elapsedS.ToString(-1, 1)), LogLevel.NORMAL);
+
+			if (!m_Collector)
+			{
+				Print(string.Format("[DataCapture] All %1 drivers seated after %2 s (no collector, no session)", seated, elapsedS.ToString(-1, 1)), LogLevel.NORMAL);
+				return;
+			}
+
+			Print(string.Format("[DataCapture] All %1 drivers seated after %2 s - starting the collector session", seated, elapsedS.ToString(-1, 1)), LogLevel.NORMAL);
+			if (!m_Collector.StartSession())
+				Print("[DataCapture] ERROR: SCR_MLDataCollector.StartSession() failed", LogLevel.ERROR);
+
 			return;
 		}
 
@@ -723,7 +758,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 					notSeated += " " + groupId.ToString();
 			}
 
-			FinishReadiness(string.Format("[DataCapture] ERROR: readiness timeout after %1 s: %2/%3 drivers seated (groups without a seated driver:%4)", elapsedS.ToString(-1, 1), seated, m_iMaxAIGroups, notSeated));
+			FinishReadiness(string.Format("[DataCapture] ERROR: readiness timeout after %1 s: %2/%3 drivers seated (groups without a seated driver:%4) - collector session NOT started", elapsedS.ToString(-1, 1), seated, m_iMaxAIGroups, notSeated));
 		}
 	}
 

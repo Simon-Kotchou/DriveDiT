@@ -14,6 +14,17 @@
 // INTEGRATIONS:
 //   - SCR_AnchorFrameSelector: Anchor frame selection for Self-Forcing++ training
 //   - SCR_MLScreenshotCapture: Synchronized frame capture for visual data
+//   - SCR_MLDataCaptureDirector: starts the session (see SESSION START)
+//
+// SESSION START:
+//   Nothing is captured on a timer or by entity name any more. The driving director on the same game mode
+//   registers each vehicle by entity (RegisterVehicle) once a driver sits in it, keeps its current drive target
+//   up to date (SetVehicleWaypoint) and calls StartSession() exactly once, when every configured driver is seated.
+//   Edit-mode (World Editor) instances do nothing.
+//
+// CSV COLUMNS (unchanged layout): waypoint_idx is the original drive-target marker id N of AI_Drive_Target_N
+// (1-based, -1 = none yet). waypoint_type and speed_limit_kmh are looked up at index N - 1 of the tables given
+// to SetWaypointClassifications(); the director sets none, so they stay -1 and 0.
 //
 // ============================================================================
 
@@ -61,7 +72,8 @@ class SCR_MLDataCollector: ScriptComponent
     protected ref array<float> m_aAccelerations;
 
     // === WAYPOINT CONTEXT ===
-    protected ref array<int> m_aCurrentWaypointIndices;
+    protected ref array<int> m_aCurrentWaypointIndices;     // per vehicle: drive-target marker id (1-based), -1 = none
+    protected ref array<vector> m_aWaypointPositions;       // per vehicle: world position of that drive target
     protected ref array<int> m_aWaypointTypes;
     protected ref array<float> m_aSpeedLimits;
     protected ref array<string> m_aWaypointDescriptions;
@@ -94,6 +106,7 @@ class SCR_MLDataCollector: ScriptComponent
         m_aDistances = new array<float>();
         m_aAccelerations = new array<float>();
         m_aCurrentWaypointIndices = new array<int>();
+        m_aWaypointPositions = new array<vector>();
         m_aWaypointTypes = new array<int>();
         m_aSpeedLimits = new array<float>();
         m_aWaypointDescriptions = new array<string>();
@@ -103,6 +116,10 @@ class SCR_MLDataCollector: ScriptComponent
         m_bAnchorSelectorInitialized = false;
         m_iAnchorFrameCount = 0;
         m_bScreenshotCaptureInitialized = false;
+
+        // World Editor (edit mode) instances never capture (review CR-012); the containers above stay valid.
+        if (SCR_Global.IsEditMode(owner) || SCR_Global.IsEditMode())
+            return;
 
         // Find or create anchor frame selector
         if (m_bEnableAnchorSelection)
@@ -124,53 +141,54 @@ class SCR_MLDataCollector: ScriptComponent
             }
         }
 
-        // Auto-initialize session after a short delay (allow world to load)
-        GetGame().GetCallqueue().CallLater(AutoInitialize, 3000, false);
-
-        Print("[MLDataCollector] Component initialized", LogLevel.NORMAL);
+        // No timer and no name-based discovery: SCR_MLDataCaptureDirector registers the vehicles and calls StartSession()
+        Print("[MLDataCollector] Component initialized, waiting for StartSession()", LogLevel.NORMAL);
     }
 
     //------------------------------------------------------------------------
-    // Auto-initialize session and find vehicles
-    protected void AutoInitialize()
+    // Start the capture session for the vehicles registered so far. Called once by SCR_MLDataCaptureDirector
+    // when every configured driver is seated. Returns false (and starts nothing) if a session is already
+    // running, no vehicle is registered or the session files cannot be created.
+    bool StartSession()
     {
-        Print("[MLDataCollector] Auto-initializing session...", LogLevel.NORMAL);
-
-        // Initialize session
-        if (!InitializeSession())
+        if (m_bSessionInitialized)
         {
-            Print("[MLDataCollector] ERROR: Failed to auto-initialize session", LogLevel.ERROR);
-            return;
+            Print("[MLDataCollector] WARNING: StartSession ignored, a session is already running: " + m_sSessionPath, LogLevel.WARNING);
+            return false;
         }
 
-        // Auto-discover vehicles in the world
-        AutoDiscoverVehicles();
+        if (m_aTrackedVehicles.IsEmpty())
+        {
+            Print("[MLDataCollector] ERROR: StartSession without registered vehicles - no session", LogLevel.ERROR);
+            return false;
+        }
 
-        Print("[MLDataCollector] Auto-initialization complete. Tracking " + m_aTrackedVehicles.Count().ToString() + " vehicles.", LogLevel.NORMAL);
+        if (!InitializeSession())
+        {
+            Print("[MLDataCollector] ERROR: Failed to initialize session", LogLevel.ERROR);
+            return false;
+        }
+
+        // Per-vehicle baselines start with the session, as they did when vehicles were registered at session start
+        for (int i = 0; i < m_aTrackedVehicles.Count(); i++)
+        {
+            IEntity vehicle = m_aTrackedVehicles[i];
+            if (vehicle)
+                m_aLastPositions[i] = vehicle.GetOrigin();
+            m_aLastSpeeds[i] = 0;
+            m_aDistances[i] = 0;
+            m_aAccelerations[i] = 0;
+        }
+
+        // The screenshot component looks up its camera in InitializeSession, so hand it the primary vehicle now
+        if (m_ScreenshotCapture)
+            m_ScreenshotCapture.SetTrackedVehicle(m_aTrackedVehicles[0]);
 
         // Start periodic capture using CallLater (more reliable than EOnFrame)
         GetGame().GetCallqueue().CallLater(PeriodicCapture, m_iCaptureIntervalMs, true);
-        Print("[MLDataCollector] Started periodic capture every " + m_iCaptureIntervalMs.ToString() + "ms", LogLevel.NORMAL);
-    }
+        Print("[MLDataCollector] Session started. Tracking " + m_aTrackedVehicles.Count().ToString() + " vehicles, capture every " + m_iCaptureIntervalMs.ToString() + "ms: " + m_sSessionPath, LogLevel.NORMAL);
 
-    //------------------------------------------------------------------------
-    // Auto-discover vehicles named AI_Car_X in the world
-    protected void AutoDiscoverVehicles()
-    {
-        BaseWorld world = GetGame().GetWorld();
-        if (!world)
-            return;
-
-        // Look for AI_Car_1 through AI_Car_10
-        for (int i = 1; i <= 10; i++)
-        {
-            string vehicleName = "AI_Car_" + i.ToString();
-            IEntity vehicle = world.FindEntityByName(vehicleName);
-            if (vehicle)
-            {
-                RegisterVehicle(vehicle);
-            }
-        }
+        return true;
     }
 
     //------------------------------------------------------------------------
@@ -190,8 +208,8 @@ class SCR_MLDataCollector: ScriptComponent
     }
 
     //------------------------------------------------------------------------
-    // Initialize a new data capture session
-    bool InitializeSession()
+    // Initialize a new data capture session (files and sub-components); StartSession() is the public entry point
+    protected bool InitializeSession()
     {
         if (!m_bEnableDataCapture)
         {
@@ -383,9 +401,10 @@ class SCR_MLDataCollector: ScriptComponent
         m_aDistances.Insert(0);
         m_aAccelerations.Insert(0);
         m_aCurrentWaypointIndices.Insert(waypointIndex);
+        m_aWaypointPositions.Insert(vector.Zero);
 
-        // Tell screenshot capture about the first tracked vehicle
-        if (m_aTrackedVehicles.Count() == 1 && m_ScreenshotCapture)
+        // Tell screenshot capture about the first tracked vehicle (StartSession does it for vehicles registered before the session)
+        if (m_aTrackedVehicles.Count() == 1 && m_ScreenshotCapture && m_bSessionInitialized)
         {
             m_ScreenshotCapture.SetTrackedVehicle(vehicle);
         }
@@ -408,22 +427,31 @@ class SCR_MLDataCollector: ScriptComponent
         m_aDistances.Remove(index);
         m_aAccelerations.Remove(index);
         m_aCurrentWaypointIndices.Remove(index);
+        m_aWaypointPositions.Remove(index);
 
         Print("[MLDataCollector] Unregistered vehicle: " + vehicle.GetName(), LogLevel.NORMAL);
     }
 
     //------------------------------------------------------------------------
-    // Update waypoint index for a vehicle
-    void SetVehicleWaypoint(int vehicleIndex, int waypointIndex)
+    // Update the current drive target of a registered vehicle: the original marker id (AI_Drive_Target_<id>,
+    // 1-based) and the target's world position. Returns false if the vehicle is not registered.
+    bool SetVehicleWaypoint(IEntity vehicle, int waypointId, vector targetPosition)
     {
-        if (vehicleIndex >= 0 && vehicleIndex < m_aCurrentWaypointIndices.Count())
-        {
-            m_aCurrentWaypointIndices[vehicleIndex] = waypointIndex;
-        }
+        int index = m_aTrackedVehicles.Find(vehicle);
+        if (!vehicle || index < 0)
+            return false;
+
+        m_aCurrentWaypointIndices[index] = waypointId;
+        m_aWaypointPositions[index] = targetPosition;
+
+        if (m_bVerboseLogging)
+            Print("[MLDataCollector] V" + index.ToString() + " (" + vehicle.GetName() + ") drive target " + waypointId.ToString() + " at " + targetPosition.ToString(), LogLevel.NORMAL);
+
+        return true;
     }
 
     //------------------------------------------------------------------------
-    // Set waypoint classifications
+    // Set waypoint classifications; entry i describes drive-target marker id i + 1
     void SetWaypointClassifications(array<int> types, array<float> speedLimits, array<string> descriptions)
     {
         m_aWaypointTypes.Clear();
@@ -489,9 +517,9 @@ class SCR_MLDataCollector: ScriptComponent
             if (i == 0 && m_bAnchorSelectorInitialized && m_AnchorSelector)
             {
                 int roadType = -1;
-                int waypointIdx = m_aCurrentWaypointIndices[i];
-                if (waypointIdx >= 0 && waypointIdx < m_aWaypointTypes.Count())
-                    roadType = m_aWaypointTypes[waypointIdx];
+                int classIdx = m_aCurrentWaypointIndices[i] - 1;   // marker id N -> table index N - 1
+                if (classIdx >= 0 && classIdx < m_aWaypointTypes.Count())
+                    roadType = m_aWaypointTypes[classIdx];
 
                 bool isAnchor = m_AnchorSelector.ProcessFrame(
                     m_iFrameCounter,
@@ -590,14 +618,15 @@ class SCR_MLDataCollector: ScriptComponent
 
         if (vehicleIndex < m_aCurrentWaypointIndices.Count())
         {
-            waypointIdx = m_aCurrentWaypointIndices[vehicleIndex];
-            if (waypointIdx >= 0 && waypointIdx < m_aWaypointTypes.Count())
+            waypointIdx = m_aCurrentWaypointIndices[vehicleIndex];  // drive-target marker id, -1 = none
+            int classIdx = waypointIdx - 1;
+            if (classIdx >= 0 && classIdx < m_aWaypointTypes.Count())
             {
-                waypointType = m_aWaypointTypes[waypointIdx];
+                waypointType = m_aWaypointTypes[classIdx];
             }
-            if (waypointIdx >= 0 && waypointIdx < m_aSpeedLimits.Count())
+            if (classIdx >= 0 && classIdx < m_aSpeedLimits.Count())
             {
-                speedLimit = m_aSpeedLimits[waypointIdx];
+                speedLimit = m_aSpeedLimits[classIdx];
             }
         }
 
@@ -873,6 +902,9 @@ class SCR_MLDataCollector: ScriptComponent
     // Cleanup on component destruction
     override void OnDelete(IEntity owner)
     {
+        if (GetGame() && GetGame().GetCallqueue())
+            GetGame().GetCallqueue().Remove(PeriodicCapture);
+
         if (m_bSessionInitialized)
         {
             FinalizeSession();

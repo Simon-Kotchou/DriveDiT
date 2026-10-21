@@ -100,6 +100,10 @@ class SCR_MLScreenshotCapture: ScriptComponent
         m_iCurrentVehicleIndex = 0;
         m_bCameraAttached = false;
 
+        // World Editor (edit mode) instances never capture (review CR-012); the container above stays valid.
+        if (SCR_Global.IsEditMode(owner) || SCR_Global.IsEditMode())
+            return;
+
         Print("[MLScreenshot] Component initialized, position: " + typename.EnumToString(SCR_MLCameraPosition, m_eCameraPosition), LogLevel.NORMAL);
     }
 

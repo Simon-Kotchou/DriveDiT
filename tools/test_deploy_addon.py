@@ -23,6 +23,7 @@ REPO = os.path.dirname(HERE)
 TOOL = os.path.join(HERE, "deploy_addon.py")
 MANIFEST = os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt")
 SCRIPT_DST = "Scripts/Game/DataCapture"
+WORLD_LAYER = "worlds/DataCapture/DC_Arland_Layers/default.layer"
 
 
 def tmp_base():
@@ -206,9 +207,10 @@ class DeployAddonTest(unittest.TestCase):
     def test_never_touches_workbench_generated_files(self):
         os.makedirs(os.path.join(self.target, SCRIPT_DST))
         generated = {"resourceDatabase.rdb": b"RDB", "UserMaps.desc": b"UserMapDescClass {\n}",
-                     "DataDrive.ent.meta": b"META ent", SCRIPT_DST + "/SCR_MLDataCollector.c.meta": b"META c",
+                     "worlds/DataCapture/DC_Arland.ent.meta": b"META ent", SCRIPT_DST + "/SCR_MLDataCollector.c.meta": b"META c",
                      SCRIPT_DST + "/SCR_AnchorFrameSelector.c.meta": b"META anchor"}
         for rel, data in generated.items():
+            os.makedirs(os.path.dirname(os.path.join(self.target, rel)), exist_ok=True)
             with open(os.path.join(self.target, rel), "wb") as f:
                 f.write(data)
         self.assertEqual(self.run_tool()[0], 0)
@@ -224,8 +226,8 @@ class DeployAddonTest(unittest.TestCase):
         foreign = os.path.join(self.target, SCRIPT_DST, "Unrelated_Handmade.c")
         with open(foreign, "w") as f:
             f.write("class Unrelated_Handmade {}\n")
-        keep = ["addon addons/DataCapture/addon.gproj", "addon addons/DataCapture/DataDrive.ent",
-                "addon addons/DataCapture/DataDrive_Layers/default.layer",
+        keep = ["addon addons/DataCapture/addon.gproj", "addon addons/DataCapture/worlds/DataCapture/DC_Arland.ent",
+                "addon addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
                 "script src/enfusion/datacapture/SCR_MLDataCollector.c",
                 "script src/enfusion/datacapture/SCR_MLScreenshotCapture.c"]
         rc, out = self.run_tool("--manifest", self.write_manifest(keep))
@@ -235,7 +237,7 @@ class DeployAddonTest(unittest.TestCase):
 
     def test_refuses_to_overwrite_a_changed_file_without_force(self):
         self.assertEqual(self.run_tool()[0], 0)
-        layer = os.path.join(self.target, "DataDrive_Layers", "default.layer")
+        layer = os.path.join(self.target, *WORLD_LAYER.split("/"))
         with open(layer, "ab") as f:
             f.write(b"// saved by Workbench\n")
         edited = sha(layer)
@@ -245,11 +247,10 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(sha(layer), edited, "refused deploy still overwrote the layer")
         rc, out = self.run_tool("--force")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(sha(layer), sha(os.path.join(REPO, "addons", "DataCapture", "DataDrive_Layers",
-                                                      "default.layer")))
+        self.assertEqual(sha(layer), sha(os.path.join(REPO, "addons", "DataCapture", *WORLD_LAYER.split("/"))))
         backups = [p for p in listing(self.target) if p.startswith(".deploy_backup/")]
         self.assertEqual(len(backups), 1, backups)
-        self.assertTrue(backups[0].endswith("DataDrive_Layers/default.layer.bak"))
+        self.assertTrue(backups[0].endswith(WORLD_LAYER + ".bak"))
         self.assertEqual(sha(os.path.join(self.target, backups[0])), edited)
 
     def test_refuses_to_overwrite_an_untracked_file_without_force(self):

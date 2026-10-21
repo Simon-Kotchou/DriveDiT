@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Static check of an Enfusion text world file (.layer / .ent) before Workbench loads it.
 
-    python3 -I -B tools/check_layer.py addons/DataCapture/DataDrive_Layers/default.layer [more files]
+    python3 -I -B tools/check_layer.py addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer [more files]
 
 Reads only. Reports, per file:
   * quoted numeric vectors such as  m_vHoodOffset "2.2 0.95 0"  (vanilla 1.8 never quotes vectors; one of them
-    made 1.8 stop parsing DataDrive's layer at byte 1468 and silently drop every later entity);
+    made 1.8 stop parsing the March capture layer at byte 1468 and silently drop every later entity);
   * brace balance and unterminated strings, counted outside string literals;
   * whether an inline userScript is present;
   * the entity list (class, name, inherited prefab, coords), including the children of $grp blocks;

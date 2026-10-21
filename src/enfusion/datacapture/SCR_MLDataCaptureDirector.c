@@ -2,7 +2,7 @@
 // SCR_MLDataCaptureDirector - compiled driving director for the capture world
 // ============================================================================
 //
-// Replaces the inline userScript of GameMode_DataCapture (DataDrive_Layers/default.layer) and the superseded
+// Replaces the inline userScript of GameMode_DataCapture (worlds/DataCapture/DC_Arland_Layers/default.layer) and the superseded
 // SCR_AIDrivingSimulator. Attach it to the GameMode_DataCapture entity (an SCR_BaseGameMode) next to
 // SCR_MLDataCollector. It never captures anything itself: the collector owns the capture clock.
 //

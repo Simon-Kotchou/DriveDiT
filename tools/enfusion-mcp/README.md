@@ -20,7 +20,7 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | MCP server | BK `0acfa884228477043c6b4c2b8c7f0c270d648398` (main, 2026-08-05), `package.json` 0.12.0, 54 tools |
 | API index | Reforger 1.8 index from [`fma-rc/enfusion-mcp`](https://github.com/fma-rc/enfusion-mcp) `4cd14dbbfb8a3b2832b0ec2480a5dcc8fe1b2c49` (`data/api/*.json`: 887 Enfusion + 8,085 Arma classes, scraped from Tools buildid 24870687). BK's own index predates 1.7 |
 | Node | nvm `v24.2.0` (BK needs `>=20`), resolved from the real `~/.nvm` (read-only) |
-| Engine | Reforger 1.8.0.13 (game buildid 24903726, Tools buildid 24870687); see DD-0 for the build pin |
+| Engine | Reforger 1.8.0.13 (game buildid 24903726, Tools buildid 24870687), the **interim** pin; see DD-0 for the build pin. The target is 1.9 once it is stable and compatibility is checked; a move to 1.9 also needs a 1.9 API index here |
 
 ## Files
 
@@ -28,7 +28,7 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 |---|---|
 | `build-bk.sh` | build at the pin, apply both guard patches, `npm ci --ignore-scripts`, `tsc`, check the guards are in `dist/`, prune devDependencies. `--data18` also composes the 1.8 data dir from the pinned fma-rc commit. `--smoke` runs `initialize` + `tools/list` and exits 1 unless it gets serverInfo and 54 tools |
 | `enfusion-mcp-wsl.sh` | stdio wrapper that Claude Code runs. Forces the three guards to `1`, refuses a `dist/` without the guard code, finds the Windows host, runs the server from `$EMCP_ROOT/cwd`. `--print-env` shows the resolved config and creates nothing; `--check` also opens one TCP connection to the NET API port |
-| `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "E:\DriveDiT\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight, refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
+| `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "E:\DriveDiT\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight against the **active** pin (`preflight.py --pin-active`: the pin that `E:\DriveDiT\pin\ACTIVE` names, switched only by DD-0's `pin_activate.py`; `WB_PIN_DIR` overrides the pin dir, `WB_PIN` is refused), names no game version, refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
 | `claude-mcp-entry.json` | the user-scope MCP entry (same as the `claude mcp add` command below) |
 | `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `457d5e46…1c92`) |
 | `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `09803bae…dc9ba`) |
@@ -130,9 +130,10 @@ Other wrapper defaults (each can be overridden by exporting it, or through `env`
 
 1. **Close Workbench.** Never save the truncated `DataDrive` world in the old session.
 2. **Relaunch Workbench on E:**, with `-profile "E:\DriveDiT\wb_profile"` and `-gproj "E:\DriveDiT\addons\DataCapture\addon.gproj"`. Use one of:
-   - **preferred:** DD-0's `E:\DriveDiT\tools\launch\wb_R1.bat` (pin preflight + pinned arguments);
-   - **from WSL (Steam running):** `bash /mnt/e/drivedit_realign/mcp/launch-workbench.sh`. It runs the same preflight and
-     refuses if DD-0 is not deployed yet. Only before DD-0 is deployed, and knowing the build is unchecked:
+   - **preferred:** DD-0's `E:\DriveDiT\tools\launch\wb_R1.bat` (pin preflight against the active pin + pinned arguments);
+   - **from WSL (Steam running):** `bash /mnt/e/drivedit_realign/mcp/launch-workbench.sh`. It runs the same preflight
+     (`--pin-active`, the pin named by `E:\DriveDiT\pin\ACTIVE`) and refuses if DD-0 is not deployed yet or no pin is
+     active. Only before DD-0 is deployed, and knowing the build is unchecked:
      `WB_SKIP_PREFLIGHT=1 bash /mnt/e/drivedit_realign/mcp/launch-workbench.sh`.
 
    Do **not** launch from the Steam library or set Steam launch options: the capture program forbids library launches for

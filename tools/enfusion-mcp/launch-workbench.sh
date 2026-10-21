@@ -13,10 +13,13 @@
 #
 # Refuses (exit 1): a GPROJ or -profile on C: or on the WSL disk (Workbench writes .meta files and
 # resourceDatabase.rdb into the opened project, and logs/captures into the profile); a running Workbench;
-# tasklist.exe not runnable; a failed pin preflight. The preflight is
-# /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --exe wb (WB_PREFLIGHT and
-# WB_PIN override); it writes its launch record under /mnt/e/DriveDiT/pin/launches. Until DD-0 is deployed,
-# WB_SKIP_PREFLIGHT=1 launches without the pin check (it says so loudly).
+# tasklist.exe not runnable; no active pin; a failed pin preflight. The preflight is
+# /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --pin-dir /mnt/e/DriveDiT/pin --exe wb (WB_PREFLIGHT and
+# WB_PIN_DIR override): it checks the pin that /mnt/e/DriveDiT/pin/ACTIVE names, exactly like wb_R1.bat, and writes
+# its launch record under <pin dir>/launches. This script names no game version. 1.8.0.13 is the interim pin; the
+# plan is to move to 1.9 by activating a new pin with DD-0's pin_activate.py (see DD-0's tools/pin/README.md).
+# WB_PIN (an explicit pin file) is no longer accepted, because it would bypass that checked switch.
+# Until DD-0 is deployed, WB_SKIP_PREFLIGHT=1 launches without the pin check (it says so loudly).
 #
 # Windows-side equivalent (PowerShell), same arguments, no preflight:
 #   Start-Process -WorkingDirectory "C:\Program Files (x86)\Steam\steamapps\common\Arma Reforger Tools\Workbench" `
@@ -41,7 +44,8 @@ WB_EXE="$WB_DIR/ArmaReforgerWorkbenchSteamDiag.exe"
 WB_IMAGE="ArmaReforgerWorkbenchSteamDiag.exe"
 TASKLIST=/mnt/c/Windows/System32/tasklist.exe
 PREFLIGHT="${WB_PREFLIGHT:-/mnt/e/DriveDiT/tools/pin/preflight.py}"
-PIN="${WB_PIN:-/mnt/e/DriveDiT/pin/pin_1.8.0.13.json}"
+PIN_DIR="${WB_PIN_DIR:-/mnt/e/DriveDiT/pin}"
+[[ -z "${WB_PIN:-}" ]] || die "WB_PIN is no longer supported: the launch checks the active pin ($PIN_DIR/ACTIVE). Switch pins with pin_activate.py; unset WB_PIN."
 PROFILE_WIN="${WB_PROFILE_WIN:-E:\\DriveDiT\\wb_profile}"
 
 GPROJ=/mnt/e/DriveDiT/addons/DataCapture/addon.gproj
@@ -75,14 +79,18 @@ if grep -qiF "\"$WB_IMAGE\"" <<<"$TL"; then
   die "Workbench is already running - close it first (this script never kills it)."
 fi
 
-# Build-pin preflight (DD-0 / capture program TKT-0): refuses on any drift from the pinned 1.8.0.13 build.
+# Build-pin preflight (DD-0 / capture program TKT-0): refuses on any drift from the ACTIVE pin.
 if [[ "${WB_SKIP_PREFLIGHT:-0}" == "1" ]]; then
   echo "launch-workbench: WARNING: WB_SKIP_PREFLIGHT=1 - the build pin is NOT checked for this launch" >&2
 else
-  [[ -f "$PREFLIGHT" && -f "$PIN" ]] \
-    || die "pin preflight not deployed ($PREFLIGHT, $PIN). Deploy DD-0, use wb_R1.bat, or set WB_SKIP_PREFLIGHT=1 knowingly."
-  off_c_drive "$PIN" || die "refusing pin $PIN: the preflight writes its launch record next to it; keep it off C:"
-  LID="$(cd /mnt/e && python3 -I -B "$PREFLIGHT" --pin "$PIN" --exe wb)" || die "PIN CHECK FAILED; Workbench not started (preflight messages above)."
+  [[ -f "$PREFLIGHT" ]] \
+    || die "pin preflight not deployed ($PREFLIGHT). Deploy DD-0, use wb_R1.bat, or set WB_SKIP_PREFLIGHT=1 knowingly."
+  off_c_drive "$PIN_DIR" \
+    || die "refusing pin dir $PIN_DIR: the preflight writes its launch record under it; use an absolute path off C: (E:)"
+  [[ -e "$PIN_DIR/ACTIVE" || -L "$PIN_DIR/ACTIVE" ]] \
+    || die "no active pin ($PIN_DIR/ACTIVE is missing). Activate one with: python3 -I -B $(dirname "$PREFLIGHT")/pin_activate.py <pin id>"
+  LID="$(cd /mnt/e && python3 -I -B "$PREFLIGHT" --pin-active --pin-dir "$PIN_DIR" --exe wb)" \
+    || die "PIN CHECK FAILED; Workbench not started (preflight messages above)."
   [[ -n "$LID" ]] || die "PIN CHECK FAILED: the preflight printed no launch id; Workbench not started."
   echo "pin OK, launch id $LID" >&2
 fi

@@ -44,13 +44,24 @@ if not exist "%WB_GPROJ%" (
   goto :fail
 )
 
+rem WSL_UTF8=1: wsl.exe writes its own messages (for example a missing distro) to STDOUT, in UTF-16 by
+rem default (measured 2026-10-20). UTF-8 keeps such a line from garbling the line after it.
+set "WSL_UTF8=1"
 set "LID="
-for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --exe wb') do set "LID=%%i"
+rem Only a stdout line that starts with a launch id (YYYYMMDDTHHMMSSZ-wb-xxxx) and holds nothing but
+rem id characters reaches LID. Every other line (a wsl.exe message, a stray print) is dropped, so it
+rem can neither block a good launch nor put cmd metacharacters (ampersand, pipe, angle brackets,
+rem quotes, percent) into LID. findstr /X and $ never match LF-only lines (measured), hence two
+rem filters: the id pattern anchored at the start, then /V on any character outside the id set.
+rem The interpreter is named (/usr/bin/python3) because -e starts no shell and its PATH holds Windows dirs.
+set "DD_ID_RE=^[0123456789][0123456789]*T[0123456789][0123456789]*Z-wb-[0123456789abcdef][0123456789abcdef]*"
+set "DD_ID_BAD=[^-0123456789abcdefTZw]"
+for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --exe wb ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
 if not defined LID (
-  set "DD_ERR=PIN CHECK FAILED. Workbench was not started. The preflight messages above say why."
+  set "DD_ERR=PIN CHECK FAILED. Workbench was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --check"
   goto :fail
 )
-rem The record must exist: this also rejects a stray stdout line (for example a wsl.exe warning).
+rem The record must exist: a launch id alone is not proof that this preflight run passed.
 if not exist "%DD_LAUNCHES%\launch_%LID%.json" (
   set "DD_ERR=PIN CHECK FAILED. No launch record for id %LID% in %DD_LAUNCHES%."
   goto :fail

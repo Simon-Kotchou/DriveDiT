@@ -13,6 +13,8 @@ Launch mode (default): on success prints ONLY the launch id on stdout, writes
 <launch-dir>/launch_<id>.json (default launch dir: <pin dir>/launches) and exits 0. On refusal prints
 nothing on stdout, explains on stderr, writes refused_<id>.json (best effort) and exits 1.
 Check mode (--check): prints a PASS/FAIL report on stdout, writes nothing, exits 0 or 1.
+--allow-fail, --mtime-resolution-s and the --game-acf/--tools-acf/--game-root/--tools-root overrides are
+accepted only with --check, so a launch is always checked, in full, against the pinned paths.
 
 Exit codes: 0 ok; 1 refused; 2 usage/config error (pin unreadable, bad path); 3 launch record not written.
 Writes are allowed only under /mnt/e (C: is always refused).
@@ -109,9 +111,10 @@ def check_app(app: str, pin_app: dict, steam_policy: dict, acf_path: str, root: 
         add("target_buildid", tgt_ok,
             "TargetBuildID %s, buildid %s%s" % (acf["target_buildid"], acf["buildid"],
                                                  "" if tgt_ok else ": an update is pending or downloading"))
-        # "0" (always auto-update) is refused even if a hand-edited pin allows it.
+        # A pin can only narrow the code policy (AUTO_UPDATE_ALLOWED: "1"), never widen it. A hand-edited pin
+        # that lists "0" (always auto-update) or "2" (high priority, also auto-updates) does not let them through.
         allowed = [str(v) for v in steam_policy.get("auto_update_behavior_allowed", pinlib.AUTO_UPDATE_ALLOWED)
-                   if str(v) != "0"]
+                   if str(v) in pinlib.AUTO_UPDATE_ALLOWED]
         aub = acf["auto_update_behavior"]
         if aub in allowed:
             add("auto_update_behavior", True, "AutoUpdateBehavior %r (%s)" % (aub, pinlib.AUTO_UPDATE_MEANING.get(aub)))
@@ -232,10 +235,11 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     ap.add_argument("--mtime-resolution-s", type=int, default=0, metavar="N",
                     help="with --check only: compare mtimes at N-second resolution (1 for a copy on E:)")
     ap.add_argument("--launch-dir", default=None, help="where launch records go (default: <pin dir>/launches)")
-    ap.add_argument("--game-acf", default=None, help="override the appmanifest path stored in the pin")
-    ap.add_argument("--tools-acf", default=None)
-    ap.add_argument("--game-root", default=None, help="override the install dir stored in the pin")
-    ap.add_argument("--tools-root", default=None)
+    ap.add_argument("--game-acf", default=None, help="with --check only: override the appmanifest path in the pin")
+    ap.add_argument("--tools-acf", default=None, help="with --check only")
+    ap.add_argument("--game-root", default=None,
+                    help="with --check only: override the install dir in the pin (the cold copy check uses it)")
+    ap.add_argument("--tools-root", default=None, help="with --check only")
     cli_argv = list(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(cli_argv)
 
@@ -249,6 +253,13 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     if args.mtime_resolution_s and not args.check:
         print("preflight: --mtime-resolution-s is only accepted with --check (launches compare mtimes exactly)",
               file=sys.stderr)
+        return 2
+    overrides = [flag for flag, val in (("--game-acf", args.game_acf), ("--tools-acf", args.tools_acf),
+                                        ("--game-root", args.game_root), ("--tools-root", args.tools_root)) if val]
+    if overrides and not args.check:
+        # A launch record must describe the files the launcher really starts: the pinned acf and install paths.
+        print("preflight: %s only accepted with --check (a launch is always checked against the pinned paths)"
+              % ", ".join(overrides), file=sys.stderr)
         return 2
     unknown = [n for n in args.allow_fail if n not in CHECK_NAMES]
     if unknown:

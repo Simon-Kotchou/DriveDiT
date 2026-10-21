@@ -84,7 +84,7 @@ data paks.
 |---|---|
 | `buildid` | buildid != pin (Steam installed another build) |
 | `target_buildid` | TargetBuildID != buildid (an update is pending or downloading) |
-| `auto_update_behavior` | AutoUpdateBehavior is not `"1"` ("Only update this game when I launch it"). `"0"` is refused even if the pin allows it |
+| `auto_update_behavior` | AutoUpdateBehavior is not `"1"` ("Only update this game when I launch it"). A pin can only narrow this: `"0"` and `"2"` are refused even if the pin lists them |
 | `state_flags` | StateFlags != 4 (not settled) |
 | `depots` | any installed depot manifest != pin |
 | `paks` | any pinned pak is missing, or its size or `mtime_ns` differs, or a pak exists that is not in the pin |
@@ -103,8 +103,10 @@ path. 3 means the launch record could not be written, so the launch is refused.
 observed appmanifest fields, every check with its detail, the host, the WSL distro and the Python version. The
 client passes the id to the game as `-dcLaunchId`, which joins a session to its record (validator check C02).
 
-**Check-only options.** `--allow-fail CHECK` and `--mtime-resolution-s N` are accepted only with `--check`. A launch
-can never waive a check. `cold_copy.sh` uses both.
+**Check-only options.** `--allow-fail CHECK`, `--mtime-resolution-s N` and the path overrides `--game-acf`,
+`--tools-acf`, `--game-root` and `--tools-root` are accepted only with `--check`. A launch can never waive a check,
+and is always checked against the pinned appmanifests and install dirs, so its record describes the files the
+launcher starts. `cold_copy.sh` uses these options to check the copy.
 
 **Today's expected result.** Until the Steam setting below is changed, the preflight refuses with
 `game.auto_update_behavior` and `tools.auto_update_behavior`.
@@ -128,9 +130,17 @@ UNVERIFIED. Steam has no "never update" option. For overnight runs, also put Ste
 
 Both launchers start the exe directly, never through `steam://`. They set the exe's own directory as the working
 directory, as a Steam launch does, and that directory holds `steam_appid.txt`. Before starting, they run the
-preflight through `wsl.exe -d Ubuntu-22.04 -e python3 -I -B ...`. The distro is named because a second one,
-`Ubuntu-22.04-E`, exists. They start the exe only when the preflight printed an id **and**
-`launch_<id>.json` exists. The second check rejects a stray stdout line, such as a wsl.exe warning.
+preflight through `wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B ...`. The distro is named because a second
+one, `Ubuntu-22.04-E`, exists. The interpreter is named because `-e` starts no shell and the PATH it gets also holds
+Windows directories. They start the exe only when the preflight printed an id **and** `launch_<id>.json` exists.
+
+How the id is read (review fix). wsl.exe writes its own messages, such as an unknown distro, to **stdout**, in UTF-16
+unless `WSL_UTF8=1` is set (both measured). The launchers set `WSL_UTF8=1` and pass the preflight's stdout through
+two `findstr` filters: the id pattern anchored at the start of the line, then `/V` on any character outside the id
+set. `findstr /X` and `$` never match the LF-only lines that WSL prints (measured), so an exact-line match is not
+available. Only a well-formed id can reach `LID`: a stray line before or after the id no longer blocks a good launch,
+and no cmd metacharacter (`&`, `|`, `<`, `>`, `"`, `%`, `^`) can reach the `echo`, `if exist` and `start` lines.
+Before this fix, a stdout line such as `x&ver` ran `ver`, and `x>file` created a file in the current directory.
 
 **`wb_R1.bat`** runs:
 
@@ -166,12 +176,17 @@ bash /mnt/e/DriveDiT/tools/pin/cold_copy.sh --run    # copies about 27.9 GB to E
 
 `--run` does the following, in order:
 1. Checks the live installs against the pin. AutoUpdateBehavior is waived; everything else must pass.
-2. Runs `rsync -rt` into `game/` and `tools/`. A marker file allows an interrupted copy to be resumed.
+2. Runs `rsync -rt` into `game/` and `tools/`. A marker file allows an interrupted copy to be resumed. A
+   destination that contains a symlink is refused before anything is written (`rsync -rt` never makes one, and one
+   could lead a write off E:).
 3. Checks the live installs again, to show that nothing changed during the copy.
 4. Checks the copy against the pin at 1 s mtime resolution. WSL drvfs truncates the mtimes it *sets* to whole
-   seconds; this was measured on E:.
+   seconds; this was measured on E:. Then each copy must hold exactly the regular files of its source, with none
+   missing and none extra (such as an rsync temp file left by a killed run).
 5. Writes `SHA256SUMS` for every copied file.
 6. Copies the pin and both appmanifests into `meta/`.
+
+The script never deletes anything except its own marker file.
 
 Verify the copy later with `cd /mnt/e/DriveDiT/pin/1.8.0.13 && sha256sum -c --quiet SHA256SUMS`. The depot manifest
 ids in the pin also allow a third-party DepotDownloader rollback. Running that tool is the user's decision (D2d).
@@ -183,7 +198,7 @@ python3 -I -B -m unittest discover -s tools/pin/tests -v
 ```
 
 Temp trees go to `$DD_PIN_TEST_TMP`, otherwise `/dev/shm`, and are deleted afterwards. Run the tests with
-`/usr/bin/python3` (3.10) as well, because `wsl.exe -e python3` resolves to it: `-e` starts no login shell.
+`/usr/bin/python3` (3.10) as well, because the launchers run the preflight with it.
 
 ## Differences from the Appendix B sketch
 
@@ -193,6 +208,7 @@ Temp trees go to `$DD_PIN_TEST_TMP`, otherwise `/dev/shm`, and are deleted after
   not in the pin.
 - In the pin, `depots` maps each depot to `{manifest, size}`, and `paks` is keyed by relative path, because there are
   two `data.pak` files: `addons/core` and `addons/data`. Mtimes are stored as `mtime_ns` and compared exactly.
-- The launchers name the WSL distro, set the working directory to the exe's directory (`start /D`), require the
-  launch record to exist, and refuse while placeholders are unset. `wb_R1.bat` refuses a second Workbench.
+- The launchers name the WSL distro and the interpreter, set the working directory to the exe's directory
+  (`start /D`), accept only a well-formed id line (`WSL_UTF8=1` plus two `findstr` filters), require the launch
+  record to exist, and refuse while placeholders are unset. `wb_R1.bat` refuses a second Workbench.
 - The preflight writes a record for refused launches as well.

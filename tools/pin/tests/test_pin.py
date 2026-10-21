@@ -3,8 +3,9 @@
     python3 -I -B -m unittest discover -s tools/pin/tests -v
 
 Temporary Steam-library trees go under $DD_PIN_TEST_TMP, else /dev/shm, else the system temp dir,
-and are deleted afterwards. Nothing is ever written under /mnt/c: the C:-refusal tests use paths
-whose parent does not exist, and the code refuses them before touching the filesystem.
+and are deleted afterwards. No /mnt/c path is ever handed to code that writes: real /mnt/c strings
+appear only in the pure path-guard tests (check_write_path never writes). Tests that run make_pin or
+preflight use a stand-in forbidden prefix inside the temp dir (TmpCase.fake_c_drive), or /proc.
 """
 from __future__ import annotations
 
@@ -23,7 +24,8 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 PIN_DIR = os.path.dirname(HERE)
 FIXTURES = os.path.join(HERE, "fixtures")
-NEVER_C = "/mnt/c/__dd0_pin_test_never_written__"
+NEVER_C = "/mnt/c/__dd0_pin_test_never_written__"   # pure path-guard tests only; never passed to make_pin/preflight
+NEVER_WRITABLE = "/proc/__dd0_pin_test_never_written__"  # outside /mnt/e, and the kernel refuses writes there
 
 
 def _load(name):
@@ -124,6 +126,18 @@ class TmpCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.roots = (self.tmp,)
         self.fs = FakeSteam(self.tmp)
+
+    def fake_c_drive(self):
+        """A stand-in for C: inside the temp dir. The guard refuses it exactly like /mnt/c, even though the
+        temp dir is an allowed root, so the refusal paths of make_pin/preflight are tested without ever
+        handing them a real /mnt/c path."""
+        self.assertIs(make_pin.pinlib, pinlib)
+        self.assertIs(preflight.pinlib, pinlib)
+        fake = os.path.join(self.tmp, "fake_c_drive")
+        saved = pinlib.FORBIDDEN_WRITE_PREFIXES
+        pinlib.FORBIDDEN_WRITE_PREFIXES = saved + (os.path.realpath(fake).lower() + "/",)
+        self.addCleanup(setattr, pinlib, "FORBIDDEN_WRITE_PREFIXES", saved)
+        return fake
 
 
 # --------------------------------------------------------------------------- parser
@@ -247,12 +261,14 @@ class MakePinTests(TmpCase):
         self.assertNotIn("LastOwner", json.dumps(pin))
 
     def test_refuses_c_drive_output(self):
-        argv = ["--pin-id", "1.8.0.13", "--out", NEVER_C + "/pin.json",
+        fake_c = self.fake_c_drive()
+        os.makedirs(fake_c)  # the parent exists, so only the guard can stop the write
+        argv = ["--pin-id", "1.8.0.13", "--out", os.path.join(fake_c, "pin.json"),
                 "--game-acf", self.fs.game_acf, "--tools-acf", self.fs.tools_acf]
-        rc, _, err = run_main(make_pin.main, argv, pinlib.DEFAULT_WRITE_ROOTS)
+        rc, _, err = run_main(make_pin.main, argv, self.roots)
         self.assertEqual(rc, 2)
         self.assertIn("C:", err)
-        self.assertFalse(os.path.exists(NEVER_C))
+        self.assertEqual(os.listdir(fake_c), [])
 
     def test_refuses_output_off_e_by_default(self):
         if os.path.realpath(self.tmp).startswith("/mnt/e/"):
@@ -384,6 +400,16 @@ class PreflightTests(TmpCase):
         self.fs.set_acf("tools", "AutoUpdateBehavior", "2")
         self.assertRefused("tools.auto_update_behavior")
 
+    def test_pin_cannot_widen_auto_update_policy(self):
+        # Review fix: a hand-edited pin may narrow the allowed values, never add "2" (or "0").
+        with open(self.fs.pin) as fh:
+            pin = json.load(fh)
+        pin["steam"]["auto_update_behavior_allowed"] = ["1", "2"]
+        with open(self.fs.pin, "w") as fh:
+            json.dump(pin, fh)
+        self.fs.set_acf("game", "AutoUpdateBehavior", "2")
+        self.assertRefused("game.auto_update_behavior")
+
     def test_refuses_missing_auto_update_key(self):
         self.fs.set_acf("tools", "AutoUpdateBehavior", None)
         self.assertRefused("tools.auto_update_behavior")
@@ -476,10 +502,12 @@ class PreflightTests(TmpCase):
         self.assertEqual((rc, out), (2, ""))
 
     def test_launch_dir_on_c_refused(self):
-        rc, out, err = run_main(preflight.main, ["--pin", self.fs.pin, "--exe", "wb", "--launch-dir", NEVER_C],
-                                pinlib.DEFAULT_WRITE_ROOTS)
+        fake_c = self.fake_c_drive()
+        rc, out, err = run_main(preflight.main, ["--pin", self.fs.pin, "--exe", "wb", "--launch-dir", fake_c],
+                                self.roots)
         self.assertEqual((rc, out), (2, ""))
-        self.assertFalse(os.path.exists(NEVER_C))
+        self.assertIn("C:", err)
+        self.assertFalse(os.path.exists(fake_c))
 
     def test_root_override_for_cold_copy(self):
         # cold_copy.sh points preflight at the copy with --game-root/--tools-root and 1 s mtime resolution.
@@ -506,6 +534,16 @@ class PreflightTests(TmpCase):
         rc, out, _ = self.launch("--mtime-resolution-s", "1")
         self.assertEqual((rc, out), (2, ""))
 
+    def test_path_overrides_only_in_check_mode(self):
+        # Review fix: a launch record must describe the pinned install the launcher starts, not another tree.
+        for flag, val in (("--game-root", self.fs.game_root), ("--tools-root", self.fs.tools_root),
+                          ("--game-acf", self.fs.game_acf), ("--tools-acf", self.fs.tools_acf)):
+            rc, out, err = self.launch(flag, val)
+            self.assertEqual((rc, out), (2, ""), flag)
+            self.assertIn("only accepted with --check", err)
+        self.assertEqual(self.records("launch_"), [])
+        self.assertEqual(self.records("refused_"), [])
+
     def test_cli_isolated_mode(self):
         # As the launchers run it: python3 -I -B <abs path>. -I drops the script dir from sys.path,
         # so this proves the explicit pinlib loader works.
@@ -514,10 +552,12 @@ class PreflightTests(TmpCase):
                            capture_output=True, text=True, cwd=self.tmp)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("RESULT: OK", r.stdout)
+        # Default write roots in a real process: a launch dir outside /mnt/e is refused (exit 2, no stdout).
         r = subprocess.run([sys.executable, "-I", "-B", script, "--pin", self.fs.pin, "--exe", "client",
-                            "--launch-dir", NEVER_C], capture_output=True, text=True, cwd=self.tmp)
+                            "--launch-dir", NEVER_WRITABLE], capture_output=True, text=True, cwd=self.tmp)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
-        self.assertFalse(os.path.exists(NEVER_C))
+        self.assertIn("outside", r.stderr)
+        self.assertFalse(os.path.exists(NEVER_WRITABLE))
 
 
 if __name__ == "__main__":

@@ -14,12 +14,15 @@
 #   1. preflight --check on the live installs. AutoUpdateBehavior is waived here, because the copy is the
 #      fallback if it stays "0". Every other check must pass, so a half-updated install is never copied.
 #   2. rsync -rt each install into DEST/game and DEST/tools. A marker file, DEST/.cold_copy_incomplete, lets an
-#      interrupted run be resumed by running the script again.
+#      interrupted run be resumed by running the script again. A DEST that already contains a symlink is refused
+#      (rsync -rt never makes one, and one could lead a write off E:).
 #   3. preflight --check on the live installs again, to show nothing changed during the copy.
 #   4. preflight --check on the copy (--game-root/--tools-root) with 1 s mtime resolution: WSL drvfs truncates
-#      the mtimes it sets to whole seconds (measured on E:).
+#      the mtimes it sets to whole seconds (measured on E:). Then each copy must hold exactly the regular files
+#      of its source: none missing, none extra (such as an rsync temp file left by a killed run).
 #   5. SHA256SUMS for every file in the copy, paths relative to DEST (sha256sum -c format).
 #   6. The pin JSON and both appmanifests are copied to DEST/meta.
+# The script never deletes anything except its own marker file.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --run) RUN=1; shift ;;
     --pin) PIN="${2:?--pin needs a path}"; shift 2 ;;
     --dest) DEST="${2:?--dest needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,/^[^#]/{/^#/p}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -84,6 +87,24 @@ elif [[ -e "$MARKER" ]]; then
 elif [[ -d "$DEST" && -n "$(ls -A -- "$DEST" 2>/dev/null)" ]]; then
   die "$DEST exists and is not empty, and has no resume marker; refusing to mix copies"
 fi
+# rsync -rt never creates symlinks. One inside DEST (for example DEST/game -> /mnt/c/...) was put there by
+# something else and would lead rsync's writes off E:, so refuse it before anything is written.
+if [[ -d "$DEST" ]]; then
+  LINK="$(find "$DEST" -type l -print -quit)"
+  [[ -z "$LINK" ]] || die "$DEST contains a symlink ($LINK); a copy holds only regular files and directories"
+fi
+
+# Exit unless the copy holds exactly the regular files of its source (paths only; content is checked by
+# preflight size/mtime and SHA256SUMS). Catches files missing from the copy and extra files in it, such as
+# an rsync temp file left behind by a killed run.
+same_file_set() {   # $1 label, $2 source dir, $3 copy dir
+  local diffs
+  diffs="$(LC_ALL=C comm -3 <(cd -- "$2" && find . -type f | LC_ALL=C sort) \
+                            <(cd -- "$3" && find . -type f | LC_ALL=C sort))"
+  [[ -z "$diffs" ]] || die "$1: file lists differ (marker left in place). Not indented: only in the source;
+indented: only in the copy. First 20:
+$(printf '%s\n' "$diffs" | head -n 20)"
+}
 
 PARENT="$DEST"; while [[ ! -d "$PARENT" ]]; do PARENT="$(dirname "$PARENT")"; done
 NEED=$(( $(du -sb -- "$GAME_SRC" | cut -f1) + $(du -sb -- "$TOOLS_SRC" | cut -f1) ))
@@ -113,6 +134,7 @@ DRY RUN: nothing was written. With --run this would execute:
   python3 -I -B '$PREFLIGHT' --pin '$PIN' --check ${WAIVE[*]}            # live installs unchanged
   python3 -I -B '$PREFLIGHT' --pin '$PIN' --check ${WAIVE[*]} \\
       --game-root '$DEST/game' --tools-root '$DEST/tools' --mtime-resolution-s 1   # the copy matches the pin
+  same file lists: find game/tools sources vs '$DEST/game' and '$DEST/tools'      # nothing missing or extra
   (cd '$DEST' && find game tools -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > '$DEST/SHA256SUMS'
   cp '$PIN' '$GAME_ACF' '$TOOLS_ACF' '$DEST/meta/' && rm '$MARKER'
 EOF
@@ -131,6 +153,9 @@ echo "== copy vs pin"
 "${PY[@]}" "$PREFLIGHT" --pin "$PIN" --check "${WAIVE[@]}" \
   --game-root "$DEST/game" --tools-root "$DEST/tools" --mtime-resolution-s 1 \
   || die "the copy does not match the pin (marker left in place)"
+echo "== copy file lists vs source"
+same_file_set game "$GAME_SRC" "$DEST/game"
+same_file_set tools "$TOOLS_SRC" "$DEST/tools"
 
 echo "== SHA256SUMS"
 ( cd -- "$DEST" && find game tools -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$DEST/SHA256SUMS.tmp"

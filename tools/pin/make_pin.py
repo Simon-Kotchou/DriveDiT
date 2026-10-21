@@ -13,8 +13,19 @@ already exist; nothing else is written.
 
 Writing a pin does not make the launchers use it: switch with `pin_activate.py <pin id>` (see README).
 
-Exit codes: 0 written; 1 install state not pinnable (buildid mismatch, update pending, no paks);
-2 usage, path or read error (nothing written).
+Rollback (README "Rollback"): restored installs never get the sub-second mtimes of the original pin back, so they
+are re-pinned under a new id, never by overwriting the original pin:
+
+    python3 -I -B make_pin.py --pin-id 1.8.0.13-r1 --restore-of 1.8.0.13 \
+        --out /mnt/e/DriveDiT/pin/pin_1.8.0.13-r1.json --expect-game-buildid 24903726 --expect-tools-buildid 24870687
+
+--restore-of REF reads <out dir>/pin_<REF>.json and refuses (exit 1) unless the new snapshot equals it in
+everything that identifies the build: appid, buildid, depot manifests, appmanifest and install paths,
+steam_appid.txt, and the set and size of every pak and exe. Only file mtimes may differ. The new pin records
+restore_of {pin_id, sha256, path} so a validator can treat both ids as one build.
+
+Exit codes: 0 written; 1 install state not pinnable (buildid mismatch, update pending, no paks, not a restore of
+--restore-of); 2 usage, path or read error (nothing written).
 """
 from __future__ import annotations
 
@@ -24,20 +35,21 @@ import os
 import sys
 
 
-def _load_pinlib():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pinlib.py")
-    name = "dd_pin_pinlib"
-    mod = sys.modules.get(name)
+def _load(name):
+    # By explicit path: `python3 -I` does not put this directory on sys.path.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+    modname = "dd_pin_" + name
+    mod = sys.modules.get(modname)
     if mod is not None and getattr(mod, "__file__", None) == path:
         return mod
-    spec = importlib.util.spec_from_file_location(name, path)
+    spec = importlib.util.spec_from_file_location(modname, path)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
+    sys.modules[modname] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-pinlib = _load_pinlib()
+pinlib = _load("pinlib")
 
 
 class NotPinnable(Exception):
@@ -105,6 +117,47 @@ def collect_app(app: str, acf_path: str, expect_buildid) -> dict:
     }
 
 
+def restore_diffs(ref: dict, apps: dict) -> list:
+    """What differs between a reference pin and a new snapshot, ignoring file mtimes (the rollback re-pin rule)."""
+    diffs = []
+    for app in pinlib.APPS:
+        r, n = ref.get(app) or {}, apps[app]
+        for key in ("appid", "buildid"):
+            if r.get(key) != n.get(key):
+                diffs.append("%s.%s %s != %s" % (app, key, n.get(key), r.get(key)))
+        rd = {d: (v or {}).get("manifest") for d, v in (r.get("depots") or {}).items()}
+        nd = {d: v.get("manifest") for d, v in n["depots"].items()}
+        if rd != nd:
+            diffs.append("%s.depots %s != %s" % (app, nd, rd))
+        for key in ("acf", "install"):
+            rv = (r.get(key) or {}).get("wsl") if isinstance(r.get(key), dict) else None
+            if rv != n[key]["wsl"]:
+                diffs.append("%s.%s %s != %s" % (app, key, n[key]["wsl"], rv))
+        if (r.get("steam_appid_txt") or {}) != n["steam_appid_txt"]:
+            diffs.append("%s.steam_appid_txt %s != %s" % (app, n["steam_appid_txt"], r.get("steam_appid_txt")))
+        for kind in ("binaries", "paks"):
+            rs = {k: (v or {}).get("size") for k, v in (r.get(kind) or {}).items()}
+            ns = {k: v["size"] for k, v in n[kind].items()}
+            for k in sorted(set(rs) - set(ns)):
+                diffs.append("%s.%s %s missing" % (app, kind, k))
+            for k in sorted(set(ns) - set(rs)):
+                diffs.append("%s.%s %s not in the reference pin" % (app, kind, k))
+            for k in sorted(set(rs) & set(ns)):
+                if rs[k] != ns[k]:
+                    diffs.append("%s.%s %s size %s != %s" % (app, kind, k, ns[k], rs[k]))
+    return diffs
+
+
+def mtimes_changed(ref: dict, apps: dict) -> int:
+    n = 0
+    for app in pinlib.APPS:
+        for kind in ("binaries", "paks"):
+            for k, v in apps[app][kind].items():
+                if ((ref[app].get(kind) or {}).get(k) or {}).get("mtime_ns") != v["mtime_ns"]:
+                    n += 1
+    return n
+
+
 def build_pin(pin_id: str, out_path: str, game: dict, tools: dict) -> dict:
     base = os.path.join(os.path.dirname(out_path), pin_id)
     return {
@@ -142,6 +195,9 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     ap.add_argument("--expect-game-buildid", type=int, default=None)
     ap.add_argument("--expect-tools-buildid", type=int, default=None)
     ap.add_argument("--force", action="store_true", help="replace an existing pin file (a pin should never change)")
+    ap.add_argument("--restore-of", default=None, metavar="PIN_ID",
+                    help="rollback re-pin: the installs are a restore of the build pinned as <out dir>/pin_PIN_ID.json; "
+                         "refuse unless they equal it in everything but file mtimes (see README 'Rollback')")
     args = ap.parse_args(argv)
 
     # Path guard first: nothing is read or written before the output path is known to be on E:.
@@ -162,6 +218,17 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
         print("make_pin: output directory does not exist (create it first): %s" % os.path.dirname(out),
               file=sys.stderr)
         return 2
+    ref = None
+    if args.restore_of is not None:
+        try:
+            ref_id = pinlib.validate_pin_id(args.restore_of)
+            if ref_id == args.pin_id:
+                raise pinlib.PinError("--restore-of %s: a restored install gets a new pin id (for example %s-r1); "
+                                      "pin_%s.json is never overwritten" % (ref_id, ref_id, ref_id))
+            ref = _load("preflight").load_pin_by_id(os.path.dirname(out), ref_id)
+        except pinlib.PinError as exc:
+            print("make_pin: %s" % exc, file=sys.stderr)
+            return 2
 
     try:
         game = collect_app("game", args.game_acf, args.expect_game_buildid)
@@ -174,6 +241,19 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
         return 2
 
     pin = build_pin(args.pin_id, out, game, tools)
+    if ref is not None:
+        diffs = restore_diffs(ref["pin"], {"game": game, "tools": tools})
+        if diffs:
+            print("make_pin: not pinnable: the installs are not a restore of pin %s (only file mtimes may differ): %s"
+                  % (ref["pin_id"], "; ".join(diffs[:12]) + ("; ... %d more" % (len(diffs) - 12) if len(diffs) > 12
+                                                              else "")), file=sys.stderr)
+            return 1
+        pin["restore_of"] = {
+            "pin_id": ref["pin_id"], "sha256": ref["sha256"], "path": ref["path"],
+            "rule": "equal to the reference pin in appid, buildid, depot manifests, appmanifest and install paths, "
+                    "steam_appid.txt and the set and size of every pak and exe; only file mtimes differ",
+            "mtimes_changed": mtimes_changed(ref["pin"], {"game": game, "tools": tools}),
+        }
     try:
         written = pinlib.write_json_new(out, pin, write_roots, overwrite=args.force)
     except (pinlib.PinError, OSError) as exc:
@@ -192,6 +272,9 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
                   "\"Only update this game when I launch it\"."
                   % (app, a["auto_update_behavior_at_pin"],
                      pinlib.AUTO_UPDATE_MEANING.get(a["auto_update_behavior_at_pin"], "unknown")), file=sys.stderr)
+    if ref is not None:
+        print("restore of pin %s: same build; %d file mtime(s) differ from it"
+              % (ref["pin_id"], pin["restore_of"]["mtimes_changed"]))
     print("wrote %s (sha256 %s)" % (written, pinlib.sha256_file(written)))
     return 0
 

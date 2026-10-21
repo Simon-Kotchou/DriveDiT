@@ -18,6 +18,9 @@ rem Build: 1.8.0.13 is the INTERIM pin. The plan is to move to 1.9 and its new v
 rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1_9.md in
 rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
 rem E:\DriveDiT\tools\pin\pin_activate.py. Never edit ACTIVE by hand.
+rem Launch path: GAME_DIR must stay the game install named in pinlib.LAUNCH_PATHS. The preflight
+rem check game.launch_path refuses any pin not made from that install, so the exe started here is
+rem always the one the pin checked. Change both together, never one alone.
 rem
 rem Flag provenance. The flags are those of Appendix B. They come from the Startup Parameters
 rem wiki page, revision 2025-02-14 (trial-ladder.md 8.2, source S1), and are UNVERIFIED on

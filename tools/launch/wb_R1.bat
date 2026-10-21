@@ -25,6 +25,9 @@ rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1
 rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
 rem E:\DriveDiT\tools\pin\pin_activate.py, which refuses a pin that does not match the installs.
 rem Never edit ACTIVE by hand.
+rem Launch path: WB_DIR must stay the Tools install named in pinlib.LAUNCH_PATHS (plus \Workbench).
+rem The preflight check tools.launch_path refuses any pin not made from that install, so the exe
+rem started here is always the one the pin checked. Change both together, never one alone.
 rem WSL: the distro is named explicitly, because a second distro (Ubuntu-22.04-E) exists.
 rem ==========================================================================================
 setlocal

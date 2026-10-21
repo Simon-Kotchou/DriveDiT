@@ -16,7 +16,9 @@ It refuses the launch unless, for BOTH the game and the Tools app:
   - TargetBuildID == buildid (no update pending) and StateFlags is the settled value from the pin;
   - AutoUpdateBehavior is an allowed value ("1" = only update when launched; "0" and "2" auto-update);
   - every pinned *.pak exists with the pinned size and mtime, and no extra *.pak exists;
-  - the launched exes and steam_appid.txt files match the pin.
+  - the launched exes and steam_appid.txt files match the pin;
+  - the pin was made from the appmanifest and install dir the launchers start (pinlib.LAUNCH_PATHS; check
+    <app>.launch_path), so a pin made from another tree can never vouch for the exe a launcher starts.
 
 Launch mode (default): on success prints ONLY the launch id on stdout, writes
 <launch-dir>/launch_<id>.json (default launch dir: <pin dir>/launches) and exits 0. The record names the pin id
@@ -56,7 +58,7 @@ def _load_pinlib():
 pinlib = _load_pinlib()
 
 CHECK_SUFFIXES = ("acf", "appid", "buildid", "target_buildid", "auto_update_behavior", "state_flags",
-                  "depots", "steam_appid_txt", "binaries", "paks")
+                  "depots", "steam_appid_txt", "binaries", "paks", "launch_path")
 CHECK_NAMES = tuple("%s.%s" % (app, s) for app in pinlib.APPS for s in CHECK_SUFFIXES)
 MAX_LISTED = 8
 
@@ -94,8 +96,19 @@ def _cmp_entry(pinned: dict, path: str, mtime_resolution_s: int = 0):
     return ", ".join(diffs) or None
 
 
-def check_app(app: str, pin_app: dict, steam_policy: dict, acf_path: str, root: str, mtime_resolution_s: int = 0):
-    """Return (checks, observed) for one app. checks: list of {name, ok, detail}."""
+def _pinned_path(pin_app: dict, key: str):
+    v = pin_app.get(key)
+    return v.get("wsl") if isinstance(v, dict) else None
+
+
+def check_app(app: str, pin_app: dict, steam_policy: dict, acf_path: str, root: str, mtime_resolution_s: int = 0,
+              launch_path=None):
+    """Return (checks, observed) for one app. checks: list of {name, ok, detail}.
+
+    launch_path is {"acf", "install"}, the paths the launchers start for this app (pinlib.LAUNCH_PATHS[app]). The
+    launch_path check compares them with the paths stored IN THE PIN, not with acf_path/root, which --check may
+    point at another tree (the cold copy).
+    """
     checks = []
 
     def add(suffix, ok, detail):
@@ -186,13 +199,27 @@ def check_app(app: str, pin_app: dict, steam_policy: dict, acf_path: str, root: 
         pak_diff.append("install dir missing: %s" % root)
     add("paks", not pak_diff,
         _fmt_list(pak_diff) if pak_diff else "%d paks match (size + mtime)" % len(pinned_paks))
+
+    lp = launch_path or {}
+    have = (_pinned_path(pin_app, "acf"), _pinned_path(pin_app, "install"))
+    want = (lp.get("acf"), lp.get("install"))
+    if have == want and None not in want:
+        add("launch_path", True, "pinned install is the one the launchers start: %s" % (pinlib.wsl_to_win(want[1])
+                                                                                        or want[1]))
+    else:
+        add("launch_path", False,
+            "pin was made from install %s (appmanifest %s), but the launchers start %s (appmanifest %s); only a pin "
+            "made from the launch install can be activated or launched" % (have[1], have[0], want[1], want[0]))
     return checks, observed
 
 
-def run_checks(pin: dict, acf_paths: dict, roots: dict, mtime_resolution_s: int = 0):
+def run_checks(pin: dict, acf_paths: dict, roots: dict, mtime_resolution_s: int = 0, launch_paths=None):
+    """All checks for both apps. launch_paths defaults to pinlib.LAUNCH_PATHS, read at call time."""
+    launch_paths = pinlib.LAUNCH_PATHS if launch_paths is None else launch_paths
     checks, observed = [], {}
     for app in pinlib.APPS:
-        c, o = check_app(app, pin[app], pin.get("steam", {}), acf_paths[app], roots[app], mtime_resolution_s)
+        c, o = check_app(app, pin[app], pin.get("steam", {}), acf_paths[app], roots[app], mtime_resolution_s,
+                         launch_paths.get(app))
         checks.extend(c)
         observed[app] = o
     return checks, observed
@@ -226,14 +253,16 @@ def load_pin_bytes(raw: bytes, path: str) -> dict:
     return pin
 
 
-def load_pin_by_id(pin_dir: str, pin_id: str) -> dict:
+def load_pin_by_id(pin_dir: str, pin_id: str, dir_fd=None) -> dict:
     """Load <pin dir>/pin_<id>.json: a valid id, a regular file (not a symlink), and a pin for that id.
 
+    With dir_fd (the opened pin dir, as pin_activate uses it), the file is read relative to that fd.
     Returns the pin source used by resolve_pin; resolved_by and pointer are left for the caller.
     """
     pin_dir = os.path.abspath(pinlib.win_to_wsl(pin_dir))
     path = pinlib.pin_file_for(pin_dir, pin_id)
-    raw = pinlib.read_regular_file(path, "pin file for %s" % pin_id, pinlib.PIN_MAX_BYTES)
+    raw = pinlib.read_regular_file(os.path.basename(path) if dir_fd is not None else path,
+                                   "pin file for %s" % pin_id, pinlib.PIN_MAX_BYTES, dir_fd=dir_fd, shown=path)
     pin = load_pin_bytes(raw, path)
     if pin.get("pin_id") != pin_id:
         raise pinlib.PinError("%s holds pin_id %r, not %r (a pin file must be named pin_<its pin_id>.json)"

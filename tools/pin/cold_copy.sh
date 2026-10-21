@@ -10,9 +10,14 @@
 #     default DEST_DIR  /mnt/e/DriveDiT/pin/<pin_id>    (results: DEST/game, DEST/tools, DEST/SHA256SUMS, DEST/meta)
 #   1.8.0.13 is the interim pin. Before moving to 1.9, cold-copy 1.8 (while it is still the active pin) if a
 #   rollback to 1.8 should stay possible; see README "1.8 is an interim pin; moving to 1.9".
+#   A restore from this copy cannot bring back sub-second mtimes (drvfs sets whole seconds), so pin_activate.py
+#   1.8.0.13 stays refused after a restore. The restored installs are re-pinned under a new id instead
+#   (make_pin.py --restore-of 1.8.0.13 --pin-id 1.8.0.13-r1), after the appmanifests are restored from DEST/meta;
+#   see README "Rollback". The pin file in DEST/meta keeps every pak and exe mtime_ns exactly.
 #
 # DRY RUN BY DEFAULT: without --run it only reads, checks the live installs against the pin, and prints the plan.
-# The sources are only read. DEST must resolve under /mnt/e; anything on C: is refused.
+# The sources are only read. DEST must pass pinlib.check_write_path: under /mnt/e, on the E: drive's own mount
+# (an unmounted /mnt/e is a directory on the WSL disk, on C:), and never on C:.
 #
 # With --run:
 #   1. preflight --check on the live installs. AutoUpdateBehavior is waived here, because the copy is the
@@ -31,7 +36,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFLIGHT="$HERE/preflight.py"
-PY=(python3 -I -B)
+PY=(/usr/bin/python3 -I -B)   # the interpreter the launchers use (DD-0 R3), not whatever python3 PATH holds
 PIN=""
 PIN_DIR=""
 DEST=""
@@ -77,8 +82,19 @@ PIN_SRC="${F[0]}"; PIN="${F[1]}"; PIN_ID="${F[2]}"
 GAME_SRC="${F[3]}"; GAME_ACF="${F[4]}"; TOOLS_SRC="${F[5]}"; TOOLS_ACF="${F[6]}"
 [[ -n "$DEST" ]] || DEST="$(dirname "$PIN")/$PIN_ID"
 
-# Write guard: resolve, then allow only /mnt/e; refuse C: explicitly.
-DEST_REAL="$(realpath -m -- "$DEST")"
+# Write guard, first pinlib.check_write_path (the guard every pin tool uses; it also checks /proc/self/mountinfo that
+# DEST lies on the E: drive's mount), then the same rules again in bash on the resolved path.
+DEST_REAL="$("${PY[@]}" -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("dd_pin_pinlib", sys.argv[1])
+pl = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = pl
+spec.loader.exec_module(pl)
+try:
+    print(pl.check_write_path(sys.argv[2]))
+except pl.PinError as exc:
+    sys.exit("cold_copy: %s" % exc)
+' "$HERE/pinlib.py" "$DEST")" || exit 1
 case "${DEST_REAL,,}/" in
   /mnt/c/*) die "refusing to write on C: ($DEST -> $DEST_REAL)" ;;
 esac
@@ -136,7 +152,9 @@ awk -v n="$NEED" -v h="$HAVE" -v p="$PARENT" 'BEGIN { printf "size       %.2f GB
 
 WAIVE=(--allow-fail game.auto_update_behavior --allow-fail tools.auto_update_behavior)
 echo
-echo "== live installs vs pin (AutoUpdateBehavior waived for the copy)"
+# The checks below name the pin file resolved above with --pin, so their PIN line says "via explicit --pin" even
+# when the active pointer chose it; the file is the same.
+echo "== live installs vs pin $PIN_ID (the file resolved above; AutoUpdateBehavior waived for the copy)"
 if ! "${PY[@]}" "$PREFLIGHT" --pin "$PIN" --check "${WAIVE[@]}"; then
   die "the live installs do not match the pin; not copying (re-pin or restore first)"
 fi
@@ -148,8 +166,8 @@ DRY RUN: nothing was written. With --run this would execute:
   mkdir -p '$DEST/game' '$DEST/tools' '$DEST/meta' && touch '$MARKER'
   rsync -rt --info=progress2 '$GAME_SRC/' '$DEST/game/'
   rsync -rt --info=progress2 '$TOOLS_SRC/' '$DEST/tools/'
-  python3 -I -B '$PREFLIGHT' --pin '$PIN' --check ${WAIVE[*]}            # live installs unchanged
-  python3 -I -B '$PREFLIGHT' --pin '$PIN' --check ${WAIVE[*]} \\
+  /usr/bin/python3 -I -B '$PREFLIGHT' --pin '$PIN' --check ${WAIVE[*]}            # live installs unchanged
+  /usr/bin/python3 -I -B '$PREFLIGHT' --pin '$PIN' --check ${WAIVE[*]} \\
       --game-root '$DEST/game' --tools-root '$DEST/tools' --mtime-resolution-s 1   # the copy matches the pin
   same file lists: find game/tools sources vs '$DEST/game' and '$DEST/tools'      # nothing missing or extra
   (cd '$DEST' && find game tools -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > '$DEST/SHA256SUMS'

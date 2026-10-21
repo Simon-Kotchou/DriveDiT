@@ -39,8 +39,10 @@ The installed copies live on E:, and the launchers call those paths:
 E:\DriveDiT\tools\pin\{pinlib,make_pin,preflight,pin_activate}.py, cold_copy.sh
 E:\DriveDiT\tools\launch\wb_R1.bat, client_R1_i01.bat
 E:\DriveDiT\pin\pin_1.8.0.13.json                     a pin (pins are immutable; one file per build)
+E:\DriveDiT\pin\pin_1.8.0.13-r1.json                  (only after a rollback) a re-pin of restored 1.8 installs; see "Rollback"
 E:\DriveDiT\pin\ACTIVE                                one line: the active pin id (written only by pin_activate.py)
 E:\DriveDiT\pin\ACTIVE.log                            one line per switch: <UTC time> <old> -> <new> <user>@<host>
+E:\DriveDiT\pin\ACTIVE.lock                           exists only while pin_activate.py runs
 E:\DriveDiT\pin\launches\launch_<id>.json             one record per allowed launch
 E:\DriveDiT\pin\launches\refused_<id>.json            one record per refused launch
 E:\DriveDiT\pin\1.8.0.13\{game,tools,meta,SHA256SUMS}  cold copy (only after cold_copy.sh --run)
@@ -51,11 +53,19 @@ To update the installed copies, copy the files from the repo. Do not edit them o
 ## Write safety
 
 Every write goes through `pinlib.check_write_path`, which resolves symlinks first. It accepts only paths under
-`/mnt/e/`, and it always refuses `/mnt/c/` (C: is nearly full and holds the live Workbench addon). `make_pin.py`
-never creates directories and never overwrites a pin unless `--force` is given. `pin_activate.py` writes only
-`ACTIVE`, a temp file next to it and `ACTIVE.log`, in the pin directory. It replaces `ACTIVE` by rename and opens
-the log with `O_NOFOLLOW`, so a symlink at either name is never written through. `cold_copy.sh` has the same guard.
-The installs and appmanifests on C: and D: are only read.
+`/mnt/e/`, and it always refuses `/mnt/c/` (C: is nearly full and holds the live Workbench addon). `/mnt/e` is only a
+name, so the guard also reads `/proc/self/mountinfo`: the path must lie on the mount at `/mnt/e` whose source is the
+`E:` drive (`pinlib.WRITE_ROOT_DRIVES`). An unmounted `/mnt/e` (an empty directory on the WSL disk, which is on C:),
+a redirected one, or another filesystem mounted below it is refused.
+
+`make_pin.py` never creates directories and never overwrites a pin unless `--force` is given. `pin_activate.py`
+writes only `ACTIVE`, a temp file next to it, `ACTIVE.log` and `ACTIVE.lock`, in the pin directory. It opens the pin
+directory once (`pinlib.open_guarded_dir`: the guard runs again on the directory the fd really refers to, which must
+be on the E: mount) and makes every create, rename and unlink relative to that fd. A pin directory swapped for a
+symlink after the check therefore cannot redirect a write. On E: (drvfs), a directory renamed under the open fd makes
+every such call fail (ENXIO, measured), so the switch fails closed. `ACTIVE` is replaced by rename, and the log and
+the lock are opened with `O_NOFOLLOW`, so a symlink at any of these names is never written through. `cold_copy.sh`
+checks its destination with the same `check_write_path`. The installs and appmanifests on C: and D: are only read.
 
 ## 1. Make a pin
 
@@ -81,6 +91,10 @@ It leaves out `LastOwner`, which is a personal Steam id.
 TargetBuildID != buildid (an update is pending), if StateFlags != 4, or if there are no paks. If AutoUpdateBehavior
 is not `"1"`, it still writes the pin but warns.
 
+Make launch pins from the default appmanifests (`--game-acf`/`--tools-acf` left out). A pin made from any other tree
+fails the `launch_path` check (section 3), so it can never be activated or launched; such a pin is for `--check`
+only. `--restore-of PIN_ID` re-pins restored installs after a rollback; see "Rollback" below.
+
 **Pin ids.** `--pin-id` must be 2 to 4 dot-separated numbers with an optional lowercase suffix, such as `1.8.0.13`,
 `1.9.0.12` or `1.9.0.9-exp`. Anything else is refused (exit 2): the id names `pin_<id>.json` and the cold-copy
 directory, so it may hold no path separator, no `..` and no whitespace. Name the file `pin_<id>.json` in the pin
@@ -96,27 +110,38 @@ python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_activate.py 1.8.0.13
 
 `E:\DriveDiT\pin\ACTIVE` holds one line, the active pin id. The launchers run `preflight.py --pin-active`, which
 checks `E:\DriveDiT\pin\pin_<id>.json`. No launcher names a game version, so moving to a new build never needs a
-launcher edit. `pin_activate.py` is the only supported way to change `ACTIVE`; never edit it by hand.
+launcher edit, as long as Steam keeps the installs where the launchers start them (`pinlib.LAUNCH_PATHS`; see
+section 4). `pin_activate.py` is the only supported way to change `ACTIVE`; never edit it by hand.
 
-`pin_activate.py <id>` refuses, and writes nothing, unless all of these hold:
+`pin_activate.py <id>` refuses, and changes nothing, unless all of these hold:
 - the id is valid;
 - `pin_<id>.json` is a regular file, not a symlink, and its `pin_id` is that id;
-- the **full preflight check** of that pin passes against the live installs it names, with no waivers. A pin that
-  does not match what Steam has installed cannot be activated. This applies both ways: a switch back to 1.8.0.13 is
-  refused while the installs are on another build;
-- an existing `ACTIVE` or `ACTIVE.log` is a regular file. A symlink is left for a human to inspect.
+- no other activation is running: it creates `ACTIVE.lock` with `O_CREAT|O_EXCL` and holds it from reading the old
+  `ACTIVE` to the read-back, so two activations are serialized (the second exits 2). A lock left by a killed run is
+  never removed automatically: if no `pin_activate.py` is running, check `ACTIVE` and `ACTIVE.log`, then delete
+  `ACTIVE.lock` by hand;
+- the **full preflight check** of that pin passes against the live installs it names, with no waivers. That includes
+  `launch_path`: the pin must have been made from the installs the launchers start. A pin that does not match what
+  Steam has installed cannot be activated. This applies both ways: a switch back to 1.8.0.13 is refused while the
+  installs are on another build, and also after a restore (see "Rollback");
+- an existing `ACTIVE` or `ACTIVE.log` is a regular file. A symlink is left for a human to inspect;
+- `ACTIVE.log` can be opened for appending. It is opened **before** `ACTIVE` changes, so a log that cannot be written
+  to (an ACL, a read-only attribute) refuses the switch with `ACTIVE` unchanged (exit 3).
 
 On success it replaces `ACTIVE` atomically (a temp file, then a rename in the same directory). It then appends
 `<UTC ISO time> <old> -> <new> <user>@<host>` to `ACTIVE.log`, for example
 `2026-10-21T08:15:02Z none -> 1.8.0.13 user@host`. `<old>` is `none` when there was no `ACTIVE`, and
-`invalid` when it held no valid id. If the id is already active, it re-checks and writes nothing.
+`invalid` when it held no valid id. If the id is already active, it re-checks and writes nothing, unless the last log
+line does not record a switch to that id. That happens when a run switched `ACTIVE` but could not write its log
+line (a disk error after the log was opened), or when `ACTIVE` was edited by hand. It then appends
+`<UTC ISO time> unlogged -> <id> <user>@<host>`, so every switch reaches the log.
 
-Exit codes: 0 activated or already active; 1 refused (a check failed); 2 usage, config or path error; 3 a write
-failed (the message says whether `ACTIVE` changed).
+Exit codes: 0 activated, already active, or the missing log line appended; 1 refused (a check failed); 2 usage,
+config, path or lock error; 3 a write failed (the message says whether `ACTIVE` changed).
 
 **How the preflight reads the pointer.** `--pin-active` refuses (exit 2, nothing on stdout, no launch record) when:
 - `ACTIVE` is missing, empty or not plain ASCII;
-- it holds more than one line, or an invalid id (one trailing LF or CRLF is allowed);
+- it holds more than one line, a stray carriage return, or an invalid id (one trailing LF or CRLF is allowed);
 - `ACTIVE` is a symlink or not a regular file;
 - `pin_<id>.json` is missing or a symlink, or holds another `pin_id`.
 
@@ -145,6 +170,7 @@ data paks.
 | `binaries` | a launched exe differs in size or mtime |
 | `steam_appid_txt` | `steam_appid.txt` changed or is missing (direct launches depend on it) |
 | `acf`, `appid` | the appmanifest is unreadable or belongs to another app |
+| `launch_path` | the appmanifest or install dir stored in the pin is not the one the launchers start (`pinlib.LAUNCH_PATHS`). Every other check reads the paths stored in the pin, so without this one a pin made from another tree could vouch for an exe it never checked |
 
 **Launch mode.** On success it prints only the launch id (for example `20261021T063012Z-client-3f9a`) on stdout and
 writes `launch_<id>.json` next to the pin, under `launches/`. On refusal it prints nothing on stdout, explains on
@@ -173,7 +199,7 @@ and is always checked against the pinned appmanifests and install dirs, so its r
 launcher starts. `cold_copy.sh` uses these options to check the copy.
 
 **Today's result.** Since 2026-10-21 both apps have `AutoUpdateBehavior "1"`, and `--pin-active --check` on pin
-1.8.0.13 passes all 20 checks.
+1.8.0.13 passes all 22 checks.
 
 ### User action that unblocks launches (P0 step 1, done 2026-10-21)
 
@@ -199,6 +225,13 @@ preflight through `wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B .../preflig
 logic names no game version: the build it accepts is whatever pin `ACTIVE` names. The distro is named because a second
 one, `Ubuntu-22.04-E`, exists. The interpreter is named because `-e` starts no shell and the PATH it gets also holds
 Windows directories. They start the exe only when the preflight printed an id **and** `launch_<id>.json` exists.
+
+**Launch paths.** The launchers start fixed exes: `wb_R1.bat` `WB_DIR` (the Tools install plus `\Workbench`),
+`client_R1_i01.bat` `GAME_DIR`, and DD-3's `launch-workbench.sh` `WB_DIR`. `pinlib.LAUNCH_PATHS` names the same
+installs and appmanifests, and the preflight's `launch_path` check requires the active pin to have been made from
+exactly them. So the exe a launcher starts is always the one its pin checked, and every launch record that credits a
+pin is true. A unit test compares `LAUNCH_PATHS` with the `.bat` files. If an install ever moves (another Steam
+library, another drive), change the launchers and `LAUNCH_PATHS` together, then make and activate a new pin.
 
 How the id is read (review fix). wsl.exe writes its own messages, such as an unknown distro, to **stdout**, in UTF-16
 unless `WSL_UTF8=1` is set (both measured). The launchers set `WSL_UTF8=1` and pass the preflight's stdout through
@@ -262,6 +295,10 @@ The script never deletes anything except its own marker file.
 Verify the copy later with `cd /mnt/e/DriveDiT/pin/1.8.0.13 && sha256sum -c --quiet SHA256SUMS`. The depot manifest
 ids in the pin also allow a third-party DepotDownloader rollback. Running that tool is the user's decision (D2d).
 
+The copy keeps file contents and whole-second mtimes, not the sub-second mtimes of three Tools files in
+`pin_1.8.0.13.json` (the Workbench exe, `core/data.pak` and `shaders-dx12.pak`). The pin copied to `meta/` still
+records every exact `mtime_ns`. A restore is therefore re-pinned under a new id; see "Rollback".
+
 ## 1.8 is an interim pin; moving to 1.9
 
 **Direction (user, 2026-10-21).** Pin 1.8.0.13 for now. The system's target is 1.9's new vehicle physics, once 1.9
@@ -301,13 +338,50 @@ It owns the go/no-go and the list of compatibility probes.
    - every client flag (the S1 probes);
    - the actuator identification behind `llc_v1` (E-01, E-02Q), since steering and the powertrain change.
 
+**Activating a pin also opens capture on it.** Once `ACTIVE` names a 1.9 pin, `client_R1_i01.bat` starts sessions on
+1.9. That is necessary, because the compatibility probes themselves need Workbench and client runs. Step 7 and the
+proposed G19 gate (`program\1_9\SURFACE.md` section 6) are procedure, not code: nothing in these tools stops a
+capture session on a pin that has not passed them. Data stays traceable, because every launch record and session
+names its pin. The admission rule belongs in validator C02 (DD-5-min; SURFACE E-02): per-pin allow-lists, read from
+the manifest or `ACTIVE`, so a session on a pin that has not passed G19 fails validation even though its launch was
+allowed. MIGRATION_1_9.md should own that rule. Until C02 enforces it, run nothing on a new pin except the probes.
+
 **Data from two builds.** Every launch record names its pin id, and the client passes the launch id into the session,
 so each session can be traced to its build. Whether data from 1.8 and 1.9 may be mixed, and on which build the sealed
 Everon test runs, is a decision for MIGRATION_1_9.md, not for these tools.
 
-**Rollback.** `pin_activate.py 1.8.0.13` works only once the 1.8 installs are back, because the check refuses
-otherwise. Bringing them back means restoring the cold copy, or a DepotDownloader rollback to the manifests in
-`pin_1.8.0.13.json` (D2d). Both are user actions. Never delete `pin_1.8.0.13.json`.
+**Rollback.** `pin_activate.py 1.8.0.13` stays refused even after the 1.8 files are back. Three Tools files in
+`pin_1.8.0.13.json` have sub-second mtimes (`...758506855800`), and activation compares `mtime_ns` exactly. A
+restore from the cold copy brings back whole seconds (drvfs sets whole seconds), and a DepotDownloader restore brings
+back download times. The checks are not weakened for this, and `pin_1.8.0.13.json` is never overwritten. Instead, the
+restored installs get a new pin id, checked against the original. Every step that writes to C: or D: is a user action
+(D2d). Close Workbench, every client and Steam first.
+
+1. Verify the cold copy: `cd /mnt/e/DriveDiT/pin/1.8.0.13 && sha256sum -c --quiet SHA256SUMS`.
+2. Restore the files of both installs from `E:\DriveDiT\pin\1.8.0.13\game` and `...\tools` (for example
+   `robocopy <copy> <install> /MIR` from Windows), or with DepotDownloader to the depot manifests in the pin.
+3. Restore both appmanifests from `E:\DriveDiT\pin\1.8.0.13\meta` into the two `steamapps` directories, because
+   Steam still records the 1.9 buildid. UNVERIFIED: how Steam treats a restored appmanifest; keep Automatic updates at
+   "1" and Steam offline. Without a cold copy there is no saved appmanifest, and editing one by hand is UNVERIFIED and
+   the user's call.
+4. Check the restored contents against the copy (read-only), for example for the game:
+   `cd /mnt/e/DriveDiT/pin/1.8.0.13 && sed -n 's#^\([0-9a-f]\{64\}\)  game/#\1  /mnt/d/SteamLibrary/steamapps/common/Arma Reforger/#p' SHA256SUMS | sha256sum -c --quiet`,
+   and the same for `tools/` with the Tools install.
+5. Re-pin under a new id. `--restore-of` refuses (exit 1) unless the restored installs equal `pin_1.8.0.13.json` in
+   appid, buildid, depot manifests, appmanifest and install paths, `steam_appid.txt`, and the set and size of every
+   pak and exe; only mtimes may differ. The new pin records `restore_of` (the original id and its sha256), so a
+   validator can treat both ids as one build:
+
+   ```bash
+   python3 -I -B /mnt/e/DriveDiT/tools/pin/make_pin.py --pin-id 1.8.0.13-r1 --restore-of 1.8.0.13 \
+     --out /mnt/e/DriveDiT/pin/pin_1.8.0.13-r1.json --expect-game-buildid 24903726 --expect-tools-buildid 24870687
+   ```
+
+6. `python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_activate.py 1.8.0.13-r1`, then
+   `preflight.py --pin-active --check` must end with `RESULT: OK (pin 1.8.0.13-r1)`.
+
+Never delete or overwrite `pin_1.8.0.13.json`. Restoring the exact mtimes from Windows (NTFS keeps 100 ns, and the pin
+in `meta/` records every `mtime_ns`) would let `1.8.0.13` itself pass again, but these tools do not do that.
 
 **Side-by-side Experimental install.** 1.9 Experimental is not the stable app. If MIGRATION_1_9.md chooses to test
 it beside the stable install, its app id, install paths and Tools arrangement are to be confirmed there. These tools
@@ -323,7 +397,9 @@ python3 -I -B -m unittest discover -s tools/pin/tests -v
 
 Temp trees go to `$DD_PIN_TEST_TMP`, otherwise `/dev/shm`, and are deleted afterwards. Run the tests with
 `/usr/bin/python3` (3.10) as well, because the launchers run the preflight with it. No test hands a real `/mnt/c`
-path to code that writes.
+path to code that writes. Tests point `pinlib.LAUNCH_PATHS` at their fake Steam layout; a script run in a subprocess
+sees the real launch paths, so its fake pin fails `launch_path` there (the tests expect that). Run the suite once
+with `DD_PIN_TEST_TMP` on E: as well: drvfs differs from tmpfs (sub-second mtimes, no FIFOs, renamed directories).
 
 ## Differences from the Appendix B sketch
 
@@ -338,4 +414,5 @@ path to code that writes.
   record to exist, and refuse while placeholders are unset. `wb_R1.bat` refuses a second Workbench.
 - The launchers check the pin named by the `ACTIVE` pointer (`--pin-active`), not a fixed pin path. The pointer is
   switched only by `pin_activate.py`, which checks the new pin first, so moving to 1.9 is a checked, logged step.
+- The preflight also checks that the pin was made from the installs the launchers start (`launch_path`).
 - The preflight writes a record for refused launches as well.

@@ -12,18 +12,26 @@
 //     it the placed vehicle <m_sVehiclePrefix>k and gives it its own forced-move waypoints on every
 //     <m_sDriveTargetPrefix>N marker; each waypoint keeps its original marker id N;
 //   - after each completed waypoint assigns a different one, never the current one and never one within 2x the
-//     completion radius of the vehicle or of the current target;
-//   - registers each vehicle with SCR_MLDataCollector once a living driver sits in its pilot seat (in group-id
-//     order, so vehicle_id = k - 1) and calls SCR_MLDataCollector.StartSession() once every configured group has a
-//     seated driver; on timeout, or if a group failed to start, it logs an ERROR and starts no session;
-//   - teleports a seated vehicle back to its own group's spawn point when it has not moved for m_fStuckTimeS.
+//     completion radius of the vehicle or of the current target; when no target qualifies the group gets none and
+//     the choice is retried (no fallback to an excluded target);
+//   - once every group has been attempted ("Spawned N/N groups"), registers each vehicle with SCR_MLDataCollector
+//     once a living driver sits in its pilot seat (in group-id order, so vehicle_id = k - 1) and calls
+//     SCR_MLDataCollector.StartSession() once every configured group has a seated driver; on timeout, or if a group
+//     failed to start, it logs an ERROR and starts no session;
+//   - teleports a vehicle back to its own group's spawn point when it has not moved for m_fStuckTimeS while a living
+//     driver sat in its pilot seat (occupancy is re-read on every monitor tick, independent of the readiness poll);
+//   - stops the collector session (SCR_MLDataCollector.StopSession) when the game mode or the game ends.
 //
 // LIFECYCLE (vanilla 1.8.0.13 Game/GameMode/SCR_BaseGameMode.c:428-458 and :499-521): the authority's first
 // EOnFrame calls StartGameMode() -> OnGameStateChanged() -> OnGameModeStart() on every SCR_BaseGameModeComponent.
 // OnGameModeStart is "called on every machine", so StartDirector() also requires Replication.IsServer():
 // SCR_BaseGameMode.IsMaster() is true whenever the entity has no RplComponent (SCR_BaseGameMode.c:366-370).
-// FallbackStart() starts the director m_iFallbackStartMs after OnPostInit if OnGameModeStart never arrived; both
-// paths go through the same idempotent StartDirector(), so at most one of them starts it.
+// FallbackStart() starts the director once m_iFallbackStartMs of world time have passed since OnPostInit without an
+// OnGameModeStart; both paths go through the same idempotent StartDirector(), so at most one of them starts it.
+//
+// Call queue: at most one entry per director function is ever pending (one repeating spawn tick, one repeating
+// monitor tick that also runs the per-group waypoint assignments, one readiness poll, one fallback timer), so a
+// single ScriptCallQueue.Remove per function in StopDirector() clears everything the director queued.
 //
 // Failure handling: a group whose spawn point, vehicle, vehicle simulation, group prefab or waypoint prefab is
 // missing or invalid is skipped with an ERROR before anything is spawned for it (no shared-car or shared-spawn
@@ -72,9 +80,12 @@ class SCR_MLDataCaptureGroupState
 	ref array<ref SCR_MLDataCaptureWaypoint> m_aWaypoints = {};
 	int m_iCurrentWaypoint = -1;	//!< index into m_aWaypoints, -1 = none assigned yet
 
-	bool m_bDriverSeated;			//!< a living character sits in the pilot seat (latest readiness check)
-	bool m_bDriverSeatedOnce;		//!< the "driver seated" line was logged
+	bool m_bDriverSeated;			//!< a living character sits in the pilot seat (latest monitor or readiness tick)
+	float m_fFirstSeatedS = -1;		//!< director time [s] when a seated driver was first seen, -1 = never
+	bool m_bSeatedLogged;			//!< the "driver seated" line was logged
 	bool m_bRegistered;				//!< registered with SCR_MLDataCollector
+	float m_fNextAssignAtMs = -1;	//!< world time at which the next waypoint is due, -1 = none pending
+	bool m_bNoTargetWarned;			//!< the "no drive target qualifies" warning was logged since the last assignment
 
 	int m_iWaypointsCompleted;
 	int m_iStuckResets;
@@ -205,7 +216,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	protected bool m_bStarted;			//!< StartDirector ran (any machine), never cleared
 	protected bool m_bActive;			//!< running on the authority and not stopped
 	protected bool m_bReadinessDone;
+	protected bool m_bReadinessArmed;	//!< the readiness poll was queued (after every group was attempted)
 	protected float m_fStartTimeMs;
+	protected float m_fFallbackArmedMs;	//!< world time when FallbackStart was queued in OnPostInit
+	protected int m_iNextGroupId;		//!< next group id the spawn tick attempts
 	protected int m_iGroupsAttempted;
 	protected int m_iGroupsFailed;
 	protected int m_iTotalWaypointsCompleted;
@@ -225,7 +239,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		Print(string.Format("[DataCapture] Director initialized on '%1' (server: %2), waiting for OnGameModeStart", owner.GetName(), Replication.IsServer()), LogLevel.NORMAL);
 
 		if (m_iFallbackStartMs > 0)
+		{
+			BaseWorld world = owner.GetWorld();
+			if (world)
+				m_fFallbackArmedMs = world.GetWorldTime();
+
 			GetGame().GetCallqueue().CallLater(FallbackStart, m_iFallbackStartMs, false);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -248,6 +268,22 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	{
 		if (m_bStarted)
 			return;
+
+		// The call queue advances by frame timeslices, and the first frame after a long world load can carry a large
+		// one. Fall back only once m_iFallbackStartMs of world time have passed since OnPostInit; until then re-queue.
+		BaseWorld world = GetGame().GetWorld();
+		if (world)
+		{
+			int remainingMs = m_iFallbackStartMs - (world.GetWorldTime() - m_fFallbackArmedMs);
+			if (remainingMs > 0)
+			{
+				if (remainingMs < 100)
+					remainingMs = 100;
+
+				GetGame().GetCallqueue().CallLater(FallbackStart, remainingMs, false);
+				return;
+			}
+		}
 
 		Print(string.Format("[DataCapture] WARNING: OnGameModeStart not received within %1 ms", m_iFallbackStartMs), LogLevel.WARNING);
 		StartDirector("FallbackStart");
@@ -291,14 +327,12 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 		}
 
+		// One repeating spawn tick: group k is attempted k * m_iSpawnStaggerMs after the start. The readiness poll is
+		// queued by ReportSpawnProgress once every group has been attempted.
 		ScriptCallQueue queue = GetGame().GetCallqueue();
-		for (int groupId = 1; groupId <= m_iMaxAIGroups; groupId++)
-		{
-			queue.CallLater(SpawnAIGroup, groupId * m_iSpawnStaggerMs, false, groupId);
-		}
-
+		m_iNextGroupId = 1;
+		queue.CallLater(SpawnNextGroup, m_iSpawnStaggerMs, true);
 		queue.CallLater(MonitorVehicles, m_iMonitorIntervalMs, true);
-		queue.CallLater(CheckReadiness, m_iReadinessPollMs, true);
 
 		if (m_iStatsIntervalMs > 0)
 			queue.CallLater(ReportDrivingStatistics, m_iStatsIntervalMs, true);
@@ -309,21 +343,34 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Called on every machine when the game mode ends (SCR_BaseGameMode.OnGameStateChanged, POSTGAME).
 	override void OnGameModeEnd(SCR_GameModeEndData data)
 	{
 		super.OnGameModeEnd(data);
-		StopDirector();
+		StopDirector(true);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Called on every machine when the world ends (ArmaReforgerScripted.OnGameEnd -> SCR_BaseGameMode.OnGameEnd),
+	//! before the entities are deleted, so the collector session is finalized while the world still exists.
+	override void OnGameEnd()
+	{
+		super.OnGameEnd();
+		StopDirector(true);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	override void OnDelete(IEntity owner)
 	{
-		StopDirector();
+		// The collector finalizes itself in its own OnDelete; do not touch another component during deletion.
+		StopDirector(false);
 		super.OnDelete(owner);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected void StopDirector()
+	//! Idempotent. Removes every call the director queued (at most one per function, see the header) and
+	//! unsubscribes from the groups. With stopCollector it also stops and finalizes the collector session.
+	protected void StopDirector(bool stopCollector)
 	{
 		m_bActive = false;
 
@@ -334,11 +381,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (queue)
 			{
 				queue.Remove(FallbackStart);
-				queue.Remove(SpawnAIGroup);
+				queue.Remove(SpawnNextGroup);
 				queue.Remove(MonitorVehicles);
 				queue.Remove(CheckReadiness);
 				queue.Remove(ReportDrivingStatistics);
-				queue.Remove(AssignNextWaypoint);
 #ifdef ENABLE_DIAG
 				queue.Remove(UpdateDebugPanel);
 #endif
@@ -347,8 +393,15 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			state.m_fNextAssignAtMs = -1;
 			if (state.m_Group)
 				state.m_Group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
+		}
+
+		if (stopCollector && m_Collector && m_Collector.IsCapturing())
+		{
+			Print("[DataCapture] Game mode or game ended - stopping the collector session", LogLevel.NORMAL);
+			m_Collector.StopSession();
 		}
 	}
 
@@ -415,6 +468,24 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		Print(string.Format("[DataCapture] Found %1/%2 drive targets %3<id>", m_aDriveTargets.Count(), m_iMaxDriveTargets, m_sDriveTargetPrefix), LogLevel.NORMAL);
 		if (!missing.IsEmpty())
 			Print("[DataCapture] WARNING: missing drive-target ids:" + missing, LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Repeating spawn tick: attempts the next group id and removes itself after the last one.
+	protected void SpawnNextGroup()
+	{
+		if (!m_bActive || m_iNextGroupId > m_iMaxAIGroups)
+		{
+			GetGame().GetCallqueue().Remove(SpawnNextGroup);
+			return;
+		}
+
+		int groupId = m_iNextGroupId;
+		m_iNextGroupId++;
+		if (m_iNextGroupId > m_iMaxAIGroups)
+			GetGame().GetCallqueue().Remove(SpawnNextGroup);
+
+		SpawnAIGroup(groupId);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -497,7 +568,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		array<string> vehicleNames = {vehicleName};
 		group.AddVehiclesStatic(vehicleNames); // Game/Entities/SCR_AIGroup.c:1847, unchanged since 1.6
 		group.GetOnWaypointCompleted().Insert(OnWaypointCompleted); // invoker params: AIWaypoint wp (server only)
-		AssignNextWaypoint(groupId);
+		AssignNextWaypoint(state);
 
 		Print(string.Format("[DataCapture] Group %1 spawned at %2 for vehicle %3 with %4 waypoints", groupId, spawnName, vehicleName, state.m_aWaypoints.Count()), LogLevel.NORMAL);
 		ReportSpawnProgress();
@@ -552,12 +623,18 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! After the last group was attempted: logs "Spawned N/M groups" once and queues the readiness poll, so the log
+	//! reads director start -> spawned N/M groups -> driver seated lines -> session start.
 	protected void ReportSpawnProgress()
 	{
-		if (m_iGroupsAttempted < m_iMaxAIGroups)
+		if (m_iGroupsAttempted < m_iMaxAIGroups || m_bReadinessArmed)
 			return;
 
+		m_bReadinessArmed = true;
 		Print(string.Format("[DataCapture] Spawned %1/%2 groups", m_aGroups.Count(), m_iMaxAIGroups), LogLevel.NORMAL);
+
+		if (m_bActive && !m_bReadinessDone)
+			GetGame().GetCallqueue().CallLater(CheckReadiness, m_iReadinessPollMs, true);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -573,17 +650,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Gives group groupId a new waypoint: never the current one, preferably none within 2x the completion radius
-	//! of the vehicle or of the current target. If every other target is that close, any other target is used.
-	protected void AssignNextWaypoint(int groupId)
+	//! Gives the group a new waypoint: never the current one and never one within 2x the completion radius of the
+	//! vehicle or of the current target. If no target qualifies, the group gets none and MonitorVehicles retries
+	//! (an excluded target would be completed without the vehicle moving).
+	protected void AssignNextWaypoint(SCR_MLDataCaptureGroupState state)
 	{
-		if (!m_bActive)
+		if (!m_bActive || !state || !state.m_Group)
 			return;
 
-		SCR_MLDataCaptureGroupState state = FindGroup(groupId);
-		if (!state || !state.m_Group)
-			return;
-
+		state.m_fNextAssignAtMs = -1;
+		int groupId = state.m_iGroupId;
 		int count = state.m_aWaypoints.Count();
 		int current = state.m_iCurrentWaypoint;
 		float exclusion = 2 * m_fWaypointRadius;
@@ -610,21 +686,21 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		if (candidates.IsEmpty())
 		{
-			for (int j = 0; j < count; j++)
+			int retryMs = m_iWaypointDelay;
+			if (retryMs < 1000)
+				retryMs = 1000;
+
+			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+			if (!state.m_bNoTargetWarned)
 			{
-				if (j != current)
-					candidates.Insert(j);
+				state.m_bNoTargetWarned = true;
+				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target - no new waypoint, retrying every %3 ms", groupId, exclusion, retryMs), LogLevel.WARNING);
 			}
 
-			if (candidates.IsEmpty())
-			{
-				Print(string.Format("[DataCapture] WARNING: group %1 has no drive target other than its current one - no new waypoint", groupId), LogLevel.WARNING);
-				return;
-			}
-
-			Print(string.Format("[DataCapture] WARNING: group %1: every other drive target is within %2 m - picking one anyway", groupId, exclusion), LogLevel.WARNING);
+			return;
 		}
 
+		state.m_bNoTargetWarned = false;
 		int next = candidates[Math.RandomIntInclusive(0, candidates.Count() - 1)];
 		int previousTargetId = state.GetCurrentTargetId();
 		SCR_MLDataCaptureWaypoint record = state.m_aWaypoints[next];
@@ -661,7 +737,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (state.m_Group)
 				state.m_Group.RemoveWaypoint(completedWaypoint);
 
-			GetGame().GetCallqueue().CallLater(AssignNextWaypoint, m_iWaypointDelay, false, state.m_iGroupId);
+			// One pending assignment per group, run by MonitorVehicles; a repeated completion event only re-arms it.
+			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + m_iWaypointDelay;
 			return;
 		}
 	}
@@ -683,8 +760,17 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Repeating until done: logs seated drivers, registers vehicles with the collector in group-id order and starts
-	//! the collector session once every configured group has a seated driver.
+	//! Re-reads whether a living driver sits in the group's pilot seat and remembers when one was first seen.
+	protected void UpdateOccupancy(SCR_MLDataCaptureGroupState state, float elapsedS)
+	{
+		state.m_bDriverSeated = HasLivingDriver(state.m_Vehicle);
+		if (state.m_bDriverSeated && state.m_fFirstSeatedS < 0)
+			state.m_fFirstSeatedS = elapsedS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Repeating until done, queued once every group was attempted: logs seated drivers, registers vehicles with the
+	//! collector in group-id order and starts the collector session once every configured group has a seated driver.
 	protected void CheckReadiness()
 	{
 		if (!m_bActive || m_bReadinessDone)
@@ -698,14 +784,14 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		bool registerInOrder = true;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			state.m_bDriverSeated = HasLivingDriver(state.m_Vehicle);
+			UpdateOccupancy(state, elapsedS);
 			if (state.m_bDriverSeated)
 			{
 				seated++;
-				if (!state.m_bDriverSeatedOnce)
+				if (!state.m_bSeatedLogged)
 				{
-					state.m_bDriverSeatedOnce = true;
-					Print(string.Format("[DataCapture] Group %1: driver seated in %2 after %3 s", state.m_iGroupId, state.m_Vehicle.GetName(), elapsedS.ToString(-1, 1)), LogLevel.NORMAL);
+					state.m_bSeatedLogged = true;
+					Print(string.Format("[DataCapture] Group %1: driver seated in %2 (first seen %3 s after the director start)", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1)), LogLevel.NORMAL);
 				}
 			}
 
@@ -742,7 +828,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			}
 
 			Print(string.Format("[DataCapture] All %1 drivers seated after %2 s - starting the collector session", seated, elapsedS.ToString(-1, 1)), LogLevel.NORMAL);
-			if (!m_Collector.StartSession())
+			if (!m_Collector.StartSession(string.Empty, m_sInitialWeather, m_iInitialHour))
 				Print("[DataCapture] ERROR: SCR_MLDataCollector.StartSession() failed", LogLevel.ERROR);
 
 			return;
@@ -778,8 +864,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 
 		float nowMs = GetGame().GetWorld().GetWorldTime();
+		float elapsedS = (nowMs - m_fStartTimeMs) / 1000.0;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			// Occupancy for stuck recovery is re-read here, so it does not depend on the readiness poll having run
+			// or still running, and it drops when the driver leaves or dies.
+			UpdateOccupancy(state, elapsedS);
+
+			if (state.m_fNextAssignAtMs >= 0 && nowMs >= state.m_fNextAssignAtMs)
+				AssignNextWaypoint(state);
+
 			if (!state.m_Vehicle || !state.m_Simulation)
 				continue;
 
@@ -811,8 +905,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	protected void CheckStuck(SCR_MLDataCaptureGroupState state, vector position, float dtS)
 	{
-		// Not before the driver is seated: a car waiting for its crew is parked, not stuck.
-		if (!m_bResetStuckVehicles || !state.m_bDriverSeatedOnce)
+		// Only while a living driver sits in the pilot seat: a car waiting for its crew is parked, not stuck.
+		if (!m_bResetStuckVehicles || !state.m_bDriverSeated)
 		{
 			state.m_fStuckTimeS = 0;
 			state.m_vStuckCheckPosition = position;

@@ -1,0 +1,54 @@
+"AppState"
+{
+	"appid"		"1874880"
+	"universe"		"1"
+	"LauncherPath"		"C:\\Program Files (x86)\\Steam\\steam.exe"
+	"name"		"Arma Reforger"
+	"StateFlags"		"4"
+	"installdir"		"Arma Reforger"
+	"LastUpdated"		"1788671755"
+	"LastPlayed"		"1774585622"
+	"SizeOnDisk"		"27180170897"
+	"StagingSize"		"0"
+	"buildid"		"24903726"
+	"LastOwner"		"0"
+	"DownloadType"		"1"
+	"UpdateResult"		"0"
+	"BytesToDownload"		"4064452080"
+	"BytesDownloaded"		"4064452080"
+	"BytesToStage"		"26917999178"
+	"BytesStaged"		"26917999178"
+	"TargetBuildID"		"24903726"
+	"AutoUpdateBehavior"		"0"
+	"AllowOtherDownloadsWhileRunning"		"0"
+	"ScheduledAutoUpdate"		"0"
+	"InstalledDepots"
+	{
+		"1874881"
+		{
+			"manifest"		"7768706146966449237"
+			"size"		"26946681496"
+		}
+		"1874882"
+		{
+			"manifest"		"1650233779375073015"
+			"size"		"233489401"
+		}
+	}
+	"InstallScripts"
+	{
+		"1874881"		"installscript.vdf"
+	}
+	"SharedDepots"
+	{
+		"228989"		"228980"
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+	}
+	"MountedConfig"
+	{
+		"language"		"english"
+	}
+}

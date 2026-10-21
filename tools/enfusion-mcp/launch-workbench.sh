@@ -19,6 +19,12 @@
 # its launch record under <pin dir>/launches. This script names no game version. 1.8.0.13 is the interim pin; the
 # plan is to move to 1.9 by activating a new pin with DD-0's pin_activate.py (see DD-0's tools/pin/README.md).
 # WB_PIN (an explicit pin file) is no longer accepted, because it would bypass that checked switch.
+# The exe this script starts (WB_DIR) is the Tools install in DD-0's pinlib.LAUNCH_PATHS, and the preflight's
+# tools.launch_path check refuses any pin not made from that install, so the pin that vouches for a launch is always
+# one made from the exe started here. Change WB_DIR only together with LAUNCH_PATHS and wb_R1.bat.
+# Like wb_R1.bat, it starts Workbench only if the preflight's stdout is exactly one launch id
+# (YYYYMMDDTHHMMSSZ-wb-xxxx) and <pin dir>/launches/launch_<id>.json exists. The preflight runs on
+# /usr/bin/python3, the interpreter the .bat launchers use, not whatever python3 PATH holds.
 # Until DD-0 is deployed, WB_SKIP_PREFLIGHT=1 launches without the pin check (it says so loudly).
 #
 # Windows-side equivalent (PowerShell), same arguments, no preflight:
@@ -43,6 +49,7 @@ WB_DIR="/mnt/c/Program Files (x86)/Steam/steamapps/common/Arma Reforger Tools/Wo
 WB_EXE="$WB_DIR/ArmaReforgerWorkbenchSteamDiag.exe"
 WB_IMAGE="ArmaReforgerWorkbenchSteamDiag.exe"
 TASKLIST=/mnt/c/Windows/System32/tasklist.exe
+PY=/usr/bin/python3
 PREFLIGHT="${WB_PREFLIGHT:-/mnt/e/DriveDiT/tools/pin/preflight.py}"
 PIN_DIR="${WB_PIN_DIR:-/mnt/e/DriveDiT/pin}"
 [[ -z "${WB_PIN:-}" ]] || die "WB_PIN is no longer supported: the launch checks the active pin ($PIN_DIR/ACTIVE). Switch pins with pin_activate.py; unset WB_PIN."
@@ -88,10 +95,16 @@ else
   off_c_drive "$PIN_DIR" \
     || die "refusing pin dir $PIN_DIR: the preflight writes its launch record under it; use an absolute path off C: (E:)"
   [[ -e "$PIN_DIR/ACTIVE" || -L "$PIN_DIR/ACTIVE" ]] \
-    || die "no active pin ($PIN_DIR/ACTIVE is missing). Activate one with: python3 -I -B $(dirname "$PREFLIGHT")/pin_activate.py <pin id>"
-  LID="$(cd /mnt/e && python3 -I -B "$PREFLIGHT" --pin-active --pin-dir "$PIN_DIR" --exe wb)" \
+    || die "no active pin ($PIN_DIR/ACTIVE is missing). Activate one with: $PY -I -B $(dirname "$PREFLIGHT")/pin_activate.py <pin id>"
+  [[ -x "$PY" ]] || die "cannot run $PY, so the pin cannot be checked; Workbench not started."
+  LID="$(cd /mnt/e && "$PY" -I -B "$PREFLIGHT" --pin-active --pin-dir "$PIN_DIR" --exe wb)" \
     || die "PIN CHECK FAILED; Workbench not started (preflight messages above)."
   [[ -n "$LID" ]] || die "PIN CHECK FAILED: the preflight printed no launch id; Workbench not started."
+  [[ "$LID" =~ ^[0-9]{8}T[0-9]{6}Z-wb-[0-9a-f]{4}$ ]] \
+    || die "PIN CHECK FAILED: the preflight output is not exactly one launch id; Workbench not started."
+  REC="$PIN_DIR/launches/launch_$LID.json"
+  [[ -f "$REC" && ! -L "$REC" ]] \
+    || die "PIN CHECK FAILED: no launch record $REC; a launch id alone is not proof the check passed. Workbench not started."
   echo "pin OK, launch id $LID" >&2
 fi
 

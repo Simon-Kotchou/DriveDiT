@@ -6,11 +6,12 @@ rem Install: E:\DriveDiT\tools\launch\wb_R1.bat. Never launch Workbench from the
 rem during the campaign.
 rem
 rem 1. Refuses if Workbench is already running (it never starts a second instance).
-rem 2. Runs the build-pin preflight in WSL. The preflight refuses unless the Steam appmanifests
-rem    and the installed files of BOTH Arma Reforger and Arma Reforger Tools match
-rem    E:\DriveDiT\pin\pin_1.8.0.13.json, and AutoUpdateBehavior is "1" ("Only update this game
+rem 2. Runs the build-pin preflight in WSL with --pin-active: E:\DriveDiT\pin\ACTIVE names the
+rem    active pin id, and the pin is E:\DriveDiT\pin\pin_ID.json. The preflight refuses unless
+rem    ACTIVE is valid and the Steam appmanifests and the installed files of BOTH Arma Reforger and
+rem    Arma Reforger Tools match that pin, and AutoUpdateBehavior is "1" ("Only update this game
 rem    when I launch it"). On success it writes E:\DriveDiT\pin\launches\launch_ID.json and
-rem    prints only the launch id.
+rem    prints only the launch id. The launch logic names no game version.
 rem 3. Starts the Workbench exe directly. The working directory is the Workbench dir, as in a
 rem    Steam launch (its steam_appid.txt holds 1874910).
 rem
@@ -19,6 +20,11 @@ rem or relaunch the app. Steam must be running.
 rem UNVERIFIED (FIX_PLAN step 4, gate P-01): that Workbench honours -profile. After the first
 rem start, check console.log for "Adding relative directory 'E:\DriveDiT\wb_profile\profile'".
 rem Args (Appendix B and FIX_PLAN step 4a): -profile, -gproj, -forceUpdate, -maxFPS 60.
+rem Build: 1.8.0.13 is the INTERIM pin. The plan is to move to 1.9 and its new vehicle physics
+rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1_9.md in
+rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
+rem E:\DriveDiT\tools\pin\pin_activate.py, which refuses a pin that does not match the installs.
+rem Never edit ACTIVE by hand.
 rem WSL: the distro is named explicitly, because a second distro (Ubuntu-22.04-E) exists.
 rem ==========================================================================================
 setlocal
@@ -56,9 +62,9 @@ rem filters: the id pattern anchored at the start, then /V on any character outs
 rem The interpreter is named (/usr/bin/python3) because -e starts no shell and its PATH holds Windows dirs.
 set "DD_ID_RE=^[0123456789][0123456789]*T[0123456789][0123456789]*Z-wb-[0123456789abcdef][0123456789abcdef]*"
 set "DD_ID_BAD=[^-0123456789abcdefTZw]"
-for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --exe wb ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
+for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --exe wb ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
 if not defined LID (
-  set "DD_ERR=PIN CHECK FAILED. Workbench was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --check"
+  set "DD_ERR=PIN CHECK FAILED. Workbench was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --check"
   goto :fail
 )
 rem The record must exist: a launch id alone is not proof that this preflight run passed.

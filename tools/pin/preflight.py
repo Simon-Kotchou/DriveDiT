@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """Build-pin preflight for the DriveDiT launchers (ticket DD-0 / program TKT-0).
 
-Every launcher runs this through `wsl.exe -e python3 -I -B .../preflight.py --pin ... --exe wb|client`
-before it starts an exe. It refuses the launch unless, for BOTH the game and the Tools app:
+Every launcher runs this through `wsl.exe -e /usr/bin/python3 -I -B .../preflight.py --pin-active --exe wb|client`
+before it starts an exe.
+
+Which pin: --pin-active (what the launchers use) reads <pin dir>/ACTIVE (default pin dir /mnt/e/DriveDiT/pin;
+--pin-dir overrides). ACTIVE must be a regular file, not a symlink, holding exactly one valid pin id, such as
+1.8.0.13 or 1.9.0.9-exp. The pin is then <pin dir>/pin_<id>.json, which must be a regular file, not a symlink,
+whose pin_id equals that id. Anything else is a config error (exit 2). Only pin_activate.py writes ACTIVE, and it
+refuses a pin that does not match the live installs. --pin PATH names a pin file explicitly; the two options are
+mutually exclusive. 1.8.0.13 is the interim pin; the plan is to move to 1.9 by activating a new pin.
+
+It refuses the launch unless, for BOTH the game and the Tools app:
   - buildid equals the pin, and the installed depot manifests equal the pin;
   - TargetBuildID == buildid (no update pending) and StateFlags is the settled value from the pin;
   - AutoUpdateBehavior is an allowed value ("1" = only update when launched; "0" and "2" auto-update);
@@ -10,7 +19,8 @@ before it starts an exe. It refuses the launch unless, for BOTH the game and the
   - the launched exes and steam_appid.txt files match the pin.
 
 Launch mode (default): on success prints ONLY the launch id on stdout, writes
-<launch-dir>/launch_<id>.json (default launch dir: <pin dir>/launches) and exits 0. On refusal prints
+<launch-dir>/launch_<id>.json (default launch dir: <pin dir>/launches) and exits 0. The record names the pin id
+and how it was resolved (active pointer or explicit path). On refusal prints
 nothing on stdout, explains on stderr, writes refused_<id>.json (best effort) and exits 1.
 Check mode (--check): prints a PASS/FAIL report on stdout, writes nothing, exits 0 or 1.
 --allow-fail, --mtime-resolution-s and the --game-acf/--tools-acf/--game-root/--tools-root overrides are
@@ -22,6 +32,7 @@ Writes are allowed only under /mnt/e (C: is always refused).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -187,11 +198,24 @@ def run_checks(pin: dict, acf_paths: dict, roots: dict, mtime_resolution_s: int 
     return checks, observed
 
 
-def load_pin(path: str) -> dict:
+def pinned_paths(pin: dict):
+    """(acf_paths, roots): the live appmanifests and install dirs the pin was made from."""
+    return ({app: pin[app]["acf"]["wsl"] for app in pinlib.APPS},
+            {app: pin[app]["install"]["wsl"] for app in pinlib.APPS})
+
+
+def print_report(checks, allow_fail=()) -> list:
+    """Print the PASS/WAIVED/FAIL lines of --check; return the failed checks that were not waived."""
+    for c in checks:
+        tag = "PASS" if c["ok"] else ("WAIVED" if c["name"] in allow_fail else "FAIL")
+        print("%-6s %-27s %s" % (tag, c["name"], c["detail"]))
+    return [c for c in checks if not c["ok"] and c["name"] not in allow_fail]
+
+
+def load_pin_bytes(raw: bytes, path: str) -> dict:
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            pin = json.load(fh)
-    except (OSError, ValueError) as exc:
+        pin = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         raise pinlib.PinError("cannot read pin %s: %s" % (path, exc))
     if not isinstance(pin, dict) or pin.get("schema") != pinlib.PIN_SCHEMA:
         raise pinlib.PinError("%s is not a %s pin file" % (path, pinlib.PIN_SCHEMA))
@@ -202,11 +226,60 @@ def load_pin(path: str) -> dict:
     return pin
 
 
+def load_pin_by_id(pin_dir: str, pin_id: str) -> dict:
+    """Load <pin dir>/pin_<id>.json: a valid id, a regular file (not a symlink), and a pin for that id.
+
+    Returns the pin source used by resolve_pin; resolved_by and pointer are left for the caller.
+    """
+    pin_dir = os.path.abspath(pinlib.win_to_wsl(pin_dir))
+    path = pinlib.pin_file_for(pin_dir, pin_id)
+    raw = pinlib.read_regular_file(path, "pin file for %s" % pin_id, pinlib.PIN_MAX_BYTES)
+    pin = load_pin_bytes(raw, path)
+    if pin.get("pin_id") != pin_id:
+        raise pinlib.PinError("%s holds pin_id %r, not %r (a pin file must be named pin_<its pin_id>.json)"
+                              % (path, pin.get("pin_id"), pin_id))
+    return {"path": path, "pin": pin, "pin_id": pin_id, "sha256": hashlib.sha256(raw).hexdigest(),
+            "pin_dir": pin_dir, "resolved_by": None, "pointer": None}
+
+
+def resolve_pin(pin_path=None, pin_active: bool = False, pin_dir=None) -> dict:
+    """Find the pin to check: exactly one of an explicit pin_path or the active pointer.
+
+    Returns {path, pin, pin_id, sha256, pin_dir, resolved_by, pointer}. resolved_by is "active-pointer" (pointer
+    is the ACTIVE file) or "explicit-path" (pointer is None). The sha256 is of the exact bytes that were parsed.
+    """
+    if bool(pin_path) == bool(pin_active):
+        raise pinlib.PinError("give exactly one of --pin PATH and --pin-active")
+    if pin_active:
+        pin_dir = os.path.abspath(pinlib.win_to_wsl(pin_dir or pinlib.DEFAULT_PIN_DIR))
+        pin_id = pinlib.read_active(pin_dir)
+        src = load_pin_by_id(pin_dir, pin_id)
+        src.update(resolved_by="active-pointer", pointer=os.path.join(pin_dir, pinlib.ACTIVE_NAME))
+        return src
+    if pin_dir:
+        raise pinlib.PinError("--pin-dir is only used with --pin-active")
+    path = os.path.abspath(pinlib.win_to_wsl(pin_path))
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise pinlib.PinError("cannot read pin %s: %s" % (path, exc))
+    pin = load_pin_bytes(raw, path)
+    return {"path": path, "pin": pin, "pin_id": pin.get("pin_id"), "sha256": hashlib.sha256(raw).hexdigest(),
+            "pin_dir": os.path.dirname(path), "resolved_by": "explicit-path", "pointer": None}
+
+
+def describe_source(src: dict) -> str:
+    if src["resolved_by"] == "active-pointer":
+        return "pin %s via active pointer %s -> %s" % (src["pin_id"], src["pointer"], src["path"])
+    return "pin %s via explicit --pin %s" % (src["pin_id"], src["path"])
+
+
 def new_launch_id(exe: str) -> str:
     return "%s-%s-%s" % (pinlib.utc_compact(pinlib.utc_now()), exe, os.urandom(2).hex())
 
 
-def make_record(status, launch_id, args, cli_argv, pin_path, pin, checks, observed) -> dict:
+def make_record(status, launch_id, args, cli_argv, src, checks, observed) -> dict:
     return {
         "schema": pinlib.LAUNCH_SCHEMA,
         "launch_id": launch_id,
@@ -214,7 +287,9 @@ def make_record(status, launch_id, args, cli_argv, pin_path, pin, checks, observ
         "utc": pinlib.utc_iso(pinlib.utc_now()),
         "exe": args.exe,
         "instance": args.instance,
-        "pin": {"path": pin_path, "pin_id": pin.get("pin_id"), "sha256": pinlib.sha256_file(pin_path)},
+        # resolved_by: "active-pointer" (--pin-active; pointer = the ACTIVE file read) or "explicit-path" (--pin).
+        "pin": {"path": src["path"], "pin_id": src["pin"].get("pin_id"), "sha256": src["sha256"],
+                "resolved_by": src["resolved_by"], "pointer": src["pointer"]},
         "observed": observed,
         "checks": checks,
         "host": {"hostname": socket.gethostname(), "wsl_distro": os.environ.get("WSL_DISTRO_NAME"),
@@ -225,7 +300,14 @@ def make_record(status, launch_id, args, cli_argv, pin_path, pin, checks, observ
 
 def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--pin", required=True, help="pin JSON written by make_pin.py")
+    which = ap.add_mutually_exclusive_group(required=True)
+    which.add_argument("--pin", default=None, help="explicit pin JSON written by make_pin.py")
+    which.add_argument("--pin-active", action="store_true",
+                       help="check the pin named by <pin dir>/ACTIVE (set it with pin_activate.py); the launchers "
+                            "use this")
+    ap.add_argument("--pin-dir", default=None,
+                    help="with --pin-active only: the directory holding ACTIVE and pin_<id>.json (default %s)"
+                         % pinlib.DEFAULT_PIN_DIR)
     ap.add_argument("--exe", choices=("wb", "client"), default=None,
                     help="which exe the launcher is about to start (required unless --check)")
     ap.add_argument("--instance", default=None, help="client instance id, e.g. i01 (recorded only)")
@@ -266,28 +348,30 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
         print("preflight: unknown check name(s) %s; known: %s" % (unknown, ", ".join(CHECK_NAMES)), file=sys.stderr)
         return 2
 
-    pin_path = os.path.abspath(pinlib.win_to_wsl(args.pin))
+    if args.pin_dir and not args.pin_active:
+        print("preflight: --pin-dir is only accepted with --pin-active", file=sys.stderr)
+        return 2
+
     launch_dir = None
     try:
-        pin = load_pin(pin_path)
+        src = resolve_pin(args.pin, args.pin_active, args.pin_dir)
         if not args.check:
-            launch_dir = pinlib.check_write_path(args.launch_dir or os.path.join(os.path.dirname(pin_path), "launches"),
+            launch_dir = pinlib.check_write_path(args.launch_dir or os.path.join(src["pin_dir"], "launches"),
                                                  write_roots)
     except pinlib.PinError as exc:
         print("preflight: %s" % exc, file=sys.stderr)
         return 2
+    pin = src["pin"]
 
-    acf_paths = {"game": args.game_acf or pin["game"]["acf"]["wsl"],
-                 "tools": args.tools_acf or pin["tools"]["acf"]["wsl"]}
-    roots = {"game": args.game_root or pin["game"]["install"]["wsl"],
-             "tools": args.tools_root or pin["tools"]["install"]["wsl"]}
+    acf_paths, roots = pinned_paths(pin)
+    acf_paths = {"game": args.game_acf or acf_paths["game"], "tools": args.tools_acf or acf_paths["tools"]}
+    roots = {"game": args.game_root or roots["game"], "tools": args.tools_root or roots["tools"]}
     checks, observed = run_checks(pin, acf_paths, roots, max(0, args.mtime_resolution_s))
     failed = [c for c in checks if not c["ok"] and c["name"] not in args.allow_fail]
 
     if args.check:
-        for c in checks:
-            tag = "PASS" if c["ok"] else ("WAIVED" if c["name"] in args.allow_fail else "FAIL")
-            print("%-6s %-27s %s" % (tag, c["name"], c["detail"]))
+        print("%-6s %s (sha256 %s)" % ("PIN", describe_source(src), src["sha256"]))
+        print_report(checks, args.allow_fail)
         if failed:
             print("RESULT: REFUSED (pin %s): %d check(s) failed: %s"
                   % (pin.get("pin_id"), len(failed), ", ".join(c["name"] for c in failed)))
@@ -297,14 +381,13 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
 
     launch_id = new_launch_id(args.exe)
     if failed:
-        print("PREFLIGHT REFUSED LAUNCH of %s (pin %s, %s):" % (args.exe, pin.get("pin_id"), pin_path),
-              file=sys.stderr)
+        print("PREFLIGHT REFUSED LAUNCH of %s (%s):" % (args.exe, describe_source(src)), file=sys.stderr)
         for c in failed:
             print("  FAIL %s: %s" % (c["name"], c["detail"]), file=sys.stderr)
         try:
             os.makedirs(launch_dir, exist_ok=True)
             rec = pinlib.write_json_new(os.path.join(launch_dir, "refused_%s.json" % launch_id),
-                                        make_record("refused", launch_id, args, cli_argv, pin_path, pin, checks, observed),
+                                        make_record("refused", launch_id, args, cli_argv, src, checks, observed),
                                         write_roots)
             print("  record: %s" % rec, file=sys.stderr)
         except (pinlib.PinError, OSError) as exc:
@@ -314,12 +397,12 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     try:
         os.makedirs(launch_dir, exist_ok=True)
         rec = pinlib.write_json_new(os.path.join(launch_dir, "launch_%s.json" % launch_id),
-                                    make_record("ok", launch_id, args, cli_argv, pin_path, pin, checks, observed),
+                                    make_record("ok", launch_id, args, cli_argv, src, checks, observed),
                                     write_roots)
     except (pinlib.PinError, OSError) as exc:
         print("PREFLIGHT REFUSED LAUNCH of %s: launch record not written: %s" % (args.exe, exc), file=sys.stderr)
         return 3
-    print("PREFLIGHT OK: %s matches pin %s; record %s" % (args.exe, pin.get("pin_id"), rec), file=sys.stderr)
+    print("PREFLIGHT OK: %s matches %s; record %s" % (args.exe, describe_source(src), rec), file=sys.stderr)
     print(launch_id)
     return 0
 

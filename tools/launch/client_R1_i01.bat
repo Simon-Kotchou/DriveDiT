@@ -6,16 +6,22 @@ rem Install: E:\DriveDiT\tools\launch\client_R1_i01.bat. Copy it to client_R1_iN
 rem instances, changing DD_INSTANCE, -posX/-posY and -GPUAdapter (S2).
 rem
 rem 1. Refuses until the per-build settings below are filled in and engine_R1.conf exists.
-rem 2. Runs the build-pin preflight in WSL (see wb_R1.bat). It prints a launch id on success and
-rem    writes E:\DriveDiT\pin\launches\launch_ID.json; it prints nothing on failure.
+rem 2. Runs the build-pin preflight in WSL with --pin-active (see wb_R1.bat): it checks the pin
+rem    that E:\DriveDiT\pin\ACTIVE names. It prints a launch id on success and writes
+rem    E:\DriveDiT\pin\launches\launch_ID.json, which records the pin id and how it was
+rem    resolved; it prints nothing on failure. The launch logic names no game version.
 rem 3. Starts ArmaReforgerSteam.exe directly. The working directory is the game dir, as in a
 rem    Steam launch (its steam_appid.txt holds 1874880). The launch id goes to the game as
 rem    -dcLaunchId, which joins the session to the preflight record (capture program 3.9).
 rem No pause on failure: a supervisor may run this unattended (exit code 1).
+rem Build: 1.8.0.13 is the INTERIM pin. The plan is to move to 1.9 and its new vehicle physics
+rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1_9.md in
+rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
+rem E:\DriveDiT\tools\pin\pin_activate.py. Never edit ACTIVE by hand.
 rem
 rem Flag provenance. The flags are those of Appendix B. They come from the Startup Parameters
 rem wiki page, revision 2025-02-14 (trial-ladder.md 8.2, source S1), and are UNVERIFIED on
-rem 1.8.0.13 until probe S1:
+rem 1.8.0.13 until probe S1. Re-verify every flag on the new build before capturing on 1.9:
 rem   -cfg            "forces to load specific user engine settings config". The file is built
 rem                   by probe E-20; whether the engine applies it is checked at S1.
 rem   -screenWidth/-screenHeight  set the WINDOW size, not the render resolution. The size is
@@ -84,9 +90,9 @@ rem The interpreter is named (/usr/bin/python3) because -e starts no shell and i
 set "DD_ID_RE=^[0123456789][0123456789]*T[0123456789][0123456789]*Z-client-[0123456789abcdef][0123456789abcdef]*"
 set "DD_ID_BAD=[^-0123456789abcdefTZilnt]"
 rem preflight prints a launch id on success and writes launch_ID.json; it prints nothing on failure
-for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --exe client --instance %DD_INSTANCE% ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
+for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --exe client --instance %DD_INSTANCE% ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
 if not defined LID (
-  set "DD_ERR=PIN CHECK FAILED. The client was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13.json --check"
+  set "DD_ERR=PIN CHECK FAILED. The client was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --check"
   goto :fail
 )
 rem The record must exist: a launch id alone is not proof that this preflight run passed.

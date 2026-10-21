@@ -3,9 +3,13 @@
 # Ticket DD-0 (capture program r2 TKT-0, P0 step 3; decision D2b). The copy lets a pinned build be restored
 # if Steam updates anyway. It is about 27.9 GB: game about 27.2 GB from D:, Tools about 0.7 GB from C:.
 #
-#   cold_copy.sh [--run] [--pin PIN_JSON] [--dest DEST_DIR]
-#     default PIN_JSON  /mnt/e/DriveDiT/pin/pin_1.8.0.13.json
+#   cold_copy.sh [--run] [--pin PIN_JSON | --pin-dir PIN_DIR] [--dest DEST_DIR]
+#     default PIN_JSON  the ACTIVE pin: PIN_DIR/pin_<id>.json, where PIN_DIR/ACTIVE names <id> (the pin the
+#                       launchers check). PIN_DIR defaults to /mnt/e/DriveDiT/pin. The pointer is validated as in
+#                       preflight --pin-active: a regular file, no symlink, one valid id, a pin holding that id.
 #     default DEST_DIR  /mnt/e/DriveDiT/pin/<pin_id>    (results: DEST/game, DEST/tools, DEST/SHA256SUMS, DEST/meta)
+#   1.8.0.13 is the interim pin. Before moving to 1.9, cold-copy 1.8 (while it is still the active pin) if a
+#   rollback to 1.8 should stay possible; see README "1.8 is an interim pin; moving to 1.9".
 #
 # DRY RUN BY DEFAULT: without --run it only reads, checks the live installs against the pin, and prints the plan.
 # The sources are only read. DEST must resolve under /mnt/e; anything on C: is refused.
@@ -28,7 +32,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFLIGHT="$HERE/preflight.py"
 PY=(python3 -I -B)
-PIN="/mnt/e/DriveDiT/pin/pin_1.8.0.13.json"
+PIN=""
+PIN_DIR=""
 DEST=""
 RUN=0
 MARGIN=$((2 * 1024 * 1024 * 1024))   # 2 GiB free-space margin
@@ -39,26 +44,37 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --run) RUN=1; shift ;;
     --pin) PIN="${2:?--pin needs a path}"; shift 2 ;;
+    --pin-dir) PIN_DIR="${2:?--pin-dir needs a path}"; shift 2 ;;
     --dest) DEST="${2:?--dest needs a path}"; shift 2 ;;
     -h|--help) sed -n '2,/^[^#]/{/^#/p}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
 
-[[ -f "$PIN" ]] || die "pin not found: $PIN (run make_pin.py first)"
+[[ -z "$PIN" || -z "$PIN_DIR" ]] || die "--pin and --pin-dir are mutually exclusive"
 [[ -f "$PREFLIGHT" ]] || die "preflight.py not found next to this script: $PREFLIGHT"
 
-# Pin fields: pin_id, and the live acf and install paths of both apps.
+# Resolve the pin with preflight's own code (resolve_pin): the ACTIVE pointer by default, or --pin. Fields: how it
+# was resolved, the pin path, pin_id (a strict pin id, so DEST cannot escape), and the live acf and install paths.
 mapfile -t F < <("${PY[@]}" -c '
-import json, sys
-p = json.load(open(sys.argv[1]))
-print(p["pin_id"])
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("dd_pin_preflight", sys.argv[1])
+pf = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = pf
+spec.loader.exec_module(pf)
+try:
+    src = pf.resolve_pin(sys.argv[2] or None, not sys.argv[2], sys.argv[3] or None)
+    pf.pinlib.validate_pin_id(src["pin"].get("pin_id"))
+except pf.pinlib.PinError as exc:
+    sys.exit("cold_copy: %s" % exc)
+p = src["pin"]
+print(pf.describe_source(src)); print(src["path"]); print(p["pin_id"])
 for app in ("game", "tools"):
     print(p[app]["install"]["wsl"]); print(p[app]["acf"]["wsl"])
-' "$PIN")
-[[ ${#F[@]} -eq 5 ]] || die "cannot read pin fields from $PIN"
-PIN_ID="${F[0]}"; GAME_SRC="${F[1]}"; GAME_ACF="${F[2]}"; TOOLS_SRC="${F[3]}"; TOOLS_ACF="${F[4]}"
-[[ "$PIN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "unexpected pin_id: $PIN_ID"
+' "$PREFLIGHT" "$PIN" "$PIN_DIR")
+[[ ${#F[@]} -eq 7 ]] || die "cannot resolve the pin (see above). Activate one with pin_activate.py, or pass --pin PIN_JSON"
+PIN_SRC="${F[0]}"; PIN="${F[1]}"; PIN_ID="${F[2]}"
+GAME_SRC="${F[3]}"; GAME_ACF="${F[4]}"; TOOLS_SRC="${F[5]}"; TOOLS_ACF="${F[6]}"
 [[ -n "$DEST" ]] || DEST="$(dirname "$PIN")/$PIN_ID"
 
 # Write guard: resolve, then allow only /mnt/e; refuse C: explicitly.
@@ -111,6 +127,7 @@ NEED=$(( $(du -sb -- "$GAME_SRC" | cut -f1) + $(du -sb -- "$TOOLS_SRC" | cut -f1
 HAVE=$(df -B1 --output=avail -- "$PARENT" | tail -n 1 | tr -d ' ')
 
 echo "pin        $PIN (pin_id $PIN_ID)"
+echo "resolved   $PIN_SRC"
 echo "game  src  $GAME_SRC"
 echo "tools src  $TOOLS_SRC"
 echo "dest       $DEST  [$STATE]"

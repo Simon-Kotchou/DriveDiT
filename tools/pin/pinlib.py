@@ -15,10 +15,12 @@ Workbench addon.
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 
 PIN_SCHEMA = "dd-pin/1"
 LAUNCH_SCHEMA = "dd-launch/1"
@@ -54,6 +56,20 @@ STATE_FLAGS_SETTLED = "4"
 
 DEFAULT_WRITE_ROOTS = ("/mnt/e/",)
 FORBIDDEN_WRITE_PREFIXES = ("/mnt/c/",)
+
+# Active pin pointer. <pin dir>/ACTIVE holds one line, the id of the pin every launcher checks
+# (preflight --pin-active), and that pin is <pin dir>/pin_<id>.json. Only pin_activate.py writes ACTIVE: it
+# refuses a pin that does not match the live installs and appends every switch to <pin dir>/ACTIVE.log.
+# 1.8.0.13 is the interim pin; the plan is to move to 1.9 once it is stable and compatibility is checked.
+DEFAULT_PIN_DIR = "/mnt/e/DriveDiT/pin"
+ACTIVE_NAME = "ACTIVE"
+ACTIVE_LOG_NAME = "ACTIVE.log"
+ACTIVE_MAX_BYTES = 64
+PIN_MAX_BYTES = 4 * 1024 * 1024
+# A pin id names a file (pin_<id>.json) and a directory (<pin dir>/<id>, the cold copy), so it is strict:
+# 2 to 4 dot-separated numbers and an optional lowercase suffix, e.g. 1.8.0.13, 1.9.0.12, 1.9.0.9-exp.
+# No path separator, no "..", no whitespace. Always used with fullmatch, so a trailing newline is refused too.
+PIN_ID_RE = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,9}){1,3}(?:-[a-z0-9]{1,16})?")
 
 
 class PinError(Exception):
@@ -343,4 +359,161 @@ def write_json_new(path: str, obj, allowed_roots=DEFAULT_WRITE_ROOTS, overwrite:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+    return target
+
+
+# --------------------------------------------------------------------------- active pin pointer
+
+
+def validate_pin_id(pin_id) -> str:
+    """Return pin_id if it is a valid pin id (PIN_ID_RE, whole string), else raise PinError."""
+    if not isinstance(pin_id, str) or PIN_ID_RE.fullmatch(pin_id) is None:
+        raise PinError("invalid pin id %r: expected 2 to 4 dot-separated numbers and an optional lowercase "
+                       "suffix, such as 1.8.0.13, 1.9.0.12 or 1.9.0.9-exp" % (pin_id,))
+    return pin_id
+
+
+def pin_file_for(pin_dir: str, pin_id: str) -> str:
+    """<pin dir>/pin_<id>.json for a valid pin id."""
+    return os.path.join(pin_dir, "pin_%s.json" % validate_pin_id(pin_id))
+
+
+def read_regular_file(path: str, what: str, limit: int) -> bytes:
+    """The whole content of a regular file. A symlink at the last path component is refused.
+
+    lstat gives the clear message. O_NOFOLLOW keeps the refusal even if the file is swapped for a link
+    between the lstat and the open, and O_NONBLOCK keeps a swapped-in FIFO from blocking the open.
+    """
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise PinError("%s not found: %s" % (what, path))
+    except OSError as exc:
+        raise PinError("cannot read %s %s: %s" % (what, path, exc))
+    if stat.S_ISLNK(st.st_mode):
+        raise PinError("%s is a symlink, refused (it must be a regular file): %s" % (what, path))
+    if not stat.S_ISREG(st.st_mode):
+        raise PinError("%s is not a regular file: %s" % (what, path))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PinError("%s is a symlink, refused (it must be a regular file): %s" % (what, path))
+        raise PinError("cannot read %s %s: %s" % (what, path, exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PinError("%s is not a regular file: %s" % (what, path))
+        chunks, total = [], 0
+        while True:
+            block = os.read(fd, 1 << 16)
+            if not block:
+                break
+            total += len(block)
+            if total > limit:
+                raise PinError("%s is larger than %d bytes: %s" % (what, limit, path))
+            chunks.append(block)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def read_active(pin_dir: str) -> str:
+    """The pin id named by <pin dir>/ACTIVE.
+
+    Raises PinError unless ACTIVE is a regular file (not a symlink) holding exactly one valid pin id,
+    optionally followed by one LF or CRLF. Empty, multi-line, padded or non-ASCII content is refused.
+    """
+    path = os.path.join(pin_dir, ACTIVE_NAME)
+    raw = read_regular_file(path, "active pin pointer", ACTIVE_MAX_BYTES)
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        raise PinError("%s is not plain ASCII; it must hold exactly one pin id line" % path)
+    if text.endswith("\r\n"):
+        body = text[:-2]
+    elif text.endswith("\n"):
+        body = text[:-1]
+    else:
+        body = text
+    if not body.strip():
+        raise PinError("%s is empty; set it with pin_activate.py <pin id>" % path)
+    if "\n" in body or "\r" in body:
+        raise PinError("%s holds more than one line; it must hold exactly one pin id" % path)
+    try:
+        return validate_pin_id(body)
+    except PinError as exc:
+        raise PinError("%s: %s" % (path, exc))
+
+
+def guarded_entry(path: str, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+    """Resolve the PARENT directory of path through check_write_path and return <resolved parent>/<name>.
+
+    For files that are replaced by rename or opened with O_NOFOLLOW: the directory entry itself is written,
+    never whatever a symlink at that name points to. The parent must already exist.
+    """
+    full = os.path.abspath(win_to_wsl(path))
+    name = os.path.basename(full)
+    if not name or name in (".", ".."):
+        raise PinError("not a file path: %s" % path)
+    parent = check_write_path(os.path.dirname(full), allowed_roots)
+    if not os.path.isdir(parent):
+        raise PinError("output directory does not exist (create it first): %s" % parent)
+    return os.path.join(parent, name)
+
+
+def write_text_replace(path: str, text: str, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+    """Atomically create or replace a small text file on a guarded path.
+
+    A temp file in the same directory is written and fsynced, then renamed over the target, so a reader sees
+    the old or the new content, never a mix. A symlink at the target name is replaced, never followed.
+    """
+    target = guarded_entry(path, allowed_roots)
+    tmp = "%s.tmp-%d" % (target, os.getpid())
+    try:
+        with open(tmp, "x", encoding="ascii", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    finally:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+    try:  # make the rename durable; drvfs may not support fsync on a directory
+        dfd = os.open(os.path.dirname(target), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+    return target
+
+
+def append_line(path: str, line: str, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+    """Append one ASCII line (a newline is added) to a guarded regular file, creating it if needed.
+
+    The file is opened with O_APPEND and O_NOFOLLOW: a symlink at the name is refused, not followed.
+    """
+    if "\n" in line or "\r" in line:
+        raise PinError("a log line must not contain a line break")
+    data = (line + "\n").encode("ascii")
+    target = guarded_entry(path, allowed_roots)
+    flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open(target, flags, 0o644)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PinError("%s is a symlink, refused" % target)
+        raise PinError("cannot open %s for append: %s" % (target, exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PinError("%s is not a regular file" % target)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     return target

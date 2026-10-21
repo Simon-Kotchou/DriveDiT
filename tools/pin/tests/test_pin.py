@@ -43,6 +43,8 @@ def _load(name):
 pinlib = _load("pinlib")
 make_pin = _load("make_pin")
 preflight = _load("preflight")
+pin_activate = _load("pin_activate")
+COLD_COPY = os.path.join(PIN_DIR, "cold_copy.sh")
 
 PIN_MTIME_NS = 1788671755 * 10**9          # 2026-09-06 (UTC), like the real paks
 TOOLS_MTIME_NS = 1788671758_506855800      # sub-second, like the real Tools paks
@@ -133,6 +135,7 @@ class TmpCase(unittest.TestCase):
         handing them a real /mnt/c path."""
         self.assertIs(make_pin.pinlib, pinlib)
         self.assertIs(preflight.pinlib, pinlib)
+        self.assertIs(pin_activate.pinlib, pinlib)
         fake = os.path.join(self.tmp, "fake_c_drive")
         saved = pinlib.FORBIDDEN_WRITE_PREFIXES
         pinlib.FORBIDDEN_WRITE_PREFIXES = saved + (os.path.realpath(fake).lower() + "/",)
@@ -314,6 +317,24 @@ class MakePinTests(TmpCase):
         self.assertIn("immutable", err)
         self.assertEqual(run_main(make_pin.main, self.fs.make_pin_argv("--force"), self.roots)[0], 0)
         self.assertEqual([n for n in os.listdir(self.fs.out_dir) if ".tmp-" in n], [])
+
+    def test_invalid_pin_id_refused(self):
+        # The id names pin_<id>.json and the cold-copy dir <pin dir>/<id>, so make_pin refuses a bad one up front.
+        for bad in ("../1.8.0.13", "1.8.0.13/x", "1.8.0.13\n", "latest", ""):
+            argv = self.fs.make_pin_argv()
+            argv[argv.index("--pin-id") + 1] = bad
+            rc, _, err = run_main(make_pin.main, argv, self.roots)
+            self.assertEqual(rc, 2, bad)
+            self.assertIn("invalid pin id", err)
+        self.assertEqual(os.listdir(self.fs.out_dir), [])
+
+    def test_warns_when_not_named_after_the_id(self):
+        argv = self.fs.make_pin_argv()
+        argv[argv.index("--out") + 1] = os.path.join(self.fs.out_dir, "other.json")
+        rc, _, err = run_main(make_pin.main, argv, self.roots)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARNING", err)
+        self.assertIn("pin_1.8.0.13.json", err)
 
 
 # --------------------------------------------------------------------------- preflight
@@ -558,6 +579,395 @@ class PreflightTests(TmpCase):
         self.assertEqual((r.returncode, r.stdout), (2, ""))
         self.assertIn("outside", r.stderr)
         self.assertFalse(os.path.exists(NEVER_WRITABLE))
+
+
+# --------------------------------------------------------------------------- active pin pointer
+
+
+def fake_steam_update(fs, game_buildid="25500000", tools_buildid="25400000"):
+    """Make the fake installs look like Steam installed another build: new buildids and a changed pak."""
+    for app, bid in (("game", game_buildid), ("tools", tools_buildid)):
+        fs.set_acf(app, "buildid", bid)
+        fs.set_acf(app, "TargetBuildID", bid)
+    fs.write(fs.game_root, "addons/data/data.pak", b"data-0 of the new build", PIN_MTIME_NS + 86400 * 10**9)
+
+
+class PinIdTests(unittest.TestCase):
+    def test_valid_ids(self):
+        for good in ("1.8.0.13", "1.9.0.12", "1.9.0.9-exp", "1.9", "10.0.1.2", "1.9.0.9-rc2"):
+            self.assertEqual(pinlib.validate_pin_id(good), good)
+
+    def test_invalid_ids(self):
+        for bad in ("", "1", "1.8.0.13\n", "1.8.0.13\r\n", " 1.8.0.13", "1.8.0.13 ", "../1.8.0.13", "1.8/0.13",
+                    "1.8\\0.13", "1..8", "..", "1.8.0.13.1", "1.8.0.13-", "1.8.0.13-EXP", "1.8.0.13-exp/x",
+                    "pin_1.8.0.13", "1.8.0.13.json", "\u0661.8.0.13", "1.8.0.13-exp-2", ".1.8", "1.8.", None, 1.8):
+            with self.assertRaises(pinlib.PinError, msg=repr(bad)):
+                pinlib.validate_pin_id(bad)
+
+    def test_pin_file_for(self):
+        self.assertEqual(pinlib.pin_file_for("/x/pin", "1.9.0.9-exp"), "/x/pin/pin_1.9.0.9-exp.json")
+        with self.assertRaises(pinlib.PinError):
+            pinlib.pin_file_for("/x/pin", "../1.8.0.13")
+
+
+class PinnedCase(TmpCase):
+    """A fake Steam layout set to AutoUpdateBehavior "1" with pin_1.8.0.13.json in out_dir (the pin dir)."""
+
+    def setUp(self):
+        super().setUp()
+        self.fs.set_auto_update("1")
+        rc, _, err = run_main(make_pin.main, self.fs.make_pin_argv(), self.roots)
+        self.assertEqual(rc, 0, err)
+        self.pin_dir = self.fs.out_dir
+        self.active = os.path.join(self.pin_dir, "ACTIVE")
+        self.log = os.path.join(self.pin_dir, "ACTIVE.log")
+        self.launches = os.path.join(self.pin_dir, "launches")
+
+    def put_active(self, data: bytes):
+        with open(self.active, "wb") as fh:
+            fh.write(data)
+
+    def pin_file(self, pin_id):
+        return os.path.join(self.pin_dir, "pin_%s.json" % pin_id)
+
+    def activate(self, pin_id, roots=None):
+        return run_main(pin_activate.main, [pin_id, "--pin-dir", self.pin_dir], roots or self.roots)
+
+    def log_lines(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="ascii") as fh:
+            return fh.read().splitlines()
+
+    def preflight_active(self, *extra):
+        return run_main(preflight.main, ["--pin-active", "--pin-dir", self.pin_dir] + list(extra), self.roots)
+
+
+class ActivePointerTests(PinnedCase):
+    def test_reads_one_valid_line(self):
+        for data in (b"1.8.0.13", b"1.8.0.13\n", b"1.8.0.13\r\n"):
+            self.put_active(data)
+            self.assertEqual(pinlib.read_active(self.pin_dir), "1.8.0.13", data)
+
+    def test_refuses_bad_content(self):
+        cases = {
+            b"": "empty", b"\n": "empty", b"   \n": "empty",
+            b"1.8.0.13\n1.9.0.12\n": "more than one line", b"1.8.0.13\n\n": "more than one line",
+            b"1.8.0.13\r": "more than one line", b"\n1.8.0.13": "more than one line",
+            b"../1.8.0.13\n": "invalid pin id", b"1.8.0.13 \n": "invalid pin id", b"pin_1.8.0.13.json\n": "invalid pin id",
+            b"\xef\xbb\xbf1.8.0.13\n": "not plain ASCII", b"1" * 100: "larger than",
+        }
+        for data, why in cases.items():
+            self.put_active(data)
+            with self.assertRaises(pinlib.PinError, msg=data) as cm:
+                pinlib.read_active(self.pin_dir)
+            self.assertIn(why, str(cm.exception), data)
+
+    def test_refuses_missing(self):
+        with self.assertRaisesRegex(pinlib.PinError, "not found"):
+            pinlib.read_active(self.pin_dir)
+
+    def test_refuses_symlink(self):
+        real = os.path.join(self.tmp, "elsewhere_ACTIVE")
+        with open(real, "wb") as fh:
+            fh.write(b"1.8.0.13\n")
+        os.symlink(real, self.active)
+        with self.assertRaisesRegex(pinlib.PinError, "symlink"):
+            pinlib.read_active(self.pin_dir)
+        os.unlink(self.active)
+        os.symlink(os.path.join(self.tmp, "dangling"), self.active)
+        with self.assertRaisesRegex(pinlib.PinError, "symlink"):
+            pinlib.read_active(self.pin_dir)
+
+    def test_refuses_directory(self):
+        os.mkdir(self.active)
+        with self.assertRaisesRegex(pinlib.PinError, "not a regular file"):
+            pinlib.read_active(self.pin_dir)
+
+
+class PreflightActiveTests(PinnedCase):
+    def record(self, lid):
+        with open(os.path.join(self.launches, "launch_%s.json" % lid)) as fh:
+            return json.load(fh)
+
+    def test_launch_record_names_pin_and_resolution(self):
+        self.put_active(b"1.8.0.13\n")
+        rc, out, err = self.preflight_active("--exe", "wb")
+        self.assertEqual(rc, 0, err)
+        lid = out.strip()
+        self.assertRegex(lid, r"^\d{8}T\d{6}Z-wb-[0-9a-f]{4}$")
+        rec = self.record(lid)
+        self.assertEqual(rec["pin"], {
+            "path": self.pin_file("1.8.0.13"), "pin_id": "1.8.0.13", "sha256": pinlib.sha256_file(self.pin_file("1.8.0.13")),
+            "resolved_by": "active-pointer", "pointer": self.active})
+        self.assertIn("--pin-active", rec["argv"])
+        self.assertIn("via active pointer", err)
+
+    def test_explicit_pin_still_works_and_is_recorded_as_such(self):
+        rc, out, err = run_main(preflight.main, ["--pin", self.pin_file("1.8.0.13"), "--exe", "client"], self.roots)
+        self.assertEqual(rc, 0, err)
+        rec = self.record(out.strip())
+        self.assertEqual((rec["pin"]["resolved_by"], rec["pin"]["pointer"], rec["pin"]["pin_id"]),
+                         ("explicit-path", None, "1.8.0.13"))
+
+    def test_refused_record_names_resolution(self):
+        self.put_active(b"1.8.0.13\n")
+        self.fs.set_acf("game", "AutoUpdateBehavior", "0")
+        rc, out, err = self.preflight_active("--exe", "wb")
+        self.assertEqual((rc, out), (1, ""))
+        refused = [n for n in os.listdir(self.launches) if n.startswith("refused_")]
+        self.assertEqual(len(refused), 1)
+        with open(os.path.join(self.launches, refused[0])) as fh:
+            rec = json.load(fh)
+        self.assertEqual((rec["pin"]["resolved_by"], rec["pin"]["pointer"]), ("active-pointer", self.active))
+
+    def test_check_mode_reports_resolution(self):
+        self.put_active(b"1.8.0.13\n")
+        rc, out, err = self.preflight_active("--check")
+        self.assertEqual(rc, 0, out + err)
+        first = out.splitlines()[0]
+        self.assertTrue(first.startswith("PIN"), first)
+        self.assertIn("pin 1.8.0.13 via active pointer %s -> %s" % (self.active, self.pin_file("1.8.0.13")), first)
+        self.assertIn("RESULT: OK (pin 1.8.0.13)", out)
+        self.assertFalse(os.path.exists(self.launches))
+
+    def test_after_a_steam_update_the_active_pin_refuses(self):
+        self.put_active(b"1.8.0.13\n")
+        fake_steam_update(self.fs)
+        rc, out, err = self.preflight_active("--exe", "client")
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("FAIL game.buildid", err)
+        self.assertIn("FAIL tools.buildid", err)
+
+    def test_pointer_problems_are_config_errors(self):
+        os.symlink(self.pin_file("1.8.0.13"), self.pin_file("1.9.0.13"))
+        shutil.copyfile(self.pin_file("1.8.0.13"), self.pin_file("1.9.0.14"))  # a regular file with pin_id 1.8.0.13
+        real = os.path.join(self.tmp, "elsewhere_ACTIVE")
+        with open(real, "wb") as fh:
+            fh.write(b"1.8.0.13\n")
+        cases = [
+            ("missing", None, "not found"),
+            ("empty", b"", "empty"),
+            ("multi-line", b"1.8.0.13\n1.8.0.13\n", "more than one line"),
+            ("invalid id", b"../pin_1.8.0.13\n", "invalid pin id"),
+            ("symlinked ACTIVE", "symlink", "symlink"),
+            ("missing pin file", b"1.9.0.12\n", "not found"),
+            ("symlinked pin file", b"1.9.0.13\n", "symlink"),
+            ("pin_id mismatch", b"1.9.0.14\n", "holds pin_id '1.8.0.13', not '1.9.0.14'"),
+        ]
+        for name, data, why in cases:
+            with self.subTest(name):
+                if os.path.lexists(self.active):
+                    os.unlink(self.active)
+                if data == "symlink":
+                    os.symlink(real, self.active)
+                elif data is not None:
+                    self.put_active(data)
+                for mode in (["--exe", "wb"], ["--check"]):
+                    rc, out, err = self.preflight_active(*mode)
+                    self.assertEqual((rc, out), (2, ""), (mode, err))
+                    self.assertIn("preflight:", err)
+                    self.assertIn(why, err)
+                self.assertFalse(os.path.exists(self.launches))
+
+    def test_pin_and_pin_active_are_mutually_exclusive(self):
+        for argv in (["--pin", self.pin_file("1.8.0.13"), "--pin-active", "--check"],
+                     ["--pin-active", "--pin", self.pin_file("1.8.0.13"), "--exe", "wb"],
+                     ["--check"]):
+            out, err = io.StringIO(), io.StringIO()
+            with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                preflight.main(argv, write_roots=self.roots)
+            self.assertEqual(cm.exception.code, 2, argv)
+            self.assertEqual(out.getvalue(), "", argv)
+            self.assertIn("--pin", err.getvalue())
+        self.assertFalse(os.path.exists(self.launches))
+        with self.assertRaises(pinlib.PinError):
+            preflight.resolve_pin(self.pin_file("1.8.0.13"), True, None)
+        with self.assertRaises(pinlib.PinError):
+            preflight.resolve_pin(None, False, None)
+
+    def test_pin_dir_only_with_pin_active(self):
+        rc, out, err = run_main(preflight.main, ["--pin", self.pin_file("1.8.0.13"), "--pin-dir", self.pin_dir,
+                                                 "--check"], self.roots)
+        self.assertEqual((rc, out), (2, ""))
+        self.assertIn("--pin-dir is only accepted with --pin-active", err)
+
+    def test_cli_isolated_mode(self):
+        self.put_active(b"1.8.0.13\n")
+        script = os.path.join(PIN_DIR, "preflight.py")
+        r = subprocess.run([sys.executable, "-I", "-B", script, "--pin-active", "--pin-dir", self.pin_dir, "--check"],
+                           capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("via active pointer", r.stdout)
+        self.assertIn("RESULT: OK (pin 1.8.0.13)", r.stdout)
+
+
+class PinActivateTests(PinnedCase):
+    LOG_RE = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ %s -> %s [A-Za-z0-9._-]+@[A-Za-z0-9._-]+$"
+
+    def test_first_activation_writes_pointer_and_log(self):
+        rc, out, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("RESULT: OK (pin 1.8.0.13)", out)
+        self.assertIn("ACTIVE: none -> 1.8.0.13", out)
+        with open(self.active, "rb") as fh:
+            self.assertEqual(fh.read(), b"1.8.0.13\n")
+        lines = self.log_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], self.LOG_RE % ("none", r"1\.8\.0\.13"))
+        self.assertEqual([n for n in os.listdir(self.pin_dir) if ".tmp-" in n], [])
+        rc, out, _ = self.preflight_active("--check")
+        self.assertEqual(rc, 0, out)
+
+    def test_already_active_writes_nothing(self):
+        self.assertEqual(self.activate("1.8.0.13")[0], 0)
+        rc, out, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("already the active pin; nothing written", out)
+        self.assertEqual(len(self.log_lines()), 1)
+
+    def test_refuses_a_pin_that_does_not_match_the_installs(self):
+        self.fs.set_acf("tools", "AutoUpdateBehavior", "0")
+        rc, out, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL   tools.auto_update_behavior", out)
+        self.assertIn("RESULT: REFUSED", out)
+        self.assertIn("NOT activated", err)
+        self.assertFalse(os.path.lexists(self.active))
+        self.assertFalse(os.path.lexists(self.log))
+
+    def test_switch_to_a_new_build_and_back_is_checked(self):
+        self.assertEqual(self.activate("1.8.0.13")[0], 0)
+        fake_steam_update(self.fs)  # Steam installs the new build
+        self.assertEqual(self.preflight_active("--check")[0], 1)
+        rc, out, err = self.activate("1.8.0.13")  # re-activating the old pin does not paper over it
+        self.assertEqual(rc, 1, out + err)
+        argv = ["--pin-id", "1.9.0.12", "--out", self.pin_file("1.9.0.12"), "--game-acf", self.fs.game_acf,
+                "--tools-acf", self.fs.tools_acf, "--expect-game-buildid", "25500000",
+                "--expect-tools-buildid", "25400000"]
+        rc, _, err = run_main(make_pin.main, argv, self.roots)
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.activate("1.9.0.12")
+        self.assertEqual(rc, 0, out + err)
+        with open(self.active, "rb") as fh:
+            self.assertEqual(fh.read(), b"1.9.0.12\n")
+        lines = self.log_lines()
+        self.assertEqual(len(lines), 2)
+        self.assertRegex(lines[1], self.LOG_RE % (r"1\.8\.0\.13", r"1\.9\.0\.12"))
+        rc, out, _ = self.preflight_active("--check")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("RESULT: OK (pin 1.9.0.12)", out)
+        # Back to 1.8.0.13 is refused while the installs are the new build: ACTIVE and the log stay as they are.
+        rc, out, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 1, out + err)
+        with open(self.active, "rb") as fh:
+            self.assertEqual(fh.read(), b"1.9.0.12\n")
+        self.assertEqual(len(self.log_lines()), 2)
+
+    def test_bad_ids_and_pin_files_are_refused(self):
+        os.symlink(self.pin_file("1.8.0.13"), self.pin_file("1.9.0.13"))
+        shutil.copyfile(self.pin_file("1.8.0.13"), self.pin_file("1.9.0.14"))
+        for pin_id, why in (("../1.8.0.13", "invalid pin id"), ("1.8.0.13/..", "invalid pin id"), ("", "invalid pin id"),
+                            ("1.9.0.12", "not found"), ("1.9.0.13", "symlink"),
+                            ("1.9.0.14", "holds pin_id '1.8.0.13', not '1.9.0.14'")):
+            rc, out, err = self.activate(pin_id)
+            self.assertEqual(rc, 2, pin_id)
+            self.assertIn(why, err, pin_id)
+        self.assertFalse(os.path.lexists(self.active))
+        self.assertFalse(os.path.lexists(self.log))
+
+    def test_symlinked_active_is_left_alone(self):
+        real = os.path.join(self.tmp, "elsewhere_ACTIVE")
+        with open(real, "wb") as fh:
+            fh.write(b"1.8.0.13\n")
+        os.symlink(real, self.active)
+        rc, _, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 2)
+        self.assertIn("not a regular file", err)
+        self.assertTrue(os.path.islink(self.active))
+        self.assertFalse(os.path.lexists(self.log))
+
+    def test_symlinked_log_refused_before_the_switch(self):
+        os.symlink(os.path.join(self.tmp, "elsewhere_log"), self.log)
+        rc, _, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 2)
+        self.assertIn("ACTIVE.log is not a regular file", err)
+        self.assertFalse(os.path.lexists(self.active))
+        self.assertFalse(os.path.lexists(os.path.join(self.tmp, "elsewhere_log")))
+
+    def test_invalid_pointer_is_replaced_and_logged(self):
+        self.put_active(b"garbage\n")
+        rc, out, err = self.activate("1.8.0.13")
+        self.assertEqual(rc, 0, out + err)
+        self.assertRegex(self.log_lines()[0], self.LOG_RE % ("invalid", r"1\.8\.0\.13"))
+
+    def test_write_guard_refuses_c_drive(self):
+        fake_c = self.fake_c_drive()
+        os.makedirs(fake_c)
+        shutil.copyfile(self.pin_file("1.8.0.13"), os.path.join(fake_c, "pin_1.8.0.13.json"))
+        rc, _, err = run_main(pin_activate.main, ["1.8.0.13", "--pin-dir", fake_c], self.roots)
+        self.assertEqual(rc, 2)
+        self.assertIn("C:", err)
+        self.assertEqual(os.listdir(fake_c), ["pin_1.8.0.13.json"])
+
+    def test_write_guard_refuses_off_e_by_default(self):
+        if os.path.realpath(self.tmp).startswith("/mnt/e/"):
+            self.skipTest("temp dir is on E:, so the default guard allows it")
+        rc, _, err = self.activate("1.8.0.13", roots=pinlib.DEFAULT_WRITE_ROOTS)
+        self.assertEqual(rc, 2)
+        self.assertIn("outside", err)
+        self.assertFalse(os.path.lexists(self.active))
+
+    def test_cli_isolated_mode(self):
+        script = os.path.join(PIN_DIR, "pin_activate.py")
+        r = subprocess.run([sys.executable, "-I", "-B", script, "../1.8.0.13", "--pin-dir", self.pin_dir],
+                           capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual((r.returncode, r.stdout), (2, ""), r.stderr)
+        self.assertIn("invalid pin id", r.stderr)
+        r = subprocess.run([sys.executable, "-I", "-B", script, "1.8.0.13", "--pin-dir", self.pin_dir],
+                           capture_output=True, text=True, cwd=self.tmp)
+        if os.path.realpath(self.tmp).startswith("/mnt/e/"):
+            self.assertEqual(r.returncode, 0, r.stderr)
+        else:
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("outside", r.stderr)
+            self.assertFalse(os.path.lexists(self.active))
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash not found")
+class ColdCopyResolutionTests(PinnedCase):
+    """cold_copy.sh resolves the active pin by default. --dest is a path the guard always refuses (/proc), so these
+    runs stop at the DEST guard and write nothing; reaching that guard proves the pin resolved."""
+
+    def cold_copy(self, *args):
+        r = subprocess.run(["bash", COLD_COPY] + list(args) + ["--dest", NEVER_WRITABLE],
+                           capture_output=True, text=True, cwd=self.tmp)
+        self.assertFalse(os.path.exists(NEVER_WRITABLE))
+        return r.returncode, r.stdout, r.stderr
+
+    def test_defaults_to_the_active_pin(self):
+        self.put_active(b"1.8.0.13\n")
+        rc, _, err = self.cold_copy("--pin-dir", self.pin_dir)
+        self.assertEqual(rc, 1)
+        self.assertIn("refusing to write outside /mnt/e", err)
+
+    def test_pointer_problems_stop_it(self):
+        rc, _, err = self.cold_copy("--pin-dir", self.pin_dir)
+        self.assertEqual(rc, 1)
+        self.assertIn("not found", err)
+        self.assertIn("cannot resolve the pin", err)
+        os.symlink(os.path.join(self.tmp, "elsewhere"), self.active)
+        rc, _, err = self.cold_copy("--pin-dir", self.pin_dir)
+        self.assertEqual(rc, 1)
+        self.assertIn("symlink", err)
+
+    def test_explicit_pin_and_exclusivity(self):
+        rc, _, err = self.cold_copy("--pin", self.pin_file("1.8.0.13"))
+        self.assertEqual(rc, 1)
+        self.assertIn("refusing to write outside /mnt/e", err)
+        rc, _, err = self.cold_copy("--pin", self.pin_file("1.8.0.13"), "--pin-dir", self.pin_dir)
+        self.assertEqual(rc, 1)
+        self.assertIn("mutually exclusive", err)
 
 
 if __name__ == "__main__":

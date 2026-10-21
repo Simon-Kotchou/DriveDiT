@@ -11,6 +11,8 @@ already exist; nothing else is written.
     python3 -I -B make_pin.py --pin-id 1.8.0.13 --out /mnt/e/DriveDiT/pin/pin_1.8.0.13.json \
         --expect-game-buildid 24903726 --expect-tools-buildid 24870687
 
+Writing a pin does not make the launchers use it: switch with `pin_activate.py <pin id>` (see README).
+
 Exit codes: 0 written; 1 install state not pinnable (buildid mismatch, update pending, no paks);
 2 usage, path or read error (nothing written).
 """
@@ -132,7 +134,9 @@ def build_pin(pin_id: str, out_path: str, game: dict, tools: dict) -> dict:
 def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", required=True, help="pin JSON to write; must be under /mnt/e; parent must exist")
-    ap.add_argument("--pin-id", required=True, help="human label of the pinned version, e.g. 1.8.0.13")
+    ap.add_argument("--pin-id", required=True,
+                    help="id of the pinned version, e.g. 1.8.0.13, 1.9.0.12 or 1.9.0.9-exp (pinlib.PIN_ID_RE); "
+                         "name the output pin_<id>.json so pin_activate.py and preflight --pin-active find it")
     ap.add_argument("--game-acf", default=pinlib.DEFAULT_ACF["game"])
     ap.add_argument("--tools-acf", default=pinlib.DEFAULT_ACF["tools"])
     ap.add_argument("--expect-game-buildid", type=int, default=None)
@@ -142,10 +146,14 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
 
     # Path guard first: nothing is read or written before the output path is known to be on E:.
     try:
+        pinlib.validate_pin_id(args.pin_id)
         out = pinlib.check_write_path(args.out, write_roots)
     except pinlib.PinError as exc:
         print("make_pin: %s" % exc, file=sys.stderr)
         return 2
+    if os.path.basename(out) != "pin_%s.json" % args.pin_id:
+        print("make_pin: WARNING: %s is not named pin_%s.json, so pin_activate.py and preflight --pin-active "
+              "will not find it" % (out, args.pin_id), file=sys.stderr)
     if os.path.exists(out) and not args.force:
         print("make_pin: %s already exists; a pin is immutable (use --force only to re-pin on purpose)" % out,
               file=sys.stderr)

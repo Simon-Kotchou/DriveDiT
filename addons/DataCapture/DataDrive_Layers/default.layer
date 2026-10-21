@@ -1,0 +1,735 @@
+SCR_AIWorld : "{E0A05C76552E7F58}Prefabs/AI/SCR_AIWorld.et" {
+ components {
+  NavmeshWorldComponent "{5584F30E67F617AD}" {
+   NavmeshSettings NavmeshWorld "{50FC63BEBE3973C5}" {
+    NavmeshFilesConfig BaseNavmeshFilesConfig "{65BA709AA9F38222}" {
+     NavmeshFile "{D8EF7131FB31AF97}worlds/GameMaster/Navmeshes/GM_Arland.nmn"
+    }
+   }
+  }
+  NavmeshWorldComponent "{5584F30EEFEE1223}" {
+   NavmeshSettings ChimeraNavmeshWorld "{50FC63BEBE3973C5}" {
+    NavmeshFilesConfig BaseNavmeshFilesConfig "{60CA9BE5536BF701}" {
+     NavmeshFile "{D8EF7131FB31AF97}worlds/GameMaster/Navmeshes/GM_Arland.nmn"
+    }
+   }
+  }
+  NavmeshWorldComponent "{5C8C9B750D124A63}" {
+   NavmeshSettings NavmeshWorld "{5C8C9B750B60C6E2}" {
+    NavmeshFilesConfig BaseNavmeshFilesConfig "{5C90BD0EC793647D}" {
+     NavmeshFile "{D8EF7131FB31AF97}worlds/GameMaster/Navmeshes/GM_Arland.nmn"
+    }
+   }
+  }
+ }
+ coords 2746.276 77.434 1661.958
+ "Accepted Road Types" 79
+ "Collision detection layers" 9437888
+}
+SCR_BaseGameMode GameMode_DataCapture : "{C1F9B6BAE0BADD20}Prefabs/MP/Modes/GameMaster/GameMode_GameMaster.et" {
+ components {
+  SCR_MLDataCollector "{AAAABBBBCCCCDDDD}" {
+   m_bEnableDataCapture 1
+   m_iCaptureIntervalMs 200
+   m_bCaptureScreenshots 1
+   m_bVerboseLogging 1
+   m_bEnableAnchorSelection 1
+  }
+  SCR_MLScreenshotCapture "{BBBBCCCCDDDDEEEE}" {
+   m_bEnableCapture 1
+   m_eCameraPosition 0
+   m_iCaptureWidth 320
+   m_iCaptureHeight 180
+   m_fCameraFOV 90
+   m_vHoodOffset "2.2 0.95 0"
+  }
+ }
+ coords 2759.086 80.111 1664.452
+ userScript "    // === ML DATA CAPTURE CONFIGURATION ==="\
+ "    protected int m_iMaxAIGroups = 5;"\
+ "    protected float m_fWaypointRadius = 30.0;"\
+ "    protected int m_iWaypointDelay = 3000;"\
+ "    protected bool m_bDetailedTelemetry = true;"\
+ "    protected bool m_bMonitorAIInputs = true;"\
+ "    protected string m_sInitialWeather = \"Overcast\";"\
+ "    protected float m_fInitialTime = 10.0;"\
+ ""\
+ "    // === INTERNAL DATA STRUCTURES ==="\
+ "    "\
+ "    // Waypoint classification constants"\
+ "    protected static const int WAYPOINT_TYPE_CITY = 0;"\
+ "    protected static const int WAYPOINT_TYPE_HIGHWAY = 1;"\
+ "    protected static const int WAYPOINT_TYPE_RURAL = 2;"\
+ "    protected static const int WAYPOINT_TYPE_OFFROAD = 3;"\
+ "    "\
+ "    // AI Group data storage"\
+ "    protected ref array<SCR_AIGroup> m_aActiveGroups = {};"\
+ "    protected ref array<int> m_aGroupIDs = {};"\
+ "    protected ref array<string> m_aVehicleNames = {};"\
+ "    protected ref array<ref array<AIWaypoint>> m_aGroupWaypoints = {};"\
+ "    protected ref array<int> m_aCurrentWaypointIndices = {};"\
+ "    protected ref array<int> m_aWaypointsCompleted = {};"\
+ "    protected ref array<float> m_aLastWaypointTimes = {};"\
+ "    "\
+ "    // Vehicle telemetry data"\
+ "    protected ref array<IEntity> m_aVehicles = {};"\
+ "    protected ref array<VehicleWheeledSimulation> m_aVehicleSimulations = {};"\
+ "    protected ref array<float> m_aVehicleDistances = {};"\
+ "    protected ref array<float> m_aMaxSpeeds = {};"\
+ "    protected ref array<float> m_aMaxRPMs = {};"\
+ "    protected ref array<vector> m_aLastPositions = {};"\
+ "    protected ref array<float> m_aLastSpeeds = {};"\
+ "    protected ref array<float> m_aAccelerations = {};"\
+ "    "\
+ "    // Stuck detection"\
+ "    protected ref array<vector> m_aStuckCheckPositions = {};"\
+ "    protected ref array<float> m_aStuckTimers = {};"\
+ "    protected static const float STUCK_TIME_THRESHOLD = 30.0;"\
+ "    protected static const float STUCK_DISTANCE_THRESHOLD = 5.0;"\
+ "    "\
+ "    // Waypoint classification data"\
+ "    protected ref array<int> m_aWaypointTypes = {};"\
+ "    protected ref array<string> m_aWaypointDescriptions = {};"\
+ "    protected ref array<float> m_aSpeedLimits = {};"\
+ "    "\
+ "    // Global waypoints"\
+ "    protected ref array<AIWaypoint> m_aGlobalWaypoints = {};"\
+ "    "\
+ "    // Environment"\
+ "    protected TimeAndWeatherManagerEntity m_WeatherManager;"\
+ "    protected float m_fSimulationStartTime;"\
+ "    protected int m_iTotalWaypointsCompleted = 0;"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void RegisterDebugMenus()"\
+ "    {"\
+ "        DiagMenu.RegisterMenu(SCR_DebugMenuID.DEBUGUI_AI_SCRIPT, \"AIScript\", \"AI\");"\
+ "        DiagMenu.RegisterBool(SCR_DebugMenuID.DEBUGUI_AI_PRINT_DEBUG, \"\", \"Show Driving Telemetry Panel\", \"AIScript\");"\
+ "        DiagMenu.RegisterBool(SCR_DebugMenuID.DEBUGUI_AI_SHOW_DEBUG_SHAPES, \"\", \"Show Vehicle Data\", \"AIScript\");"\
+ "        DiagMenu.RegisterBool(SCR_DebugMenuID.DEBUGUI_AI_SHOW_FRIENDLY_IN_AIM, \"\", \"Show AI Inputs\", \"AIScript\");"\
+ "        Print(\"[DataCapture] Registered debug menus\", LogLevel.NORMAL);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void UpdateDebugPanel()"\
+ "    {"\
+ "        if (!DiagMenu.GetBool(SCR_DebugMenuID.DEBUGUI_AI_PRINT_DEBUG))"\
+ "            return;"\
+ "        "\
+ "        DbgUI.Begin(\"ML Data Capture - Driving Simulator\");"\
+ "        "\
+ "        float simTime = (GetGame().GetWorld().GetWorldTime() - m_fSimulationStartTime) / 1000.0;"\
+ "        DbgUI.Text(string.Format(\"=== DATA CAPTURE SESSION ===\"));"\
+ "        DbgUI.Text(string.Format(\"Simulation Time: %1s\", simTime.ToString(5, 1)));"\
+ "        DbgUI.Text(string.Format(\"Active Vehicles: %1\", m_aActiveGroups.Count()));"\
+ "        DbgUI.Text(string.Format(\"Total Waypoints: %1\", m_iTotalWaypointsCompleted));"\
+ "        DbgUI.Text(\"\");"\
+ "        "\
+ "        if (DiagMenu.GetBool(SCR_DebugMenuID.DEBUGUI_AI_SHOW_DEBUG_SHAPES))"\
+ "        {"\
+ "            for (int i = 0; i < m_aVehicleSimulations.Count(); i++)"\
+ "            {"\
+ "                ShowVehicleDebugData(i);"\
+ "            }"\
+ "        }"\
+ "        "\
+ "        DbgUI.End();"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void ShowVehicleDebugData(int index)"\
+ "    {"\
+ "        if (index >= m_aVehicleSimulations.Count())"\
+ "            return;"\
+ "            "\
+ "        VehicleWheeledSimulation sim = m_aVehicleSimulations[index];"\
+ "        IEntity vehicle = m_aVehicles[index];"\
+ "        "\
+ "        if (!sim || !vehicle)"\
+ "            return;"\
+ "        "\
+ "        int groupID = index + 1;"\
+ "        DbgUI.Text(string.Format(\"--- VEHICLE %1 ---\", groupID));"\
+ "        "\
+ "        float speed = sim.GetSpeedKmh();"\
+ "        float steering = sim.GetSteering();"\
+ "        float throttle = sim.GetThrottle();"\
+ "        float brake = sim.GetBrake();"\
+ "        int gear = sim.GetGear();"\
+ "        float engineRPM = sim.EngineGetRPM();"\
+ "        bool engineOn = sim.EngineIsOn();"\
+ "        "\
+ "        DbgUI.Text(string.Format(\"Speed: %1 km/h\", speed.ToString(5, 1)));"\
+ "        "\
+ "        if (index < m_aAccelerations.Count())"\
+ "        {"\
+ "            float acceleration = m_aAccelerations[index];"\
+ "            DbgUI.Text(string.Format(\"Acceleration: %1 km/h/s\", acceleration.ToString(4, 1)));"\
+ "        }"\
+ "        "\
+ "        string engineStatus = \"OFF\";"\
+ "        if (engineOn)"\
+ "            engineStatus = \"ON\";"\
+ "        DbgUI.Text(string.Format(\"Engine: %1 (%2 RPM)\", engineStatus, engineRPM.ToString(6, 0)));"\
+ "        DbgUI.Text(string.Format(\"Gear: %1\", gear));"\
+ "        "\
+ "        if (index < m_aStuckTimers.Count())"\
+ "        {"\
+ "            float stuckTime = m_aStuckTimers[index];"\
+ "            if (stuckTime > 5.0)"\
+ "            {"\
+ "                DbgUI.Text(string.Format(\"STUCK WARNING: %1s\", stuckTime.ToString(4, 1)));"\
+ "            }"\
+ "        }"\
+ "        "\
+ "        if (DiagMenu.GetBool(SCR_DebugMenuID.DEBUGUI_AI_SHOW_FRIENDLY_IN_AIM))"\
+ "        {"\
+ "            DbgUI.Text(\"=== AI INPUTS ===\");"\
+ "            DbgUI.Text(string.Format(\"Steering: %1\", steering.ToString(4, 2)));"\
+ "            DbgUI.Text(string.Format(\"Throttle: %1\", throttle.ToString(4, 2)));"\
+ "            DbgUI.Text(string.Format(\"Brake: %1\", brake.ToString(4, 2)));"\
+ "        }"\
+ "        "\
+ "        DbgUI.Text(\"\");"\
+ "    }"\
+ ""\
+ "    override void OnGameStart()"\
+ "    {"\
+ "        super.OnGameStart();"\
+ "        m_fSimulationStartTime = GetGame().GetWorld().GetWorldTime();"\
+ "        "\
+ "        Print(\"[DataCapture] Starting ML data collection session\", LogLevel.NORMAL);"\
+ "        "\
+ "        RegisterDebugMenus();"\
+ "        InitializeEnvironment();"\
+ "        InitializeWaypointClassifications();"\
+ "        "\
+ "        for (int i = 1; i <= m_iMaxAIGroups; i++)"\
+ "        {"\
+ "            GetGame().GetCallqueue().CallLater(SpawnAIGroup, i * 2000, false, i);"\
+ "        }"\
+ "        "\
+ "        if (m_bDetailedTelemetry)"\
+ "            GetGame().GetCallqueue().CallLater(MonitorVehicleTelemetry, 200, true);"\
+ "        "\
+ "        GetGame().GetCallqueue().CallLater(UpdateDebugPanel, 16, true);"\
+ "        GetGame().GetCallqueue().CallLater(ReportDrivingStatistics, 60000, true);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void InitializeEnvironment()"\
+ "    {"\
+ "        ChimeraWorld world = ChimeraWorld.CastFrom(GetGame().GetWorld());"\
+ "        if (world)"\
+ "        {"\
+ "            m_WeatherManager = world.GetTimeAndWeatherManager();"\
+ "            if (m_WeatherManager)"\
+ "            {"\
+ "                m_WeatherManager.SetHoursMinutesSeconds(m_fInitialTime, 0, 0, true);"\
+ "                "\
+ "                if (!m_sInitialWeather.IsEmpty())"\
+ "                {"\
+ "                    m_WeatherManager.ForceWeatherTo(true, m_sInitialWeather, 0.1, 999999);"\
+ "                    Print(\"[DataCapture] Weather set to: \" + m_sInitialWeather, LogLevel.NORMAL);"\
+ "                }"\
+ "                "\
+ "                Print(string.Format(\"[DataCapture] Time set to: %1:00\", m_fInitialTime), LogLevel.NORMAL);"\
+ "            }"\
+ "        }"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void InitializeWaypointClassifications()"\
+ "    {"\
+ "        m_aWaypointTypes.Clear();"\
+ "        m_aWaypointDescriptions.Clear();"\
+ "        m_aSpeedLimits.Clear();"\
+ "        "\
+ "        for (int i = 1; i <= 20; i++)"\
+ "        {"\
+ "            int waypointType;"\
+ "            string description;"\
+ "            float speedLimit;"\
+ "            "\
+ "            if (i <= 6)"\
+ "            {"\
+ "                waypointType = WAYPOINT_TYPE_CITY;"\
+ "                description = \"City Street\";"\
+ "                speedLimit = 50.0;"\
+ "            }"\
+ "            else if (i <= 12)"\
+ "            {"\
+ "                waypointType = WAYPOINT_TYPE_HIGHWAY;"\
+ "                description = \"Highway\";"\
+ "                speedLimit = 120.0;"\
+ "            }"\
+ "            else if (i <= 17)"\
+ "            {"\
+ "                waypointType = WAYPOINT_TYPE_RURAL;"\
+ "                description = \"Rural Road\";"\
+ "                speedLimit = 80.0;"\
+ "            }"\
+ "            else"\
+ "            {"\
+ "                waypointType = WAYPOINT_TYPE_OFFROAD;"\
+ "                description = \"Off-Road\";"\
+ "                speedLimit = 40.0;"\
+ "            }"\
+ "            "\
+ "            m_aWaypointTypes.Insert(waypointType);"\
+ "            m_aWaypointDescriptions.Insert(description);"\
+ "            m_aSpeedLimits.Insert(speedLimit);"\
+ "        }"\
+ "        "\
+ "        Print(\"[DataCapture] Classified 20 waypoints into 4 categories\", LogLevel.NORMAL);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void SpawnAIGroup(int groupIndex)"\
+ "    {"\
+ "        string spawnGroup = \"{35681BE27C302FF5}Prefabs/Groups/BLUFOR/GreenBerets/Group_US_GreenBeret_SentryTeam.et\";"\
+ "        "\
+ "        string spawnPointName = \"AI_Spawn_\" + groupIndex;"\
+ "        IEntity spawnPosition = GetGame().GetWorld().FindEntityByName(spawnPointName);"\
+ "        "\
+ "        if (!spawnPosition)"\
+ "            spawnPosition = GetGame().GetWorld().FindEntityByName(\"AI_Spawn_1\");"\
+ "            "\
+ "        if (!spawnPosition)"\
+ "        {"\
+ "            Print(string.Format(\"[DataCapture] No spawn position for vehicle %1\", groupIndex), LogLevel.ERROR);"\
+ "            return;"\
+ "        }"\
+ ""\
+ "        Resource resource = GenerateAndValidateResource(spawnGroup);"\
+ "        if (!resource) return;"\
+ ""\
+ "        SCR_AIGroup group = SCR_AIGroup.Cast(GetGame().SpawnEntityPrefab(resource, null, GenerateSpawnParameters(spawnPosition.GetOrigin())));"\
+ "        if (!group) return;"\
+ ""\
+ "        m_aActiveGroups.Insert(group);"\
+ "        m_aGroupIDs.Insert(groupIndex);"\
+ "        "\
+ "        string vehicleName = \"AI_Car_\" + groupIndex;"\
+ "        m_aVehicleNames.Insert(vehicleName);"\
+ "        m_aCurrentWaypointIndices.Insert(-1);"\
+ "        m_aWaypointsCompleted.Insert(0);"\
+ "        m_aLastWaypointTimes.Insert(GetGame().GetWorld().GetWorldTime());"\
+ "        "\
+ "        IEntity vehicle = GetGame().GetWorld().FindEntityByName(vehicleName);"\
+ "        if (vehicle)"\
+ "        {"\
+ "            ref array<string> vehicleArray = new array<string>();"\
+ "            vehicleArray.Insert(vehicleName);"\
+ "            group.AddVehiclesStatic(vehicleArray);"\
+ "            "\
+ "            if (m_bDetailedTelemetry)"\
+ "                InitializeVehicleTelemetry(vehicle, groupIndex);"\
+ "        }"\
+ "        else"\
+ "        {"\
+ "            Print(string.Format(\"[DataCapture] Vehicle %1 not found\", vehicleName), LogLevel.WARNING);"\
+ "        }"\
+ ""\
+ "        CreateWaypointsForGroup(groupIndex);"\
+ "        group.GetOnWaypointCompleted().Insert(OnWaypointCompleted);"\
+ "        AddNextWaypointForGroup(groupIndex);"\
+ "        "\
+ "        Print(string.Format(\"[DataCapture] Vehicle %1 spawned and capturing data\", groupIndex), LogLevel.NORMAL);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void InitializeVehicleTelemetry(IEntity vehicle, int groupID)"\
+ "    {"\
+ "        VehicleWheeledSimulation vehicleSim = VehicleWheeledSimulation.Cast(vehicle.FindComponent(VehicleWheeledSimulation));"\
+ "        if (vehicleSim)"\
+ "        {"\
+ "            m_aVehicles.Insert(vehicle);"\
+ "            m_aVehicleSimulations.Insert(vehicleSim);"\
+ "            m_aVehicleDistances.Insert(0.0);"\
+ "            m_aMaxSpeeds.Insert(0.0);"\
+ "            m_aMaxRPMs.Insert(0.0);"\
+ "            m_aLastSpeeds.Insert(0.0);"\
+ "            m_aAccelerations.Insert(0.0);"\
+ "            "\
+ "            vector transform[4];"\
+ "            vehicle.GetWorldTransform(transform);"\
+ "            m_aLastPositions.Insert(transform[3]);"\
+ "            m_aStuckCheckPositions.Insert(transform[3]);"\
+ "            m_aStuckTimers.Insert(0.0);"\
+ "            "\
+ "            Print(string.Format(\"[DataCapture] Telemetry initialized for vehicle %1\", groupID), LogLevel.NORMAL);"\
+ "        }"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void CreateWaypointsForGroup(int groupIndex)"\
+ "    {"\
+ "        ref array<AIWaypoint> groupWaypoints = new array<AIWaypoint>();"\
+ "        "\
+ "        for (int i = 1; i <= 20; i++)"\
+ "        {"\
+ "            string placeholderName = \"AI_Drive_Target_\" + i;"\
+ "            IEntity placeholderPosition = GetGame().GetWorld().FindEntityByName(placeholderName);"\
+ "            "\
+ "            if (placeholderPosition)"\
+ "            {"\
+ "                AIWaypoint waypoint = CreateWaypoint(placeholderPosition.GetOrigin(), i);"\
+ "                if (waypoint)"\
+ "                {"\
+ "                    groupWaypoints.Insert(waypoint);"\
+ "                    m_aGlobalWaypoints.Insert(waypoint);"\
+ "                }"\
+ "            }"\
+ "        }"\
+ "        "\
+ "        m_aGroupWaypoints.Insert(groupWaypoints);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected AIWaypoint CreateWaypoint(vector position, int waypointID)"\
+ "    {"\
+ "        string waypointType = \"{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_ForcedMove.et\";"\
+ "        Resource resource = GenerateAndValidateResource(waypointType);"\
+ "        if (!resource) return null;"\
+ ""\
+ "        EntitySpawnParams params = GenerateSpawnParameters(position);"\
+ "        AIWaypoint waypoint = AIWaypoint.Cast(GetGame().SpawnEntityPrefab(resource, null, params));"\
+ "        "\
+ "        if (waypoint)"\
+ "        {"\
+ "            waypoint.SetCompletionRadius(m_fWaypointRadius);"\
+ "            waypoint.SetName(\"DrivingWP_\" + waypointID);"\
+ "        }"\
+ ""\
+ "        return waypoint;"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void AddNextWaypointForGroup(int groupIndex)"\
+ "    {"\
+ "        if (groupIndex < 1 || groupIndex > m_aActiveGroups.Count())"\
+ "            return;"\
+ "            "\
+ "        int arrayIndex = groupIndex - 1;"\
+ "        SCR_AIGroup group = m_aActiveGroups[arrayIndex];"\
+ "        ref array<AIWaypoint> groupWaypoints = m_aGroupWaypoints[arrayIndex];"\
+ "        "\
+ "        if (!group || groupWaypoints.IsEmpty())"\
+ "            return;"\
+ ""\
+ "        int randomIndex = Math.RandomIntInclusive(0, groupWaypoints.Count() - 1);"\
+ "        AIWaypoint nextWaypoint = groupWaypoints[randomIndex];"\
+ ""\
+ "        if (nextWaypoint)"\
+ "        {"\
+ "            group.AddWaypoint(nextWaypoint);"\
+ "            m_aCurrentWaypointIndices[arrayIndex] = randomIndex;"\
+ "            "\
+ "            string description = m_aWaypointDescriptions[randomIndex];"\
+ "            float speedLimit = m_aSpeedLimits[randomIndex];"\
+ "            "\
+ "            Print(string.Format(\"[DataCapture] Vehicle %1 heading to %2 (Limit: %3 km/h)\", "\
+ "                groupIndex, description, speedLimit), LogLevel.NORMAL);"\
+ "        }"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void OnWaypointCompleted(AIWaypoint completedWaypoint)"\
+ "    {"\
+ "        m_iTotalWaypointsCompleted++;"\
+ "        "\
+ "        int groupIndex = FindGroupIndexByWaypoint(completedWaypoint);"\
+ "        if (groupIndex < 0) return;"\
+ ""\
+ "        m_aWaypointsCompleted[groupIndex] = m_aWaypointsCompleted[groupIndex] + 1;"\
+ "        m_aLastWaypointTimes[groupIndex] = GetGame().GetWorld().GetWorldTime();"\
+ "        "\
+ "        SCR_AIGroup group = m_aActiveGroups[groupIndex];"\
+ "        group.RemoveWaypoint(completedWaypoint);"\
+ "        "\
+ "        int actualGroupID = m_aGroupIDs[groupIndex];"\
+ "        GetGame().GetCallqueue().CallLater(AddNextWaypointForGroup, m_iWaypointDelay, false, actualGroupID);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected int FindGroupIndexByWaypoint(AIWaypoint waypoint)"\
+ "    {"\
+ "        for (int i = 0; i < m_aGroupWaypoints.Count(); i++)"\
+ "        {"\
+ "            ref array<AIWaypoint> groupWaypoints = m_aGroupWaypoints[i];"\
+ "            if (groupWaypoints.Find(waypoint) >= 0)"\
+ "                return i;"\
+ "        }"\
+ "        return -1;"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void MonitorVehicleTelemetry()"\
+ "    {"\
+ "        for (int i = 0; i < m_aVehicleSimulations.Count(); i++)"\
+ "        {"\
+ "            VehicleWheeledSimulation sim = m_aVehicleSimulations[i];"\
+ "            IEntity vehicle = m_aVehicles[i];"\
+ "            "\
+ "            if (!sim || !vehicle)"\
+ "                continue;"\
+ "                "\
+ "            UpdateVehicleTelemetry(i, sim, vehicle);"\
+ "        }"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void UpdateVehicleTelemetry(int index, VehicleWheeledSimulation sim, IEntity vehicle)"\
+ "    {"\
+ "        float speed = sim.GetSpeedKmh();"\
+ "        "\
+ "        vector transform[4];"\
+ "        vehicle.GetWorldTransform(transform);"\
+ "        vector currentPosition = transform[3];"\
+ "        "\
+ "        vector lastPosition = m_aLastPositions[index];"\
+ "        float distance = vector.Distance(currentPosition, lastPosition);"\
+ "        m_aVehicleDistances[index] = m_aVehicleDistances[index] + distance;"\
+ "        m_aLastPositions[index] = currentPosition;"\
+ "        "\
+ "        float lastSpeed = m_aLastSpeeds[index];"\
+ "        float acceleration = (speed - lastSpeed) / 0.2;"\
+ "        m_aAccelerations[index] = acceleration;"\
+ "        m_aLastSpeeds[index] = speed;"\
+ "        "\
+ "        if (speed > m_aMaxSpeeds[index])"\
+ "            m_aMaxSpeeds[index] = speed;"\
+ "        "\
+ "        float engineRPM = sim.EngineGetRPM();"\
+ "        if (engineRPM > m_aMaxRPMs[index])"\
+ "            m_aMaxRPMs[index] = engineRPM;"\
+ "        "\
+ "        CheckStuckVehicle(index, currentPosition);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void CheckStuckVehicle(int index, vector currentPosition)"\
+ "    {"\
+ "        vector stuckCheckPosition = m_aStuckCheckPositions[index];"\
+ "        float distanceMoved = vector.Distance(currentPosition, stuckCheckPosition);"\
+ "        "\
+ "        if (distanceMoved < STUCK_DISTANCE_THRESHOLD)"\
+ "        {"\
+ "            m_aStuckTimers[index] = m_aStuckTimers[index] + 0.2;"\
+ "            "\
+ "            if (m_aStuckTimers[index] >= STUCK_TIME_THRESHOLD)"\
+ "            {"\
+ "                ResetStuckVehicle(index);"\
+ "            }"\
+ "        }"\
+ "        else"\
+ "        {"\
+ "            m_aStuckTimers[index] = 0.0;"\
+ "            m_aStuckCheckPositions[index] = currentPosition;"\
+ "        }"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void ResetStuckVehicle(int index)"\
+ "    {"\
+ "        IEntity vehicle = m_aVehicles[index];"\
+ "        if (!vehicle) return;"\
+ "        "\
+ "        int groupID = index + 1;"\
+ "        Print(string.Format(\"[DataCapture] Vehicle %1 stuck - resetting\", groupID), LogLevel.WARNING);"\
+ "        "\
+ "        string spawnPointName = \"AI_Spawn_\" + groupID;"\
+ "        IEntity spawnPosition = GetGame().GetWorld().FindEntityByName(spawnPointName);"\
+ "        "\
+ "        if (!spawnPosition)"\
+ "            spawnPosition = GetGame().GetWorld().FindEntityByName(\"AI_Spawn_1\");"\
+ "        "\
+ "        if (spawnPosition)"\
+ "        {"\
+ "            vector spawnTransform[4];"\
+ "            spawnPosition.GetWorldTransform(spawnTransform);"\
+ "            spawnTransform[3][1] = spawnTransform[3][1] + 2.0;"\
+ "            "\
+ "            vehicle.SetWorldTransform(spawnTransform);"\
+ "            "\
+ "            m_aStuckTimers[index] = 0.0;"\
+ "            m_aStuckCheckPositions[index] = spawnTransform[3];"\
+ "            m_aLastPositions[index] = spawnTransform[3];"\
+ "        }"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected void ReportDrivingStatistics()"\
+ "    {"\
+ "        float simulationTime = (GetGame().GetWorld().GetWorldTime() - m_fSimulationStartTime) / 1000.0;"\
+ "        "\
+ "        Print(\"=== ML DATA CAPTURE STATISTICS ===\", LogLevel.NORMAL);"\
+ "        Print(string.Format(\"Session time: %1 minutes\", (simulationTime / 60.0).ToString(4, 1)), LogLevel.NORMAL);"\
+ "        Print(string.Format(\"Active vehicles: %1\", m_aActiveGroups.Count()), LogLevel.NORMAL);"\
+ "        Print(string.Format(\"Total waypoints: %1\", m_iTotalWaypointsCompleted), LogLevel.NORMAL);"\
+ "        "\
+ "        for (int i = 0; i < m_aGroupIDs.Count(); i++)"\
+ "        {"\
+ "            int groupID = m_aGroupIDs[i];"\
+ "            float distance = 0.0;"\
+ "            float maxSpeed = 0.0;"\
+ "            "\
+ "            if (i < m_aVehicleDistances.Count())"\
+ "            {"\
+ "                distance = m_aVehicleDistances[i];"\
+ "                maxSpeed = m_aMaxSpeeds[i];"\
+ "            }"\
+ "            "\
+ "            Print(string.Format(\"Vehicle %1: Distance=%2m MaxSpeed=%3km/h\","\
+ "                groupID, distance.ToString(6, 1), maxSpeed.ToString(5, 1)), LogLevel.NORMAL);"\
+ "        }"\
+ "        Print(\"=================================\", LogLevel.NORMAL);"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected Resource GenerateAndValidateResource(string resourceToLoad)"\
+ "    {"\
+ "        Resource resource = Resource.Load(resourceToLoad);"\
+ "        if (!resource.IsValid())"\
+ "        {"\
+ "            Print(string.Format(\"[DataCapture] Invalid resource: %1\", resourceToLoad), LogLevel.ERROR);"\
+ "            return null;"\
+ "        }"\
+ "        return resource;"\
+ "    }"\
+ ""\
+ "    //------------------------------------------------------------------------------------------------"\
+ "    protected EntitySpawnParams GenerateSpawnParameters(vector position)"\
+ "    {"\
+ "        EntitySpawnParams params = EntitySpawnParams();"\
+ "        params.TransformMode = ETransformMode.WORLD;"\
+ "        params.Transform[3] = position;"\
+ "        return params;"\
+ "    }"
+ m_bAllowFactionChange 0
+}
+ScriptedChatEntity : "{536D80EB494DDC43}Prefabs/MP/Campaign/CampaignMPChatEntity.et" {
+ coords 2742.402 77.857 1675.119
+}
+SCR_FactionManager FactionManager : "{589540B35EBA8CDC}Prefabs/MP/Managers/Factions/FactionManager_USxUSSR.et" {
+ coords 2756.882 78.926 1666.877
+ Factions {
+  SCR_Faction "{56B2B46E9AF80999}" {
+   m_bIsPlayable 0
+  }
+ }
+}
+RadioManagerEntity : "{B8E09FAB91C4ECCD}Prefabs/Radio/RadioManager.et" {
+ coords 2761.461 79.788 1706.195
+}
+SCR_SpawnPoint : "{4FEA25583D0975F7}Prefabs/MP/Spawning/SpawnPoint_USSR.et" {
+ coords 2741.421 77.594 1613.211
+}
+SCR_SpawnPoint : "{5A2220DD0C16958B}Prefabs/MP/Spawning/SpawnPoint_US.et" {
+ coords 2745.148 77.438 1661.807
+}
+SCR_LoadoutManager : "{AA4E7419A1FF65B0}Prefabs/MP/Managers/Loadouts/LoadoutManager_Base.et" {
+ coords 2746.328 77.526 1618.818
+}
+SCR_ManualCamera ManualCamera : "{D7A968EF71B93BD6}Prefabs/Editor/Camera/ManualCamera.et" {
+ coords 2750 85 1665
+ angleY 0
+}
+Vehicle AI_Car_1 : "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et" {
+ coords 2749.877 77.366 1663.289
+ angleY 0
+}
+Vehicle AI_Car_2 : "{F649585ABB3706C4}Prefabs/Vehicles/Wheeled/M151A2/M151A2.et" {
+ coords 2872.187 71.563 1737.453
+ angleY -120.993
+}
+Vehicle AI_Car_3 : "{259EE7B78C51B624}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et" {
+ coords 3149.147 11.286 2776.615
+ angleY 62.455
+}
+Vehicle AI_Car_4 : "{4AE9D080927D3CB9}Prefabs/Vehicles/Wheeled/S1203/S1203_base.et" {
+ coords 1392.771 23.201 3321.72
+ angleY 29.624
+}
+Vehicle AI_Car_5 : "{B55C6990A6A9411B}Prefabs/Vehicles/Wheeled/M998/M998_covered.et" {
+ coords 1282.581 37.973 2919.702
+ angleY 139.706
+}
+$grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Components/SlotWaypoint.et" {
+ AI_Spawn_1 {
+  coords 2753.238 77.308 1671.273
+ }
+ AI_Spawn_2 {
+  coords 2867.769 71.625 1740.42
+ }
+ AI_Spawn_3 {
+  coords 3157.101 11.353 2774.954
+ }
+ AI_Spawn_4 {
+  coords 1393.486 23.013 3327.364
+ }
+ AI_Spawn_5 {
+  coords 1289.592 37.994 2920.685
+ }
+ AI_Drive_Target_1 {
+  coords 3092.207 15.749 2747.312
+ }
+ AI_Drive_Target_2 {
+  coords 992.83 38.206 2940.62
+ }
+ AI_Drive_Target_3 {
+  coords 3550.172 45.065 2642.215
+ }
+ AI_Drive_Target_4 {
+  coords 3106.991 33.398 2100.733
+ }
+ AI_Drive_Target_5 {
+  coords 2813.979 73.363 1634.789
+ }
+ AI_Drive_Target_6 {
+  coords 2833.619 8.131 1126.499
+ }
+ AI_Drive_Target_7 {
+  coords 1504.92 31.875 1154.657
+ }
+ AI_Drive_Target_8 {
+  coords 1304.186 10.719 1860.371
+ }
+ AI_Drive_Target_9 {
+  coords 674.534 1.174 2287.923
+ }
+ AI_Drive_Target_10 {
+  coords 620.086 39 2566.323
+ }
+ AI_Drive_Target_11 {
+  coords 1403.365 36.25 2314.117
+ }
+ AI_Drive_Target_12 {
+  coords 2209.135 57.973 2091.847
+ }
+ AI_Drive_Target_13 {
+  coords 3149.088 5.413 1222.101
+ }
+ AI_Drive_Target_14 {
+  coords 2289.669 89.563 1276.592
+ }
+ AI_Drive_Target_15 {
+  coords 1736.575 16.01 2102.819
+ }
+ AI_Drive_Target_16 {
+  coords 1978.49 41.985 2681.806
+ }
+ AI_Drive_Target_17 {
+  coords 1984.422 51.375 2998.811
+ }
+ AI_Drive_Target_18 {
+  coords 1829.025 15.109 3444.452
+ }
+ AI_Drive_Target_19 {
+  coords 2555.162 19.076 3086.956
+ }
+ AI_Drive_Target_20 {
+  coords 2635.36 98.781 2653.366
+ }
+}

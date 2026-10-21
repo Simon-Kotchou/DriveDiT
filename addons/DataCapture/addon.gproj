@@ -1,0 +1,8 @@
+GameProject {
+ ID "DataCapture"
+ GUID "88BEF4187E0D2DFC"
+ TITLE "DriveDiT DataCapture"
+ Dependencies {
+  "58D0FB3206B6F859"
+ }
+}

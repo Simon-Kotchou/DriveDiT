@@ -26,8 +26,12 @@ SCR_AIWorld : "{E0A05C76552E7F58}Prefabs/AI/SCR_AIWorld.et" {
  "Accepted Road Types" 79
  "Collision detection layers" 9437888
 }
-SCR_BaseGameMode GameMode_DataCapture {
+SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/GameMode_Plain.et" {
  components {
+  SCR_RespawnSystemComponent "{56B2B4793051E7C9}" {
+   m_SpawnLogic SCR_SpawnLogic "{5D36888CC966608A}" {
+   }
+  }
   SCR_MLDataCollector "{AAAABBBBCCCCDDDD}" {
    m_bEnableDataCapture 1
    m_iCaptureIntervalMs 200

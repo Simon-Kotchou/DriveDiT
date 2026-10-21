@@ -31,9 +31,12 @@ python3 -I -B tools/test_deploy_addon.py -v       # self-test (temp targets only
 ```
 
 The tool also writes `Scripts/Game/DataCapture/DC_BuildInfo.c` (git sha, branch, dirty flag, deploy time, manifest
-and content hashes) and tracks what it deployed in `<target>/.deploy_state.json`. It refuses C: targets, files
-outside the manifest, and overwriting or deleting anything that changed in the target since it was deployed (for
-example a layer saved by Workbench) unless `--force` is given, which backs the old file up first.
+and content hashes) and tracks what it deployed in `<target>/.deploy_state.json`. It deploys only into a folder inside
+`/mnt/e/DriveDiT/addons/` (`--allow-root DIR` adds a scratch root under `/mnt/e/` or `/dev/shm/`, for static checks and
+the self-test) and never onto C: or the WSL disk image. It refuses files outside the manifest (case variants
+included), writing through a symlink or junction inside the target, and overwriting or deleting anything that
+changed in the target since it was deployed (for example a layer saved by Workbench) unless `--force` is given,
+which backs the old file up first.
 
 ## Editing the world
 

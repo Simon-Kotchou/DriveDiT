@@ -4,9 +4,11 @@
     python3 -I -B tools/test_deploy_addon.py -v
 
 Every case deploys into a fresh temporary target and removes it afterwards. The temporary base directory is
-$DEPLOY_ADDON_TEST_TMP if set, else /dev/shm (RAM, so nothing lands on the WSL disk), else the system default.
-The repo itself is only read. C:-drive cases always run with --dry-run under a parent that does not exist, so even
-a broken guard could not write there.
+$DEPLOY_ADDON_TEST_TMP if set (it must be under /mnt/e/ or /dev/shm/, the only places deploy_addon.py accepts as
+--allow-root), else $TMPDIR when it is on E: (tools/run_tests.sh sets that), else /dev/shm (RAM, so nothing lands on
+the WSL disk image on C:). Without any of them the tests are skipped; they never fall back to /tmp. The repo itself
+is only read. C: and WSL-disk targets are checked in-process on the pure target_reason(), so no such path is ever
+passed to the tool; other refused targets run with --dry-run under a parent that does not exist.
 """
 
 import hashlib
@@ -19,6 +21,8 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import deploy_addon  # noqa: E402  (pure checks are tested in-process; the tool has no import side effects)
 REPO = os.path.dirname(HERE)
 TOOL = os.path.join(HERE, "deploy_addon.py")
 MANIFEST = os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt")
@@ -30,9 +34,12 @@ def tmp_base():
     base = os.environ.get("DEPLOY_ADDON_TEST_TMP")
     if base:
         return base
+    tmpdir = os.path.realpath(os.environ.get("TMPDIR") or "/")
+    if tmpdir.startswith("/mnt/e/") and os.path.isdir(tmpdir):  # tools/run_tests.sh points TMPDIR at E:
+        return tmpdir
     if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
         return "/dev/shm"
-    return None
+    raise unittest.SkipTest("no $DEPLOY_ADDON_TEST_TMP and no writable /dev/shm; not using the system temp dir")
 
 
 def sha(path):
@@ -74,8 +81,10 @@ class DeployAddonTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_tool(self, *args, target=None):
+    def run_tool(self, *args, target=None, allow_root=True):
         cmd = [sys.executable, "-I", "-B", TOOL, "--target", target or self.target] + list(args)
+        if allow_root:
+            cmd += ["--allow-root", self.tmp]
         p = subprocess.run(cmd, cwd=self.tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return p.returncode, p.stdout.decode() + p.stderr.decode()
 
@@ -182,8 +191,8 @@ class DeployAddonTest(unittest.TestCase):
             self.assertIn("REFUSED", out)
             self.assertFalse(os.path.exists(self.target), "%s: refusal still wrote the target" % line)
 
-    def test_refuses_c_drive_targets(self):
-        # --dry-run plus a parent that does not exist: nothing could be written even if the guard failed.
+    def test_refuses_c_drive_and_wsl_disk_targets(self):
+        # Checked in-process on the pure target_reason(): no C: or WSL-disk path is ever passed to the tool's argv.
         probes = ["/mnt/c/__dd_deploy_selftest_missing__/DataCapture",
                   "C:\\__dd_deploy_selftest_missing__\\DataCapture",
                   "c:/__dd_deploy_selftest_missing__/DataCapture"]
@@ -192,22 +201,109 @@ class DeployAddonTest(unittest.TestCase):
             os.symlink("/mnt/c", link)
             probes.append(os.path.join(link, "__dd_deploy_selftest_missing__", "DataCapture"))
         for target in probes:
+            reason = deploy_addon.target_reason(target, [self.tmp])
+            self.assertIsNotNone(reason, target)
+            self.assertIn("C: drive", reason)
+        # The WSL disk image (/tmp, ~) lives on C:; /mnt/d is the read-only game install.
+        for target in ("/tmp/__dd_deploy_selftest_missing__/DataCapture",
+                       os.path.join(os.path.expanduser("~"), "__dd_deploy_selftest_missing__", "DataCapture"),
+                       "/mnt/d/__dd_deploy_selftest_missing__/DataCapture"):
+            self.assertIsNotNone(deploy_addon.target_reason(target, [self.tmp]), target)
+
+    def test_refuses_targets_outside_the_allowed_roots(self):
+        # A sibling of the allowed root is not inside it, E: outside DriveDiT/addons is not allowed, and an allowed
+        # root itself is not a target.
+        probes = [os.path.join(os.path.dirname(self.tmp), "__dd_deploy_selftest_missing__", "DataCapture"),
+                  "/mnt/e/__dd_deploy_selftest_missing__/DataCapture",
+                  "/mnt/e/DriveDiT/addons",
+                  self.tmp]
+        for target in probes:
             rc, out = self.run_tool("--dry-run", target=target)
             self.assertEqual(rc, 2, "%s: %s" % (target, out))
-            self.assertIn("C: drive", out)
-        self.assertFalse(os.path.exists("/mnt/c/__dd_deploy_selftest_missing__"))
+            self.assertIn("not inside an allowed deploy root", out)
+            self.assertNotIn("DRY RUN", out, target)
+        for target in probes[:2]:
+            self.assertFalse(os.path.exists(os.path.dirname(target)), target)
+
+    def test_default_root_is_accepted_without_allow_root(self):
+        self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/DataCapture"))
+        self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/__dd_deploy_selftest__/DataCapture"))
+        self.assertIsNotNone(deploy_addon.target_reason(self.target))  # only with --allow-root
+
+    def test_refuses_bad_allow_roots(self):
+        for root in ("/tmp", os.path.expanduser("~"), "/mnt/e", "/mnt/d", "/mnt/e/__dd_deploy_selftest_missing__"):
+            reason = deploy_addon.allow_root_reason(root)
+            self.assertIsNotNone(reason, root)
+            self.assertIn("--allow-root", reason)
+        self.assertIsNone(deploy_addon.allow_root_reason(self.tmp))
+        rc, out = self.run_tool("--dry-run", "--allow-root", "/mnt/e", target="/mnt/e/__dd_deploy_selftest__/x",
+                                allow_root=False)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("--allow-root /mnt/e resolves to /mnt/e", out)
 
     def test_refuses_target_inside_repo(self):
         rc, out = self.run_tool("--dry-run", target=os.path.join(REPO, "build_addon_test"))
         self.assertEqual(rc, 2, out)
         self.assertIn("overlaps the repo", out)
 
+    def test_refuses_case_variants_of_manifest_paths(self):
+        # E: is case-insensitive: a case variant opens the real file, so it must neither bypass the denylist nor
+        # deploy under a second spelling.
+        for line in ("script src/enfusion/datacapture/scr_binaryserializer.c",
+                     "script src/enfusion/datacapture/SCR_DRIVINGSIMDEBUGUI.c",
+                     "script src/enfusion/datacapture/scr_mldatacollector.c",
+                     "script SRC/enfusion/datacapture/SCR_MLDataCollector.c",
+                     "script src/enfusion/DataCapture/CORE/SCR_CaptureBuffer.c",
+                     "addon  addons/DataCapture/ADDON.gproj"):
+            manifest = self.write_manifest(["addon addons/DataCapture/addon.gproj", line])
+            rc, out = self.run_tool("--manifest", manifest)
+            self.assertEqual(rc, 2, "%s: %s" % (line, out))
+            self.assertIn("REFUSED", out)
+            self.assertFalse(os.path.exists(self.target), "%s: refusal still wrote the target" % line)
+
+    def test_refuses_symlinked_directories_inside_the_target(self):
+        self.assertEqual(self.run_tool()[0], 0)
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        # A Scripts folder that points elsewhere (e.g. a junction into an old C: addon) must not receive the scripts.
+        shutil.rmtree(os.path.join(self.target, "Scripts"))
+        os.symlink(outside, os.path.join(self.target, "Scripts"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("symlink or junction", out)
+        self.assertEqual(os.listdir(outside), [], "a deploy wrote through a symlinked directory")
+        os.remove(os.path.join(self.target, "Scripts"))
+
+        # A redirected backup folder must not receive --force backups.
+        self.assertEqual(self.run_tool()[0], 0)
+        layer = os.path.join(self.target, *WORLD_LAYER.split("/"))
+        with open(layer, "ab") as f:
+            f.write(b"// saved by Workbench\n")
+        edited = sha(layer)
+        os.symlink(outside, os.path.join(self.target, ".deploy_backup"))
+        rc, out = self.run_tool("--force")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("symlink or junction", out)
+        self.assertEqual(os.listdir(outside), [])
+        self.assertEqual(sha(layer), edited, "a refused deploy still replaced the layer")
+        os.remove(os.path.join(self.target, ".deploy_backup"))
+
+        # A symlinked state file is refused before it is read or replaced.
+        state = os.path.join(self.target, ".deploy_state.json")
+        os.replace(state, os.path.join(outside, "state.json"))
+        os.symlink(os.path.join(outside, "state.json"), state)
+        rc, out = self.run_tool("--force")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("symlink or junction", out)
+        self.assertEqual(os.listdir(outside), ["state.json"])
+
     # --- state, Workbench files and drift ------------------------------------------------------------------------
 
     def test_never_touches_workbench_generated_files(self):
         os.makedirs(os.path.join(self.target, SCRIPT_DST))
         generated = {"resourceDatabase.rdb": b"RDB", "UserMaps.desc": b"UserMapDescClass {\n}",
-                     "worlds/DataCapture/DC_Arland.ent.meta": b"META ent", SCRIPT_DST + "/SCR_MLDataCollector.c.meta": b"META c",
+                     "worlds/DataCapture/DC_Arland.ent.meta": b"META ent",
+                     SCRIPT_DST + "/SCR_MLDataCollector.c.meta": b"META c",
                      SCRIPT_DST + "/SCR_AnchorFrameSelector.c.meta": b"META anchor"}
         for rel, data in generated.items():
             os.makedirs(os.path.dirname(os.path.join(self.target, rel)), exist_ok=True)

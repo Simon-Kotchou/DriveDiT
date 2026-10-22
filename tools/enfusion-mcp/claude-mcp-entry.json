@@ -1,0 +1,8 @@
+{
+  "enfusion-mcp": {
+    "type": "stdio",
+    "command": "/mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh",
+    "args": [],
+    "env": {}
+  }
+}

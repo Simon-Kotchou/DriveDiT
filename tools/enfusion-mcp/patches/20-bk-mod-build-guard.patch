@@ -1,0 +1,31 @@
+# 20  BK guard: disable 'mod' action=build when ENFUSION_MCP_NO_AUTO_LAUNCH=1 (the wrapper sets it).
+# Paths are relative to the steffenbk/enfusion-mcp-BK REPO ROOT at 0acfa884228477043c6b4c2b8c7f0c270d648398.
+# Apply in the build copy (build-bk.sh does it once diff 21 is applied):  git apply 20-bk-mod-build-guard.patch
+# Why: mcp-setup verifier F3 - tools/bk-wsl-guard.patch gates launch and handler copy but not mod.ts runBuild -> spawn,
+# so a 'mod build' call from WSL would start a second Workbench with Linux paths and default its output to C:.
+
+--- a/src/tools/mod.ts
++++ b/src/tools/mod.ts
+@@ -458,6 +458,22 @@
+           };
+         }
+ 
++        if (process.env.ENFUSION_MCP_NO_AUTO_LAUNCH === "1") {
++          // DriveDiT local guard: from WSL this would spawn a second Workbench with /mnt/... paths, and the
++          // default output dir is <workbenchPath>/addons/<addon>/output, i.e. under Program Files on C:.
++          return {
++            content: [
++              {
++                type: "text",
++                text:
++                  "mod build is disabled here (ENFUSION_MCP_NO_AUTO_LAUNCH=1). Run ArmaReforgerWorkbenchSteamDiag.exe " +
++                  "-wbModule=ResourceManager -buildData ... from Windows with Windows paths and an E: output directory.",
++              },
++            ],
++            isError: true,
++          };
++        }
++
+         const exePath = findWorkbenchExe(config.workbenchPath);
+         if (!exePath) {
+           return {

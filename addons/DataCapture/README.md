@@ -260,3 +260,4 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e19kill | taskkill consistency (opt-in) | until killed, max 300 s | `e19_write.py [<e19 play_dir>] --kill <play_dir>` |
 | e01 | Mode A actuation identification | ~6 min | `e01_actuation.py e01 <play_dir>` |
 | e02a | first-pass steer -> kappa | ~10-15 min | `e01_actuation.py e02a <play_dir>` |
+| e05 | R1 camera, 10 Hz screenshots (E-05, E-06) | 10 min | `e05_images.py <play_dir> --log <console.log>`, `e06_fiducial.py <play_dir>` |

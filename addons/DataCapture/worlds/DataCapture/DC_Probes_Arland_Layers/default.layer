@@ -92,6 +92,32 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fE02aMaxTurnDeg 330
    m_iAssumedSteerSign -1
   }
+  DC_ProbeImages "{DC4A50B300000004}" {
+   m_vMountPos 0 1.25 0.3
+   m_fMountPitchDeg -4
+   m_fVerticalFovDeg 50
+   m_fNearPlaneM 0.1
+   m_fFarPlaneM 3000
+   m_fImageHz 10
+   m_fDurationS 600
+   m_iInFlightTimeoutMs 2000
+   m_bFiducial 1
+   m_iPatchPx 32
+   m_iMarginPx 16
+   m_iGapPx 8
+   m_bDrive 1
+   m_fDriveKmh 30
+   m_vAreaStart 1495.4 0 2620
+   m_fAreaHeadingDeg 0.11
+   m_fAreaLengthM 1100
+   m_fAreaHalfWidthM 25
+   m_fAreaMarginM 3
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSpeedKp 0.08
+   m_fSpeedKi 0.02
+   m_fBrakeScale 0.5
+  }
  }
  coords 2759.086 80.111 1664.452
  m_bAllowFactionChange 0

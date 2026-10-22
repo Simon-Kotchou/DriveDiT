@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "drivedit.route/1",
+  "title": "DriveDiT route (capture contract dc-2.0, nav_v1)",
+  "description": "One route schema for nav_v1, the T0 loop (DD-7-min), the route sampler (DD-7) and C17 (DD-5-min). Coordinates are Enfusion world metres: x east, y up, z north. The polyline is the driving line (already offset to the lane); along-route distances s_m are horizontal (x, z) arc length from the first point. drivedit_nav.validate_route also checks what this schema cannot: segment lengths >= 0.01 m, s_m within the route length, the closed-route tolerance (1 m) and a declared length_m (0.05 m).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "route_id", "map_id", "split", "nav_version", "lane_side", "closed", "polyline", "maneuvers", "stops"],
+  "properties": {
+    "schema": {"const": "drivedit.route/1"},
+    "route_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$", "description": "Stable id, e.g. arland_t0_loop_v1; recorded per episode."},
+    "map_id": {"enum": ["arland", "kolguyev", "everon"], "description": "Canonical map id (never a terrain name such as Cain or Eden)."},
+    "split": {"enum": ["train", "val_l", "a0", "a_stress", "k_val", "k_rep", "everon_harness", "everon_test"], "description": "Split tag; must belong to map_id (see allOf). Sessions take their split from it; VAL-C is chosen per session, not per route."},
+    "nav_version": {"const": "nav_v1"},
+    "lane_side": {"enum": ["right", "center", "mixed"], "description": "How the driving line was derived: right lane centre, road centreline (narrow roads), or both along the route."},
+    "closed": {"type": "boolean", "description": "True when the first and last point coincide (a loop). nav_v1 never wraps; a multi-lap episode repeats the loop in the polyline."},
+    "polyline": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}, "description": "[x, y, z] in world metres."}
+    },
+    "maneuvers": {
+      "type": "array",
+      "description": "Junction maneuvers in increasing s_m (distinct positions). nav_v1 reports the next one within 200 m, else man_follow.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["s_m", "type"],
+        "properties": {
+          "s_m": {"type": "number", "minimum": 0},
+          "type": {"enum": ["left", "straight", "right"]},
+          "junction_id": {"type": "string"}
+        }
+      }
+    },
+    "stops": {
+      "type": "array",
+      "description": "Commanded stops in non-decreasing s_m. A stop at the route end is the same command (kind route_end). nav_v1 gives d_stop = 200 when none is within 200 m.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["s_m", "kind"],
+        "properties": {
+          "s_m": {"type": "number", "minimum": 0},
+          "kind": {"enum": ["route_end", "commanded"]},
+          "dwell_s": {"type": "number", "minimum": 0}
+        }
+      }
+    },
+    "length_m": {"type": "number", "minimum": 0, "description": "Optional; if present it must equal the horizontal polyline length within 0.05 m."},
+    "source": {"type": "object", "description": "Provenance: generator, graph sha256, seed, input files."},
+    "created": {"type": "string"},
+    "description": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"map_id": {"const": "arland"}}}, "then": {"properties": {"split": {"enum": ["train", "val_l", "a0", "a_stress"]}}}},
+    {"if": {"properties": {"map_id": {"const": "kolguyev"}}}, "then": {"properties": {"split": {"enum": ["k_val", "k_rep"]}}}},
+    {"if": {"properties": {"map_id": {"const": "everon"}}}, "then": {"properties": {"split": {"enum": ["everon_harness", "everon_test"]}}}}
+  ]
+}

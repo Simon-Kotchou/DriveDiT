@@ -4,7 +4,7 @@
     python3 -I -B tools/validator/dc_validate.py --session DIR [--profile capture] [--trial ID]
         [--report-dir DIR | --no-report] [--engine-logs DIR] [--route FILE ...] [--routes-dir DIR]
         [--launch-record FILE] [--allow-list FILE] [--vehicle-card FILE] [--thresholds FILE] [--sealed-eval]
-        [--checks C01,C06,...] [--json] [--legacy]
+        [--checks C01,C06,...] [--image-suffix S] [--json] [--legacy]
 
 What it checks: C01 C02 C05 C06 C07 C08 C10 C11 C12 C13a C13b C15 C17 C20 C21 C28 C31 C34 C35 (the T0-MIN and T1
 set; tools/validator/checks/ documents each). The session is read by data/dc2/reader.py (strict=False, so every
@@ -15,6 +15,8 @@ follow the session's trial.trial_id, or a --trial of the same or a higher tier (
 flag from T1, C10 T0 limit, C12 / C13b SOFT, C21 SOFT before T1 and HARD from T1, C31 from T1, C17 SOFT at T1 /
 HARD at T2-T3 / INFO elsewhere. A check that depends on a TBD-by-probe value is marked "provisional" while dc-2.0
 is a DRAFT. --profile capture is the only profile so far (eval_lockstep and eval_async come with the bridge, DD-8).
+--image-suffix names the TBD-4 file suffix the engine appends to an img path (one of the reader's IMAGE_SUFFIXES,
+default .png); the harvester passes its --screenshot-suffix through it.
 
 The sealed admission runs before any session file is parsed: an Everon session (map_id, terrain, an Eden-rooted
 root_world, the session id, a path under heldout/ or SEALED; also with --legacy) and every --route file (map_id
@@ -155,6 +157,8 @@ def parse_args(argv):
                     help="thresholds file (default: thresholds_dc2.<pin_id>.json of the session's pin)")
     ap.add_argument("--sealed-eval", action="store_true", help="the sealed evaluation path (Everon)")
     ap.add_argument("--checks", default=None, help="comma-separated subset of check ids")
+    ap.add_argument("--image-suffix", default=None,
+                    help="TBD-4: the suffix of the image files, one of the reader's IMAGE_SUFFIXES (default .png)")
     ap.add_argument("--json", action="store_true", help="print the report JSON instead of the summary")
     ap.add_argument("--legacy", action="store_true", help="dc-1.0 self-test: the session must FAIL")
     return ap.parse_args(argv)
@@ -175,6 +179,9 @@ def validate(args):
         report_name(session_dir)
     reader = base.load_reader()
     schema = reader.load_schema()
+    image_suffix = reader.IMAGE_SUFFIX if args.image_suffix is None else args.image_suffix
+    if image_suffix not in reader.IMAGE_SUFFIXES:
+        raise Refused("--image-suffix %r is not one of the TBD-4 names %s" % (image_suffix, reader.IMAGE_SUFFIXES))
     only = set(c.strip() for c in args.checks.split(",")) if args.checks else None
     if only and only - set(checks.CHECK_IDS):
         raise Refused("unknown check id(s) %s" % sorted(only - set(checks.CHECK_IDS)))
@@ -197,7 +204,8 @@ def validate(args):
     else:
         try:
             session = reader.open_session(session_dir, sealed_eval=args.sealed_eval, strict=False,
-                                          vehicle_card=args.vehicle_card, image_visitor=collector.visit)
+                                          vehicle_card=args.vehicle_card, image_visitor=collector.visit,
+                                          image_suffix=image_suffix)
         except reader.SealedMapError as e:
             raise Refused(str(e))
         except reader.LegacySessionError as e:

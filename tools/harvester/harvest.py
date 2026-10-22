@@ -3,7 +3,7 @@
 runbook step R4).
 
     python3 -I -B tools/harvester/harvest.py [--session DIR ...] [--dry-run] [--routes-dir DIR]
-        [--allow-mixed-builds --reason TEXT] [--log-before-s S] [--log-after-s S]
+        [--allow-mixed-builds --reason TEXT] [--log-before-s S] [--log-after-s S] [--screenshot-suffix S]
 
 Validate, decode fiducials, build the derivative, move: Arland sessions of the Workbench and packaged-client profiles
 only. Kolguyev and Everon routing, crash salvage, frozen manifests and the loader guards are DD-6.
@@ -21,16 +21,20 @@ outside it is read for sessions or written):
 Per session, in this order:
   1. Admission, read-only. A directory that is not named arland_*, or whose session.json map is not Arland (map_id,
      terrain, an Eden-rooted root_world, session_id), is refused with one line and nothing else: no report, no log
-     value, no file (Everon is the sealed test map; Kolguyev routing is DD-6). An unsealed session (no
-     session_end.json) is skipped. pin_id, build_key and use_class are read here, before validation. A -exp pin
-     (or pin.channel experimental) routes the session to compat19/<pin_id>/, never to captures/ (MIGRATION_1_9 3.4).
-     rig.derivative_wh and rig.derivative_codec must be the contract's [512, 288] and jpeg_q95.
+     value, no file, and not its directory name (Everon is the sealed test map; Kolguyev routing is DD-6). An
+     unsealed session (no session_end.json) is skipped. pin_id, build_key and use_class are read here, before
+     validation. A -exp pin (or pin.channel experimental) routes the session to compat19/<pin_id>/, never to
+     captures/ (MIGRATION_1_9 3.4); a session of wb_profile_x19 with a stable pin is held. rig.derivative_wh and
+     rig.derivative_codec must be the contract's [512, 288] and jpeg_q95. The engine-log slice (below) is cut here
+     too, so a session whose logs cannot be attributed is held before anything is written.
   2. Sidecars (the DD-5-min conventions): _launch/launch_<launch_id>.json, _engine_logs/*.log (each engine log
      sliced to the session's time window) and harvest.json (the build stamp; build_key of a dd-launch/1 session,
      dc-2.0 10.1). dc_validate reads all three from the session directory.
-  3. dc_validate, run as `tools/validator/dc_validate.py --session DIR --no-report --json`. Exit 0 or 2 routes the
-     session to captures/arland/<YYYY-MM-DD>/<trial_id>/<session_id>/ and exit 1 to captures/_rejected/<session_id>/.
-     Exit 3 (a refusal) holds it in place, except a compat19 session (no thresholds exist for an experimental pin).
+  3. dc_validate, run as `tools/validator/dc_validate.py --session DIR --no-report --json --image-suffix S`. Exit 0
+     or 2 routes the session to captures/arland/<YYYY-MM-DD>/<trial_id>/<session_id>/ and exit 1 to
+     captures/_rejected/<session_id>/. Exit 3 (a refusal or a validator error) holds it in place and removes the
+     sidecars again, except that a compat19 session refused for want of a thresholds file (none exists for an
+     experimental pin) goes to compat19.
   4. _harvest/: dc_validate.json (the report), img_decoded.csv (img_resolved of dc-2.0 9.8, one row per img row),
      deriv/f_<slot:08d>.jpg, result.json and SHA256SUMS. A PASS (or PASS_WITH_WARNINGS) session gets one derivative
      per fiducial-decoded slot: the centred 16:9 of the core (the 1280x720 core of a 1408x720 client image, the
@@ -45,12 +49,16 @@ Raw data is never modified or deleted. Inside a session the harvester writes onl
 _launch/, _engine_logs/, _harvest/, _harvest.partial/ and *.dd6tmp), never through a symlink, and the move is a
 rename. Deleting raw PNGs after derivative + validation + checksums (the retention rule) is not done here.
 
-Re-runs and kills. A run that finds nothing to do writes nothing. A complete _harvest/ whose SHA256SUMS verifies and
-whose harvest.json carries the build stamp admission found (pin_id, build_key, use_class, channel) is moved as it
-is; any other harvester output is rebuilt. A kill at any point leaves the whole session either at its source or at
-its destination. A session that was moved but not catalogued is catalogued by the next run, after the same map check
-and a full SHA256SUMS verification at its destination. A torn last catalog line (a killed append) is cut off before
-the next append; complete rows are never changed.
+Re-runs and kills. A run that finds nothing to do writes nothing. A session held at admission or by a validator
+refusal is left as it was found; one held later keeps only harvester-owned names, which the next run replaces. A
+complete _harvest/ of this harvester version whose SHA256SUMS verifies, whose harvest.json carries the build stamp
+admission found (pin_id, build_key, use_class, channel, screenshot suffix) and whose result.json names this session
+and the destination its verdict routes to is moved as it is; any other harvester output is rebuilt. A kill at any
+point leaves the whole session either at its source or at its destination. A session that was moved but not
+catalogued is catalogued by the next run, after the same map check, a check of its harvest.json and result.json and
+a full SHA256SUMS verification at its destination. A catalog row counts only with its line feed: under the lock, an
+unterminated last line that is a complete row gets its line feed back, and a torn one (a killed append) is cut off;
+complete rows are never changed.
 
 One build per run (MIGRATION_1_9 3.3). The sessions a run will catalogue outside compat19 must share one build_key.
 Otherwise the run is refused, unless --allow-mixed-builds --reason TEXT is given (the reason goes into the catalog
@@ -63,16 +71,23 @@ DD-14a's sidecar pin_<pin_id>.build_key.json. When none of these exists (a dd-la
 build_key/1 is computed from the pin and its copy's SHA256SUMS (build_key_v1). All sources found must agree. A
 session with no source is held.
 
-Engine logs. The run is the newest logs_* run that started before the session. Each *.log is sliced to
-[start.unix_s - --log-before-s, end.unix_s + --log-after-s], and the window is cut at the nearest line that names
-another session id, so a neighbouring Play's lines stay out. A log without a parseable header (a crash.log written
-by a dying process) is kept whole, so C20 still sees it.
+Engine logs (C20 is HARD from T0, so a session whose logs cannot be attributed is held, never passed). The run is
+the newest logs_* run whose console.log header says it started before the session, and it must name the session.
+A run that loaded an Eden-rooted world or names an everon_ or kolguyev_ session is not used at all: another map's
+Play ran in that process, so the session is held and no line is copied (dc-2.0 3). Each *.log is sliced to
+[start.unix_s - --log-before-s, end.unix_s + --log-after-s]; the window starts at the session's own DD-4-min START
+marker when the log has one, and it is cut at the nearest line at or before the start, or at or after the end,
+that names another session id, so a neighbouring Play's lines stay out. The slice must name the session. A
+headerless crash.log (written by a dying process) is attributed by its modification time: kept whole when that lies
+in the window, else left out and listed in harvest.json; any other headerless log holds the session.
 
-TBD-by-probe. TBD-4: the engine-written screenshot name is the reader's IMAGE_SUFFIX. A file in frames/ named
-f_<slot:08d> plus another suffix the probe scheduler polls (DC_ProbeImages.c m_aSuffixes, the bare name included)
-holds the session, and the message names the suffix: the reader would not see it (any other stray file is C11's).
-TBD-6: in both launch-guard modes (cli, wb_escape) the launch record is found by pin.launch_id. The other TBDs are
-read from the session by dc_validate.
+TBD-by-probe. TBD-4: --screenshot-suffix (default the reader's IMAGE_SUFFIX, .png) is the suffix the engine appends
+to the img request path, one of the names the probe scheduler polls (DC_ProbeImages.c m_aSuffixes, the bare name
+included; the reader's IMAGE_SUFFIXES). It goes to dc_validate (--image-suffix), the derivative pass and
+img_decoded.csv's file column. A file in frames/ named f_<slot:08d> plus another of those suffixes holds the
+session, and the message names the suffix: the reader would not see it (any other stray file is C11's). TBD-6: in
+both launch-guard modes (cli, wb_escape) the launch record is found by pin.launch_id. The other TBDs are read from
+the session by dc_validate.
 
 Exit codes: 0 every session found was harvested, or there was nothing to do; 1 a session went to captures/_rejected;
 2 a session was held, refused or (with --session) skipped and stays in place (2 wins over 1); 3 the run was refused
@@ -109,7 +124,7 @@ READER_PATH = os.path.join(REPO, "data", "dc2", "reader.py")
 DC_VALIDATE = os.path.join(REPO, "tools", "validator", "dc_validate.py")
 DEFAULT_ROUTES_DIR = os.path.join(REPO, "addons", "DataCapture", "Configs", "routes")
 
-HARVESTER_VERSION = "harvest/1 (DD-6-min)"
+HARVESTER_VERSION = "harvest/2 (DD-6-min)"
 HARVEST_SCHEMA = "drivedit.harvest/1"
 RESULT_SCHEMA = "drivedit.harvest-result/1"
 CATALOG_SCHEMA = "drivedit.catalog-session/1"
@@ -121,6 +136,7 @@ TEST_ROOT_PREFIXES = ("/dev/shm/", "/mnt/e/")
 FORBIDDEN_DEVICE_PATHS = (("/mnt/c", "the C: drive"), ("/", "the WSL disk image, which lives on the C: drive"))
 
 WB_PROFILES = ("wb_profile", "wb_profile_x19")
+X19_PROFILE = "wb_profile_x19"      # 1.9 Experimental Workbench: never harvested into captures/ (MIGRATION_1_9 3.4)
 CLIENT_PROFILES = "client_profiles"
 CLIENT_INSTANCE_RE = re.compile(r"^i[0-9]{2}$")
 PROFILE_DIR = "profile"             # $profile of a -profile root
@@ -145,7 +161,6 @@ PARTIAL_DIR = "_harvest.partial"
 TMP_SUFFIX = ".dd6tmp"
 OWN_NAMES = (HARVEST_JSON, LAUNCH_SIDECAR, LOGS_SIDECAR, HARVEST_DIR, PARTIAL_DIR)
 SUMS_NAME = "SHA256SUMS"
-STAMP_KEYS = ("pin_id", "build_key", "use_class", "channel")     # what a reusable _harvest/ must still match
 
 # The derivative of dc-2.0 10.1 (rig.derivative_wh, rig.derivative_codec) and CAPTURE_PROGRAM r2 3.9: 512x288 JPEG
 # q95. A session that states anything else is held; a new value is a contract change.
@@ -165,9 +180,6 @@ MAX_JSON_BYTES = 4 << 20
 # The executables the launchers start (client_R1_iNN.bat GAME_EXE, wb_R1.bat WB_EXE), relative to the install dir
 # (DD-0 pinlib BINARIES); build_key/1 hashes them with the app ids and buildids (MIGRATION_1_9 2.2).
 BUILD_KEY_EXES = (("game", "ArmaReforgerSteam.exe"), ("tools", "Workbench/ArmaReforgerWorkbenchSteamDiag.exe"))
-# TBD-4: the file names the probe scheduler polls for an extension-less request path (DC_ProbeImages.c
-# m_aSuffixes; "" is the bare path). The reader reads IMAGE_SUFFIX only.
-SCREENSHOT_SUFFIXES = (".png", ".bmp.png", ".bmp", ".jpg", "")
 
 LOG_HEADER_RE = re.compile(rb"^Log .* started at ([0-9]{4})-([0-9]{2})-([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) "
                            rb"\(([0-9]{4})-([0-9]{2})-([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) UTC\)")
@@ -177,7 +189,16 @@ LOG_RUN_SLACK_S = 2.0               # a log run may start up to this long after 
 LOG_CUT_S = 0.0005                  # half a log millisecond: a cut line itself stays outside the window
 DEFAULT_LOG_BEFORE_S = 2.0          # before session.json start.unix_s (a whole second): the session's first lines
 DEFAULT_LOG_AFTER_S = 15.0          # after session_end.json end.unix_s: the shutdown of the capture components
+# A log run that names an Eden-rooted world (dc-2.0 3.1: every one counts as Everon) or a session id of another map
+# had another map's Play in its process: none of its lines is copied into an Arland session.
+LOG_EDEN_WORLD_RE = re.compile(rb"worlds[/\\]eden[/\\]", re.IGNORECASE)
+LOG_OTHER_MAP_IDS = (b"everon_", b"kolguyev_")
+# DD-4-min DC_Session.OpenSession prints this right after it takes start.unix_s ("[DC_Session] START session <id>
+# dir=..."): when present, the session's window starts at it, so a previous Play's last lines stay out.
+LOG_START_MARKER = b"[DC_Session] START session %s "
+CRASH_LOG = "crash.log"
 VALIDATE_TIMEOUT_S = 3 * 3600
+NO_THRESHOLDS_REFUSAL = "refused: no thresholds file for pin "     # dc_validate.thresholds_path, exit 3
 
 EXIT_OK, EXIT_REJECTED, EXIT_HELD, EXIT_REFUSED, EXIT_ERROR = 0, 1, 2, 3, 4
 VERDICT_ROUTE = {"PASS": "captures", "PASS_WITH_WARNINGS": "captures", "FAIL": "rejected"}
@@ -228,6 +249,10 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utc_text(unix_s):
+    return datetime.datetime.fromtimestamp(unix_s, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -238,6 +263,14 @@ def sha256_file(path):
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def hidden(rel):
+    """rel with its last component (the directory name of a refused, non-Arland session: its map, trial and start
+    time) replaced by a placeholder holding a hash of it, so a refusal line names no session value."""
+    head, name = os.path.split(rel)
+    digest = sha256_bytes(name.encode("utf-8", "surrogateescape"))[:12]
+    return "%s/<not Arland, name sha256 %s>" % (head, digest)
 
 
 def json_text(obj):
@@ -405,6 +438,7 @@ class Profile:
         self.name = name
         self.base = os.path.join(root, name)
         self.client_instance = client_instance
+        self.experimental = name == X19_PROFILE
         self.sessions = os.path.join(self.base, PROFILE_DIR, SESSIONS_DIR)
         self.launch_dir = os.path.join(self.base, PROFILE_DIR, LAUNCH_COPY_DIR)
         self.log_bases = [os.path.join(self.base, "logs")]
@@ -439,7 +473,8 @@ def is_arland(meta):
 
 
 class Candidate:
-    """A sealed Arland session admitted for harvest: its identity, build stamp, launch record and route class."""
+    """A sealed Arland session admitted for harvest: its identity, build stamp, launch record, engine-log slice and
+    route class."""
 
     def __init__(self, path, profile, meta, end):
         self.path = path
@@ -457,6 +492,8 @@ class Candidate:
         self.build_key_source = None
         self.launch_bytes = None
         self.launch_source = None
+        self.screenshot_suffix = reader.IMAGE_SUFFIX
+        self.logs = None
 
     def date(self):
         stamp = self.session_id.split("_")[2]
@@ -473,9 +510,16 @@ class Candidate:
             return route, "%s/%s/%s" % (CAPTURES, REJECTED, self.session_id)
         return route, "%s/arland/%s/%s/%s" % (CAPTURES, self.date(), self.trial_id, self.session_id)
 
+    def route_of(self, verdict):
+        """(route, dest) a verdict sends this session to, or None (a refusal of a stable-pin session is held)."""
+        if not self.experimental and verdict not in VERDICT_ROUTE:
+            return None
+        return self.dest_for(verdict)
+
     def stamp(self):
-        return {"pin_id": self.pin_id, "build_key": self.build_key, "use_class": self.use_class,
-                "channel": self.channel}
+        """What a reusable _harvest/ must still match: the build stamp admission found and the TBD-4 suffix."""
+        return {"session_id": self.session_id, "pin_id": self.pin_id, "build_key": self.build_key,
+                "use_class": self.use_class, "channel": self.channel, "screenshot_suffix": self.screenshot_suffix}
 
 
 def admit(path, profile, schema):
@@ -520,7 +564,11 @@ def admit(path, profile, schema):
     if wh != DERIVATIVE_WH or codec != DERIVATIVE_CODEC:
         return "held", "rig.derivative_wh %r / rig.derivative_codec %r are not the contract's %r / %s" % (
             wh, codec, DERIVATIVE_WH, DERIVATIVE_CODEC)
-    return "ok", Candidate(path, profile, meta, end)
+    c = Candidate(path, profile, meta, end)
+    if profile.experimental and not c.experimental:
+        return "held", ("a session of %s (the 1.9 Experimental Workbench) with the stable pin %s; Experimental "
+                        "output is never harvested into captures/ (MIGRATION_1_9 3.4)" % (profile.name, pin_id))
+    return "ok", c
 
 
 def find_launch_record(c, root):
@@ -649,23 +697,26 @@ def resolve_build_key(c, rec, root):
 
 
 def check_frame_names(c):
-    """TBD-4: a screenshot written under another name the probe scheduler polls (f_<slot:08d> plus a suffix of
-    SCREENSHOT_SUFFIXES other than the reader's IMAGE_SUFFIX) holds the session: the reader would not see it, so
-    C10/C11 would reject good data. Any other stray file is left to C11."""
+    """TBD-4: a screenshot written under another name the probe scheduler polls (f_<slot:08d> plus one of the
+    reader's IMAGE_SUFFIXES other than this run's --screenshot-suffix) holds the session: the reader would not see
+    it, so C10/C11 would reject good data. Any other stray file is left to C11. A symlinked frames/ is held before
+    it is listed."""
     fdir = os.path.join(c.path, "frames")
+    if os.path.islink(fdir):
+        raise Held("frames/ is a symlink; the harvester never reads through one")
     if not os.path.isdir(fdir):
         return
     other = {}
     for name in os.listdir(fdir):
         m = FRAME_NAME_RE.match(name)
         suffix = name[m.end():] if m else None
-        if suffix is not None and suffix != reader.IMAGE_SUFFIX and suffix in SCREENSHOT_SUFFIXES:
+        if suffix is not None and suffix != c.screenshot_suffix and suffix in reader.IMAGE_SUFFIXES:
             other[suffix] = other.get(suffix, 0) + 1
     if other:
-        raise Held("TBD-4: frames/ holds %s; the reader reads frames/f_<slot:08d>%s only (IMAGE_SUFFIX in "
-                   "data/dc2/reader.py is set at the T0-ENG freeze), so the session stays in place" % (
+        raise Held("TBD-4: frames/ holds %s; this run reads frames/f_<slot:08d>%s only (--screenshot-suffix %r; "
+                   "pass the suffix TBD-4 settles on), so the session stays in place" % (
                        ", ".join("%d file(s) f_<slot:08d>%s" % (n, suffix or " without extension")
-                                 for suffix, n in sorted(other.items())), reader.IMAGE_SUFFIX))
+                                 for suffix, n in sorted(other.items())), c.screenshot_suffix, c.screenshot_suffix))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -708,12 +759,8 @@ def timed_lines(data):
     return out
 
 
-def slice_log(data, lo, hi):
-    """The lines of one engine log whose UTC time lies in [lo, hi] (leading and trailing empty lines dropped), or
-    None without a header."""
-    timed = timed_lines(data)
-    if timed is None:
-        return None
+def slice_timed(timed, lo, hi):
+    """The lines of timed_lines() output whose UTC time lies in [lo, hi], leading and trailing empty lines dropped."""
     out = [line for t, line in timed if lo <= t <= hi]
     while out and not out[0].strip():
         out.pop(0)
@@ -722,19 +769,21 @@ def slice_log(data, lo, hi):
     return out
 
 
-def engine_log_slice(c, root, before_s, after_s, id_re):
-    """(run directory name, window, {log name: [lines]}, [names kept whole]) of the engine-log run that holds the
-    session, or None when no run or no time window is known.
-
-    The run is the newest logs_* run (or a log base holding console.log itself) that started before the session.
-    Each *.log is sliced to [start.unix_s - before_s, end.unix_s + after_s]; the window is cut at the nearest line
-    before the start or after the end that names another session id (a neighbouring Play of the same process). A
-    log without a parseable header is kept whole: it cannot be sliced, and a non-empty crash.log must reach C20."""
-    start = get(c.meta, "start.unix_s")
-    end = get(c.end, "end.unix_s") if c.end else None
-    if not isinstance(start, int) or not isinstance(end, int) or end < start:
+def slice_log(data, lo, hi):
+    """The lines of one engine log whose UTC time lies in [lo, hi] (leading and trailing empty lines dropped), or
+    None without a header."""
+    timed = timed_lines(data)
+    if timed is None:
         return None
+    return slice_timed(timed, lo, hi)
+
+
+def find_log_run(c, root, start):
+    """(path, note) of the newest engine-log run of the session's profile (a logs_* directory, or a log base holding
+    console.log itself) whose console.log header says it started before the session. note lists the runs whose
+    header does not parse. Held when there is none."""
     runs = []
+    unparsed = []
     for base in c.profile.log_bases:
         if not os.path.isdir(base) or not real_below(base, root):
             continue
@@ -744,36 +793,91 @@ def engine_log_slice(c, root, before_s, after_s, id_re):
             if os.path.isdir(run) and real_below(console, root) and os.path.isfile(console):
                 with open(console, "rb") as f:
                     head = log_header(f.read(4096))
-                if head is not None and head[0] <= start + LOG_RUN_SLACK_S:
+                if head is None:
+                    unparsed.append(os.path.relpath(run, root))
+                elif head[0] <= start + LOG_RUN_SLACK_S:
                     runs.append((head[0], run))
+    note = ""
+    if unparsed:
+        note = " (the console.log header of %s does not parse)" % ", ".join(sorted(unparsed))
     if not runs:
-        return None
-    _, run = max(runs)
+        raise Held("no engine-log run that started before the session in %s%s, so C20 (HARD) cannot be evaluated" % (
+            " or ".join(os.path.relpath(base, root) for base in c.profile.log_bases), note))
+    return max(runs)[1], note
+
+
+def engine_log_slice(c, root, before_s, after_s, id_re):
+    """{run, window_utc, start_marker, files: {log name: [lines]}, kept_whole: [names], left_out: {name: why}} of the
+    engine-log run that holds the session. Held whenever the logs cannot be attributed to the session, so C20 (HARD
+    from T0) never passes on missing or foreign lines:
+
+      * the run (find_log_run) must name the session (its Screenshot-saved lines and DD-4-min's markers do);
+      * a run that names an Eden-rooted world or an everon_ / kolguyev_ session id had another map's Play in its
+        process (dc-2.0 3: Everon is sealed), so no line of it is copied;
+      * each *.log is sliced to [start.unix_s - before_s, end.unix_s + after_s]. The window starts at the session's
+        own START marker (LOG_START_MARKER) when the log has one, and it is cut at the nearest line at or before the
+        start, or at or after the end, that names another session id (a neighbouring Play of the same process). The
+        slice must name the session;
+      * a headerless crash.log is attributed by its modification time: kept whole when that lies in the window, else
+        left out and listed. Any other non-empty headerless log holds the session: its lines have no time."""
+    start = get(c.meta, "start.unix_s")
+    end = get(c.end, "end.unix_s") if c.end else None
+    if not isinstance(start, int) or not isinstance(end, int) or end < start:
+        raise Held("start.unix_s / end.unix_s give no time window, so the engine logs cannot be sliced (C20)")
+    run, note = find_log_run(c, root, start)
+    run_rel = os.path.relpath(run, root)
     logs = {}
     for name in sorted(os.listdir(run)):
         path = os.path.join(run, name)
         if name.endswith(".log") and os.path.isfile(path) and real_below(path, root):
             with open(path, "rb") as f:
-                logs[name] = f.read()
-    lo, hi = start - before_s, end + after_s
+                logs[name] = (f.read(), os.fstat(f.fileno()).st_mtime)
     own = c.session_id.encode("ascii")
-    for data in logs.values():
-        for t, line in timed_lines(data) or []:
-            if (lo < t < start or end < t < hi) and any(m.group(0) != own for m in id_re.finditer(line)):
-                if t > end:
-                    hi = min(hi, t - LOG_CUT_S)
-                else:
+    if not any(own in data for data, _ in logs.values()):
+        raise Held("engine-log run %s does not name the session, so it is not the session's run%s" % (run_rel, note))
+    for data, _ in logs.values():
+        if LOG_EDEN_WORLD_RE.search(data) or any(m.group(0).startswith(LOG_OTHER_MAP_IDS)
+                                                 for m in id_re.finditer(data)):
+            raise Held("engine-log run %s names an Eden-rooted world or a session of another map: that Play ran in the "
+                       "same process, so no line of the run is copied (Everon is sealed)" % run_rel)
+    timed = dict((name, timed_lines(data)) for name, (data, _) in logs.items())
+    lo, hi = start - before_s, end + after_s
+    marker = LOG_START_MARKER % own
+    marked = False
+    for lines in timed.values():
+        for t, line in lines or []:
+            if marker in line and lo <= t <= end:
+                lo = max(lo, t)
+                marked = True
+    for lines in timed.values():
+        for t, line in lines or []:
+            if lo <= t <= hi and (t <= start or t >= end) and any(m.group(0) != own for m in id_re.finditer(line)):
+                if t <= start:
                     lo = max(lo, t + LOG_CUT_S)
+                else:
+                    hi = min(hi, t - LOG_CUT_S)
     files = {}
     whole = []
-    for name, data in logs.items():
-        lines = slice_log(data, lo, hi)
-        if lines is None and data.strip():
+    left_out = {}
+    for name, (data, mtime) in logs.items():
+        if timed[name] is not None:
+            lines = slice_timed(timed[name], lo, hi)
+            if lines:
+                files[name] = lines
+        elif not data.strip():
+            continue
+        elif name.lower() != CRASH_LOG:
+            raise Held("%s/%s has no parseable header, so its lines cannot be attributed to the session's window" % (
+                run_rel, name))
+        elif lo <= mtime <= hi:
             files[name] = data.rstrip(b"\n").split(b"\n")
             whole.append(name)
-        elif lines:
-            files[name] = lines
-    return os.path.basename(run), [lo, hi], files, whole
+        else:
+            left_out[name] = "no header; written %s, outside the session's window" % utc_text(mtime)
+    if not any(own in line for lines in files.values() for line in lines):
+        raise Held("no line of engine-log run %s in the session's window names the session" % run_rel)
+    return {"run": os.path.basename(run), "window_utc": [lo, hi], "start_marker": marked, "files": files,
+            "kept_whole": whole, "left_out": left_out}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -873,6 +977,18 @@ def verify_sums(session_dir):
     return True, "%d files verified" % len(present)
 
 
+def parse_row(line):
+    """The catalog row of one line's bytes (a JSON object with a session_id), or None. A torn append never parses:
+    a JSON object is complete only with its closing brace."""
+    try:
+        row = json.loads(line.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if isinstance(row, dict) and isinstance(row.get("session_id"), str):
+        return row
+    return None
+
+
 # ------------------------------------------------------------------------------------------------
 # The harvester
 # ------------------------------------------------------------------------------------------------
@@ -926,26 +1042,35 @@ class Harvester:
     def uncatalogued(self, known):
         """Harvested sessions at a destination (they hold _harvest/) that the catalog does not list: moved by a run
         that was killed before its catalog row. Each one passes the map check first (a non-Arland one is refused
-        and nothing else of it is read), then its result.json and harvest.json must name it and its destination,
-        and SHA256SUMS must verify. Returns [{status, dest, detail, build_key, route}]."""
+        and nothing else of it is read; its name is not printed), then its result.json and harvest.json must name
+        it, its destination and route and a valid build_key (a symlinked _harvest/ is not read), and SHA256SUMS
+        must verify. Returns [{status, dest, detail, build_key, route}]."""
         out = []
-        for parts, depth in (((CAPTURES, "arland"), 2), ((CAPTURES, REJECTED), 0), ((COMPAT19,), 1)):
+        for parts, depth, route in (((CAPTURES, "arland"), 2, "captures"), ((CAPTURES, REJECTED), 0, "rejected"),
+                                    ((COMPAT19,), 1, "compat19")):
             for dest in self._walk_dirs(os.path.join(self.root, *parts), depth):
                 name = os.path.basename(dest)
-                if name in known or not os.path.isdir(os.path.join(dest, HARVEST_DIR)):
+                hdir = os.path.join(dest, HARVEST_DIR)
+                if name in known or not (os.path.isdir(hdir) or os.path.islink(hdir)):
                     continue
                 rel = os.path.relpath(dest, self.root).replace(os.sep, "/")
                 entry = {"dest": rel, "build_key": None, "route": None}
                 meta = read_json(os.path.join(dest, "session.json")) if name.startswith("arland_") else None
                 if meta is None or not is_arland(meta) or meta.get("session_id") != name:
-                    out.append(dict(entry, status="refused", detail=NOT_ARLAND + " (found at a destination; not "
-                                    "catalogued)"))
+                    out.append(dict(entry, dest=hidden(rel), status="refused", detail=NOT_ARLAND + " (found at a "
+                                    "destination; not catalogued)"))
                     continue
-                result = read_json(os.path.join(dest, HARVEST_DIR, "result.json")) or {}
+                if os.path.islink(hdir):
+                    out.append(dict(entry, status="held", detail="%s/ is a symlink; not read, not catalogued" %
+                                    HARVEST_DIR))
+                    continue
+                result = read_json(os.path.join(hdir, "result.json")) or {}
                 stamp = read_json(os.path.join(dest, HARVEST_JSON)) or {}
-                if result.get("session_id") != name or result.get("dest") != rel or stamp.get("session_id") != name:
+                key = stamp.get("build_key")
+                if result.get("session_id") != name or result.get("dest") != rel or stamp.get("session_id") != name \
+                        or result.get("route") != route or not (isinstance(key, str) and BUILD_KEY_RE.match(key)):
                     out.append(dict(entry, status="held", detail="result.json / harvest.json do not name this "
-                                    "session and destination; not catalogued"))
+                                    "session, its destination and route and a build_key; not catalogued"))
                     continue
                 try:
                     ok, detail = verify_sums(dest)
@@ -984,18 +1109,16 @@ class Harvester:
         return path
 
     def catalog_rows(self):
-        """The complete rows of the catalog (a torn last line is skipped)."""
+        """The complete rows of the catalog. A row counts only with its line feed: an unterminated last line is
+        not counted here (catalog_tail reconciles it under the lock)."""
         path = self.catalog_path()
         if not os.path.isfile(path):
             return []
         rows = []
         with open(path, "rb") as f:
-            for line in f.read().split(b"\n"):
-                try:
-                    row = json.loads(line.decode("ascii"))
-                except (UnicodeDecodeError, ValueError):
-                    continue
-                if isinstance(row, dict) and isinstance(row.get("session_id"), str):
+            for line in f.read().split(b"\n")[:-1]:
+                row = parse_row(line)
+                if row is not None:
                     rows.append(row)
         return rows
 
@@ -1018,24 +1141,56 @@ class Harvester:
                "run_id": self.run_id, "mixed_builds_reason": self.reason}
         return dict((k, row[k]) for k in CATALOG_COLUMNS)
 
+    def catalog_tail(self, fd):
+        """Reconcile an unterminated last line of the catalog (fd open read-write, under the lock): a complete row
+        whose line feed was lost gets it back (the row and its run_id are kept), a torn append is cut off; complete
+        rows are never changed. Returns "terminated", "cut" or None, and leaves fd at the end of the file."""
+        size = os.fstat(fd).st_size
+        keep = size
+        while keep > 0:
+            os.lseek(fd, keep - 1, os.SEEK_SET)
+            if os.read(fd, 1) == b"\n":
+                break
+            keep -= 1
+        action = None
+        if keep != size:
+            os.lseek(fd, keep, os.SEEK_SET)
+            if parse_row(os.read(fd, size - keep)) is not None:
+                os.lseek(fd, size, os.SEEK_SET)
+                write_all(fd, b"\n")
+                action = "terminated"
+            else:
+                os.ftruncate(fd, keep)
+                action = "cut"
+            os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_END)
+        return action
+
+    def reconcile_catalog(self):
+        """catalog_tail on catalog/sessions.jsonl when it exists (under the lock); reports what it did."""
+        path = self.catalog_path()
+        if not os.path.isfile(path):
+            return
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            action = self.catalog_tail(fd)
+        finally:
+            os.close(fd)
+        if action == "terminated":
+            self.report("repaired", "%s/%s" % (CATALOG_DIR, CATALOG_NAME), "the last row had lost its line feed; "
+                        "the line feed was added, the row is unchanged")
+        elif action == "cut":
+            self.report("repaired", "%s/%s" % (CATALOG_DIR, CATALOG_NAME), "a torn last line (a killed append) was "
+                        "cut off")
+
     def catalog_append(self, row):
-        """Append one row to catalog/sessions.jsonl (under the lock; never through a symlink). A row counts only
-        with its line feed: a torn last line left by a killed append is cut off first, complete rows are never
-        changed. Every byte is written and flushed to the disk."""
+        """Append one row to catalog/sessions.jsonl (under the lock; never through a symlink), after catalog_tail.
+        Every byte is written and flushed to the disk."""
         ensure_dir(self.root, CATALOG_DIR)
         line = (json.dumps(row, separators=(",", ":")) + "\n").encode("ascii")
         fd = os.open(self.catalog_path(), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
         try:
-            size = os.fstat(fd).st_size
-            keep = size
-            while keep > 0:
-                os.lseek(fd, keep - 1, os.SEEK_SET)
-                if os.read(fd, 1) == b"\n":
-                    break
-                keep -= 1
-            if keep != size:
-                os.ftruncate(fd, keep)
-            os.lseek(fd, keep, os.SEEK_SET)
+            self.catalog_tail(fd)
             write_all(fd, line)
             os.fsync(fd)
         finally:
@@ -1079,13 +1234,19 @@ class Harvester:
                 self.report("done", rel, "already harvested (catalog/sessions.jsonl lists it)")
                 continue
             status, value = admit(path, profile, self.schema)
+            if status == "refused":
+                self.report(status, hidden(rel), value)
+                continue
             if status != "ok":
                 self.report(status, rel, value)
                 continue
+            value.screenshot_suffix = self.args.screenshot_suffix
             try:
                 value.launch_bytes, rec, value.launch_source = find_launch_record(value, self.root)
                 value.build_key, value.build_key_source = resolve_build_key(value, rec, self.root)
                 check_frame_names(value)
+                value.logs = engine_log_slice(value, self.root, self.args.log_before_s, self.args.log_after_s,
+                                              self.id_re)
             except Held as e:
                 self.report("held", rel, str(e))
                 continue
@@ -1120,6 +1281,7 @@ class Harvester:
             return self.finish([])
         self.lock()
         try:
+            self.reconcile_catalog()
             for c in candidates:
                 rel = os.path.relpath(c.path, self.root)
                 try:
@@ -1175,19 +1337,23 @@ class Harvester:
         src = c.path
         if not os.path.isdir(src):
             raise Held("gone before it was harvested (another harvester moved it?)")
-        result = None
-        if os.path.isdir(os.path.join(src, HARVEST_DIR)):
-            stamp = read_json(os.path.join(src, HARVEST_JSON)) or {}
-            if all(stamp.get(k) == v for k, v in c.stamp().items()) and verify_sums(src)[0]:
-                result = read_json(os.path.join(src, HARVEST_DIR, "result.json"))
+        if os.path.islink(src) or not real_below(src, self.root):
+            raise Held("reached through a symlink since admission; nothing was written")
+        result = self.reusable(c)
         if result is None:
             self.clean(src)
             self.write_sidecars(c)
             self.hook("after_sidecars")
-            report, code, refusal = self.validate(c)
+            try:
+                report, code, refusal = self.validate(c)
+            except Held:
+                self.drop_sidecars(src)
+                raise
             self.hook("after_validate")
-            if report is None and not c.experimental:
-                raise Held("dc_validate refused the session (exit %d): %s" % (code, refusal))
+            if report is None and not (c.experimental and refusal.startswith(NO_THRESHOLDS_REFUSAL)):
+                self.drop_sidecars(src)
+                raise Held("dc_validate refused the session or failed (exit %d): %s; the sidecars were removed "
+                           "again" % (code, refusal))
             result = self.build(c, report, code, refusal)
             self.hook("before_harvest_rename")
             os.rename(os.path.join(src, PARTIAL_DIR), os.path.join(src, HARVEST_DIR))
@@ -1205,12 +1371,37 @@ class Harvester:
         self.report("harvested", result["session_id"], detail, route=result["route"], dest=result["dest"],
                     verdict=result["verdict"])
 
+    def reusable(self, c):
+        """The result.json of a complete _harvest/ left in the source by an earlier run that was killed before the
+        move, when it can be moved as it is: built by this harvester version, its SHA256SUMS verifies, harvest.json
+        carries the stamp admission found (c.stamp) and result.json names this session and the route and
+        destination its verdict sends it to. None otherwise (it is rebuilt). A symlinked _harvest/ is not read."""
+        hdir = os.path.join(c.path, HARVEST_DIR)
+        if os.path.islink(hdir) or not os.path.isdir(hdir):
+            return None
+        stamp = read_json(os.path.join(c.path, HARVEST_JSON)) or {}
+        result = read_json(os.path.join(hdir, "result.json")) or {}
+        if any(stamp.get(k) != v for k, v in c.stamp().items()) or stamp.get("harvester_version") != HARVESTER_VERSION:
+            return None
+        if result.get("harvester_version") != HARVESTER_VERSION or result.get("session_id") != c.session_id:
+            return None
+        if c.route_of(result.get("verdict")) != (result.get("route"), result.get("dest")):
+            return None
+        return result if verify_sums(c.path)[0] else None
+
     def clean(self, src):
         """Remove the outputs of an earlier, unfinished run: _harvest/, _harvest.partial/ and *.dd6tmp (the
         sidecars are replaced next). Never raw data."""
         for name in sorted(os.listdir(src)):
             if name in (HARVEST_DIR, PARTIAL_DIR) or name.endswith(TMP_SUFFIX):
                 remove_own(src, name)
+
+    def drop_sidecars(self, src):
+        """Remove the sidecars of a session that stays in place after a validator refusal, so a held session is
+        left as it was found (re-runs do not rewrite it)."""
+        for name in (LAUNCH_SIDECAR, LOGS_SIDECAR, HARVEST_JSON):
+            remove_own(src, name)
+        fsync_dir(src)
 
     def replace_dir(self, src, name, files):
         """Replace the harvester-owned directory src/name by one holding files ({name: bytes}); without files the
@@ -1231,20 +1422,14 @@ class Harvester:
         src = c.path
         launch_name = "launch_%s.json" % c.launch_id
         self.replace_dir(src, LAUNCH_SIDECAR, {launch_name: c.launch_bytes})
-        sliced = engine_log_slice(c, self.root, self.args.log_before_s, self.args.log_after_s, self.id_re)
-        logs = None
-        if sliced is not None:
-            run, window, files, whole = sliced
-            self.replace_dir(src, LOGS_SIDECAR, dict((name, b"\n".join(lines) + b"\n")
-                                                     for name, lines in files.items()))
-            logs = {"run": run, "window_utc": window, "lines": dict((n, len(v)) for n, v in sorted(files.items())),
-                    "kept_whole": whole}
-        else:
-            self.replace_dir(src, LOGS_SIDECAR, {})
+        files = c.logs["files"]
+        self.replace_dir(src, LOGS_SIDECAR, dict((name, b"\n".join(lines) + b"\n") for name, lines in files.items()))
+        logs = dict((k, c.logs[k]) for k in ("run", "window_utc", "start_marker", "kept_whole", "left_out"))
+        logs["lines"] = dict((n, len(v)) for n, v in sorted(files.items()))
         stamp = {"schema": HARVEST_SCHEMA, "session_id": c.session_id, "harvester_version": HARVESTER_VERSION,
                  "created_utc": utc_now(), "pin_id": c.pin_id, "pin_sha256": get(c.meta, "pin.pin_sha256"),
                  "channel": c.channel, "use_class": c.use_class, "build_key": c.build_key,
-                 "build_key_source": c.build_key_source,
+                 "build_key_source": c.build_key_source, "screenshot_suffix": c.screenshot_suffix,
                  "launch_record": {"path": "%s/%s" % (LAUNCH_SIDECAR, launch_name),
                                    "sha256": sha256_bytes(c.launch_bytes), "source": c.launch_source},
                  "engine_logs": logs}
@@ -1253,7 +1438,8 @@ class Harvester:
 
     def validate(self, c):
         """(report or None, exit code, refusal text) of dc_validate on the session (a subprocess, no report file)."""
-        cmd = [sys.executable, "-I", "-B", DC_VALIDATE, "--session", c.path, "--no-report", "--json"]
+        cmd = [sys.executable, "-I", "-B", DC_VALIDATE, "--session", c.path, "--no-report", "--json",
+               "--image-suffix=%s" % c.screenshot_suffix]
         if self.args.routes_dir:
             cmd += ["--routes-dir", self.args.routes_dir]
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -1290,7 +1476,7 @@ class Harvester:
             verdict = "REFUSED"
             write_file(os.path.join(partial, "dc_validate.txt"), ("exit %d: %s\n" % (code, refusal)).encode(
                 "ascii", errors="replace"))
-        route, dest = c.dest_for(verdict) if verdict in VERDICT_ROUTE else ("compat19", c.compat_dest())
+        route, dest = c.route_of(verdict)
         plan = derivative_plan(c.meta) if verdict in ("PASS", "PASS_WITH_WARNINGS") else None
         deriv = {}
         if plan is not None:
@@ -1309,7 +1495,8 @@ class Harvester:
 
         images = None
         try:
-            images = reader.open_session(src, strict=False, decode_images=True, image_visitor=visit).images
+            images = reader.open_session(src, strict=False, decode_images=True, image_visitor=visit,
+                                         image_suffix=c.screenshot_suffix).images
         except Held:
             raise
         except Exception as e:  # a failed session the reader cannot read still moves to _rejected with its report
@@ -1401,6 +1588,9 @@ def parse_args(argv):
                     help="engine-log slice: seconds before the session start (default %(default)s)")
     ap.add_argument("--log-after-s", type=float, default=DEFAULT_LOG_AFTER_S,
                     help="engine-log slice: seconds after the session end (default %(default)s)")
+    ap.add_argument("--screenshot-suffix", choices=reader.IMAGE_SUFFIXES, default=reader.IMAGE_SUFFIX,
+                    help="TBD-4: the suffix the engine appends to an img path ('' for the bare path; default "
+                         "%(default)s); passed to dc_validate --image-suffix")
     ap.add_argument("--test-root", default=None, help="TESTS ONLY: a /dev/shm/ or /mnt/e/ directory in place of %s"
                     % DATA_ROOT)
     args = ap.parse_args(argv)

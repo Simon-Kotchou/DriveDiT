@@ -6,10 +6,16 @@
 
   * the seed rows EL-001..EL-007 are CAPTURE_PROGRAM r2.2 Appendix A verbatim (the section sign written &sect;);
     compared with /mnt/e/drivedit_realign/program/CAPTURE_PROGRAM.md when it exists, else that test skips;
-  * the ledger is ASCII with LF line ends and passes the checker against itself and against git HEAD;
+  * the ledger is ASCII with LF line ends and passes the checker against itself and against git HEAD, and its
+    committed history passes --history;
   * appending a row passes; editing, removing, reordering or inserting a row fails, and so do an id gap, a date
-    that goes back and a rewritten seed (even when the base is rewritten the same way).
-Base versions are written to a temporary directory under $TMPDIR (on /dev/shm/ or /mnt/e/, else /dev/shm/).
+    that goes back and a rewritten seed (even when the base is rewritten the same way);
+  * a row outside the table (after a blank line, before the header, or text after the table that looks like a row)
+    and a table inside an HTML comment or a code fence fail (review F-6);
+  * in a scratch git repository, an edit or a removal that was committed passes the HEAD comparison but fails
+    --history (review F-4).
+Base versions and the scratch repository are written to a temporary directory under $TMPDIR (on /dev/shm/ or
+/mnt/e/, never /mnt/e/DriveDiT nor the C: or WSL-image device; else /dev/shm/).
 """
 
 import contextlib
@@ -18,6 +24,7 @@ import importlib.util
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -36,6 +43,34 @@ def load(name, rel):
 
 
 checker = load("dd6_ledger_check", "tools/harvester/check_ledger_append_only.py")
+
+
+def scratch_ok(path):
+    """True for an existing, writable directory under /dev/shm/ or /mnt/e/ (symlinks resolved) that is not inside
+    /mnt/e/DriveDiT and not on the device of C: or of the WSL disk image (/), as test_harvest.scratch_ok."""
+    real = os.path.realpath(path or "/")
+    low = real.lower()
+    if not (low.startswith("/dev/shm/") or low.startswith("/mnt/e/")) or low == "/mnt/e/drivedit" \
+            or low.startswith("/mnt/e/drivedit/"):
+        return False
+    if not (os.path.isdir(real) and os.access(real, os.W_OK)):
+        return False
+    dev = os.stat(real).st_dev
+    return all(not os.path.isdir(other) or os.stat(other).st_dev != dev for other in ("/mnt/c", "/"))
+
+
+def temp_dir(prefix):
+    base = os.environ.get("TMPDIR")
+    if not scratch_ok(base):
+        base = "/dev/shm"
+    return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(base))
+
+
+def run_main(argv):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = checker.main(argv)
+    return code, out.getvalue()
 
 
 def ledger_text():
@@ -81,21 +116,22 @@ class LedgerSeedTest(unittest.TestCase):
         self.assertEqual([r.split(" | ", 1)[0][2:] for r in rows[:7]], list(checker.SEED_IDS))
 
     def test_checker_cli_against_git_head(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = checker.main(["--base-rev", "HEAD"])
-        self.assertEqual(code, 0, out.getvalue())
-        self.assertTrue(out.getvalue().startswith("ok: "), out.getvalue())
+        code, out = run_main(["--base-rev", "HEAD"])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.startswith("ok: "), out)
+
+    def test_committed_history_only_appends(self):
+        """--history over this repository: every commit that changed the ledger only appended to it."""
+        if checker.git(checker.REPO, "rev-parse", "--verify", "--quiet", "HEAD").returncode != 0:
+            self.skipTest("%s is not a git checkout" % checker.REPO)
+        code, out = run_main(["--history"])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.startswith("ok: "), out)
 
 
 class AppendOnlyTest(unittest.TestCase):
     def setUp(self):
-        base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-        low = base.lower()
-        if not ((low.startswith("/dev/shm/") or low.startswith("/mnt/e/")) and os.path.isdir(base)) \
-                or low == "/mnt/e/drivedit" or low.startswith("/mnt/e/drivedit/"):
-            base = "/dev/shm"
-        self.tmp = tempfile.mkdtemp(prefix="dd6_ledger_", dir=base)
+        self.tmp = temp_dir("dd6_ledger_")
         self.base = seed_only(ledger_text())
 
     def tearDown(self):
@@ -164,6 +200,29 @@ class AppendOnlyTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("differ from the Appendix A seed", out)
 
+    def test_rows_outside_the_table_fail(self):
+        grown = self.edited(lambda rows: rows + [NEW_ROW])
+        lines = self.base.split("\n")
+        head = lines.index(checker.HEADER)
+        fenced = lines[:head] + ["```"] + lines[head:head + 9] + ["```"] + lines[head + 9:]   # header, separator, seed
+        cases = {
+            "row after a blank line": self.edited(lambda rows: rows + ["", NEW_ROW]),
+            "row text after the table": self.base.rstrip("\n") + "\n\nNotes:\n" + NEW_ROW + "\n",
+            "row before the header": "\n".join(lines[:head] + [NEW_ROW, ""] + lines[head:]),
+            "table in an HTML comment": "\n".join(lines[:head] + ["<!--"] + lines[head:]) + "-->\n",
+            "table in a code fence": "\n".join(fenced),
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                code, out = self.run_cli(text, base_text=self.base)
+                self.assertEqual(code, 1, out)
+                self.assertIn("violation:", out)
+        # the slip F-6 describes: EL-008 after a blank line, then edited; the check must not say ok
+        hidden = self.edited(lambda rows: rows + ["", NEW_ROW])
+        code, out = self.run_cli(hidden.replace("build change; no", "build change, no"), base_text=hidden)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.run_cli(grown)[0], 0)
+
     def test_not_ascii_or_crlf_fails(self):
         for name, text in (("section sign", self.base.replace("&sect;", "\u00a7")),
                            ("crlf", self.base.replace("\n", "\r\n"))):
@@ -175,6 +234,69 @@ class AppendOnlyTest(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     code = checker.main(["--ledger", path, "--base-file", LEDGER])
                 self.assertEqual(code, 1, out.getvalue())
+
+
+class HistoryTest(unittest.TestCase):
+    """--history in a scratch git repository: a committed edit or removal of a row passes the comparison with HEAD
+    (the base is the edited file itself) but fails the history check."""
+
+    def setUp(self):
+        self.tmp = temp_dir("dd6_ledger_git_")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(os.path.join(self.repo, "docs", "program"))
+        self.env = dict(os.environ, HOME=self.tmp, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                        GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid", GIT_COMMITTER_NAME="test",
+                        GIT_COMMITTER_EMAIL="test@example.invalid")
+        self.git("init", "-q")
+        self.seed = seed_only(ledger_text())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", self.repo, "-c", "init.defaultBranch=main"] + list(args), check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
+
+    def commit(self, text, message):
+        with open(os.path.join(self.repo, checker.LEDGER_REL), "wb") as f:
+            f.write(text.encode("ascii"))
+        self.git("add", checker.LEDGER_REL)
+        self.git("commit", "-q", "-m", message)
+
+    def with_rows(self, extra):
+        lines = self.seed.split("\n")
+        i = lines.index(checker.SEPARATOR) + 1 + len(checker.SEED_IDS)
+        return "\n".join(lines[:i] + extra + lines[i:])
+
+    def appended_then(self, rows, message):
+        """Commit the seed, then EL-008 (history ok), then the ledger with rows after the seed instead."""
+        self.commit(self.seed, "seed")
+        self.commit(self.with_rows([NEW_ROW]), "append EL-008")
+        code, out = run_main(["--history", "--repo", self.repo])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ok: 2 commit(s)", out)
+        self.commit(self.with_rows(rows), message)
+        code, out = run_main(["--repo", self.repo, "--base-rev", "HEAD"])
+        self.assertEqual(code, 0, out)                            # the HEAD comparison cannot see it
+        return run_main(["--history", "--repo", self.repo])
+
+    def test_committed_edit_fails_history(self):
+        code, out = self.appended_then([NEW_ROW.replace("build change; no", "build change, no")], "edit EL-008")
+        self.assertEqual(code, 1, out)
+        self.assertIn("row 8 changed", out)
+
+    def test_committed_removal_fails_history(self):
+        code, out = self.appended_then([], "remove EL-008")
+        self.assertEqual(code, 1, out)
+        self.assertIn("row EL-008 of the base was removed", out)
+
+    def test_deleting_the_ledger_fails(self):
+        self.commit(self.seed, "seed")
+        self.git("rm", "-q", checker.LEDGER_REL)
+        self.git("commit", "-q", "-m", "delete")
+        code, out = run_main(["--history", "--repo", self.repo])
+        self.assertEqual(code, 1, out)
+        self.assertIn("deletes %s" % checker.LEDGER_REL, out)
 
 
 if __name__ == "__main__":

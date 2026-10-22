@@ -21,7 +21,8 @@ so no column list is written down here):
   * each committed chunk by header name (C05): a missing required or an unknown column refuses the chunk; each row
     is parsed whole into temporaries (type, finite number without exponent, enum, required non-empty) and appended
     only when every field is valid, so a bad row never leaves the columns at different lengths (CR-093);
-  * frames/: each img row's file (path + IMAGE_SUFFIX, TBD-4), its size and its fiducial v2 code
+  * frames/: each img row's file (path + the image suffix, TBD-4: IMAGE_SUFFIX unless open_session is given
+    another of IMAGE_SUFFIXES), its size and its fiducial v2 code
     (data/dc2/fiducial.py); captured_render_frame is the code unwrapped against issue_render_frame (img_resolved).
 
 Joins and timing (section 6 and the streams JSON "timing"): img -> hf exact on captured_render_frame; hf -> ctl
@@ -76,6 +77,9 @@ CARDS_DIR = os.path.join(REPO, "tools", "ident", "cards")
 READER_VERSION = "dc2-reader/1"
 CONTRACT_VERSION = "dc-2.0"
 IMAGE_SUFFIX = ".png"           # TBD-4 default: the engine appends .png to the extension-less request path
+# TBD-4 candidates: the names the probe scheduler polls for an extension-less request path (DC_ProbeImages.c
+# m_aSuffixes; "" is the bare path). Until the T0-ENG freeze a caller may read any one of them.
+IMAGE_SUFFIXES = (".png", ".bmp.png", ".bmp", ".jpg", "")
 ENV_TRANSITION_MS = 15000       # features_v1 masks.env_transition: 1 for 15 s after an environment change
 LEGACY_MARKERS = ("telemetry.csv", "summary.txt", "session_info.txt")
 LEGACY_DIR_RE = re.compile(r"^session_[0-9]+$")
@@ -611,6 +615,7 @@ class Session:
         self.heartbeat = []
         self.streams = {}
         self.images = []
+        self.image_suffix = IMAGE_SUFFIX
         self.vehicle_card = None
 
     # -- small helpers --------------------------------------------------------------------------
@@ -680,7 +685,7 @@ GOLDEN_DECISION_KEYS = ("decision_step", "episode_id", "hl_seq", "state", "actio
 
 
 def open_session(path, sealed_eval=False, strict=True, schema=None, decode_images=True, vehicle_card=None,
-                 salvage=False, image_visitor=None):
+                 salvage=False, image_visitor=None, image_suffix=IMAGE_SUFFIX):
     """Read one dc-2.0 session directory.
 
     sealed_eval     True only on the sealed evaluation path (Everon, heldout/, SEALED).
@@ -697,7 +702,11 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
     image_visitor   optional callable(session, img_resolved_row, rgb_uint8_hwc), called once per readable image in
                     slot order after the stream joins exist (the validator's image checks use it, so each image is
                     read once).
+    image_suffix    the suffix the engine appends to an img request path (TBD-4): one of IMAGE_SUFFIXES, default
+                    IMAGE_SUFFIX. ValueError for any other.
     """
+    if image_suffix not in IMAGE_SUFFIXES:
+        raise ValueError("image_suffix %r is not one of the TBD-4 names %s" % (image_suffix, IMAGE_SUFFIXES))
     schema = schema or load_schema()
     real = check_paths(path, sealed_eval)
     if not os.path.isdir(real):
@@ -710,6 +719,7 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
         raise SealedMapError("%s is an Everon session; it is read only on the sealed evaluation path "
                              "(sealed_eval=True)" % path)
     s = Session(real, schema)
+    s.image_suffix = image_suffix
     meta = _read_session_json(s, "session.json")
     if meta is None:
         raise ReaderError("%s: session.json is missing or unreadable (%s)" % (
@@ -957,7 +967,8 @@ def fid_margin(image, result):
 
 def _image_files(s):
     """(file, error) per img row, before anything is read: path must be exactly frames/f_<slot_id:08d> (TBD-4; else
-    a C11 problem) and the file must resolve inside the session directory (else C01). Stored in s.image_files."""
+    a C11 problem), the file is path + s.image_suffix and it must resolve inside the session directory (else C01).
+    Stored in s.image_files."""
     img = s.streams["img"]
     s.image_files = []
     for slot, path in zip(img.data["slot_id"], img.data["path"]):
@@ -970,7 +981,7 @@ def _image_files(s):
                                       % (path, want)))
             s.image_files.append((None, "path %r is not %s" % (path, want)))
             continue
-        rel = path + IMAGE_SUFFIX
+        rel = path + s.image_suffix
         full = os.path.join(s.path, rel)
         if os.path.lexists(full) and not inside(s.path, full):
             s.problems.append(Problem("C01", rel, "resolves outside the session directory; not read"))

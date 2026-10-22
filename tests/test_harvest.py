@@ -28,6 +28,15 @@ the run; a session moved but not catalogued is catalogued only after the map che
 verification; every kill hook ends with the run manifest written; a cached _harvest/ is rebuilt when its build_key
 no longer matches; a headerless crash.log reaches C20; a neighbouring Play's lines stay out of the slice; a torn
 catalog line is cut off; off-contract derivative fields hold the session; a second harvester is refused.
+The second review (t0c/review/REVIEW_DD_6_MIN.md, F-1..F-15) added: a log run that names an Eden-rooted world or an
+everon_ / kolguyev_ session holds the session and nothing is copied; the window starts at the session's own START
+marker and cuts inclusively at another session's line; no log run, an unparsable header or a run that does not name
+the session holds it; a headerless crash.log is attributed by its modification time; a catalog row that lost its
+line feed is kept; --screenshot-suffix reaches dc_validate and the derivative pass; a wb_profile_x19 session with a
+stable pin is held; an -exp session goes to compat19 only on the no-thresholds refusal; a cache of another
+harvester version or destination is rebuilt; a held session is left as it was found; a profile swapped for a
+symlink after admission, a symlinked frames/ and a symlinked _harvest/ are not read; a refusal line names no
+session directory.
 DC_TEST_E_SCRATCH (an existing directory under /mnt/e, outside /mnt/e/DriveDiT) also runs the Workbench harvest on
 E: (drvfs rename); without it that test skips.
 """
@@ -47,6 +56,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import numpy
 
@@ -64,6 +74,9 @@ EXES = {"game/ArmaReforgerSteam.exe": b"synthetic client exe",
         "game/ArmaReforgerSteamDiag.exe": b"synthetic diag client exe",
         "tools/Workbench/ArmaReforgerWorkbenchSteamDiag.exe": b"synthetic workbench exe"}
 OTHER_KEY = hashlib.sha256(b"another build").hexdigest()
+EXP_KEY = hashlib.sha256(b"synthetic 1.9 build").hexdigest()
+OTHER_ID = "arland_T0b_20261025T091540Z_wb_i00_beef"
+DC_VME = ["Virtual Machine Exception", "Class: 'DC_Session'"]      # a HARD C20 pattern once timed
 
 
 def load(name, rel):
@@ -206,13 +219,14 @@ def write_engine_logs(log_base, sid, start_unix, end_unix, session_lines, before
     log_file(os.path.join(log_base, run_dir_name(new), "console.log"), new, ["%s ENGINE : new" % stamp(new + 1)])
 
 
-def make_session(root, kind="golden", variant=None, pin_sha=None, edit=None, client="i01", logs=None):
-    """Generate one session into its profile's DC_Sessions folder and move the generator's sidecars where the engine
-    and the launchers put their originals. edit(meta, end, record) may change session.json, session_end.json and
-    the launch record; logs(start, end) may return console lines (before, after) to put around the session's own.
-    Returns the session directory."""
+def make_session(root, kind="golden", variant=None, pin_sha=None, edit=None, client="i01", logs=None,
+                 wb="wb_profile"):
+    """Generate one session into its profile's DC_Sessions folder (client_profiles/<client> or the Workbench profile
+    wb) and move the generator's sidecars where the engine and the launchers put their originals. edit(meta, end,
+    record) may change session.json, session_end.json and the launch record; logs(start, end) may return console
+    lines (before, after) to put around the session's own. Returns the session directory."""
     is_client = kind == "client_1408"
-    profile = os.path.join(root, "client_profiles", client) if is_client else os.path.join(root, "wb_profile")
+    profile = os.path.join(root, "client_profiles", client) if is_client else os.path.join(root, wb)
     sessions = os.path.join(profile, "profile", "DC_Sessions")
     os.makedirs(sessions, exist_ok=True)
     sdir = synth.generate(sessions, kind=kind, variant=variant)["session_dir"]
@@ -246,8 +260,43 @@ def make_session(root, kind="golden", variant=None, pin_sha=None, edit=None, cli
     return sdir
 
 
+def experimental(meta, end, record):
+    """make_session edit: a 1.9 Experimental session (pin 1.9.0.10-exp, EXP_KEY) launched with a dd-launch/2
+    record."""
+    for obj in (meta["pin"], end["pin"]):
+        obj.update({"pin_id": "1.9.0.10-exp", "build_key": EXP_KEY})
+    meta["pin"].update({"channel": "experimental", "launch_schema": "dd-launch/2"})
+    meta["use_class"] = "compat-preview"
+    record.update({"schema": "dd-launch/2", "build_key": EXP_KEY, "channel": "experimental",
+                   "use_class": "compat-preview"})
+    record["pin"]["pin_id"] = "1.9.0.10-exp"
+
+
 def dest_of(root, sid):
     return os.path.join(root, "captures", "arland", "2026-10-25", "T0b", sid)
+
+
+def run_dir_of(root, src):
+    """The engine-log run directory make_session wrote for a Workbench session."""
+    start = read_json(os.path.join(src, "session.json"))["start"]["unix_s"]
+    return os.path.join(root, "wb_profile", "logs", run_dir_name(start - 3 * 3600))
+
+
+def window_of(src):
+    return (read_json(os.path.join(src, "session.json"))["start"]["unix_s"],
+            read_json(os.path.join(src, "session_end.json"))["end"]["unix_s"])
+
+
+def hidden_line(rel):
+    """The path a refusal line prints for a non-Arland session directory (its name hashed)."""
+    head, name = os.path.split(rel)
+    return "%s/<not Arland, name sha256 %s>" % (head, hashlib.sha256(name.encode("ascii")).hexdigest()[:12])
+
+
+def resum(sdir):
+    """Rewrite _harvest/SHA256SUMS of a session after a test edited a file in it (the harvester's own listing)."""
+    files = harvest.tree_files(sdir)
+    write(os.path.join(sdir, "_harvest", "SHA256SUMS"), harvest.sums_text(files, "_harvest/SHA256SUMS"))
 
 
 def catalog(root):
@@ -380,6 +429,9 @@ class HarvestWorkbenchTest(unittest.TestCase):
         self.assertEqual(console.count("Screenshot saved to"), 130)
         self.assertEqual(stamp_["engine_logs"]["run"], run_dir_name(read_json(
             os.path.join(self.dest, "session.json"))["start"]["unix_s"] - 3 * 3600))
+        self.assertEqual((stamp_["engine_logs"]["start_marker"], stamp_["engine_logs"]["kept_whole"],
+                          stamp_["engine_logs"]["left_out"], stamp_["screenshot_suffix"]), (False, [], {}, ".png"))
+        self.assertEqual(stamp_["harvester_version"], harvest.HARVESTER_VERSION)
 
     def test_catalog_row_and_run_manifest(self):
         rows = catalog(self.root)
@@ -475,10 +527,10 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual(proc.stderr, b"")
         lines = proc.stdout.decode("ascii").splitlines()
         self.assertEqual(len(lines), 1, lines)
-        self.assertTrue(lines[0].startswith("refused wb_profile/profile/DC_Sessions/%s: not an Arland session"
-                                            % WB_ID), lines[0])
-        for value in ("Eden", "853E92315D1D9EFE", "dev", "1.8.0.13", "T0b_20261025T091512Z_wb_i00_5e00:"):
-            self.assertNotIn(value, lines[0].split(": ", 1)[1])
+        self.assertTrue(lines[0].startswith("refused %s: not an Arland session" % hidden_line(
+            "wb_profile/profile/DC_Sessions/" + WB_ID)), lines[0])
+        for value in ("Eden", "853E92315D1D9EFE", "dev", "1.8.0.13", "T0b", "20261025T091512Z", "5e00"):
+            self.assertNotIn(value, lines[0])
         self.assertEqual(snapshot(self.root), before)
         self.assertFalse(os.path.exists(os.path.join(self.root, "catalog")))
 
@@ -490,10 +542,13 @@ class RefusalTest(unittest.TestCase):
         before = snapshot(self.root)
         code, out = run(self.root)
         self.assert_nothing_written(before, code, out)
-        self.assertEqual(out.splitlines(), ["refused wb_profile/profile/DC_Sessions/everon_T0b_20261025T091512Z_"
-                                            "wb_i00_5e00: not an Arland session; DD-6-min harvests Arland only "
+        self.assertEqual(out.splitlines(), ["refused %s: not an Arland session; DD-6-min harvests Arland only "
                                             "(Everon is sealed, Kolguyev routing is DD-6); nothing was read or "
-                                            "written"])
+                                            "written" % hidden_line("wb_profile/profile/DC_Sessions/everon_T0b_"
+                                                                    "20261025T091512Z_wb_i00_5e00")])
+        self.assertNotIn("everon_", out)
+        code, again = run(self.root)                                  # every run prints the same line, no name
+        self.assertEqual((code, again), (2, out))
 
     def test_kolguyev_is_refused(self):
         def kolguyev(meta, end, record):
@@ -531,16 +586,6 @@ class RefusalTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "manifests")))     # nothing went to captures/arland
 
     def test_experimental_session_goes_to_compat19(self):
-        key = hashlib.sha256(b"synthetic 1.9 build").hexdigest()
-
-        def experimental(meta, end, record):
-            for obj in (meta["pin"], end["pin"]):
-                obj.update({"pin_id": "1.9.0.10-exp", "build_key": key})
-            meta["pin"].update({"channel": "experimental", "launch_schema": "dd-launch/2"})
-            meta["use_class"] = "compat-preview"
-            record.update({"schema": "dd-launch/2", "build_key": key, "channel": "experimental",
-                           "use_class": "compat-preview"})
-            record["pin"]["pin_id"] = "1.9.0.10-exp"
         make_session(self.root, pin_sha=self.pin_sha, edit=experimental)
         code, out = run(self.root)
         self.assertEqual(code, 0, out)
@@ -551,7 +596,7 @@ class RefusalTest(unittest.TestCase):
             self.assertIn(b"refused", f.read())                       # no thresholds exist for an -exp pin
         row = catalog(self.root)[0]
         self.assertEqual((row["route"], row["verdict"], row["pin_id"], row["build_key"], row["use_class"]),
-                         ("compat19", "REFUSED", "1.9.0.10-exp", key, "compat-preview"))
+                         ("compat19", "REFUSED", "1.9.0.10-exp", EXP_KEY, "compat-preview"))
         self.assertEqual(row["build_key_source"], "session.json + launch_record")
         verify_sums_independently(self, dest)
 
@@ -561,7 +606,8 @@ class RefusalTest(unittest.TestCase):
         def other_build(meta, end, record):
             meta["pin"]["build_key"] = OTHER_KEY
             end["pin"]["build_key"] = OTHER_KEY
-        make_session(self.root, kind="golden_5hz", pin_sha=self.pin_sha, edit=other_build)
+        # the second build on the packaged client: its engine logs are its own process's run
+        make_session(self.root, kind="client_1408", pin_sha=self.pin_sha, edit=other_build)
         before = snapshot(self.root)
         code, out = run(self.root)
         self.assert_nothing_written(before, code, out, want_code=3)
@@ -576,7 +622,7 @@ class RefusalTest(unittest.TestCase):
         doc = read_json(os.path.join(self.root, "manifests", "harvest_runs", runs[0]))
         self.assertEqual((doc["mixed_builds"], doc["reason"]), (True, "test of a declared mixed stage"))
         self.assertEqual(doc["build_keys"], sorted([expected_build_key(), OTHER_KEY]))
-        self.assertEqual(sorted(r["session_id"] for r in catalog(self.root)), [WB_ID, WB5_ID])
+        self.assertEqual(sorted(r["session_id"] for r in catalog(self.root)), sorted([WB_ID, CL_ID]))
 
     def test_build_key_sources(self):
         src = make_session(self.root, pin_sha=self.pin_sha)
@@ -651,29 +697,108 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual([r["build_key"] for r in catalog(self.root)], [OTHER_KEY])
         verify_sums_independently(self, dest)
 
-    def test_headerless_crash_log_reaches_c20(self):
+    def test_headerless_crash_log_in_the_window_reaches_c20(self):
         src = make_session(self.root, pin_sha=self.pin_sha)
-        start = read_json(os.path.join(src, "session.json"))["start"]["unix_s"]
-        write(os.path.join(self.root, "wb_profile", "logs", run_dir_name(start - 3 * 3600), "crash.log"),
-              b"Assertion failed\r\nProgram: synthetic\r\n")
+        _, end = window_of(src)
+        crash = os.path.join(run_dir_of(self.root, src), "crash.log")
+        write(crash, b"Assertion failed\r\nProgram: synthetic\r\n")
+        os.utime(crash, (end + 5, end + 5))                          # written 5 s after the seal: inside
         code, out = run(self.root)
         self.assertEqual(code, 1, out)
         dest = os.path.join(self.root, "captures", "_rejected", WB_ID)
         rep = read_json(os.path.join(dest, "_harvest", "dc_validate.json"))
         c20 = [c for c in rep["checks"] if c["id"] == "C20"][0]
         self.assertEqual((c20["status"], c20["value"]["hard"]["crash_log"]), ("FAIL", 1))
-        self.assertEqual(read_json(os.path.join(dest, "harvest.json"))["engine_logs"]["kept_whole"], ["crash.log"])
+        logs = read_json(os.path.join(dest, "harvest.json"))["engine_logs"]
+        self.assertEqual((logs["kept_whole"], logs["left_out"]), (["crash.log"], {}))
+
+    def test_headerless_crash_log_after_the_window_is_left_out(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        _, end = window_of(src)
+        crash = os.path.join(run_dir_of(self.root, src), "crash.log")
+        write(crash, b"Assertion failed\r\nProgram: synthetic\r\n")
+        os.utime(crash, (end + 600, end + 600))                      # a crash at a later Play stop or exit
+        code, out = run(self.root)
+        self.assertEqual(code, 0, out)
+        dest = dest_of(self.root, WB_ID)
+        self.assertEqual(read_json(os.path.join(dest, "_harvest", "dc_validate.json"))["verdict"], "PASS")
+        self.assertFalse(os.path.exists(os.path.join(dest, "_engine_logs", "crash.log")))
+        logs = read_json(os.path.join(dest, "harvest.json"))["engine_logs"]
+        self.assertEqual(logs["kept_whole"], [])
+        self.assertEqual(list(logs["left_out"]), ["crash.log"])
+        self.assertIn("outside the session's window", logs["left_out"]["crash.log"])
+
+    def test_other_headerless_log_is_held(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        write(os.path.join(run_dir_of(self.root, src), "error.log"), b"no header\r\nsome error\r\n")
+        before = snapshot(self.root)
+        code, out = run(self.root)
+        self.assert_nothing_written(before, code, out)
+        self.assertIn("error.log has no parseable header", out)
+
+    def test_no_engine_log_run_is_held(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        shutil.rmtree(os.path.join(self.root, "wb_profile", "logs"))
+        before = snapshot(self.root)
+        code, out = run(self.root)
+        self.assert_nothing_written(before, code, out)
+        self.assertIn("no engine-log run that started before the session in wb_profile/logs", out)
+        self.assertTrue(os.path.isdir(src))
+
+    def test_unparsable_console_header_is_held(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        console = os.path.join(run_dir_of(self.root, src), "console.log")
+        with open(console, "rb") as f:
+            data = f.read()
+        write(console, data.replace(b" started at ", b" opened at ", 1))
+        before = snapshot(self.root)
+        code, out = run(self.root)
+        self.assert_nothing_written(before, code, out)
+        # the older run's header parses, but that run does not name the session
+        self.assertIn("does not name the session, so it is not the session's run (the console.log header of "
+                      "wb_profile/logs/%s does not parse)" % os.path.basename(run_dir_of(self.root, src)), out)
+
+    def test_log_run_of_another_map_is_held_and_nothing_copied(self):
+        cases = {
+            "Eden world 4 s after the end": lambda s, e: ((), [
+                "%s ENGINE       : Loading world {853E92315D1D9EFE}worlds/Eden/Eden.ent" % stamp(e + 4)]),
+            "everon_ session an hour later": lambda s, e: ((), [
+                "%s RESOURCES    : Screenshot saved to $profile:DC_Sessions/everon_T0b_20261025T101500Z_wb_i00_0e0e/"
+                "frames/f_00000001.png" % stamp(e + 3600)]),
+            "kolguyev_ session before": lambda s, e: ([
+                "%s SCRIPT       : [DC] session_start id=kolguyev_T0b_20261025T080000Z_wb_i00_0c0c" % stamp(s - 600)],
+                ()),
+        }
+        for n, (name, logs) in enumerate(sorted(cases.items())):
+            with self.subTest(name):
+                root = os.path.join(self.root, "case%d" % n)
+                os.mkdir(root)
+                make_session(root, pin_sha=write_pin(root), logs=logs)
+                before = snapshot(root)
+                code, out = run(root)
+                self.assertEqual((code, snapshot(root)), (2, before), out)
+                self.assertIn("names an Eden-rooted world or a session of another map", out)
+                for value in ("worlds/Eden", "853E92315D1D9EFE", "everon_T0b", "kolguyev_T0b", "0e0e", "0c0c"):
+                    self.assertNotIn(value, out)
+
+    def test_headerless_crash_log_naming_eden_is_held(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        _, end = window_of(src)
+        crash = os.path.join(run_dir_of(self.root, src), "crash.log")
+        write(crash, b"Assertion failed\r\nWorld: {853E92315D1D9EFE}worlds/Eden/Eden.ent\r\n")
+        os.utime(crash, (end + 5, end + 5))
+        before = snapshot(self.root)
+        code, out = run(self.root)
+        self.assert_nothing_written(before, code, out)
+        self.assertIn("names an Eden-rooted world or a session of another map", out)
+        self.assertNotIn("worlds/Eden", out)
 
     def test_neighbouring_plays_stay_out_of_the_slice(self):
-        other = "arland_T0b_20261025T091540Z_wb_i00_beef"
-
         def neighbours(start, end):
-            before = ["%s SCRIPT    (E): Virtual Machine Exception" % stamp(start - 5),
-                      "Class: 'DC_Session'"]
+            before = ["%s SCRIPT    (E): %s" % (stamp(start - 5), DC_VME[0]), DC_VME[1]]
             after = ["%s SCRIPT       : [DC] shutdown done" % stamp(end + 3),
-                     "%s SCRIPT       : [DC] session_start id=%s" % (stamp(end + 6), other),
-                     "%s SCRIPT    (E): Virtual Machine Exception" % stamp(end + 8),
-                     "Class: 'DC_Session'"]
+                     "%s SCRIPT       : [DC] session_start id=%s" % (stamp(end + 6), OTHER_ID),
+                     "%s SCRIPT    (E): %s" % (stamp(end + 8), DC_VME[0]), DC_VME[1]]
             return before, after
         make_session(self.root, pin_sha=self.pin_sha, logs=neighbours)
         code, out = run(self.root)
@@ -682,8 +807,48 @@ class RefusalTest(unittest.TestCase):
         with open(os.path.join(dest, "_engine_logs", "console.log"), "rb") as f:
             console = f.read().decode("ascii")
         self.assertIn("[DC] shutdown done", console)
-        self.assertNotIn(other, console)
+        self.assertNotIn(OTHER_ID, console)
         self.assertNotIn("Virtual Machine Exception", console)
+
+    def test_cut_at_another_session_is_inclusive(self):
+        """A neighbouring Play's line at exactly end.unix_s (or start.unix_s) cuts the window there."""
+        def neighbours(start, end):
+            before = ["%s SCRIPT    (E): %s" % (stamp(start - 1), DC_VME[0]), DC_VME[1],
+                      "%s SCRIPT       : [DC] session_end id=%s" % (stamp(start), OTHER_ID)]
+            after = ["%s SCRIPT       : [DC] session_start id=%s" % (stamp(end), OTHER_ID),
+                     "%s SCRIPT    (E): %s" % (stamp(end + 1), DC_VME[0]), DC_VME[1]]
+            return before, after
+        make_session(self.root, pin_sha=self.pin_sha, logs=neighbours)
+        code, out = run(self.root)
+        self.assertEqual(code, 0, out)
+        dest = dest_of(self.root, WB_ID)
+        with open(os.path.join(dest, "_engine_logs", "console.log"), "rb") as f:
+            console = f.read().decode("ascii")
+        self.assertNotIn(OTHER_ID, console)
+        self.assertNotIn("Virtual Machine Exception", console)
+        self.assertEqual(console.count("Screenshot saved to"), 130)
+
+    def test_own_start_marker_bounds_the_window(self):
+        """A previous Play's last lines after its own marker but inside the before-margin stay out once the
+        session's DD-4-min START marker is in the log."""
+        def neighbours(start, end):
+            before = ["%s SCRIPT       : [DC_Session] END session %s status=ok" % (stamp(start - 1.5), OTHER_ID),
+                      "%s SCRIPT    (E): %s" % (stamp(start - 1), DC_VME[0]), DC_VME[1],
+                      "%s SCRIPT       : [DC_Session] START session %s dir=$profile:DC_Sessions/%s"
+                      % (stamp(start), WB_ID, WB_ID)]
+            return before, ()
+        make_session(self.root, pin_sha=self.pin_sha, logs=neighbours)
+        code, out = run(self.root)
+        self.assertEqual(code, 0, out)
+        dest = dest_of(self.root, WB_ID)
+        with open(os.path.join(dest, "_engine_logs", "console.log"), "rb") as f:
+            console = f.read().decode("ascii")
+        self.assertTrue(console.splitlines()[0].endswith("START session %s dir=$profile:DC_Sessions/%s"
+                                                         % (WB_ID, WB_ID)), console[:200])
+        self.assertNotIn("Virtual Machine Exception", console)
+        logs = read_json(os.path.join(dest, "harvest.json"))["engine_logs"]
+        self.assertTrue(logs["start_marker"])
+        self.assertEqual(logs["window_utc"][0], window_of(dest)[0])
 
     def test_torn_catalog_line_is_cut_before_the_next_row(self):
         make_session(self.root, pin_sha=self.pin_sha)
@@ -694,6 +859,28 @@ class RefusalTest(unittest.TestCase):
         code, out = run(self.root)
         self.assertEqual(code, 0, out)
         self.assertEqual([r["session_id"] for r in catalog(self.root)], [WB_ID, WB5_ID])
+        self.assertIn("repaired catalog/sessions.jsonl: a torn last line", out)
+
+    def test_catalog_row_without_its_line_feed_is_kept(self):
+        """A complete last row that lost its line feed is not counted (the session is found uncatalogued) and gets
+        the line feed back under the lock: one row, its first run_id, one run manifest."""
+        make_session(self.root, pin_sha=self.pin_sha)
+        self.assertEqual(run(self.root)[0], 0)
+        path = os.path.join(self.root, "catalog", "sessions.jsonl")
+        with open(path, "rb") as f:
+            data = f.read()
+        write(path, data[:-1])
+        self.assertEqual(harvest.Harvester(self.root, harvest.parse_args([]), True).catalog_rows(), [])
+        manifests = sorted(os.listdir(os.path.join(self.root, "manifests", "harvest_runs")))
+        code, out = run(self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("repaired catalog/sessions.jsonl: the last row had lost its line feed", out)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "manifests", "harvest_runs"))), manifests)
+        before = snapshot(self.root)
+        self.assertEqual(run(self.root)[0], 0)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_uncatalogued_destination_is_checked_before_its_row(self):
         make_session(self.root, pin_sha=self.pin_sha)
@@ -715,8 +902,9 @@ class RefusalTest(unittest.TestCase):
         before = snapshot(self.root)
         code, out = run(self.root)
         self.assert_nothing_written(before, code, out)
-        self.assertEqual(out.splitlines(), ["refused captures/_rejected/arland_T0b_20261025T091512Z_wb_i00_0bad: "
-                                            + harvest.NOT_ARLAND + " (found at a destination; not catalogued)"])
+        line = "refused %s: %s (found at a destination; not catalogued)" % (
+            hidden_line("captures/_rejected/arland_T0b_20261025T091512Z_wb_i00_0bad"), harvest.NOT_ARLAND)
+        self.assertEqual(out.splitlines(), [line])
 
     def test_second_harvester_is_refused(self):
         src = make_session(self.root, pin_sha=self.pin_sha)
@@ -740,7 +928,7 @@ class RefusalTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             harvest.build_key_v1(pin, {"game/ArmaReforgerSteam.exe": "a" * 64})
 
-    def test_tbd4_other_screenshot_name_is_held(self):
+    def test_tbd4_other_screenshot_name_is_held_then_harvested_with_its_suffix(self):
         src = make_session(self.root, pin_sha=self.pin_sha)
         fdir = os.path.join(src, "frames")
         for name in os.listdir(fdir):
@@ -748,7 +936,37 @@ class RefusalTest(unittest.TestCase):
         before = snapshot(self.root)
         code, out = run(self.root)
         self.assert_nothing_written(before, code, out)
-        self.assertIn("TBD-4: frames/ holds 130 file(s) f_<slot:08d> without extension", out)
+        self.assertIn("TBD-4: frames/ holds 130 file(s) f_<slot:08d> without extension; this run reads "
+                      "frames/f_<slot:08d>.png only (--screenshot-suffix '.png'", out)
+        code, out = run(self.root, "--screenshot-suffix", ".bmp")
+        self.assert_nothing_written(before, code, out)
+        code, out = run(self.root, "--screenshot-suffix", "")         # the bare request path (TBD-4 outcome)
+        self.assertEqual(code, 0, out)
+        dest = dest_of(self.root, WB_ID)
+        rep = read_json(os.path.join(dest, "_harvest", "dc_validate.json"))
+        checks = dict((c["id"], c) for c in rep["checks"])
+        self.assertEqual((rep["verdict"], checks["C10"]["status"], checks["C11"]["status"]), ("PASS", "PASS", "PASS"))
+        result = read_json(os.path.join(dest, "_harvest", "result.json"))
+        self.assertEqual((result["decoded"], result["derivatives"]), (130, 130))
+        fields = reader.load_schema().raw["derived"]["img_resolved"]["fields"]
+        with open(os.path.join(dest, "_harvest", "img_decoded.csv"), "rb") as f:
+            _, rows = reader.parse_csv_bytes(f.read(), fields, "img_decoded.csv", [])
+        self.assertEqual(rows[0]["file"], "frames/f_%08d" % rows[0]["slot_id"])
+        self.assertEqual(read_json(os.path.join(dest, "harvest.json"))["screenshot_suffix"], "")
+
+    def test_tbd4_suffix_is_one_of_the_polled_names(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()):
+            run(self.root, "--screenshot-suffix", ".gif")
+        self.assertEqual(cm.exception.code, 3)
+        with self.assertRaises(ValueError):
+            reader.open_session(src, image_suffix=".gif")
+        proc = subprocess.run([sys.executable, "-I", "-B", harvest.DC_VALIDATE, "--session", src, "--no-report",
+                               "--image-suffix", ".gif"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        self.assertEqual(proc.returncode, 3, proc.stdout)
+        self.assertTrue(proc.stdout.startswith(b"refused: --image-suffix '.gif'"), proc.stdout)
+        self.assertEqual(reader.IMAGE_SUFFIXES, (".png", ".bmp.png", ".bmp", ".jpg", ""))    # DC_ProbeImages.c:80
 
     def test_launch_record_missing_or_different_is_held(self):
         src = make_session(self.root, pin_sha=self.pin_sha)
@@ -767,6 +985,133 @@ class RefusalTest(unittest.TestCase):
         code, out = run(self.root)
         self.assert_nothing_written(before, code, out)
         self.assertIn("no launch record launch_%s.json" % lid, out)
+
+    def test_x19_profile_with_a_stable_pin_is_held(self):
+        src = make_session(self.root, pin_sha=self.pin_sha, wb="wb_profile_x19")
+        before = snapshot(self.root)
+        code, out = run(self.root)
+        self.assert_nothing_written(before, code, out)
+        self.assertIn("held wb_profile_x19/profile/DC_Sessions/%s: a session of wb_profile_x19 (the 1.9 "
+                      "Experimental Workbench) with the stable pin 1.8.0.13" % WB_ID, out)
+        shutil.rmtree(src)
+        make_session(self.root, pin_sha=self.pin_sha, wb="wb_profile_x19", edit=experimental)
+        code, out = run(self.root)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "compat19", "1.9.0.10-exp", WB_ID)), out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "captures")))
+
+    def test_validator_failure_of_an_exp_session_is_held(self):
+        """Only dc_validate's no-thresholds refusal sends an -exp session to compat19; a crash holds it."""
+        src = make_session(self.root, pin_sha=self.pin_sha, edit=experimental)
+        raw = snapshot(src)
+        with mock.patch.object(harvest.Harvester, "validate",
+                               lambda h, c: (None, 3, "ZeroDivisionError: division by zero")):
+            code, out = run(self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("dc_validate refused the session or failed (exit 3): ZeroDivisionError", out)
+        self.assertEqual(snapshot(src), raw)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "compat19")))
+        self.assertEqual(catalog(self.root), [])
+
+    def test_validator_refusal_leaves_the_session_as_found(self):
+        def unthresholded(meta, end, record):
+            for obj in (meta["pin"], end["pin"]):
+                obj.update({"pin_id": "1.8.0.99", "build_key": OTHER_KEY})
+            record["pin"]["pin_id"] = "1.8.0.99"
+        src = make_session(self.root, pin_sha=self.pin_sha, edit=unthresholded)
+        raw = snapshot(src)
+        code, out = run(self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("dc_validate refused the session or failed (exit 3): refused: no thresholds file for pin "
+                      "1.8.0.99", out)
+        self.assertEqual(snapshot(src), raw)                           # no _launch/, _engine_logs/, harvest.json
+        before = snapshot(self.root)
+        self.assertEqual(run(self.root)[0], 2)
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_cache_of_another_destination_or_version_is_rebuilt(self):
+        """A _harvest/ left by a killed run is moved as it is only when result.json names the destination its
+        verdict routes to and this harvester version built it; checksums that verify are not enough."""
+        later = "harvest/9 (a later version)"
+        for case in ("destination", "version"):
+            with self.subTest(case):
+                root = os.path.join(self.root, case)
+                os.mkdir(root)
+                src = make_session(root, pin_sha=write_pin(root))
+                self.assertEqual(run_subprocess(root, "after_harvest_rename").returncode, -signal.SIGKILL)
+                version = harvest.HARVESTER_VERSION
+                if case == "destination":
+                    result_path = os.path.join(src, "_harvest", "result.json")
+                    write(result_path, json_bytes(dict(read_json(result_path), route="rejected",
+                                                       dest="captures/_rejected/" + WB_ID)))
+                    resum(src)
+                    self.assertTrue(harvest.verify_sums(src)[0])
+                else:
+                    version = later
+                with mock.patch.object(harvest, "HARVESTER_VERSION", version):
+                    code, out = run(root)
+                self.assertEqual(code, 0, out)
+                dest = dest_of(root, WB_ID)
+                self.assertTrue(os.path.isdir(dest), out)
+                result = read_json(os.path.join(dest, "_harvest", "result.json"))
+                self.assertEqual((result["route"], result["harvester_version"]), ("captures", version))
+                self.assertEqual([r["route"] for r in catalog(root)], ["captures"])
+                verify_sums_independently(self, dest)
+
+    def test_reconciled_destination_without_a_build_key_is_held(self):
+        make_session(self.root, pin_sha=self.pin_sha)
+        self.assertEqual(run(self.root)[0], 0)
+        dest = dest_of(self.root, WB_ID)
+        os.remove(os.path.join(self.root, "catalog", "sessions.jsonl"))
+        stamp_ = read_json(os.path.join(dest, "harvest.json"))
+        del stamp_["build_key"]
+        write(os.path.join(dest, "harvest.json"), json_bytes(stamp_))
+        resum(dest)
+        code, out = run(self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("do not name this session, its destination and route and a build_key; not catalogued", out)
+        self.assertEqual(catalog(self.root), [])
+
+    def test_profile_swapped_for_a_symlink_after_admission_is_held(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        profile = os.path.join(self.root, "wb_profile")
+        moved = os.path.join(self.root, "outside")
+        raw = snapshot(src)
+        lock = harvest.Harvester.lock
+
+        def swap_then_lock(h):
+            os.rename(profile, moved)
+            os.symlink(moved, profile)
+            lock(h)
+        with mock.patch.object(harvest.Harvester, "lock", swap_then_lock):
+            code, out = run(self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("reached through a symlink since admission; nothing was written", out)
+        self.assertEqual(snapshot(os.path.join(moved, os.path.relpath(src, profile))), raw)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "captures")))
+
+    def test_symlinked_frames_or_harvest_is_not_read(self):
+        src = make_session(self.root, pin_sha=self.pin_sha)
+        outside = os.path.join(self.root, "outside_frames")
+        os.rename(os.path.join(src, "frames"), outside)
+        os.symlink(outside, os.path.join(src, "frames"))
+        before = snapshot(self.root)
+        code, out = run(self.root, "--dry-run")
+        self.assert_nothing_written(before, code, out)
+        self.assertIn("frames/ is a symlink", out)
+        self.assertNotIn("holds", out)                                # the target was not listed
+        os.unlink(os.path.join(src, "frames"))
+        os.rename(outside, os.path.join(src, "frames"))
+        self.assertEqual(run(self.root)[0], 0)
+        dest = dest_of(self.root, WB_ID)
+        os.remove(os.path.join(self.root, "catalog", "sessions.jsonl"))
+        moved = os.path.join(self.root, "outside_harvest")
+        os.rename(os.path.join(dest, "_harvest"), moved)
+        os.symlink(moved, os.path.join(dest, "_harvest"))
+        code, out = run(self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("_harvest/ is a symlink; not read, not catalogued", out)
+        self.assertEqual(catalog(self.root), [])
 
     def test_roots(self):
         self.assertEqual(harvest.DATA_ROOT, "/mnt/e/DriveDiT")

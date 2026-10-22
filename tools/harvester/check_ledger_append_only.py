@@ -3,21 +3,30 @@
 CAPTURE_PROGRAM r2 L4 and Appendix A).
 
     python3 -I -B tools/harvester/check_ledger_append_only.py [--ledger FILE] [--base-rev REV | --base-file FILE]
+    python3 -I -B tools/harvester/check_ledger_append_only.py --history [REV]
+        (both with [--repo DIR], the git repository; default this one)
 
 Checks, in this order:
   1. Format. The file is ASCII with LF line ends and holds exactly one ledger table: the header
      `| Id | Date | Exposure or decision | Effect allowed |`, the separator `|---|---|---|---|`, then one row per
      entry with four non-empty cells. Ids run EL-001, EL-002, ... without a gap, and dates are real YYYY-MM-DD dates
-     that never go back from one row to the next.
+     that never go back from one row to the next. Nothing outside the table may look like a row (a `|` line after
+     it, or an `| EL-` line before it, e.g. a row appended after a blank line), and the table may not sit inside an
+     HTML comment or a code fence.
   2. Seed. Rows EL-001 to EL-007 are the Appendix A seed, byte for byte. Their sha256 is fixed here (SEED_SHA256),
      so the seed cannot be rewritten even in a commit that also rewrites the base.
   3. Append-only. Every row of the base version (the ledger at git revision --base-rev, default HEAD, or
      --base-file) is still present, unchanged and in the same order, at the start of the table; new rows only follow
      it. A base without the ledger (before the commit that adds it) skips this check.
 
-Text outside the table may change; the entries may not. Reads only: git show for --base-rev (GIT_OPTIONAL_LOCKS=0),
-no file is written. Exit codes: 0 the ledger is valid and only grew, 1 a violation (each one is printed),
-2 a usage error or an unreadable file.
+--history checks the committed history instead, so an edit that was committed (which the HEAD comparison cannot
+see) still fails: every commit reachable from REV (default HEAD) that changed the ledger must pass checks 1 and 2,
+and check 3 against the ledger of each of its parents; the commit that adds it has no base, and a commit that
+deletes it is a violation. The test suite runs it.
+
+Text outside the table may change; the entries may not. Reads only: git show, cat-file and rev-list
+(GIT_OPTIONAL_LOCKS=0), no file is written. Exit codes: 0 the ledger is valid and only grew, 1 a violation (each one
+is printed), 2 a usage error or an unreadable file.
 """
 
 import argparse
@@ -33,6 +42,9 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 LEDGER_REL = "docs/program/everon_ledger.md"
 HEADER = "| Id | Date | Exposure or decision | Effect allowed |"
 SEPARATOR = "|---|---|---|---|"
+ROW_LIKE_RE = re.compile(r"^\s*\|")                       # a table line: none may follow the ledger table
+EL_ROW_RE = re.compile(r"^\s*\|\s*EL-[0-9]")              # an entry row: none may precede it
+COMMENT_RE = re.compile(r"<!--.*?(-->|\Z)", re.DOTALL)    # an HTML comment (an unclosed one runs to the end)
 ROW_RE = re.compile(r"^\| (EL-[0-9]{3}) \| ([0-9]{4}-[0-9]{2}-[0-9]{2}) \| (.+) \| (.+) \|$")
 SEED_IDS = ("EL-001", "EL-002", "EL-003", "EL-004", "EL-005", "EL-006", "EL-007")
 # sha256 of the seed rows EL-001..EL-007 (each row line + LF), copied verbatim from CAPTURE_PROGRAM r2.2 Appendix A
@@ -47,7 +59,10 @@ class LedgerError(Exception):
 
 
 def table_rows(text):
-    """The row lines of the ledger table (after the header and separator), in file order."""
+    """The row lines of the ledger table (after the header and separator), in file order. LedgerError when the
+    table is not the one visible table of the file: an `| EL-` line before it, any table line after it (a row
+    appended after a blank line would be outside the checked table), or the table inside an HTML comment or a code
+    fence."""
     lines = text.split("\n")
     heads = [i for i, line in enumerate(lines) if line == HEADER]
     if len(heads) != 1:
@@ -60,6 +75,18 @@ def table_rows(text):
         if not line.startswith("|"):
             break
         rows.append(line)
+    after = i + 2 + len(rows)
+    stray = [n + 1 for n, line in enumerate(lines[:i]) if EL_ROW_RE.match(line)]
+    stray += [n + 1 for n, line in enumerate(lines[after:], after) if ROW_LIKE_RE.match(line)]
+    if stray:
+        raise LedgerError("line(s) %s outside the ledger table look like rows; every entry goes in the one table, "
+                          "with no blank line before it" % ", ".join(str(n) for n in stray[:5]))
+    start = sum(len(line) + 1 for line in lines[:i])
+    end = sum(len(line) + 1 for line in lines[:after])
+    if any(m.start() < end and m.end() > start for m in COMMENT_RE.finditer(text)):
+        raise LedgerError("the ledger table lies inside an HTML comment")
+    if sum(1 for line in lines[:i] if line.lstrip().startswith("```")) % 2:
+        raise LedgerError("the ledger table lies inside a code fence")
     return rows
 
 
@@ -117,19 +144,21 @@ def check_append_only(base_rows, rows):
     return problems
 
 
-def git_base(rev, rel):
-    """Bytes of rel at git revision rev of this repo, or None when the revision has no such file."""
+def git(repo, *args):
+    """A read-only git command in repo (no optional locks)."""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
-    proc = subprocess.run(["git", "-C", REPO, "cat-file", "-e", "%s:%s" % (rev, rel)], stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, env=env)
+    return subprocess.run(["git", "-C", repo] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+
+
+def git_base(rev, rel, repo=REPO):
+    """Bytes of rel at git revision rev of repo, or None when the revision has no such file."""
+    proc = git(repo, "cat-file", "-e", "%s:%s" % (rev, rel))
     if proc.returncode != 0:
-        check = subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        check = git(repo, "rev-parse", "--verify", "--quiet", rev + "^{commit}")
         if check.returncode != 0:
             raise OSError("git revision %r not found" % rev)
         return None
-    proc = subprocess.run(["git", "-C", REPO, "show", "%s:%s" % (rev, rel)], stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, env=env)
+    proc = git(repo, "show", "%s:%s" % (rev, rel))
     if proc.returncode != 0:
         raise OSError("git show %s:%s failed: %s" % (rev, rel, proc.stderr.decode("utf-8", "replace").strip()))
     return proc.stdout
@@ -148,15 +177,55 @@ def check(ledger_bytes, base_bytes):
     return problems
 
 
+def check_history(rev, repo=REPO, rel=LEDGER_REL):
+    """(commits checked, problems) of the ledger's committed history: every commit reachable from rev that changed
+    rel, oldest first, against each of its parents (check() with the parent's version as the base; none for the
+    commit that adds it). A commit that deletes the ledger is a violation. OSError when git cannot answer."""
+    proc = git(repo, "rev-list", "--full-history", "--reverse", rev, "--", rel)
+    if proc.returncode != 0:
+        raise OSError("git rev-list %s -- %s failed: %s" % (rev, rel, proc.stderr.decode("utf-8", "replace").strip()))
+    commits = proc.stdout.decode("ascii").split()
+    if not commits:
+        return [], ["no commit reachable from %s adds %s" % (rev, rel)]
+    problems = []
+    for commit in commits:
+        parents = git(repo, "rev-list", "--parents", "-n", "1", commit).stdout.decode("ascii").split()[1:]
+        data = git_base(commit, rel, repo)
+        if data is None:
+            problems.append("%s deletes %s" % (commit[:12], rel))
+            continue
+        for base in [git_base(p, rel, repo) for p in parents] or [None]:
+            problems += ["%s: %s" % (commit[:12], p) for p in check(data, base)]
+    return commits, problems
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--ledger", default=os.path.join(REPO, LEDGER_REL), help="the ledger (default %s)" % LEDGER_REL)
+    ap.add_argument("--ledger", default=None, help="the ledger (default %s of --repo)" % LEDGER_REL)
+    ap.add_argument("--repo", default=REPO, help="the git repository (default this one)")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--base-rev", default=None, help="git revision of the base version (default HEAD)")
     group.add_argument("--base-file", default=None, help="a file holding the base version")
+    group.add_argument("--history", nargs="?", const="HEAD", default=None, metavar="REV",
+                       help="check every commit that changed the ledger, up to REV (default HEAD)")
     args = ap.parse_args(argv)
+    if args.history and args.ledger:
+        ap.error("--history checks the committed ledger of --repo; --ledger does not apply")
+    if args.history:
+        try:
+            commits, problems = check_history(args.history, args.repo)
+        except OSError as e:
+            print("error: %s" % e)
+            return EXIT_USAGE
+        for p in problems:
+            print("violation: %s" % p)
+        if problems:
+            return EXIT_VIOLATION
+        print("ok: %d commit(s) up to %s changed %s; each only appended to its parents' ledger" % (
+            len(commits), args.history, LEDGER_REL))
+        return EXIT_OK
     try:
-        with open(args.ledger, "rb") as f:
+        with open(args.ledger or os.path.join(args.repo, LEDGER_REL), "rb") as f:
             ledger = f.read()
         if args.base_file:
             with open(args.base_file, "rb") as f:
@@ -164,7 +233,7 @@ def main(argv=None):
             base_name = args.base_file
         else:
             rev = args.base_rev or "HEAD"
-            base = git_base(rev, LEDGER_REL)
+            base = git_base(rev, LEDGER_REL, args.repo)
             base_name = "%s:%s" % (rev, LEDGER_REL)
     except OSError as e:
         print("error: %s" % e)

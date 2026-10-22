@@ -31,3 +31,4 @@ addon  addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.lay
 script src/enfusion/datacapture/DC_LaunchGuard.c
 script src/enfusion/datacapture/DC_ProbeCsv.c
 script src/enfusion/datacapture/DC_ProbeRunner.c
+script src/enfusion/datacapture/DC_ProbeEngine.c

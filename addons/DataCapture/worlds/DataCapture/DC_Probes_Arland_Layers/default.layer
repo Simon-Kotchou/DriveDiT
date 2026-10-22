@@ -42,6 +42,16 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fWarmupS 3
    m_fGapS 1
   }
+  DC_ProbeEngine "{DC4A50B300000002}" {
+   m_fE10TelemetryPeriodS 0.05
+   m_bE10StepRows 1
+   m_iE19LargeBytes 1048576
+   m_fE19KillWindowS 300
+   m_fE19KillChunkS 0.1
+   m_iE19KillRowsPerChunk 6
+   m_sE20EngineModules "VideoUserSettings,DisplayUserSettings"
+   m_sE20GameModules "SCR_VideoSettings"
+  }
  }
  coords 2759.086 80.111 1664.452
  m_bAllowFactionChange 0

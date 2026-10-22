@@ -253,3 +253,8 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 
 | id | measures | Play time | analysis |
 |---|---|---|---|
+| e10 | ticks per world-second, k | whole plan | `e10_ticks.py <play_dir>` |
+| e04 | S105 components, gearbox | < 1 s | `e04_components.py <play_dir>` |
+| e20 | render-settings dump | < 1 s | `e20_settings.py <play_dir> [--compare <client play_dir>] [--profile-dir <dir>]` |
+| e19 | writer return values | < 5 s | `e19_write.py <play_dir>` |
+| e19kill | taskkill consistency (opt-in) | until killed, max 300 s | `e19_write.py [<e19 play_dir>] --kill <play_dir>` |

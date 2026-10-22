@@ -32,27 +32,58 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_SpawnLogic SCR_SpawnLogic "{5D36888CC966608A}" {
    }
   }
-  SCR_MLDataCollector "{AAAABBBBCCCCDDDD}" {
-   m_bEnableDataCapture 1
-   m_iCaptureIntervalMs 200
-   m_bCaptureScreenshots 1
-   m_bVerboseLogging 1
-   m_bEnableAnchorSelection 1
+  DC_Session "{DC4A50B400000001}" {
+   m_sMapId "arland"
+   m_sTerrain "Arland"
+   m_sRootWorld "{A9806AF617972E97}worlds/Arland/Arland.ent"
+   m_fMapSizeM 4096
+   m_fMapSizeTolM 256
+   m_fLatitudeDeg 47.411
+   m_fLatitudeTolDeg 0.05
+   m_sRequiredProfileRoot "E:/DriveDiT"
+   m_bAllowWorkbenchWithoutLaunchId 0
+   m_bEscapeBindToProcessStart 1
+   m_fImageHz 10
+   m_iImgInflightTimeoutMs 2000
+   m_iImgLeadMs 0
+   m_fChunkMaxS 10
+   m_fReadinessTimeoutS 30
+   m_fHeartbeatPeriodS 5
+   m_bCloseOnDcStop 1
+   m_bKeepLogsOpen 0
+   m_bVerifyChunkLength 0
+   m_sRenderSettingsModules "VideoUserSettings,DisplayUserSettings"
   }
-  SCR_MLScreenshotCapture "{BBBBCCCCDDDDEEEE}" {
-   m_bEnableCapture 1
-   m_eCameraPosition 0
-   m_iCaptureWidth 320
-   m_iCaptureHeight 180
-   m_fCameraFOV 90
-   m_vHoodOffset 2.2 0.95 0
+  DC_EgoSession "{DC4A50B400000002}" {
+   m_sEgoPrefab "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et"
+   m_vSpawnPos 1495.41 0 2626
+   m_fSpawnHeadingDeg 0.11
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSettleMaxKmh 1
+   m_bForceEnableSimulation 0
   }
-  SCR_MLDataCaptureDirector "{6D1A2B3C4D5E6F70}" {
-   m_iMaxAIGroups 5
-   m_fWaypointRadius 30
-   m_iWaypointDelay 3000
-   m_sInitialWeather "Overcast"
-   m_iInitialHour 10
+  DC_StreamRecorder "{DC4A50B400000003}" {
+   m_iSteerSign -1
+   m_iYawAxisSign 1
+   m_sSteeringGeometry "unknown_on_1.8"
+   m_iSunElevationSign -1
+   m_bRoadContext 1
+   m_bForwardOnly 1
+  }
+  DC_HfRecorder "{DC4A50B400000004}" {
+   m_vMountPos 0 1.25 0.3
+   m_fMountPitchDeg -4
+   m_fVerticalFovDeg 50
+   m_fNearPlaneM 0.1
+   m_fFarPlaneM 3000
+  }
+  DC_ImageScheduler "{DC4A50B400000005}" {
+   m_iPatchPx 32
+   m_iMarginPx 16
+   m_iGapPx 8
+   m_iBandPx 64
+   m_sScreenshotSuffixes ".png,.bmp.png,.bmp,.jpg,noext"
   }
  }
  coords 2759.086 80.111 1664.452

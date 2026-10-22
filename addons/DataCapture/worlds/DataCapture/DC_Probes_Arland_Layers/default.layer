@@ -118,6 +118,53 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fSpeedKi 0.02
    m_fBrakeScale 0.5
   }
+  DC_ProbeMarkers "{DC4A50B300000005}" {
+   m_vMountPos 0 1.25 0.3
+   m_fMountPitchDeg -4
+   m_fVerticalFovDeg 50
+   m_fNearPlaneM 0.1
+   m_fFarPlaneM 3000
+   m_iPatchPx 32
+   m_iMarginPx 16
+   m_iGapPx 8
+   m_vAreaStart 1495.4 0 2620
+   m_fAreaHeadingDeg 0.11
+   m_fAreaLengthM 1100
+   m_fAreaHalfWidthM 25
+   m_fAreaMarginM 3
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSpeedKp 0.08
+   m_fSpeedKi 0.02
+   m_fBrakeScale 0.5
+   m_eMarkerKind 0
+   m_sMarkerPrefab "{25C8B889A777399D}Prefabs/Props/Infrastructure/ConeTraffic/ConeTraffic_01_red.et"
+   m_vMarkerColor 1 0 1
+   m_fMarkerRadiusM 0.25
+   m_fStraightFromM 20
+   m_fStraightToM 400
+   m_fStraightStepM 20
+   m_fMarkerLateralM 10
+   m_sMarkerHeights "0.6,1.6"
+   m_fRingAlongM 700
+   m_fRingRadiusM 25
+   m_iRingCount 24
+   m_fRingHeightM 0.8
+   m_fSlalomKmh 40
+   m_fSlalomAmplitude 0.3
+   m_fSlalomPeriodS 3
+   m_fSlalomS 30
+   m_fBacklogS 10
+   m_fBrakeFromKmh 40
+   m_fCurveKmh 25
+   m_fCurveSteer 0.2
+   m_fCurveS 15
+   m_fImageHz 10
+   m_iInFlightTimeoutMs 2000
+   m_sFpsPhases "60,30"
+   m_iProjMarkersPerFrame 16
+   m_fProjMaxDistM 150
+  }
  }
  coords 2759.086 80.111 1664.452
  m_bAllowFactionChange 0

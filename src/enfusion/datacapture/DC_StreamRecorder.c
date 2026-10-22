@@ -894,8 +894,11 @@ class DC_StreamRecorder : DC_SessionModule
 			}
 		}
 
+		if (m_Session.HasWriteFailure())
+			return;
+
 		WriteCtlRow(physicsStep, worldMs);
-		if (physicsStep % m_Session.GetTelemetryEveryK() == 0)
+		if (!m_Session.HasWriteFailure() && physicsStep % m_Session.GetTelemetryEveryK() == 0)
 			WriteTelemetryRow(physicsStep, worldMs, ego, simulation);
 	}
 

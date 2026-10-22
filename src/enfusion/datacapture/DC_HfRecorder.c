@@ -157,13 +157,16 @@ class DC_HfRecorder : DC_SessionModule
 		DC_ProbeCsv.AddMat34Columns(columns, "veh");
 		columns.Insert("fps");
 
-		m_Hf = new DC_ChunkWriter();
-		bool opened = m_Hf.Open(session.GetSessionDir(), "hf", columns, HF_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
-		session.RegisterStream(m_Hf);
+		// The session keeps the only strong reference (RegisterStream); a new object assigned straight to the weak
+		// member would be released at once
+		DC_ChunkWriter writer = new DC_ChunkWriter();
+		bool opened = writer.Open(session.GetSessionDir(), "hf", columns, HF_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
+		session.RegisterStream(writer);
+		m_Hf = writer;
 		if (opened)
 			return true;
 
-		session.FailWrite("hf: " + m_Hf.GetFailure());
+		session.FailWrite("hf: " + writer.GetFailure());
 		return false;
 	}
 
@@ -184,6 +187,9 @@ class DC_HfRecorder : DC_SessionModule
 			m_Session.Fail(DC_Session.END_CAMERA_LOST, string.Format("rig camera current %1, attached %2 at render frame %3", DC_LaunchGuard.BoolText(current), DC_LaunchGuard.BoolText(attached), renderFrame));
 			return;
 		}
+
+		if (m_Session.HasWriteFailure())
+			return;
 
 		if (renderFrame <= m_iLastFrame)
 		{

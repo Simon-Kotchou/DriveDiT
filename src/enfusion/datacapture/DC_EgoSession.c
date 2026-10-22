@@ -250,13 +250,16 @@ class DC_EgoSession : DC_SessionModule
 
 		array<string> columns = {};
 		AddEpisodeColumns(columns);
-		m_Episodes = new DC_ChunkWriter();
-		bool opened = m_Episodes.Open(session.GetSessionDir(), "episodes", columns, EPISODES_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
-		session.RegisterStream(m_Episodes);
+		// The session keeps the only strong reference (RegisterStream); a new object assigned straight to the weak
+		// member would be released at once
+		DC_ChunkWriter writer = new DC_ChunkWriter();
+		bool opened = writer.Open(session.GetSessionDir(), "episodes", columns, EPISODES_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
+		session.RegisterStream(writer);
+		m_Episodes = writer;
 		if (opened)
 			return true;
 
-		session.FailWrite("episodes: " + m_Episodes.GetFailure());
+		session.FailWrite("episodes: " + writer.GetFailure());
 		return false;
 	}
 
@@ -295,8 +298,9 @@ class DC_EgoSession : DC_SessionModule
 		if (m_iEpisodeId < 0 || physicsStep % m_Session.GetStepsPerDecision() != 0)
 			return;
 
+		// The first terminal event wins: a termination the driver already reported is kept over the planned end
 		string reason = m_Recorder.GetTermination();
-		if (m_Session.IsStopping())
+		if (reason.IsEmpty() && m_Session.IsStopping())
 			reason = TERMINATION_SESSION_STOP;
 
 		if (!reason.IsEmpty())
@@ -316,9 +320,14 @@ class DC_EgoSession : DC_SessionModule
 		if (m_iEpisodeId < 0)
 			return;
 
-		string reason = TERMINATION_SESSION_STOP;
-		if (endReason != DC_Session.END_DURATION && endReason != DC_Session.END_STOP && endReason != DC_Session.END_DC_STOP)
-			reason = TERMINATION_SCRIPT_ERROR;
+		// The first terminal event wins: a termination the driver already reported is kept
+		string reason = m_Recorder.GetTermination();
+		if (reason.IsEmpty())
+		{
+			reason = TERMINATION_SESSION_STOP;
+			if (DC_Session.IsErrorEndReason(endReason))
+				reason = TERMINATION_SCRIPT_ERROR;
+		}
 
 		EndEpisode(m_Session.GetLastPostStep(), reason);
 	}

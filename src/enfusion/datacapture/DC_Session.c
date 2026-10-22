@@ -1719,10 +1719,14 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (SealOnFailure())
 			return;
 
+		// The first failed commit stops the loop: no further chunk is acknowledged after it
 		foreach (DC_SessionStream stream : m_aStreams)
 		{
 			if (!stream.FlushIfDue(worldMs))
+			{
 				FailWrite(stream.GetName() + ": " + stream.GetFailure());
+				break;
+			}
 		}
 
 		if (SealOnFailure())
@@ -1804,6 +1808,14 @@ class DC_Session : SCR_BaseGameModeComponent
 		m_ePhase = DC_ESessionPhase.CLOSED;
 		m_bStopping = true;
 
+		// World teardown calls no module, so an open episode cannot get its episodes row: never a successful stop
+		if (teardown && m_iEpisodeId >= 0 && !IsErrorEndReason(endReason))
+		{
+			endReason = END_SCRIPT_ERROR;
+			if (m_sFailureDetail.IsEmpty())
+				m_sFailureDetail = string.Format("world deleted with episode %1 open: its episodes row is missing", m_iEpisodeId);
+		}
+
 		// After a write failure no further row is acknowledged: every stream but events is dropped before the modules
 		// write their last rows
 		if (m_bWriteFailed)
@@ -1823,47 +1835,24 @@ class DC_Session : SCR_BaseGameModeComponent
 			}
 		}
 
-		if (m_bWriteFailed)
+		if (endReason == END_ZERO_EGO)
 		{
-			// Only the events row script_error is still attempted
-			LogEvent("script_error", "reason=write_fail");
-			DC_SessionStream events = FindStream("events");
-			if (events && !events.HasFailed())
-				events.Close();
+			// A session without an ego acknowledges no row at all (dc-2.0 5.3: zero_ego, 0 rows, 0 images)
+			foreach (DC_SessionStream emptyStream : m_aStreams)
+			{
+				emptyStream.Abandon();
+			}
 		}
 		else
 		{
-			if (endReason == END_SCRIPT_ERROR)
-				LogEvent("script_error", "reason=other");
-
-			// A commit that fails here stops the acknowledgement too: later streams are dropped, and the events row
-			// script_error is attempted while the events stream is still open
-			foreach (DC_SessionStream stream : m_aStreams)
-			{
-				bool isEvents = stream.GetName() == "events";
-				if (m_bWriteFailed && !isEvents)
-				{
-					stream.Abandon();
-					continue;
-				}
-
-				if (m_bWriteFailed && isEvents)
-					LogEvent("script_error", "reason=write_fail");
-
-				if (!stream.Close())
-				{
-					m_bWriteFailed = true;
-					if (m_sFailureDetail.IsEmpty())
-						m_sFailureDetail = stream.GetName() + ": " + stream.GetFailure();
-				}
-			}
+			CloseStreams(endReason);
 		}
 
 		if (m_bWriteFailed)
 			endReason = END_WRITE_FAIL;
 
 		string status = "ok";
-		if (endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP)
+		if (IsErrorEndReason(endReason))
 			status = "failed";
 
 		bool endWritten = WriteSessionEnd(status, endReason);
@@ -1891,6 +1880,56 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (!teardown && endReason == END_DC_STOP && m_bCloseOnDcStop)
 			GetGame().RequestClose();
 #endif
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Commits every stream, the events stream last: a commit that fails stops the acknowledgement (the later streams
+	//! are dropped) and the events row script_error is still attempted before events is closed
+	protected void CloseStreams(string endReason)
+	{
+		if (!m_bWriteFailed && endReason == END_SCRIPT_ERROR)
+			LogEvent("script_error", "reason=other");
+
+		foreach (DC_SessionStream stream : m_aStreams)
+		{
+			if (stream.GetName() == "events")
+				continue;
+
+			if (m_bWriteFailed)
+			{
+				stream.Abandon();
+				continue;
+			}
+
+			if (!stream.Close())
+				NoteCloseFailure(stream);
+		}
+
+		DC_SessionStream events = FindStream("events");
+		if (!events)
+			return;
+
+		if (events.HasFailed())
+		{
+			events.Abandon();
+			return;
+		}
+
+		if (m_bWriteFailed)
+			LogEvent("script_error", "reason=write_fail");
+
+		if (!events.Close())
+			NoteCloseFailure(events);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void NoteCloseFailure(notnull DC_SessionStream stream)
+	{
+		m_bWriteFailed = true;
+		if (m_sFailureDetail.IsEmpty())
+			m_sFailureDetail = stream.GetName() + ": " + stream.GetFailure();
+
+		Print(LOG + "ERROR: write_fail at the seal: " + stream.GetName() + ": " + stream.GetFailure(), LogLevel.ERROR);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1987,6 +2026,13 @@ class DC_Session : SCR_BaseGameModeComponent
 			return -1;
 
 		return stream.GetLastCommittedKey();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true for every end reason but duration, stop and dc_stop (the session_end.json status is then failed)
+	static bool IsErrorEndReason(string endReason)
+	{
+		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2168,16 +2214,20 @@ class DC_Session : SCR_BaseGameModeComponent
 			return false;
 		}
 
-		Print(string.Format(LOG + "event %1 %2 (step %3, episode %4)", kind, clean, m_iPhysicsStep, m_iEpisodeId), LogLevel.NORMAL);
+		Print(string.Format(LOG + "event %1 %2 (step %3, episode %4)", kind, clean, m_iLastPostStep, m_iEpisodeId), LogLevel.NORMAL);
 		DC_SessionStream events = FindStream("events");
 		if (!events || !m_bHasStartTimestamp)
+			return false;
+
+		// After a write failure only the script_error row is still attempted (no further row is acknowledged)
+		if (m_bWriteFailed && kind != "script_error")
 			return false;
 
 		int worldMs = GetWorldMs();
 		m_EventRow.Clear();
 		m_EventRow.AddInt(m_iEventSeq);
 		m_EventRow.AddInt(m_iEpisodeId);
-		m_EventRow.AddInt(m_iPhysicsStep);
+		m_EventRow.AddInt(m_iLastPostStep);		// the last completed step (dc-2.0 9.5)
 		m_EventRow.AddInt(GetRenderFrame());
 		m_EventRow.AddInt(worldMs);
 		m_EventRow.AddString(kind);
@@ -2260,7 +2310,8 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Requests still unresolved when the session sealed (images.pending_at_end)
+	//! Requests in flight now (images.pending_at_end when the session seals; kept current by the image module, so a
+	//! teardown seal that calls no module still has it)
 	void SetImagesPending(int pending)
 	{
 		m_iImagesPending = pending;

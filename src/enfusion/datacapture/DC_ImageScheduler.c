@@ -222,13 +222,16 @@ class DC_ImageScheduler : DC_SessionModule
 		}
 
 		array<string> columns = {"slot_id", "episode_id", "ego_slot_id", "requested_world_ms", "issue_status", "issue_world_ms", "issue_render_frame", "issue_physics_step", "path", "cam_current", "cam_attached"};
-		m_Img = new DC_ChunkWriter();
-		bool opened = m_Img.Open(session.GetSessionDir(), "img", columns, IMG_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
-		session.RegisterStream(m_Img);
+		// The session keeps the only strong reference (RegisterStream); a new object assigned straight to the weak
+		// member would be released at once
+		DC_ChunkWriter writer = new DC_ChunkWriter();
+		bool opened = writer.Open(session.GetSessionDir(), "img", columns, IMG_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
+		session.RegisterStream(writer);
+		m_Img = writer;
 		if (opened)
 			return true;
 
-		session.FailWrite("img: " + m_Img.GetFailure());
+		session.FailWrite("img: " + writer.GetFailure());
 		return false;
 	}
 
@@ -257,9 +260,10 @@ class DC_ImageScheduler : DC_SessionModule
 
 		while (DueMs(anchorMs, m_iNextSlot) <= worldMs)
 		{
-			HandleSlot(anchorMs, renderFrame, worldMs);
-			if (!m_Img || m_Img.HasFailed())
+			if (!m_Img || m_Session.HasWriteFailure())
 				return;
+
+			HandleSlot(anchorMs, renderFrame, worldMs);
 		}
 	}
 
@@ -304,6 +308,7 @@ class DC_ImageScheduler : DC_SessionModule
 				m_iInFlightSlot = slot;
 				m_sInFlightPath = path;
 				m_iInFlightTickMs = System.GetTickCount();
+				m_Session.SetImagesPending(1);
 			}
 		}
 
@@ -347,6 +352,7 @@ class DC_ImageScheduler : DC_SessionModule
 		if (index >= 0)
 		{
 			m_bInFlight = false;
+			m_Session.SetImagesPending(0);
 			m_aSuffixCounts[index] = m_aSuffixCounts[index] + 1;
 			if (m_sFirstSuffix.IsEmpty())
 				m_sFirstSuffix = m_aSuffixes[index];
@@ -359,6 +365,7 @@ class DC_ImageScheduler : DC_SessionModule
 			return;
 
 		m_bInFlight = false;
+		m_Session.SetImagesPending(0);
 		m_Session.CountImageResolved(false);
 		m_Session.LogEvent("img_timeout", "img_slot_id=" + m_iInFlightSlot.ToString());
 	}

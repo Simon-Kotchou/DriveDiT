@@ -11,7 +11,10 @@ Checks, without touching any session data:
   * the features_v1 registry rules: no student_input channel is absolute, the policy sees action_cmd and action_exec
     only as history (offset <= -1), aux_target and eval_only channels are never inputs, C24's forbidden list;
   * the field tables in docs/capture_contract/dc-2.0.md equal the JSON, row by row;
-  * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md;
+  * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md, and the spec's TBD and tensor tables
+    equal the JSON in every column;
+  * the timing rules: the decision boundary on a synthetic timeline whose command changes, the as-of telemetry join,
+    the TBD-1 resolution order and the image grid phase lock;
   * the session id rule and the canonical map ids;
   * the committed contract files are ASCII with LF line ends.
 The checks are plain functions that return a list of violations, so the tests can also show that a broken copy of a
@@ -21,6 +24,7 @@ file is caught.
 import copy
 import fnmatch
 import json
+import math
 import os
 import re
 import unittest
@@ -68,7 +72,7 @@ R2_STREAM_ITEMS = {
     "telemetry: angular velocity": ["telemetry.angvel_local_x", "telemetry.angvel_local_y",
                                     "telemetry.angvel_local_z"],
     "telemetry: acceleration": ["telemetry.acc_local_x", "telemetry.acc_local_y", "telemetry.acc_local_z"],
-    "telemetry: speed": ["telemetry.speed_mps"],
+    "telemetry: speed": ["telemetry.speed_engine_mps"],
     "telemetry: gear": ["telemetry.gear"],
     "telemetry: RPM": ["telemetry.rpm"],
     "telemetry: per-wheel slip": ["telemetry.w%d_slip_long" % i for i in range(4)] +
@@ -351,7 +355,24 @@ def md_agreement_violations(schema, text):
     tbd_rows = tables.get(("tbd", ""))
     if tbd_rows is None or [r[0] for r in tbd_rows] != [t["id"] for t in schema["tbd_by_probe"]]:
         errors.append("spec: the TBD table differs from tbd_by_probe")
+    else:
+        for r, t in zip(tbd_rows, schema["tbd_by_probe"]):
+            want = [t["id"], t["item"], t["default_r2"], t["decided_by"], "yes" if t["blocks_freeze"] else "no"]
+            if r != want:
+                errors.append("spec: TBD row %s differs from tbd_by_probe (item, default, probe or blocking)" % t["id"])
     return errors
+
+
+def offset_text(access):
+    return "<= %d" % access["max_offset"] if access["input"] else "no"
+
+
+def tensor_row(t):
+    """The spec's tensor-table row of a tensor: name, shape, class, WM input, policy input, targets, channels."""
+    shape = "[" + ",".join(str(x) for x in t["shape"]) + "]"
+    targets = ", ".join(r for r in ("world_model", "policy") if t["access"][r]["target"]) or "-"
+    return ["`%s`" % t["name"], shape, t["class"], offset_text(t["access"]["world_model"]),
+            offset_text(t["access"]["policy"]), targets, ", ".join("`%s`" % c["name"] for c in t["channels"])]
 
 
 class StreamSchemaTest(unittest.TestCase):
@@ -500,6 +521,188 @@ class StreamSchemaTest(unittest.TestCase):
         commit = [f["name"] for f in self.schema["files"]["commit.csv"]["fields"]]
         self.assertEqual(commit, ["chunk_id", "first_key", "last_key", "n_rows", "n_bytes"])
         self.assertEqual(self.schema["session"]["chunk_name"] % 3, "chunk_00003.csv")
+
+    def test_tbd1_resolution_order(self):
+        def resolve(slice_s):
+            n = int(math.floor(0.1 / slice_s + 0.5))
+            k = max([d for d in range(1, n + 1) if n % d == 0 and d * slice_s <= 0.05 + 1e-6] or [1])
+            return n, k
+        expect = {1 / 60.0: (6, 3), 1 / 50.0: (5, 1), 1 / 30.0: (3, 1), 1 / 120.0: (12, 6), 1 / 100.0: (10, 5)}
+        for slice_s, want in expect.items():
+            n, k = resolve(slice_s)
+            self.assertEqual((n, k), want, slice_s)
+            self.assertEqual(n % k, 0, slice_s)
+        tbd1 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-1"][0]
+        self.assertEqual(resolve(tbd1["default"]["fixed_time_slice_s"]),
+                         (tbd1["default"]["physics_steps_per_decision"], tbd1["default"]["telemetry_every_k"]))
+        self.assertIn("decided first", tbd1["default_r2"])
+        self.assertIn("WorldTimestamp", tbd1["default_r2"])
+
+    def test_decision_boundary_on_a_changing_command(self):
+        """Synthetic timeline: the HL decides in EOnPostSimulate of P_t, the command applies from P_t + 1. A builder
+        that follows the JSON timing offsets must give action_cmd_t = decision t, label_t = decision t (mode E),
+        state_t free of decision t, and state_t+1 - state_t = N steps of decision t."""
+        timing = self.schema["timing"]
+        sample = timing["sample"]
+        n_dec, k, dt = 6, 3, 1.0 / 60.0
+        self.assertEqual(timing["decision"]["hl_seq_increments_at_step_offset"], 1)
+
+        def simulate(decision_of, steps=61):
+            speed, held, seq, pending = 0.0, None, -1, None
+            ctl, telemetry = {}, {}
+            for step in range(steps):
+                if pending is not None:          # EOnSimulate: a decision taken after the previous step applies
+                    held, seq = pending
+                    pending = None
+                accel = held if held is not None else 0.0
+                speed += accel * dt
+                label = None
+                if step % n_dec == 0:            # EOnPostSimulate: rows first, then the decision on the state after
+                    label = decision_of(step // n_dec, speed)
+                ctl[step] = {"hl_accel": held, "hl_seq": seq, "exp_accel_now": label, "input_post_throttle": accel}
+                if step % k == 0:
+                    telemetry[step] = {"speed": speed}
+                if label is not None:
+                    pending = (label, step // n_dec)
+            return ctl, telemetry
+
+        def build(ctl, telemetry):
+            rows = []
+            last = sample["action_exec"]["last_step_offset"]
+            self.assertEqual(last, "physics_steps_per_decision")
+            for p in sorted(s for s in ctl if s % n_dec == 0):
+                end = p + n_dec
+                if end not in ctl:
+                    break
+                rows.append({
+                    "state": telemetry[p + sample["state"]["step_offset"]]["speed"],
+                    "action_cmd": ctl[p + sample["action_cmd"]["step_offset"]]["hl_accel"],
+                    "label": ctl[p + sample["action_label"]["step_offset"]]["exp_accel_now"],
+                    "exec_seq": [ctl[s]["hl_seq"] for s in range(p + sample["action_exec"]["first_step_offset"],
+                                                                  end + 1)],
+                })
+            return rows
+
+        plan = [0.5, -1.0, 2.0, 0.0, 1.5, -0.5, 3.0, -2.0, 1.0, 0.25, 0.75]
+        rows = build(*simulate(lambda t, speed: plan[t]))
+        self.assertEqual(len(rows), 10)
+        for t, r in enumerate(rows):
+            self.assertEqual(r["action_cmd"], plan[t], t)
+            self.assertEqual(r["label"], plan[t], t)
+            self.assertEqual(r["exec_seq"], [t] * n_dec, t)
+            if t + 1 < len(rows):
+                self.assertAlmostEqual(rows[t + 1]["state"] - r["state"], n_dec * plan[t] * dt, places=9)
+        # state_t never contains a step of decision t: changing decision 4 alone leaves state_4 unchanged
+        changed = list(plan)
+        changed[4] = -3.0
+        rows2 = build(*simulate(lambda t, speed: changed[t]))
+        self.assertEqual(rows2[4]["state"], rows[4]["state"])
+        self.assertNotEqual(rows2[5]["state"], rows[5]["state"])
+        # the old reading (action_cmd at P_t itself) would label decision t with the command of t - 1
+        ctl, _ = simulate(lambda t, speed: plan[t])
+        self.assertEqual(ctl[4 * n_dec]["hl_accel"], plan[3])
+
+    def test_telemetry_join_is_as_of(self):
+        joins = self.schema["timing"]["joins"]
+        self.assertTrue(joins["img_to_hf"].startswith("exact"))
+        self.assertTrue(joins["hf_to_ctl"].startswith("exact"))
+        self.assertTrue(joins["hf_to_telemetry"].startswith("as-of"))
+        k = 3
+        telemetry_steps = list(range(0, 60, k))
+        for last_physics_step in range(0, 58):           # frames on steps not divisible by k have no exact match
+            as_of = max(s for s in telemetry_steps if s <= last_physics_step)
+            self.assertLess(last_physics_step - as_of, k)
+        self.assertNotIn(7, telemetry_steps)
+
+    def test_image_grid_is_phase_locked(self):
+        grid = self.schema["timing"]["image_grid"]
+        self.assertIn("physics_step 0", grid["anchor"])
+        self.assertIn("img_lead_ms", grid["due_ms"])
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        for name in ("clocks.img_lead_ms", "clocks.img_inflight_timeout_ms"):
+            self.assertTrue(session[name]["required"], name)
+            self.assertEqual(session[name]["tbd"], "TBD-2", name)
+        # 60 Hz steps, 10 Hz grid and decisions, lead 0: grid point g is due at decision step g's world time
+        slice_ms, n_dec, image_hz, lead = 1000.0 / 60.0, 6, 10.0, 0.0
+        for g in range(20):
+            due = 0.0 + g * 1000.0 / image_hz - lead
+            self.assertAlmostEqual(due, g * n_dec * slice_ms, places=6)
+        derived = {f["name"] for f in self.schema["derived"]["decision_index"]["fields"]}
+        self.assertTrue({"obs_age_steps", "obs_age_ms", "obs_valid"} <= derived)
+
+    def test_launch_guard_modes(self):
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertNotIn("launch_guard", session)
+        self.assertEqual(session["launch_guard.launch_mode"]["enum"], ["cli", "wb_escape"])
+        self.assertEqual(self.schema["enums"]["launch_mode"], ["cli", "wb_escape"])
+        for name in ("launch_guard.record_path", "launch_guard.record_launch_id", "launch_guard.cli_seen",
+                     "launch_guard.profile_root_ok"):
+            self.assertTrue(session[name]["required"], name)
+        self.assertTrue(session["launch_guard.escape_binding"].get("nullable"))
+        self.assertIn("Mode `wb_escape`", self.spec)
+        self.assertIn("wb_R1_dclaunch.patch", self.spec)
+        self.assertIn("only an inference", self.spec)
+
+    def test_image_failure_states(self):
+        img = {f["name"]: f for f in self.schema["streams"]["img"]["fields"]}
+        self.assertEqual(img["issue_status"]["enum"], ["issued", "skipped_busy", "make_failed"])
+        kinds = {f["name"]: f for f in self.schema["streams"]["events"]["fields"]}["kind"]["enum"]
+        self.assertIn("img_timeout", kinds)
+        self.assertIn("img_timeout", self.schema["enums"]["event_kind"])
+        images = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}["images"]["desc"]
+        for word in ("make_failed", "timed_out", "pending_at_end"):
+            self.assertIn(word, images)
+        self.assertIn("pending_at_end", self.schema["timing"]["image_grid"]["session_end"])
+
+    def test_vehicle_slots_never_named_slot_id(self):
+        for name, s in self.schema["streams"].items():
+            names = [f["name"] for f in s["fields"]]
+            if name != "img":
+                self.assertNotIn("slot_id", names, name)
+        self.assertEqual(self.schema["streams"]["traffic"]["key"], ["physics_step", "veh_slot_id"])
+        self.assertIn("veh_slot_id", [f["name"] for f in self.schema["streams"]["events"]["fields"]])
+
+    def test_speed_names_are_distinct(self):
+        for name, s in self.schema["streams"].items():
+            self.assertNotIn("speed_mps", [f["name"] for f in s["fields"]], name)
+        self.assertIn("speed_engine_mps", [f["name"] for f in self.schema["streams"]["telemetry"]["fields"]])
+
+    def test_writer_patterns_and_heartbeat(self):
+        self.assertIn("heartbeat.csv", self.schema["files"])
+        self.assertNotIn("heartbeat.txt", self.schema["files"])
+        self.assertIn("APPEND", self.schema["writer"]["heartbeat"])
+        self.assertIn("APPEND", self.schema["writer"]["commit"])
+        self.assertIn("at least one row", self.schema["writer"]["chunk"])
+        tbd3 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-3"][0]
+        self.assertTrue(tbd3["default"]["append_reopen_per_line"])
+        self.assertFalse(tbd3["default"]["rewrite_in_place"])
+        self.assertIn("c11", tbd3["default_r2"])
+
+    def test_session_root_and_identity_rules(self):
+        self.assertTrue(self.schema["session"]["root"].startswith("$profile:DC_Sessions/"))
+        self.assertTrue(any("DrivingData" in r for r in self.schema["session"]["never_read_roots"]))
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertIn("harvest.json", session["pin.build_key"]["desc"])
+        self.assertIn("never edited", session["pin.build_key"]["desc"])
+        self.assertIn("dcTrial", session["exe.cli"]["desc"])
+        self.assertNotIn("Every -dc*", session["exe.cli"]["desc"])
+        tbd9 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-9"][0]
+        self.assertEqual(tbd9["default"]["road_key_format"], "<n_pts>/<x0>:<z0>/<x1>:<z1>")
+        self.assertNotIn(",", tbd9["default"]["road_key_format"])
+
+    def test_reserved_reaction_fields(self):
+        for name in ("react_veh_slot_id", "react_visible"):
+            f = resolve_ref(self.schema, "ctl." + name)
+            self.assertIsNotNone(f, name)
+            self.assertTrue(f.get("reserved"), name)
+
+    def test_open_items_list_every_proposal(self):
+        section15 = self.spec[self.spec.index("## 15. Open items"):]
+        for phrase in ("decision boundary", "decision phase lock", "obs_t rule", "ego frame", "`end_reason` values",
+                       "chunk rules", "nav_v1 rules", "route schema", "`wb_escape`", "DC_Sessions/",
+                       "forward-only"):
+            self.assertIn(phrase, section15, phrase)
+        self.assertIn("nav_v2", self.spec[:self.spec.index("## 1. ")])
 
     def test_files_ascii_lf(self):
         for path in (SPEC_MD, STREAMS_JSON, FEATURES_JSON):
@@ -770,9 +973,33 @@ class FeaturesRegistryTest(unittest.TestCase):
         self.assertIsNotNone(rows)
         self.assertEqual([r[0].strip("`") for r in rows], [t["name"] for t in self.reg["tensors"]])
         for r, t in zip(rows, self.reg["tensors"]):
-            self.assertEqual(r[2], t["class"], t["name"])
-            chans = [x.strip().strip("`") for x in r[6].split(",")]
-            self.assertEqual(chans, [c["name"] for c in t["channels"]], t["name"])
+            self.assertEqual(r, tensor_row(t), t["name"])
+
+    def test_spec_tensor_drift_is_caught(self):
+        drifted = self.spec.replace("| `action_cmd` | [T,3] | student_input | <= 0 | <= -1 |",
+                                    "| `action_cmd` | [T,3] | student_input | <= 0 | <= 0 |", 1)
+        self.assertNotEqual(drifted, self.spec)
+        rows = md_tables(drifted)[("tensors", "")]
+        bad = [t["name"] for r, t in zip(rows, self.reg["tensors"]) if r != tensor_row(t)]
+        self.assertEqual(bad, ["action_cmd"])
+        drifted = self.spec.replace("| TBD-7 | gearbox and gear index semantics |", "| TBD-7 | gear map |", 1)
+        self.assertTrue(md_agreement_violations(self.schema, drifted))
+
+    def test_5hz_fallback_shapes(self):
+        fallback = self.reg["offsets"]["fallback_5hz"]
+        self.assertEqual(fallback["decision_hz"], 5)
+        self.assertEqual(fallback["shapes"]["action_exec"], ["T", fallback["physics_steps_per_decision"], 4])
+        self.assertEqual(self.tensors["action_exec"]["shape"][1], self.reg["offsets"]["physics_steps_per_decision"])
+        tbd2 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-2"][0]
+        self.assertEqual(tbd2["default"]["fallback_physics_steps_per_decision"], fallback["physics_steps_per_decision"])
+        self.assertEqual(self.tensors["action_cmd"]["shape"], ["T", 3])
+
+    def test_policy_valid_has_a_recorded_source(self):
+        pv = self.channels["policy_valid"][1]
+        self.assertEqual(pv["source"], "ctl.react_visible")
+        self.assertTrue(resolve_ref(self.schema, pv["source"]).get("reserved"))
+        self.assertIn("P_t + 1", self.tensors["action_cmd"]["rule"])
+        self.assertIn("exp_*_now at P_t", self.tensors["action_label"]["rule"])
 
 
 if __name__ == "__main__":

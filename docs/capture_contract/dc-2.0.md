@@ -22,6 +22,10 @@ Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; p
 - The JSON twins are normative for field names, order, types, units and keys. This document is normative for
   meaning. `tests/test_contract_dc2.py` checks that the field tables below equal the JSON, so a disagreement is a test
   failure, not a judgement call.
+- nav_v1 (`drivedit_nav` and `drivedit_nav/route_schema.json`) is part of this DRAFT and freezes with it. After the
+  freeze any change of nav behaviour (progress window, lookahead, maneuver window, stop clearance, route-deviation
+  limit) or of the route schema is a new `nav_version` (nav_v2), stamped in `episodes.nav_version` and
+  `session.json versions.nav_version`; nav_v1 output never changes in place.
 - Change control. Until the freeze, edits land on this branch. The freeze (T0-ENG core GO, target 2026-10-24) replaces
   every blocking TBD with the measured value, sets the status line to FROZEN and needs sign-off from the DD-4-min,
   DD-5-min and DD-7-min authors. After the freeze any change of a field, unit, sign, key, cadence or registry rule is
@@ -38,24 +42,30 @@ block the freeze. TBD-6 to TBD-9 change a value or a mechanism only, never a fie
 <!-- dc2:tbd -->
 | Id | Item | Default (r2) | Decided by | Blocks freeze |
 |---|---|---|---|---|
-| TBD-1 | k rule: telemetry cadence and decision steps | telemetry_every_k = round(50 ms / GetFixedTimeSlice()) = 3 at a 60 Hz fixed step; physics_steps_per_decision = round(100 ms / GetFixedTimeSlice()) = 6; k divides it | E-10 | yes |
-| TBD-2 | image_hz (10 or 5) and the one-request-in-flight rule | image_hz = 10 (world-time slot grid, one MakeScreenshot request in flight); fall back to 5 Hz first if E-05 shows misses or request-to-file latency that 10 Hz cannot sustain | E-05 | yes |
-| TBD-3 | writer semantics (FileHandle.Write return values, Close durability, taskkill mid-commit) | FileHandle.Write returns the number of bytes written (FileHandle.c:93-103; WriteLine returns void and is never used); any return other than the expected byte count is a short or failed write; a closed file survives a process kill | E-19 | yes |
+| TBD-1 | k rule: telemetry cadence and decision steps | physics_steps_per_decision = floor(100 ms / GetFixedTimeSlice() + 0.5), decided first (= 6 at a 60 Hz fixed step); telemetry_every_k = the largest divisor k of physics_steps_per_decision with k x GetFixedTimeSlice() <= 50 ms, at least 1 (= 3 at 60 Hz), so k always divides it; E-10 also logs the WorldTimestamp clock next to GetWorldTime per step | E-10 | yes |
+| TBD-2 | image_hz (10 or 5) and the one-request-in-flight rule | image_hz = 10 (world-time slot grid phase-locked to the decision steps, img_lead_ms = 0, one MakeScreenshot request in flight, in-flight timeout 2000 ms); fall back to 5 Hz first if E-05 shows misses or request-to-file latency that 10 Hz cannot sustain; at 5 Hz the HL decision rate drops to 5 Hz as well (the decision interval is the training interval, r2 3.5); img_lead_ms is set from the E-05/E-06 capture offsets | E-05 | yes |
+| TBD-3 | writer semantics (FileHandle.Write return values, Close durability, taskkill mid-commit) | FileHandle.Write returns the number of bytes written (FileHandle.c:93-103; WriteLine returns void and is never used); any return other than the expected byte count is a short or failed write; a closed file survives a process kill; one open-APPEND-write-close cycle per line adds exactly that line (commit.csv and heartbeat.csv; E-19 c11 and the e19kill e19_commit_append.csv log); no file is rewritten in place (E-19 c10 only records whether WRITE truncates) | E-19 | yes |
 | TBD-4 | engine-written screenshot file name | the request path has no extension (frames/f_<slot_id:08d>) and the engine appends .png, so the file is frames/f_<slot_id:08d>.png (1.8 evidence: a request ending .bmp produced *.bmp.png) | E-05 | yes |
-| TBD-5 | steer_sign normalisation (and the yaw-axis and local-axes checks) | steer_sign = -1: CarSteering is +1 for left, the contract is right-positive, so steer_contract = steer_sign * steer_engine; yaw_axis_sign = +1 [inference: Enfusion is left-handed with Y up, so +angvel_local_y is clockwise seen from above]; vehicle-local axes x right, y up, z forward | E-01 | yes |
-| TBD-6 | launch id visible in Workbench Play | System.GetCLIParam("dcLaunchId") returns Workbench's own -dcLaunchId argument in Play mode (answered by DD-1's profile guard log line at the user's next Play: 'Capture output allowed' or 'capture output refused') | E-11 | no |
-| TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed) | E-04, E-01 | no |
+| TBD-5 | steer_sign normalisation (and the yaw-axis and local-axes checks) | steer_sign = -1: CarSteering is +1 for left, the contract is right-positive, so steer_contract = steer_sign * steer_engine; yaw_axis_sign = +1 [inference: Enfusion is left-handed with Y up, so +angvel_local_y is clockwise seen from above]; vehicle-local axes x right, y up, z forward; checked by tools/probes/t0eng/e01_actuation.py: steer_sign, yaw_axis_sign and local_axes (z forward: sign of vel_l_z on forward motion; x right: sign of corr(acc_l_x, v x heading rate)) | E-01 | yes |
+| TBD-6 | launch id visible in Workbench Play | System.GetCLIParam("dcLaunchId") returns Workbench's own -dcLaunchId argument in Play mode (launch_guard.launch_mode cli). Answered by DD-4-probe's E-11 console line (-dcLaunchId visible=0 or 1); DD-1's 'Capture output allowed' or 'capture output refused' line tests GetCLIParam("profile") and is only an inference about it. If the id is not visible, Workbench sessions pass through the escape (launch_guard.launch_mode wb_escape, section 5.1); the session.json fields exist either way | E-11 | no |
+| TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that | E-04, E-01 | no |
 | TBD-8 | render-settings dump keys | GetGame().GetEngineUserSettings() modules VideoUserSettings and DisplayUserSettings, keys from SCR_SettingsManagerVideoModule.c:12-56 | E-20 | no |
-| TBD-9 | road key of the in-engine road dump | E-08a dedupes roads by first/last point plus point count; telemetry.road_key uses the same key so offline matching (E-08b) can join it | E-08a | no |
+| TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | E-08a | no |
 
 Consequences the freeze must apply:
-- TBD-1: if `GetFixedTimeSlice()` is not 1/60 s, k and `physics_steps_per_decision` follow the rule (they must stay
-  integers with k dividing `physics_steps_per_decision`); C08 and C28 keep counting steps. If the rule cannot give a
-  50 ms telemetry grid, the telemetry period becomes k x slice and is recorded in `clocks.telemetry_every_k`.
-- TBD-2: at 5 Hz the training interval becomes 200 ms (r2 3.5 subsampling path). The HL decision rate stays 10 Hz
-  unless the freeze decides otherwise, and the builder then exposes both held HL commands of the interval.
+- TBD-1: the rule is applied in this order: `physics_steps_per_decision` N = floor(100 ms / slice + 0.5) first (an
+  explicit half-up rounding, the same in Python and Enforce), then k = the largest divisor of N with k x slice <= 50 ms
+  (compared with a 1 us tolerance; at least 1). k therefore always divides N: (N, k) = (6, 3) at a 60 Hz slice,
+  (5, 1) at 50 Hz and (3, 1) at 30 Hz. If k x slice is not 50 ms, the telemetry period is k x slice and is recorded
+  through `clocks.telemetry_every_k`; C08 and C28 keep counting steps. E-10 logs the WorldTimestamp clock (the
+  `world_time_ms` source) next to `GetWorldTime`, so "world time advances per step" is answered for the right clock.
+- TBD-2: at 5 Hz the HL decision rate drops to 5 Hz as well, because the decision interval is the training interval
+  (r2 3.5): `clocks.decision_hz` 5, `physics_steps_per_decision` 12 at a 60 Hz slice. The tensors keep their names;
+  `action_cmd` stays [T,3] and `action_exec` becomes [T,12,4] (`features_v1.json` `offsets.fallback_5hz`).
 - TBD-3: if `Write` does not report short writes reliably, the writer re-checks each closed chunk's size with the
-  1.8 file API chosen at E-19 before writing the commit line.
+  1.8 file API chosen at E-19 before writing the commit line. If E-19 c11 or the e19kill append log shows that the
+  open-APPEND-write-close cycle loses or duplicates lines, commit.csv and heartbeat.csv are kept open for the session
+  instead (the e19kill `e19_commit.csv` pattern).
 - TBD-4: the img stream keeps the request path; only the harvester's `img_resolved.file` rule changes.
 - TBD-5: `steer_sign` and `yaw_axis_sign` are recorded per session in `control.*` and per vehicle card; export always
   normalises to the contract sign (section 7).
@@ -143,10 +153,10 @@ field. They are never interchanged: `cain` and `eden` are not map ids.
 ### 4.2 Layout
 
 ```
-$profile:DrivingData/<session_id>/
+$profile:DC_Sessions/<session_id>/
   session.json              written once, after every start check passed (section 5)
   session_end.json          written last; its presence seals the session
-  heartbeat.txt             overwritten every 5 s
+  heartbeat.csv             header at session start, one row appended every 5 s
   ctl/chunk_00000.csv ...   ctl/commit.csv
   telemetry/ ...            same pattern for every stream
   hf/ ...
@@ -167,14 +177,19 @@ Stream summary:
 | `img` | required | EOnFrame | image_hz world-time grid (TBD-2) | `slot_id` | 1 | 100 |
 | `events` | required | as they occur | irregular | `event_seq` | 1 | 100 |
 | `episodes` | required | at episode end | one row per episode | `episode_id` | 1 | 1 |
-| `traffic` | reserved | EOnPostSimulate | telemetry steps, one row per live traffic vehicle (from DD-4, T2; absent before) | `physics_step`, `slot_id` | - | 2000 |
+| `traffic` | reserved | EOnPostSimulate | telemetry steps, one row per live traffic vehicle (from DD-4, T2; absent before) | `physics_step`, `veh_slot_id` | - | 2000 |
 
-The camera description of the review's camera.json lives in `session.json` `rig` (R12).
+The camera description of the review's camera.json lives in `session.json` `rig` (R12). A stream directory holds only
+chunks with at least one row: a stream with no row in a chunk period (events, episodes) writes no chunk and no
+commit line for it.
 
 ### 4.3 Path policy
 
-- The game writes only under `$profile:DrivingData/<session_id>/`. There is no capture-root override such as
+- The game writes only under `$profile:DC_Sessions/<session_id>/`. There is no capture-root override such as
   `-dcCaptureRoot` (R26), so the FileIO authorisation prompt and `-scriptAuthorizeAll` are never needed.
+- `$profile:DC_Sessions/` holds dc-2.0 sessions only. DD-1's dc-1.0 `$profile:DrivingData/session_<n>/` folders and
+  DD-4-probe's `$profile:DC_Probes/` lie beside it and are never read by the dc-2.0 harvester, reader or validator,
+  so a Play that runs a dc-1.0 producer and a dc-2.0 session never mixes their files.
 - `$profile` must lie under `E:\DriveDiT\` (the launch guard, section 5, and DD-1's profile guard). The C: drive is
   never a capture, scratch or harvest target.
 - The harvester moves a sealed session, by rename on E:, to:
@@ -192,15 +207,36 @@ The camera description of the review's camera.json lives in `session.json` `rig`
 
 ### 5.1 Launch guard (fail closed)
 
-Nothing is written, not even a directory, unless all of these hold (DD-4-probe `DC_LaunchGuard`, DD-4-min):
-1. `System.GetCLIParam("dcLaunchId", id)` succeeds (TBD-6 for Workbench Play);
-2. `FileIO.FileExists("$profile:dc_launch/launch_" + id + ".json")` is true; the launchers (`wb_R1.bat`,
-   `client_R1_iNN.bat`) copy the preflight record there, so a Workbench or client started any other way, or a
-   `$profile` outside the launch, never writes;
-3. the record parses, has `status` `ok`, and yields `pin_id`, `pin_sha256`, the buildids, `channel`, `use_class` and,
-   from dd-launch/2 on, `build_key` (dd-launch/1 records: `channel` stable, `use_class` dev, `build_key` filled by the
-   harvester from the pin);
-4. `-profile` lies inside `E:\DriveDiT` (DD-1's guard).
+Nothing is written, not even a directory, unless the guard passes in one of two modes (DD-4-probe
+`DC_LaunchGuard`, reused by DD-4-min). `session.json` `launch_guard.*` records which mode passed and how.
+
+Mode `cli` (every client session; Workbench when TBD-6 is positive):
+1. `System.GetCLIParam("dcLaunchId", id)` succeeds and `id` is a launch id (20-64 characters of `[0-9A-Za-z-]`);
+2. `-profile` is visible and lies inside `E:\DriveDiT`, and in Workbench the `$profile` resolved by
+   `Workbench.GetAbsolutePath` lies there too; a `$profile` Workbench cannot resolve refuses;
+3. `FileIO.FileExists("$profile:dc_launch/launch_" + id + ".json")` is true. The launchers are meant to copy the
+   preflight record there, so a Workbench or client started any other way never writes. As of DD-0 `6f045b1`
+   neither does so yet: `wb_R1.bat` passes `-dcLaunchId` and copies the record only after DD-0 component 4 plus the
+   follow-up patch `t0/dd0_followup/wb_R1_dclaunch.patch` is applied and installed; `client_R1_iNN.bat` passes the
+   id but copies nothing, which DD-9-min must add before the first client session (S1);
+4. the record parses, has `status` `ok`, names the same launch id and this exe (`wb` or `client`), and yields
+   `pin_id`, `pin_sha256`, the buildids, `channel`, `use_class` and, from dd-launch/2 on, `build_key` (dd-launch/1
+   records: `channel` stable, `use_class` dev, `build_key` null and supplied by the harvester's `harvest.json`).
+
+Mode `wb_escape` (Workbench only, for a Play that cannot see the command line at all, TBD-6 negative):
+1. no command-line parameter is visible (a visible command line without `-dcLaunchId` always refuses: Workbench was
+   then started by hand), and the escape is enabled on the capture component;
+2. the resolved `$profile` lies inside `E:\DriveDiT` (refused when it cannot be resolved);
+3. the newest `-wb-` record in `$profile:dc_launch` is valid (as in cli item 4), younger than the deploy
+   (`DC_BuildInfo.DEPLOY_UTC`), and was written by the launch that started this Workbench process: at most 300 s
+   before the process start, estimated as `System.GetUnixTime() - System.GetTickCount() / 1000`, and not after it
+   (`launch_guard.escape_binding` `process_start`). Only the newest record is considered; when it belongs to another
+   Workbench start the guard refuses and never falls back to an older record. If E-11 shows that `GetTickCount`
+   does not count from the process start, the binding can be switched off for a Play
+   (`escape_binding` `newest_after_deploy`).
+4. Escape sessions are development and qualification data: C02 accepts `wb_escape` with `use_class` dev, probe and
+   appearance and refuses it for `g19` and `production` (proposed; Workbench sessions are dev-only unless C30 parity
+   passes anyway). The client has no escape.
 
 A refusal logs one ERROR line naming the failed condition. Edit mode never captures: every DC component checks
 `SCR_Global.IsEditMode` first and queues nothing.
@@ -224,7 +260,9 @@ A refusal logs one ERROR line naming the failed condition. Edit mode never captu
 4. The directory is created (refused if it exists) and `session.json` is written. The streams start; the warm-up is
    recorded and masked (`events` `warmup_end`).
 5. Episodes run (`events` `episode_start` ... `episode_end`, one `episodes` row each).
-6. End (duration, Play stop, `DC_STOP`, or an error): every open chunk is closed and committed, then
+6. End (duration, Play stop, `DC_STOP`, or an error): no new image request is issued; `hf` rows continue until no
+   request is in flight or `clocks.img_inflight_timeout_ms` has passed (requests still unresolved count as
+   `images.pending_at_end`); then every open chunk with at least one row is closed and committed, and
    `session_end.json` is written last. Status `ok` only if every commit succeeded; otherwise `failed`.
 7. Shutdown is idempotent and removes every owned callback; nothing is captured after `session_end.json`
    (`ScriptCallQueue.Dump()` shows no DC_* entry, T0d).
@@ -249,19 +287,38 @@ with `end_reason` `zero_ego`, 0 rows and 0 images; an ego or camera lost later e
 - **No CallLater clock.** ctl and telemetry are written from `EOnPostSimulate`, which fires once per fixed step and may
   fire several times per engine update (VERIFIED-r2 `IEntity.c:53-64`). Telemetry therefore sits on an exact
   k x slice grid (50 ms at 60 Hz) whatever the FPS (R01).
-- **Decision steps.** The HL driver decides on the physics steps with
-  `physics_step mod physics_steps_per_decision == 0` (6 at 60 Hz, TBD-1), so `hl_seq` increments there. Because k
-  divides `physics_steps_per_decision`, every decision step is also a telemetry step.
-- **Images.** The slot grid runs in world time at `image_hz` (TBD-2) from the first slot after the warm-up starts. The
-  request is issued in the first frame whose world time is at or past the slot (C08: jitter <= 1 render frame at
-  p99). One request is in flight at a time; a slot that arrives while one is in flight is written with
-  `issue_status` `skipped_busy` and counts as missing (C10). The request path is extension-less (R06).
+- **Decision steps.** Decision step t is the physics step P_t with `P_t mod physics_steps_per_decision == 0` (N = 6
+  at 60 Hz, TBD-1). Because k divides N, every decision step is also a telemetry step.
+- **Decision boundary** (machine-readable in the streams JSON `timing`). In step P_t, `EOnSimulate` applies the
+  command held so far and `EOnPostSimulate` writes the ctl and telemetry rows of P_t: they describe the state after
+  step P_t. Then, still in `EOnPostSimulate` of P_t, the HL driver decides on that state. The new command applies in
+  `EOnSimulate` of steps P_t + 1 .. P_t + N, so:
+  - `ctl.hl_*` of a step is the command applied in that step, and `hl_seq` increments at P_t + 1;
+  - `ctl.exp_*_now` of a step is the expert re-evaluated after that step; at P_t it is the label of decision t;
+  - `action_cmd_t` = `ctl.hl_*` at P_t + 1 (applied over steps (P_t, P_t + N]); `action_label_t` = `ctl.exp_*_now`
+    at P_t; `action_exec_t` = the ctl rows P_t + 1 .. P_t + N; `state_t` = telemetry at P_t, which holds no step of
+    `action_cmd_t`; obs_t+1 at P_t + N holds exactly N steps of it;
+  - the closed-loop bridge (DD-8) pauses after `EOnPostSimulate` of P_t, sends state_t and obs_t, and applies the
+    returned command from step P_t + 1, so training and test see the same boundary.
+- **Images.** The slot grid runs in world time at `image_hz` (TBD-2), phase-locked to the decision steps: grid point
+  g = 0, 1, 2, ... is due at the `world_time_ms` of physics_step 0 + g x 1000 / image_hz - `clocks.img_lead_ms`
+  (default 0; at image_hz = decision_hz grid point g is due `img_lead_ms` before decision step g). Each grid point
+  reached while the ego is live and the camera current becomes the next `slot_id`. The request is issued in the
+  first frame whose world time is at or past the due time (C08: jitter <= 1 render frame at p99). One request is in
+  flight at a time: a slot that arrives while one is in flight is written `skipped_busy`, a request that
+  `MakeScreenshot` refuses is written `make_failed`, and both count as missing (C10). A request whose file is not
+  seen within `clocks.img_inflight_timeout_ms` (real time) stops blocking the next slot; it is logged as an `events`
+  row `img_timeout` (payload `img_slot_id=<n>`) and in heartbeat `img_fail`. The request path is extension-less (R06).
 - **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`) from each image and joins `hf` at that
-  `captured_render_frame` (C13a); `hf.last_physics_step` then joins `telemetry` and `ctl`. This join is exact by
-  construction and does not prove the scene's age; E-06A (marker reprojection per rig x exe x build) and C13b do.
-- **Sampling at the model boundary.** Decision step t at physics step P_t uses: telemetry and ctl at P_t; the newest
-  image whose `captured_render_frame` has `last_physics_step <= P_t`, dropped (masks 0) when that image is older than
-  one image period; nav from `drivedit_nav.nav_v1` at the pose of P_t.
+  `captured_render_frame` (C13a, exact). `hf.last_physics_step` joins `ctl` exactly (ctl has every step). Telemetry
+  exists only on every k-th step, so `hf` joins `telemetry` as-of: the newest telemetry step <= `last_physics_step`,
+  whose age is below k steps when no telemetry row is missing (otherwise the frame is not joined and its masks are
+  0). The pose at capture is `hf`'s own `cam_*` and `veh_*`. These joins do not prove the scene's age; E-06A (marker
+  reprojection per rig x exe x build) and C13b do.
+- **Sampling at the model boundary.** Decision step t at physics step P_t uses the samples of the decision boundary
+  above; obs_t is the newest image whose captured frame has `last_physics_step <= P_t`, dropped (masks 0) when it is
+  older than one image period; nav comes from `drivedit_nav.nav_v1` at the pose of P_t. The builder writes the
+  realised image age of every decision step (`decision_index`, section 9.8).
 - Sessions are at most 30 min (the fiducial code is unique for 73 min at 60 FPS).
 
 ## 7. Units, axes and sign convention
@@ -271,8 +328,9 @@ with `end_reason` `zero_ego`, 0 rows and 0 images; an ego or camera lost later e
 - **World frame.** Enfusion metres, Y up: x east, y up (altitude), z north. Positions, transforms and route polylines
   are in this frame.
 - **Vehicle-local frame.** x right, y up, z forward, as returned by `GetVelocityLocal`, `GetAngularVelocityLocal` and
-  `GetAccelerationLocal` (checked in the E-01 analysis, TBD-5). Rows 0-2 of `GetWorldTransform` are the right, up and
-  forward axes in world coordinates (`right_*`, `up_*`, `fwd_*`).
+  `GetAccelerationLocal` (checked by the E-01 analysis `local_axes`: z forward from the sign of the local forward
+  velocity while the car advances, x right from the sign of the lateral acceleration in turns; TBD-5). Rows 0-2 of
+  `GetWorldTransform` are the right, up and forward axes in world coordinates (`right_*`, `up_*`, `fwd_*`).
 - **Heading.** `heading_rad = atan2(fwd_x, fwd_z)`: 0 = north (+z), increasing clockwise seen from above (towards
   +x, east), wrapped to (-pi, pi]. World-frame heading is eval-only.
 - **Ego frame** (nav, lane errors, anchors). Origin at the ego entity origin, horizontal: x forward along the heading,
@@ -293,7 +351,10 @@ with `end_reason` `zero_ego`, 0 rows and 0 images; an ego or camera lost later e
 - **Getters mean inputs.** `GetSteering`, `GetThrottle`, `GetBrake` return simulation inputs, not wheel angle or force
   (`VehicleWheeledSimulation.c:18-37`): they are `input_*`, never "applied".
 - **Gear.** `gear` and `llc_gear` are engine indices; the vehicle card maps them to reverse, neutral and forward
-  (TBD-7) for `dir_state`.
+  (TBD-7) for `dir_state`. T0-MIN is forward-only: the card names only `gear_indices_forward` (from E-01), so
+  `dir_state` is +1 in those gears and 0 otherwise (standstill in an unmapped gear), never -1; `gear_index_neutral`
+  and `gear_index_reverse` stay null until a probe phase measures them (DD-7-ident), and no session commands
+  `hl_dir` -1 before that.
 - **Sun.** `sun_elev_deg` comes from `GetCurrentSunMoonDirAndPhase`; the direction convention of `sun_dir` is checked
   at T0-MIN (a noon session gives a positive elevation).
 
@@ -306,16 +367,19 @@ with `end_reason` `zero_ego`, 0 rows and 0 images; an ego or camera lost later e
   as the decimal point and no exponent; at least 3 decimals for m, m/s and m/s2 and 6 for rad, rad/s, 1/m and unit
   vectors. Booleans are 0 or 1.
 - **Chunks.** Rows are buffered per stream. A chunk is closed at the stream's `chunk_max_rows`, after 10 s of world
-  time (`clocks.chunk_max_s`), or at session end, whichever comes first. It is written whole, header plus rows, as
+  time (`clocks.chunk_max_s`), or at session end, whichever comes first; a chunk is written only when it holds at
+  least one row, so `first_key` and `last_key` are always defined. It is written whole, header plus rows, as
   `<stream>/chunk_NNNNN.csv` (5 digits, from 00000) by one `FileHandle.Write`, and closed. `FileHandle` has no flush
   and `FileIO` no rename, so a crash loses at most the chunk in memory.
 - **Commit.** After the chunk is closed, one line `chunk_id,first_key,last_key,n_rows,n_bytes` is appended to
-  `<stream>/commit.csv` (header written when the file is created) and closed. A row is **acknowledged only when its
-  chunk's commit line was written successfully.**
+  `<stream>/commit.csv` (header written when the file is created) with one open-APPEND-write-close cycle. A row is
+  **acknowledged only when its chunk's commit line was written successfully.**
 - **Write checks.** Every `Write` return is compared with the byte length of the text (ASCII, so one byte per
-  character). `WriteLine` returns void and is never used. Semantics on failure, read-only targets and process kill:
-  TBD-3 (E-19).
-- **Failure.** Any short or failed write (chunk, commit line, heartbeat, `session.json`) stops the session: an
+  character). `WriteLine` returns void and is never used. No file is rewritten in place: chunk files, session.json
+  and session_end.json are new files, and commit.csv and heartbeat.csv only grow by appended lines (so whether
+  `FileMode.WRITE` truncates an existing file, E-19 c10, never matters). Semantics on failure, read-only targets,
+  the append cycle and process kill: TBD-3 (E-19 c01-c11 and both e19kill commit logs).
+- **Failure.** Any short or failed write (chunk, commit line, heartbeat row, `session.json`) stops the session: an
   `events` row `script_error` with payload `reason=write_fail` is attempted, `session_end.json` with status `failed`
   and `end_reason` `script_error:write_fail` is attempted, and no further rows are acknowledged. The session never
   claims success.
@@ -333,9 +397,10 @@ Commit log (`<stream>/commit.csv`):
 | `n_rows` | int | - | yes | Data rows in the chunk (header excluded). |
 | `n_bytes` | int | B | yes | Bytes of the chunk file, header included. |
 
-Heartbeat (`heartbeat.txt`, overwritten every 5 s: header plus one row):
+Heartbeat (`heartbeat.csv`: the header at session start, then one row appended every 5 s with one
+open-APPEND-write-close cycle; readers and the supervisor take the last complete row):
 
-<!-- dc2:fields file=heartbeat.txt -->
+<!-- dc2:fields file=heartbeat.csv -->
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `unix_s` | int | s | yes | Wall time. |
@@ -363,13 +428,13 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `episode_id` | int | - | yes | Current episode; -1 outside an episode (warm-up, settle, between episodes). |
 | `mode` | enum | - | yes | Capture mode of this step (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle). Values: E, N, R, X, D, H, A, I. |
 | `driver` | enum | - | yes | Who produced the executed HL command of this step (C18, C27). Values: expert, policy, human, ai, none. |
-| `hl_seq` | int | - | yes | HL decision counter: -1 before the first decision, +1 at every decision step (physics_step mod physics_steps_per_decision == 0, TBD-1). [TBD-1] |
-| `hl_kappa` | float | 1/m | no | Held executed HL curvature target (action_cmd.kappa_target), right-positive. Empty in mode I. [right+] |
-| `hl_accel` | float | m/s2 | no | Held executed HL acceleration target (action_cmd.a_target, desired). |
-| `hl_dir` | int | - | no | Held executed HL direction command: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
-| `exp_kappa_now` | float | 1/m | no | Expert HL curvature re-evaluated on the true state at this step (r2 3.2): a 60 Hz diagnostic; at a decision step it is the policy label. Empty when no expert is attached. [right+] |
-| `exp_accel_now` | float | m/s2 | no | Expert HL acceleration re-evaluated at this step. |
-| `exp_dir_now` | int | - | no | Expert HL direction re-evaluated at this step (added to r2's exp_{kappa,accel}_now so the label has all three action channels). Values: -1, 0, 1. |
+| `hl_seq` | int | - | yes | Counter of the HL decision applied in this step: -1 before the first decision; it increments on the first step after each decision step (physics_step mod physics_steps_per_decision == 1), because the decision of P_t is taken in EOnPostSimulate of P_t and applies from step P_t + 1 (section 6, TBD-1). [TBD-1] |
+| `hl_kappa` | float | 1/m | no | Held HL curvature target applied in this step's EOnSimulate (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision step), right-positive. Empty in mode I. [right+] |
+| `hl_accel` | float | m/s2 | no | Held HL acceleration target applied in this step (action_cmd.a_target, desired). |
+| `hl_dir` | int | - | no | Held HL direction command applied in this step: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
+| `exp_kappa_now` | float | 1/m | no | Expert HL curvature re-evaluated on the true state after this step (EOnPostSimulate, r2 3.2): a 60 Hz diagnostic; at a decision step P_t it is the label of decision t, which in mode E is the command applied from P_t + 1. Empty when no expert is attached. [right+] |
+| `exp_accel_now` | float | m/s2 | no | Expert HL acceleration re-evaluated after this step. |
+| `exp_dir_now` | int | - | no | Expert HL direction re-evaluated after this step (added to r2's exp_{kappa,accel}_now so the label has all three action channels). Values: -1, 0, 1. |
 | `llc_steer_raw` | float | 1 | no | llc_v1 steering before its rate limiter and lag, engine-native sign (contract sign: multiply by session.json control.steer_sign, TBD-5). Empty when llc_v1 is not driving. [engine-native, build-scoped, TBD-5] |
 | `llc_steer_lim` | float | 1 | no | llc_v1 steering after the explicit rate limiter and first-order lag, as passed to SetSteering, engine-native sign. Range [-1, 1]. [engine-native, build-scoped, TBD-5] |
 | `llc_throttle` | float | 1 | no | llc_v1 throttle as passed to SetThrottle; never non-zero together with llc_brake. Range [0, 1]. [build-scoped] |
@@ -394,6 +459,8 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `steer_signal_raw` | float | 1 | no | Reserved, post-GO (DD-4-probe (d)): the simulation's steering0 signal, a raw candidate for the applied steering. Empty until CC-07 step 0 validates it. [build-scoped, reserved] |
 | `wheel_angle_l_rad` | float | rad | no | Reserved: applied left road-wheel angle, right-positive. Unknown on 1.8; filled only after CC-07 step 0 validates a source (MIGRATION_1_9 8.3). [right+, build-scoped, reserved] |
 | `wheel_angle_r_rad` | float | rad | no | Reserved: applied right road-wheel angle, right-positive. Unknown on 1.8. [right+, build-scoped, reserved] |
+| `react_veh_slot_id` | int | - | no | Reserved until DD-4/DD-7 (empty before): vehicle slot of the actor the expert reacts to in this step (perception-limited reactions, r2 3.1); empty when it reacts to no actor. [reserved] |
+| `react_visible` | bool | - | no | Reserved until DD-4/DD-7: 1 when that actor passes the in-engine visibility test of r2 3.1 (camera FOV + 10 deg, raycast line of sight, or within 15 m), 0 when not; the builder sets policy_valid 0 while a reaction to an invisible actor lasts. [reserved] |
 
 ### 9.2 Stream `telemetry` (every k-th physics step)
 
@@ -426,34 +493,34 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `acc_local_x` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), x component. [vehicle_local] |
 | `acc_local_y` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), y component. [vehicle_local] |
 | `acc_local_z` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), z component. [vehicle_local] |
-| `speed_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 as reported by the engine. |
+| `speed_engine_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 as reported by the engine (unsigned; the signed forward speed is telemetry_export.speed_fwd_mps, the registry channel speed_mps). |
 | `gear` | int | - | yes | GetGear() (engine index, TBD-7). [TBD-7] |
 | `rpm` | float | rpm | yes | EngineGetRPM(). |
 | `engine_on` | bool | - | yes | EngineIsOn(). |
 | `handbrake` | bool | - | yes | IsHandbrakeOn(). |
 | `ground_contact` | bool | - | yes | HasAnyGroundContact(). |
 | `wheel_count` | int | - | yes | WheelCount(); the w0..w3 columns hold the first four wheels. |
-| `w0_contact` | bool | - | no | Wheel 0 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
+| `w0_contact` | bool | - | no | Wheel 0 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
 | `w0_slip_long` | float | 1 | no | Wheel 0 longitudinal slip (WheelGetLongitudinalSlip), raw engine value. [build-scoped] |
 | `w0_slip_lat` | float | 1 | no | Wheel 0 lateral slip (WheelGetLateralSlip), raw engine value. [build-scoped] |
 | `w0_material` | str | - | no | Wheel 0 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter. |
 | `w0_temp_c` | float | degC | no | Reserved, null on 1.8: wheel 0 tyre temperature (MIGRATION_1_9 8.3). [reserved] |
-| `w1_contact` | bool | - | no | Wheel 1 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
+| `w1_contact` | bool | - | no | Wheel 1 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
 | `w1_slip_long` | float | 1 | no | Wheel 1 longitudinal slip (WheelGetLongitudinalSlip), raw engine value. [build-scoped] |
 | `w1_slip_lat` | float | 1 | no | Wheel 1 lateral slip (WheelGetLateralSlip), raw engine value. [build-scoped] |
 | `w1_material` | str | - | no | Wheel 1 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter. |
 | `w1_temp_c` | float | degC | no | Reserved, null on 1.8: wheel 1 tyre temperature (MIGRATION_1_9 8.3). [reserved] |
-| `w2_contact` | bool | - | no | Wheel 2 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
+| `w2_contact` | bool | - | no | Wheel 2 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
 | `w2_slip_long` | float | 1 | no | Wheel 2 longitudinal slip (WheelGetLongitudinalSlip), raw engine value. [build-scoped] |
 | `w2_slip_lat` | float | 1 | no | Wheel 2 lateral slip (WheelGetLateralSlip), raw engine value. [build-scoped] |
 | `w2_material` | str | - | no | Wheel 2 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter. |
 | `w2_temp_c` | float | degC | no | Reserved, null on 1.8: wheel 2 tyre temperature (MIGRATION_1_9 8.3). [reserved] |
-| `w3_contact` | bool | - | no | Wheel 3 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
+| `w3_contact` | bool | - | no | Wheel 3 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count. |
 | `w3_slip_long` | float | 1 | no | Wheel 3 longitudinal slip (WheelGetLongitudinalSlip), raw engine value. [build-scoped] |
 | `w3_slip_lat` | float | 1 | no | Wheel 3 lateral slip (WheelGetLateralSlip), raw engine value. [build-scoped] |
 | `w3_material` | str | - | no | Wheel 3 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter. |
 | `w3_temp_c` | float | degC | no | Reserved, null on 1.8: wheel 3 tyre temperature (MIGRATION_1_9 8.3). [reserved] |
-| `road_key` | str | - | no | Key of the closest engine road in the E-08a dump's key format (TBD-9); empty when no road is found. [TBD-9] |
+| `road_key` | str | - | no | Key of the closest engine road, <n_pts>/<x0>:<z0>/<x1>:<z1> exactly as the E-08a dump writes it (TBD-9); empty when no road is found. [TBD-9] |
 | `road_dist_m` | float | m | no | Distance to the closest road (RoadNetworkManager.GetClosestRoad). |
 | `road_width_m` | float | m | no | BaseRoad.GetWidth() of the closest road. |
 | `lane_lat_err_m` | float | m | no | Lane-relative signed lateral error: ego offset from the active route's driving line, positive = ego right of the line. Computed by the driver interface; empty without an active route. [right+] |
@@ -471,7 +538,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `moon_phase01` | float | 1 | yes | Moon phase (0 new, 1 full) from GetCurrentSunMoonDirAndPhase. |
 | `sun_elev_deg` | float | deg | yes | Sun elevation above the horizon from sun_dir (the sign convention of sun_dir is checked at T0-MIN: a noon session must give a positive elevation). |
 | `traffic_n` | int | - | yes | Number of live traffic vehicles (0 until T2). |
-| `traffic_slots` | str | - | no | Traffic slots as 'slot_id:entity_id' pairs joined by ';' (no commas); empty when traffic_n = 0. |
+| `traffic_slots` | str | - | no | Traffic vehicles as 'veh_slot_id:entity_id' pairs joined by ';' (no commas); empty when traffic_n = 0. |
 
 ### 9.3 Stream `hf` (every render frame)
 
@@ -516,8 +583,8 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `slot_id` | int (key) | slot | yes | Image slot, 0-based, +1 per row. Slots advance only while the ego is live and the camera current. |
 | `episode_id` | int | - | yes | As in ctl. |
 | `ego_slot_id` | int | - | yes | As in telemetry. |
-| `requested_world_ms` | int | ms | yes | World time of the slot on the image_hz grid (TBD-2). [TBD-2] |
-| `issue_status` | enum | - | yes | issued, or skipped_busy when the previous request was still in flight at the slot (TBD-2); a skipped slot counts as missing in C10. Values: issued, skipped_busy. [TBD-2] |
+| `requested_world_ms` | int | ms | yes | Due time of the slot's grid point: world_time_ms of physics_step 0 + g x 1000 / image_hz - clocks.img_lead_ms (section 6, TBD-2). [TBD-2] |
+| `issue_status` | enum | - | yes | issued; skipped_busy when the previous request was still in flight and younger than clocks.img_inflight_timeout_ms at the slot; make_failed when System.MakeScreenshot returned false (the issue fields are kept). Skipped and failed slots count as missing in C10 (TBD-2). Values: issued, skipped_busy, make_failed. [TBD-2] |
 | `issue_world_ms` | int | ms | no | World time of the frame the request was issued in (the first frame at or after the slot). Empty when skipped. |
 | `issue_render_frame` | int | frame | no | render_frame of that frame. Empty when skipped. |
 | `issue_physics_step` | int | step | no | last_physics_step at issue. Empty when skipped. |
@@ -529,7 +596,8 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 
 Event kinds: `session_start`, `warmup_end`, `episode_start`, `settle_end`, `episode_end`, `perturb_start`,
 `perturb_end`, `nav_command`, `style_set`, `teleport`, `respawn`, `env_change`, `pause`, `resume`, `stuck`,
-`collision`, `camera_reset`, `dc_stop`, `script_error`, and `veh_cfg_override` (reserved, null on 1.8; a 1.9
+`collision`, `camera_reset`, `img_timeout` (an image request in flight longer than `clocks.img_inflight_timeout_ms`;
+payload `img_slot_id=<n>`), `dc_stop`, `script_error`, and `veh_cfg_override` (reserved, null on 1.8; a 1.9
 `Update*Configuration` call must be logged with this kind).
 
 <!-- dc2:fields stream=events -->
@@ -540,9 +608,9 @@ Event kinds: `session_start`, `warmup_end`, `episode_start`, `settle_end`, `epis
 | `physics_step` | int | step | yes | physics_step of the last completed step when the event was recorded. |
 | `render_frame` | int | frame | yes | render_frame when the event was recorded. |
 | `world_time_ms` | int | ms | yes | As in ctl. |
-| `kind` | enum | - | yes | Event kind (veh_cfg_override is reserved, null on 1.8). Values: session_start, warmup_end, episode_start, settle_end, episode_end, perturb_start, perturb_end, nav_command, style_set, teleport, respawn, env_change, pause, resume, stuck, collision, camera_reset, dc_stop, script_error, veh_cfg_override. |
-| `slot_id` | int | - | yes | Subject vehicle slot, -1 when none. |
-| `payload` | str | - | no | Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason. |
+| `kind` | enum | - | yes | Event kind (veh_cfg_override is reserved, null on 1.8). Values: session_start, warmup_end, episode_start, settle_end, episode_end, perturb_start, perturb_end, nav_command, style_set, teleport, respawn, env_change, pause, resume, stuck, collision, camera_reset, img_timeout, dc_stop, script_error, veh_cfg_override. |
+| `veh_slot_id` | int | - | yes | Subject vehicle slot (ego_slot_id or a traffic slot), -1 when none; named veh_slot_id so a join by column name never meets img.slot_id. |
+| `payload` | str | - | no | Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason, img_timeout img_slot_id. |
 
 ### 9.6 Stream `episodes` (one row per episode, written at its end)
 
@@ -582,14 +650,15 @@ Event kinds: `session_start`, `warmup_end`, `episode_start`, `settle_end`, `epis
 
 ### 9.7 Stream `traffic` (reserved for T2)
 
-Written from DD-4 on, at the telemetry cadence, one row per live traffic vehicle; key (`physics_step`, `slot_id`).
+Written from DD-4 on, at the telemetry cadence, one row per live traffic vehicle; key (`physics_step`,
+`veh_slot_id`).
 Absent in T0-MIN to T1 sessions; readers accept its absence.
 
 <!-- dc2:fields stream=traffic -->
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `physics_step` | int (key) | step | yes | Telemetry step of the row (same cadence as telemetry). |
-| `slot_id` | int (key) | - | yes | Traffic vehicle slot (never reused). |
+| `veh_slot_id` | int (key) | - | yes | Traffic vehicle slot (never reused). |
 | `entity_id` | str | - | yes | IEntity.GetID() token, constant per slot (C35). |
 | `prefab` | str | - | yes | Prefab resource name. |
 | `pos_x` | float | m | yes | Vehicle position, x component. [world, eval-only] |
@@ -598,7 +667,7 @@ Absent in T0-MIN to T1 sessions; readers accept its absence.
 | `fwd_x` | float | 1 | yes | Vehicle forward axis, x component. [world, eval-only] |
 | `fwd_y` | float | 1 | yes | Vehicle forward axis, y component. [world, eval-only] |
 | `fwd_z` | float | 1 | yes | Vehicle forward axis, z component. [world, eval-only] |
-| `speed_mps` | float | m/s | yes | GetSpeedKmh() / 3.6. |
+| `speed_engine_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 (unsigned). |
 
 ### 9.8 Offline-derived columns
 
@@ -640,7 +709,7 @@ Reader, per telemetry row (`telemetry_export`):
 | `acc_long_mps2` | float | m/s2 | yes | acc_local_z: achieved longitudinal acceleration. |
 | `acc_lat_mps2` | float | m/s2 | yes | acc_local_x: achieved lateral acceleration, right-positive. [right+] |
 | `kappa_realised` | float | 1/m | no | yaw_rate_rps / speed_fwd_mps when abs(speed_fwd_mps) > 3 m/s, else empty. [right+] |
-| `dir_state` | int | - | yes | Drive direction from the gear through the vehicle card: +1 forward gear, 0 neutral, -1 reverse (TBD-7). Values: -1, 0, 1. [TBD-7] |
+| `dir_state` | int | - | yes | Drive direction from the gear through the vehicle card: +1 forward gear, 0 neutral, -1 reverse (TBD-7); forward-only in T0-MIN (section 7). Values: -1, 0, 1. [TBD-7] |
 | `delta_eff_rad` | float | rad | no | Reserved: bicycle-equivalent road-wheel angle from wheel_angle_l/r; C15's steer_eff once it exists. kappa = tan(delta_eff)/L holds only for abs(a_lat) <= 1 m/s2 [target]. [right+, build-scoped, reserved] |
 
 Harvester `nav_fill` through `drivedit_nav.nav_v1`, per telemetry row of an episode with a route (`nav`):
@@ -663,7 +732,9 @@ Harvester `nav_fill` through `drivedit_nav.nav_v1`, per telemetry row of an epis
 | `man_right` | int | - | yes | Next maneuver within 200 m is a right turn. Values: 0, 1. |
 | `man_follow` | int | - | yes | No maneuver within 200 m (follow the road). Values: 0, 1. |
 | `d_man` | float | m | yes | Distance to the next maneuver, 0-200; 200 with man_follow. Range [0, 200]. |
-| `d_stop` | float | m | yes | Distance to the next commanded stop, 0-200; 200 = none. Range [0, 200]. |
+| `d_stop` | float | m | yes | Distance to the next stop (nav_v1: route_end only), 0-200; 200 = none. Range [0, 200]. |
+| `dist_to_route_m` | float | m | yes | Horizontal distance from the pose to its projection inside the progress window (drivedit_nav). [eval-only] |
+| `nav_valid` | int | - | yes | 0 when dist_to_route_m > 30 m (the r2 1.3 route-deviation limit): the route points are then meaningless and the builder sets policy_valid and wm_valid to 0. Values: 0, 1. |
 
 Road matching (E-08b) and region (C24), per telemetry row (`road`):
 
@@ -674,6 +745,20 @@ Road matching (E-08b) and region (C24), per telemetry row (`road`):
 | `matched_road_id` | str | - | no | Generator polyline matched to road_key by E-08b (Hausdorff <= 2 m); empty when unmatched. [TBD-9] |
 | `road_class` | enum | - | yes | Class inherited from the matched generator; unmatched roads are not drivable. Values: asphalt_e01, asphalt_e02, asphalt_e03, dirt, trail, cobblestone, concrete, unmatched. |
 | `region` | enum | - | yes | Region of the ego position per splits_v2 (C24). Values: train, val_l, buffer, k_val, k_rep, everon. [eval-only] |
+
+Dataset builder, per decision step (`decision_index`; the decision boundary and image rule of section 6):
+
+<!-- dc2:fields derived=decision_index -->
+| Field | Type | Unit | Req | Description |
+|---|---|---|---|---|
+| `decision_step` | int (key) | step | yes | P_t: physics_step of decision step t (P_t mod physics_steps_per_decision == 0). |
+| `hl_seq` | int | - | yes | ctl.hl_seq at P_t + 1: the decision applied over steps (P_t, P_t + physics_steps_per_decision]. |
+| `obs_slot_id` | int | slot | no | img.slot_id of obs_t; empty when no image qualifies. |
+| `obs_captured_render_frame` | int | frame | no | img_resolved.captured_render_frame of obs_t. |
+| `obs_last_physics_step` | int | step | no | hf.last_physics_step of that frame (<= P_t). |
+| `obs_age_steps` | int | step | no | P_t - obs_last_physics_step: the realised image age in physics steps. |
+| `obs_age_ms` | int | ms | no | world_time_ms of P_t minus hf.world_time_ms of the captured frame. |
+| `obs_valid` | bool | - | yes | 1 when an image qualifies and is at most one image period old; 0 sets wm_valid and policy_valid to 0. |
 
 ## 10. Session files
 
@@ -707,15 +792,15 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `trial.duration_s` | float | s | yes | Planned capture length after warm-up. |
 | `exe.kind` | enum | - | yes | wb (Workbench), cl (ArmaReforgerSteam client), cld (Diag client). Values: wb, cl, cld. |
 | `exe.instance` | str | - | yes | Instance tag i00..i99 (Workbench: i00). |
-| `exe.cli` | object | - | yes | Every -dc* command-line parameter seen (System.GetCLIParam). |
+| `exe.cli` | object | - | yes | The named -dc* parameters read with System.GetCLIParam, name -> value: dcLaunchId, dcTrial (and any later named -dc* parameter). 1.8 cannot list command-line parameters, so unnamed ones are never recorded. |
 | `engine.build_version` | str | - | yes | GetGame().GetBuildVersion() at start (repeated at end). |
 | `engine.build_time` | str | - | yes | GetGame().GetBuildTime(). |
 | `engine.fixed_time_slice_s` | float | s | yes | BaseWorld.GetFixedTimeSlice() (TBD-1). [TBD-1] |
 | `pin.pin_id` | str | - | yes | Pin id from the launch record (e.g. 1.8.0.13; 1.9 later). |
 | `pin.pin_sha256` | str | - | yes | sha256 of the pin file, from the launch record. |
-| `pin.build_key` | str | - | yes, null ok | Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a). null only while launch records are dd-launch/1; the harvester then fills it from the pin before validation, and C02 refuses a session without one. |
+| `pin.build_key` | str | - | yes, null ok | Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a) from a dd-launch/2 record; null while launch records are dd-launch/1. session.json is never edited after it is written: the harvester then writes build_key (from the pin) into its sidecar harvest.json, and C02 reads it from there and refuses a session that has neither. |
 | `pin.channel` | enum | - | yes | stable or experimental (dd-launch/1 records: stable). Values: stable, experimental. |
-| `pin.launch_id` | str | - | yes | -dcLaunchId; joins the launch record in E:\DriveDiT\pin\launches. |
+| `pin.launch_id` | str | - | yes | -dcLaunchId (launch_mode cli) or the id of the matched record (wb_escape); joins the launch record in E:\DriveDiT\pin\launches. |
 | `pin.launch_schema` | str | - | yes | Schema of the launch record read (dd-launch/1, later /2). |
 | `pin.game_buildid` | int | - | yes | Game Steam buildid from the launch record. |
 | `pin.tools_buildid` | int | - | yes | Tools Steam buildid from the launch record. |
@@ -746,6 +831,8 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `clocks.physics_steps_per_decision` | int | step | yes | Physics steps per HL decision (TBD-1). [TBD-1] |
 | `clocks.decision_hz` | float | 1/s | yes | HL decision rate (10). |
 | `clocks.image_hz` | float | 1/s | yes | Image slot rate (TBD-2; default 10). [TBD-2] |
+| `clocks.img_inflight_timeout_ms` | int | ms | yes | Real-time limit after which a request in flight stops blocking the next slot (TBD-2; default 2000). [TBD-2] |
+| `clocks.img_lead_ms` | int | ms | yes | Image grid lead: grid point g is due img_lead_ms before the world time of decision step g at image_hz = decision_hz (TBD-2; default 0, set from the E-05/E-06 capture offsets). [TBD-2] |
 | `clocks.chunk_max_s` | float | s | yes | World-time bound on a chunk (10). |
 | `rig.rig_id` | str | - | yes | vehicle + mount + vFOV + writer + source class + render-settings hash (r2 3.4). |
 | `rig.rig_name` | str | - | yes | e.g. R1-S105. |
@@ -767,7 +854,12 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `rig.render_settings` | object | - | yes | VideoUserSettings + DisplayUserSettings dump (TBD-8). [TBD-8] |
 | `rig.render_settings_hash` | str | - | yes | Hash of that dump (C30). |
 | `env_initial` | object | - | yes | {weather_state, rain, fog, wetness, tod_h, date, day_auto_advance}. |
-| `launch_guard` | object | - | yes | {cli_seen, record_path, profile_root_ok}: how the guard passed. |
+| `launch_guard.launch_mode` | enum | - | yes | How the launch guard passed: cli (-dcLaunchId visible) or wb_escape (Workbench Play without a visible command line; section 5.1). Values: cli, wb_escape. |
+| `launch_guard.record_path` | str | - | yes | The matched record, $profile:dc_launch/launch_<id>.json. |
+| `launch_guard.record_launch_id` | str | - | yes | launch_id inside the matched record (equals pin.launch_id). |
+| `launch_guard.cli_seen` | bool | - | yes | 1 when System.GetCLIParam saw -dcLaunchId or -profile (E-11). |
+| `launch_guard.profile_root_ok` | bool | - | yes | 1: -profile (when visible) and the resolved $profile lie inside E:\DriveDiT. |
+| `launch_guard.escape_binding` | str | - | yes, null ok | wb_escape only: process_start (the record was written by the launch that started this Workbench; the default) or newest_after_deploy (binding switched off for one Play); null in cli mode. |
 
 ### 10.2 `session_end.json`
 
@@ -787,12 +879,12 @@ the harvester, never treated as complete.
 | `end.physics_step` | int | step | yes | Last physics_step. |
 | `end.render_frame` | int | frame | yes | Last render_frame. |
 | `pin.pin_id` | str | - | yes | Repeated from session.json; C02 requires equality. |
-| `pin.build_key` | str | - | yes, null ok | Repeated from session.json (same null rule as there). |
+| `pin.build_key` | str | - | yes, null ok | Repeated from session.json (same null rule; the harvester's harvest.json then carries it). |
 | `engine.build_version` | str | - | yes | GetBuildVersion() read again at the end; C02 requires it to equal the start value. |
 | `counts` | object | - | yes | Per stream: {rows, chunks, last_key} of committed data. |
-| `images` | object | - | yes | {requested, issued, skipped_busy}. |
+| `images` | object | - | yes | {requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3). |
 | `episodes` | int | - | yes | Number of episode rows committed. |
-| `heartbeats` | int | - | yes | Number of heartbeat writes. |
+| `heartbeats` | int | - | yes | Number of heartbeat rows appended. |
 
 ## 11. Version stamps and the one-build rule
 
@@ -806,7 +898,10 @@ Every session carries, in `session.json`: `contract_version`; `versions.features
 - 1.8.0.13 is the interim pin; the target build is the first 1.9 stable build that passes G19 (D2 r2.1). The contract
   is the same on both; only the stamps and the per-build values differ.
 - `build_key` (game and Tools appid and buildid, sha256 of the client and Workbench exes) is the build identity; pins
-  with equal `build_key` are one build (`1.8.0.13`, `1.8.0.13-r1`, `1.8.0.13-cold`).
+  with equal `build_key` are one build (`1.8.0.13`, `1.8.0.13-r1`, `1.8.0.13-cold`). With dd-launch/1 records the
+  session's `pin.build_key` is null and the harvester supplies it in its sidecar `harvest.json` next to the sealed
+  session; `session.json` and `session_end.json` are never edited after they are written. C02 and every manifest
+  take `build_key` from `session.json` when it is set, else from `harvest.json`.
 - `use_class` is set at launch (`dev`, `appearance`, `probe`, `compat-preview`, `g19`, `production`); C02 refuses
   `production` without a qualified G19 record for the session's `build_key`.
 - `pin_id` and `build_key` are `eval_only` in `features_v1`: there is no model-visible build token.
@@ -840,6 +935,9 @@ input or a target).
 | `eval_only` | [T,-] | eval_only | no | no | - | `pos_x`, `pos_y`, `pos_z`, `heading_world_rad`, `vel_world_x`, `vel_world_y`, `vel_world_z`, `distance_total_m`, `route_progress_m`, `map_id`, `terrain`, `region`, `split`, `session_id`, `pin_id`, `build_key`, `exp_now_60hz` |
 
 Rules (r2 3.3, R35):
+- Offsets are decision steps and follow the decision boundary of section 6: offset 0 of `state`, `nav` and `image`
+  is the state after step P_t; offset 0 of `action_cmd` and `action_exec` is the command applied over steps
+  (P_t, P_t + N]. At the 5 Hz fallback (TBD-2) the decision rate drops to 5 Hz; `action_exec` is then [T,12,4].
 - The world model conditions on `action_cmd` at offset 0, the command executed over [t, t+dt) through `llc_v1`, plus
   state history. It is never conditioned on realised future state (acceleration, speed, yaw at t+1 ...).
 - The policy predicts `action_label` (the expert's HL command at t) and sees `action_cmd` and `action_exec` only as
@@ -862,10 +960,15 @@ Rules (r2 3.3, R35):
   `d_man` (0-200 m; 200 with follow) and `d_stop` (0-200 m; 200 = no commanded stop within 200 m). `p10` is computed
   for ablations only and is not in the tensor.
 - Progress is ordered (r2 1.3): the ego is projected onto the route inside a +-30 m along-route window around the last
-  progress, and progress never decreases, which handles loop crossings. Along-route distances are horizontal arc
-  length.
-- Stops are explicit nav commands; a stop at the route end is the same command (a `route_end` stop in the route file).
-  Hindsight goals are never nav inputs (RT-C03).
+  progress (`PROGRESS_WINDOW_M`), and progress never decreases, which handles loop crossings. Along-route distances
+  are horizontal arc length. The lookahead clamps at the route end and never wraps, also on a closed route.
+- `dist_to_route_m` is the distance to that projection. Above 30 m (the r2 1.3 route-deviation limit) nav_v1 returns
+  `nav_valid` 0: the route points are then meaningless (for example a first call far from the route start) and the
+  builder sets `policy_valid` and `wm_valid` to 0. A non-finite pose (NaN or inf) raises.
+- Stops are explicit nav commands. nav_v1 has terminal stops only: every route has exactly one stop, of kind
+  `route_end`, at the route end (`s_m` = length). A stop the ego must leave again needs a release that every caller
+  sees (a logged `stop_release` nav command, consumed by the harvester, builder and bridge alike); that, the
+  `commanded` stop kind and any dwell time are nav_v2 (DD-7). Hindsight goals are never nav inputs (RT-C03).
 - `drivedit_nav/route_schema.json` is the one route schema (`route_id`, `map_id`, split tag, lane side, driving-line
   polyline in world metres, maneuvers, stops) shared by nav_v1, the T0 loop (DD-7-min), the sampler (DD-7) and C17
   (DD-5-min). `load_route` refuses Everon routes outside the sealed evaluation path.
@@ -875,15 +978,38 @@ Rules (r2 3.3, R35):
 - `drivedit_nav.to_legacy_6d` gives the CLAUDE.md 6D view `[steer-equivalent of kappa_target, a_target, p20_x, p20_y,
   speed(t), yaw_rate(t)]`. It is deprecated, needs the vehicle card's inverse steering map, and its state fields are
   history at t. The CLAUDE.md tensor-contract update is DD-11 (D15).
-- dc-1.0 sessions (`$profile:DrivingData/session_<n>/`) never match the dc-2.0 session id; the dc-2.0 reader raises on
-  them, and they are never mixed with dc-2.0 data. Until DD-11 and DD-12 merge, CLAUDE.md's Tensor Contracts, ENFCAP,
-  BMP, Rust streaming and navigation sections are stale; this contract governs.
+- dc-1.0 sessions (`$profile:DrivingData/session_<n>/`) live outside the dc-2.0 root `$profile:DC_Sessions/` and never
+  match the dc-2.0 session id; the dc-2.0 reader raises on them, and they are never mixed with dc-2.0 data. Until DD-11
+  and DD-12 merge, CLAUDE.md's Tensor Contracts, ENFCAP, BMP, Rust streaming and navigation sections are stale; this
+  contract governs.
 
 ## 15. Open items before the freeze
 
 - TBD-1 to TBD-5 from `docs/trials/T0-ENG.md` (E-10, E-05, E-19, E-01).
 - User decision D15 (adopt dc-2.0 and the CLAUDE.md tensor-contract change).
 - Sign-off by the DD-4-min, DD-5-min and DD-7-min authors.
-- Proposed here and to be confirmed at the freeze: the `ACTIVE` trial pointer (5.2), the VAL-C hash rule (3.2), the
-  `skipped_busy` slot rule (6), `exp_dir_now` (9.1), the reserved `traffic` stream (9.7) and the `privileged_route`
-  teacher inputs (12).
+- Proposed here and to be confirmed at the freeze (none of these is r2 text):
+  - trial selection: the `ACTIVE` trial pointer when `-dcTrial` is absent (5.2);
+  - splits: the VAL-C hash rule `int(sha256(session_id)[:8], 16) mod 10 == 0` (3.2);
+  - session root `$profile:DC_Sessions/` beside the dc-1.0 `DrivingData` and the probes' `DC_Probes` (4.3);
+  - one ego per session; every ctl and telemetry row describes a live ego (2);
+  - `end_reason` values duration, stop, dc_stop, script_error:write_fail, script_error:other, zero_ego, ego_lost,
+    camera_lost; failures before the directory exists have none; status ok or failed only (5.3, 10.2);
+  - the launch-guard escape `wb_escape`, its process-start binding and its C02 use-class rule (5.1);
+  - the decision boundary: decide in `EOnPostSimulate` of P_t, apply from P_t + 1 (6);
+  - the decision phase lock `physics_step mod physics_steps_per_decision == 0`, the TBD-1 resolution order, and the
+    image grid phase lock with `img_lead_ms` (6);
+  - the obs_t rule: newest image with `last_physics_step <= P_t`, dropped when older than one image period (6);
+  - the `skipped_busy`, `make_failed` and `img_timeout` image rules and the end-of-session drain (5.3, 6);
+  - the 5 Hz fallback dropping the decision rate to 5 Hz (TBD-2);
+  - chunk rules: close at `chunk_max_rows` or 10 s of world time, at least one row per chunk; commit.csv and
+    heartbeat.csv grow only by open-APPEND-write-close (8);
+  - the ego frame x forward, y right, and the heading convention `atan2(fwd_x, fwd_z)`, clockwise positive (7);
+  - T0-MIN forward-only `dir_state` (7, TBD-7);
+  - `exp_dir_now` (9.1), the reserved `react_veh_slot_id` and `react_visible` (9.1), `veh_slot_id` (9.5, 9.7), the
+    reserved `traffic` stream (9.7) and the `privileged_route` teacher inputs (12);
+  - nav_v1 rules: progress None = episode start (0 m), the 30 m progress window, horizontal arc length, the lookahead
+    clamped at the end and never wrapping, a maneuver counted while progress <= its `s_m` and reported within 200 m,
+    a stop pending until progress passes it by 2 m, terminal `route_end` stops only, `nav_valid` above 30 m (13);
+  - the route schema: `lane_side` in {right, center, mixed}, the polyline is the driving line, split tags per map
+    (`val_c` is a session property, not a route tag), exactly one `route_end` stop at the route end (13).

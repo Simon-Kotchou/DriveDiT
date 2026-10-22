@@ -10,8 +10,8 @@
     {
       "id": "TBD-1",
       "item": "k rule: telemetry cadence and decision steps",
-      "default_r2": "telemetry_every_k = round(50 ms / GetFixedTimeSlice()) = 3 at a 60 Hz fixed step; physics_steps_per_decision = round(100 ms / GetFixedTimeSlice()) = 6; k divides it",
-      "default": {"telemetry_every_k": 3, "physics_steps_per_decision": 6, "fixed_time_slice_s": 0.016666666666666666},
+      "default_r2": "physics_steps_per_decision = floor(100 ms / GetFixedTimeSlice() + 0.5), decided first (= 6 at a 60 Hz fixed step); telemetry_every_k = the largest divisor k of physics_steps_per_decision with k x GetFixedTimeSlice() <= 50 ms, at least 1 (= 3 at 60 Hz), so k always divides it; E-10 also logs the WorldTimestamp clock next to GetWorldTime per step",
+      "default": {"telemetry_every_k": 3, "physics_steps_per_decision": 6, "fixed_time_slice_s": 0.016666666666666666, "rule": "N = floor(0.1 / slice + 0.5); k = the largest divisor of N with k * slice <= 0.05 + 1e-6, at least 1"},
       "decided_by": "E-10",
       "blocks_freeze": true,
       "results": "docs/trials/T0-ENG.md",
@@ -20,22 +20,22 @@
     {
       "id": "TBD-2",
       "item": "image_hz (10 or 5) and the one-request-in-flight rule",
-      "default_r2": "image_hz = 10 (world-time slot grid, one MakeScreenshot request in flight); fall back to 5 Hz first if E-05 shows misses or request-to-file latency that 10 Hz cannot sustain",
-      "default": {"image_hz": 10, "fallback_image_hz": 5},
+      "default_r2": "image_hz = 10 (world-time slot grid phase-locked to the decision steps, img_lead_ms = 0, one MakeScreenshot request in flight, in-flight timeout 2000 ms); fall back to 5 Hz first if E-05 shows misses or request-to-file latency that 10 Hz cannot sustain; at 5 Hz the HL decision rate drops to 5 Hz as well (the decision interval is the training interval, r2 3.5); img_lead_ms is set from the E-05/E-06 capture offsets",
+      "default": {"image_hz": 10, "fallback_image_hz": 5, "img_inflight_timeout_ms": 2000, "img_lead_ms": 0, "fallback_physics_steps_per_decision": 12},
       "decided_by": "E-05",
       "blocks_freeze": true,
       "results": "docs/trials/T0-ENG.md",
-      "affects": ["img stream cadence", "issue_status skipped_busy detection", "training interval", "C08", "C10"]
+      "affects": ["img stream cadence", "issue_status skipped_busy and make_failed", "clocks.img_inflight_timeout_ms", "clocks.img_lead_ms", "training interval and decision rate", "C08", "C10"]
     },
     {
       "id": "TBD-3",
       "item": "writer semantics (FileHandle.Write return values, Close durability, taskkill mid-commit)",
-      "default_r2": "FileHandle.Write returns the number of bytes written (FileHandle.c:93-103; WriteLine returns void and is never used); any return other than the expected byte count is a short or failed write; a closed file survives a process kill",
-      "default": {"write_returns_bytes": true},
+      "default_r2": "FileHandle.Write returns the number of bytes written (FileHandle.c:93-103; WriteLine returns void and is never used); any return other than the expected byte count is a short or failed write; a closed file survives a process kill; one open-APPEND-write-close cycle per line adds exactly that line (commit.csv and heartbeat.csv; E-19 c11 and the e19kill e19_commit_append.csv log); no file is rewritten in place (E-19 c10 only records whether WRITE truncates)",
+      "default": {"write_returns_bytes": true, "append_reopen_per_line": true, "rewrite_in_place": false},
       "decided_by": "E-19",
       "blocks_freeze": true,
       "results": "docs/trials/T0-ENG.md",
-      "affects": ["acknowledged writer", "commit.csv", "C34", "end_reason script_error:write_fail"]
+      "affects": ["acknowledged writer", "commit.csv", "heartbeat.csv", "C34", "end_reason script_error:write_fail"]
     },
     {
       "id": "TBD-4",
@@ -50,7 +50,7 @@
     {
       "id": "TBD-5",
       "item": "steer_sign normalisation (and the yaw-axis and local-axes checks)",
-      "default_r2": "steer_sign = -1: CarSteering is +1 for left, the contract is right-positive, so steer_contract = steer_sign * steer_engine; yaw_axis_sign = +1 [inference: Enfusion is left-handed with Y up, so +angvel_local_y is clockwise seen from above]; vehicle-local axes x right, y up, z forward",
+      "default_r2": "steer_sign = -1: CarSteering is +1 for left, the contract is right-positive, so steer_contract = steer_sign * steer_engine; yaw_axis_sign = +1 [inference: Enfusion is left-handed with Y up, so +angvel_local_y is clockwise seen from above]; vehicle-local axes x right, y up, z forward; checked by tools/probes/t0eng/e01_actuation.py: steer_sign, yaw_axis_sign and local_axes (z forward: sign of vel_l_z on forward motion; x right: sign of corr(acc_l_x, v x heading rate))",
       "default": {"steer_sign": -1, "yaw_axis_sign": 1, "local_axes": "x_right_y_up_z_forward"},
       "decided_by": "E-01",
       "blocks_freeze": true,
@@ -65,18 +65,18 @@
     {
       "id": "TBD-6",
       "item": "launch id visible in Workbench Play",
-      "default_r2": "System.GetCLIParam(\"dcLaunchId\") returns Workbench's own -dcLaunchId argument in Play mode (answered by DD-1's profile guard log line at the user's next Play: 'Capture output allowed' or 'capture output refused')",
-      "default": {"launch_id_source": "cli"},
+      "default_r2": "System.GetCLIParam(\"dcLaunchId\") returns Workbench's own -dcLaunchId argument in Play mode (launch_guard.launch_mode cli). Answered by DD-4-probe's E-11 console line (-dcLaunchId visible=0 or 1); DD-1's 'Capture output allowed' or 'capture output refused' line tests GetCLIParam(\"profile\") and is only an inference about it. If the id is not visible, Workbench sessions pass through the escape (launch_guard.launch_mode wb_escape, section 5.1); the session.json fields exist either way",
+      "default": {"launch_id_source": "cli", "fallback_mode": "wb_escape"},
       "decided_by": "E-11",
       "blocks_freeze": false,
       "results": "docs/trials/T0-ENG.md",
-      "affects": ["launch guard mechanism (no field changes)"]
+      "affects": ["launch guard mechanism and launch_guard.launch_mode (no field changes)"]
     },
     {
       "id": "TBD-7",
       "item": "gearbox and gear index semantics",
-      "default_r2": "HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed)",
-      "default": {"automatic_gearbox": true},
+      "default_r2": "HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that",
+      "default": {"automatic_gearbox": true, "dir_state_t0_min": "forward_only", "card_fields": ["gear_indices_forward", "gear_index_neutral", "gear_index_reverse"]},
       "decided_by": "E-04, E-01",
       "blocks_freeze": false,
       "results": "docs/trials/T0-ENG.md",
@@ -95,8 +95,8 @@
     {
       "id": "TBD-9",
       "item": "road key of the in-engine road dump",
-      "default_r2": "E-08a dedupes roads by first/last point plus point count; telemetry.road_key uses the same key so offline matching (E-08b) can join it",
-      "default": {},
+      "default_r2": "road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates",
+      "default": {"road_key_format": "<n_pts>/<x0>:<z0>/<x1>:<z1>", "decimals": 2, "no_points": "0"},
       "decided_by": "E-08a",
       "blocks_freeze": false,
       "results": "docs/trials/T0-ENG.md",
@@ -133,14 +133,15 @@
     }
   ],
   "session": {
-    "root": "$profile:DrivingData/<session_id>/",
+    "root": "$profile:DC_Sessions/<session_id>/",
+    "never_read_roots": ["$profile:DrivingData/ (dc-1.0 session_<n> folders of DD-1)", "$profile:DC_Probes/ (DD-4-probe)"],
     "id_format": "<map_id>_<trial_id>_<YYYYMMDDTHHMMSSZ>_<exe>_<inst>_<rand4>",
     "id_regex": "^(arland|kolguyev|everon)_[A-Za-z0-9-]{1,16}_[0-9]{8}T[0-9]{6}Z_(wb|cl|cld)_i[0-9]{2}_[0-9a-f]{4}$",
     "id_example": "arland_T0b_20261025T091512Z_wb_i00_7f3a",
     "layout": [
       "session.json",
       "session_end.json",
-      "heartbeat.txt",
+      "heartbeat.csv",
       "<stream>/chunk_NNNNN.csv",
       "<stream>/commit.csv",
       "frames/f_<slot_id:08d> (engine-written name: TBD-4)"
@@ -162,11 +163,41 @@
   },
   "writer": {
     "write_api": "FileHandle.Write with the byte count checked (TBD-3); FileHandle.WriteLine is never used",
-    "chunk": "a chunk file is written whole (header + rows) by one Write, then closed; it is closed at chunk_max_rows, after chunk_max_s of world time, or at session end, whichever comes first",
+    "chunk": "a chunk file is written whole (header + rows) by one Write, then closed; it is closed at chunk_max_rows, after chunk_max_s of world time, or at session end, whichever comes first; a chunk is written only when it holds at least one row",
     "chunk_max_s": 10,
-    "commit": "after the chunk is closed, one commit line {chunk_id, first_key, last_key, n_rows, n_bytes} is appended to <stream>/commit.csv and checked; only then are the chunk's rows acknowledged",
-    "on_failure": "any short or failed write (chunk, commit line, heartbeat, session.json) stops the session with end_reason script_error:write_fail; status ok is never written",
+    "commit": "after the chunk is closed, one commit line {chunk_id, first_key, last_key, n_rows, n_bytes} is appended to <stream>/commit.csv with one open-APPEND-write-close cycle and checked; only then are the chunk's rows acknowledged",
+    "heartbeat": "heartbeat.csv: header when the session starts, then one row appended every 5 s with one open-APPEND-write-close cycle; never rewritten in place; readers take the last complete row",
+    "on_failure": "any short or failed write (chunk, commit line, heartbeat row, session.json) stops the session with end_reason script_error:write_fail; status ok is never written",
     "readers": "read committed chunks only; discard uncommitted tails; C34 re-reads every committed chunk"
+  },
+  "timing": {
+    "decision": {
+      "decide_in": "EOnPostSimulate of the decision step P_t (P_t mod physics_steps_per_decision == 0), after the ctl and telemetry rows of P_t are written, from the state after step P_t",
+      "applies_in": "EOnSimulate of steps P_t + 1 .. P_t + physics_steps_per_decision",
+      "hl_seq_increments_at_step_offset": 1,
+      "bridge_pause": "the closed-loop bridge (DD-8) pauses after EOnPostSimulate of P_t, sends state_t and obs_t, and applies the returned command from step P_t + 1"
+    },
+    "sample": {
+      "state": {"stream": "telemetry", "step_offset": 0},
+      "nav": {"stream": "telemetry", "step_offset": 0},
+      "action_cmd": {"stream": "ctl", "fields": ["hl_kappa", "hl_accel", "hl_dir"], "step_offset": 1},
+      "action_label": {"stream": "ctl", "fields": ["exp_kappa_now", "exp_accel_now", "exp_dir_now"], "step_offset": 0},
+      "action_exec": {"stream": "ctl", "first_step_offset": 1, "last_step_offset": "physics_steps_per_decision"},
+      "obs": {"rule": "the newest image whose captured hf frame has last_physics_step <= P_t", "max_age": "one image period", "output": "derived decision_index"}
+    },
+    "joins": {
+      "img_to_hf": "exact: img_resolved.captured_render_frame = hf.render_frame",
+      "hf_to_ctl": "exact: hf.last_physics_step = ctl.physics_step",
+      "hf_to_telemetry": "as-of: the newest telemetry.physics_step <= hf.last_physics_step; its age is below telemetry_every_k steps when no telemetry row is missing, otherwise the frame is not joined (masks 0)",
+      "capture_pose": "hf.cam_* and hf.veh_* of the captured frame"
+    },
+    "image_grid": {
+      "anchor": "world_time_ms of physics_step 0 (the first decision step)",
+      "due_ms": "anchor + g * 1000 / image_hz - clocks.img_lead_ms for grid point g = 0, 1, 2, ...; each grid point reached while the ego is live and the camera current becomes the next slot_id",
+      "issue": "the first render frame whose world time is at or past due_ms; one request in flight",
+      "in_flight_timeout": "a request whose file is not seen within clocks.img_inflight_timeout_ms (real time) stops blocking the next slot: events kind img_timeout (payload img_slot_id=<n>) and heartbeat img_fail",
+      "session_end": "no new request; hf rows continue until no request is in flight or img_inflight_timeout_ms has passed, then the session seals; requests still unresolved count as images.pending_at_end"
+    }
   },
   "enums": {
     "map_id": ["arland", "kolguyev", "everon"],
@@ -219,11 +250,13 @@
       "stuck",
       "collision",
       "camera_reset",
+      "img_timeout",
       "dc_stop",
       "script_error",
       "veh_cfg_override"
     ],
-    "issue_status": ["issued", "skipped_busy"],
+    "issue_status": ["issued", "skipped_busy", "make_failed"],
+    "launch_mode": ["cli", "wb_escape"],
     "road_class": ["asphalt_e01", "asphalt_e02", "asphalt_e03", "dirt", "trail", "cobblestone", "concrete", "unmatched"],
     "actuation_mode": ["A", "B"],
     "source_class": ["wb_viewport", "client_1408x720"]
@@ -275,13 +308,13 @@
         {"name": "episode_id", "type": "int", "unit": "-", "required": true, "desc": "Current episode; -1 outside an episode (warm-up, settle, between episodes)."},
         {"name": "mode", "type": "enum", "unit": "-", "required": true, "enum": ["E", "N", "R", "X", "D", "H", "A", "I"], "desc": "Capture mode of this step (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle)."},
         {"name": "driver", "type": "enum", "unit": "-", "required": true, "enum": ["expert", "policy", "human", "ai", "none"], "desc": "Who produced the executed HL command of this step (C18, C27)."},
-        {"name": "hl_seq", "type": "int", "unit": "-", "required": true, "tbd": "TBD-1", "desc": "HL decision counter: -1 before the first decision, +1 at every decision step (physics_step mod physics_steps_per_decision == 0, TBD-1)."},
-        {"name": "hl_kappa", "type": "float", "unit": "1/m", "required": false, "sign": "right+", "desc": "Held executed HL curvature target (action_cmd.kappa_target), right-positive. Empty in mode I."},
-        {"name": "hl_accel", "type": "float", "unit": "m/s2", "required": false, "desc": "Held executed HL acceleration target (action_cmd.a_target, desired)."},
-        {"name": "hl_dir", "type": "int", "unit": "-", "required": false, "enum": [-1, 0, 1], "desc": "Held executed HL direction command: -1 reverse, 0 stop, +1 forward."},
-        {"name": "exp_kappa_now", "type": "float", "unit": "1/m", "required": false, "sign": "right+", "desc": "Expert HL curvature re-evaluated on the true state at this step (r2 3.2): a 60 Hz diagnostic; at a decision step it is the policy label. Empty when no expert is attached."},
-        {"name": "exp_accel_now", "type": "float", "unit": "m/s2", "required": false, "desc": "Expert HL acceleration re-evaluated at this step."},
-        {"name": "exp_dir_now", "type": "int", "unit": "-", "required": false, "enum": [-1, 0, 1], "desc": "Expert HL direction re-evaluated at this step (added to r2's exp_{kappa,accel}_now so the label has all three action channels)."},
+        {"name": "hl_seq", "type": "int", "unit": "-", "required": true, "tbd": "TBD-1", "desc": "Counter of the HL decision applied in this step: -1 before the first decision; it increments on the first step after each decision step (physics_step mod physics_steps_per_decision == 1), because the decision of P_t is taken in EOnPostSimulate of P_t and applies from step P_t + 1 (section 6, TBD-1)."},
+        {"name": "hl_kappa", "type": "float", "unit": "1/m", "required": false, "sign": "right+", "desc": "Held HL curvature target applied in this step's EOnSimulate (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision step), right-positive. Empty in mode I."},
+        {"name": "hl_accel", "type": "float", "unit": "m/s2", "required": false, "desc": "Held HL acceleration target applied in this step (action_cmd.a_target, desired)."},
+        {"name": "hl_dir", "type": "int", "unit": "-", "required": false, "enum": [-1, 0, 1], "desc": "Held HL direction command applied in this step: -1 reverse, 0 stop, +1 forward."},
+        {"name": "exp_kappa_now", "type": "float", "unit": "1/m", "required": false, "sign": "right+", "desc": "Expert HL curvature re-evaluated on the true state after this step (EOnPostSimulate, r2 3.2): a 60 Hz diagnostic; at a decision step P_t it is the label of decision t, which in mode E is the command applied from P_t + 1. Empty when no expert is attached."},
+        {"name": "exp_accel_now", "type": "float", "unit": "m/s2", "required": false, "desc": "Expert HL acceleration re-evaluated after this step."},
+        {"name": "exp_dir_now", "type": "int", "unit": "-", "required": false, "enum": [-1, 0, 1], "desc": "Expert HL direction re-evaluated after this step (added to r2's exp_{kappa,accel}_now so the label has all three action channels)."},
         {"name": "llc_steer_raw", "type": "float", "unit": "1", "required": false, "sign": "engine-native", "build_scoped": true, "tbd": "TBD-5", "desc": "llc_v1 steering before its rate limiter and lag, engine-native sign (contract sign: multiply by session.json control.steer_sign, TBD-5). Empty when llc_v1 is not driving."},
         {"name": "llc_steer_lim", "type": "float", "unit": "1", "required": false, "range": [-1, 1], "sign": "engine-native", "build_scoped": true, "tbd": "TBD-5", "desc": "llc_v1 steering after the explicit rate limiter and first-order lag, as passed to SetSteering, engine-native sign."},
         {"name": "llc_throttle", "type": "float", "unit": "1", "required": false, "range": [0, 1], "build_scoped": true, "desc": "llc_v1 throttle as passed to SetThrottle; never non-zero together with llc_brake."},
@@ -305,7 +338,9 @@
         {"name": "noise_id", "type": "int", "unit": "-", "required": true, "desc": "Disturbance id (events perturb_start/perturb_end); -1 when none."},
         {"name": "steer_signal_raw", "type": "float", "unit": "1", "required": false, "build_scoped": true, "reserved": true, "desc": "Reserved, post-GO (DD-4-probe (d)): the simulation's steering0 signal, a raw candidate for the applied steering. Empty until CC-07 step 0 validates it."},
         {"name": "wheel_angle_l_rad", "type": "float", "unit": "rad", "required": false, "sign": "right+", "build_scoped": true, "reserved": true, "desc": "Reserved: applied left road-wheel angle, right-positive. Unknown on 1.8; filled only after CC-07 step 0 validates a source (MIGRATION_1_9 8.3)."},
-        {"name": "wheel_angle_r_rad", "type": "float", "unit": "rad", "required": false, "sign": "right+", "build_scoped": true, "reserved": true, "desc": "Reserved: applied right road-wheel angle, right-positive. Unknown on 1.8."}
+        {"name": "wheel_angle_r_rad", "type": "float", "unit": "rad", "required": false, "sign": "right+", "build_scoped": true, "reserved": true, "desc": "Reserved: applied right road-wheel angle, right-positive. Unknown on 1.8."},
+        {"name": "react_veh_slot_id", "type": "int", "unit": "-", "required": false, "reserved": true, "desc": "Reserved until DD-4/DD-7 (empty before): vehicle slot of the actor the expert reacts to in this step (perception-limited reactions, r2 3.1); empty when it reacts to no actor."},
+        {"name": "react_visible", "type": "bool", "unit": "-", "required": false, "reserved": true, "desc": "Reserved until DD-4/DD-7: 1 when that actor passes the in-engine visibility test of r2 3.1 (camera FOV + 10 deg, raycast line of sight, or within 15 m), 0 when not; the builder sets policy_valid 0 while a reaction to an invisible actor lasts."}
       ]
     },
     "telemetry": {
@@ -343,34 +378,34 @@
         {"name": "acc_local_x", "type": "float", "unit": "m/s2", "required": true, "frame": "vehicle_local", "source": "VehicleBaseSimulation.GetAccelerationLocal", "desc": "Ego acceleration in the vehicle-local frame (GetAccelerationLocal), x component."},
         {"name": "acc_local_y", "type": "float", "unit": "m/s2", "required": true, "frame": "vehicle_local", "source": "VehicleBaseSimulation.GetAccelerationLocal", "desc": "Ego acceleration in the vehicle-local frame (GetAccelerationLocal), y component."},
         {"name": "acc_local_z", "type": "float", "unit": "m/s2", "required": true, "frame": "vehicle_local", "source": "VehicleBaseSimulation.GetAccelerationLocal", "desc": "Ego acceleration in the vehicle-local frame (GetAccelerationLocal), z component."},
-        {"name": "speed_mps", "type": "float", "unit": "m/s", "required": true, "source": "VehicleBaseSimulation.GetSpeedKmh", "desc": "GetSpeedKmh() / 3.6 as reported by the engine."},
+        {"name": "speed_engine_mps", "type": "float", "unit": "m/s", "required": true, "source": "VehicleBaseSimulation.GetSpeedKmh", "desc": "GetSpeedKmh() / 3.6 as reported by the engine (unsigned; the signed forward speed is telemetry_export.speed_fwd_mps, the registry channel speed_mps)."},
         {"name": "gear", "type": "int", "unit": "-", "required": true, "source": "VehicleWheeledSimulation.GetGear", "tbd": "TBD-7", "desc": "GetGear() (engine index, TBD-7)."},
         {"name": "rpm", "type": "float", "unit": "rpm", "required": true, "source": "VehicleWheeledSimulation.EngineGetRPM", "desc": "EngineGetRPM()."},
         {"name": "engine_on", "type": "bool", "unit": "-", "required": true, "source": "VehicleWheeledSimulation.EngineIsOn", "desc": "EngineIsOn()."},
         {"name": "handbrake", "type": "bool", "unit": "-", "required": true, "source": "VehicleWheeledSimulation.IsHandbrakeOn", "desc": "IsHandbrakeOn()."},
         {"name": "ground_contact", "type": "bool", "unit": "-", "required": true, "source": "VehicleBaseSimulation.HasAnyGroundContact", "desc": "HasAnyGroundContact()."},
         {"name": "wheel_count", "type": "int", "unit": "-", "required": true, "source": "VehicleWheeledSimulation.WheelCount", "desc": "WheelCount(); the w0..w3 columns hold the first four wheels."},
-        {"name": "w0_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 0 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
+        {"name": "w0_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 0 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
         {"name": "w0_slip_long", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLongitudinalSlip", "build_scoped": true, "desc": "Wheel 0 longitudinal slip (WheelGetLongitudinalSlip), raw engine value."},
         {"name": "w0_slip_lat", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLateralSlip", "build_scoped": true, "desc": "Wheel 0 lateral slip (WheelGetLateralSlip), raw engine value."},
         {"name": "w0_material", "type": "str", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelGetContactMaterial", "desc": "Wheel 0 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter."},
         {"name": "w0_temp_c", "type": "float", "unit": "degC", "required": false, "reserved": true, "desc": "Reserved, null on 1.8: wheel 0 tyre temperature (MIGRATION_1_9 8.3)."},
-        {"name": "w1_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 1 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
+        {"name": "w1_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 1 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
         {"name": "w1_slip_long", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLongitudinalSlip", "build_scoped": true, "desc": "Wheel 1 longitudinal slip (WheelGetLongitudinalSlip), raw engine value."},
         {"name": "w1_slip_lat", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLateralSlip", "build_scoped": true, "desc": "Wheel 1 lateral slip (WheelGetLateralSlip), raw engine value."},
         {"name": "w1_material", "type": "str", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelGetContactMaterial", "desc": "Wheel 1 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter."},
         {"name": "w1_temp_c", "type": "float", "unit": "degC", "required": false, "reserved": true, "desc": "Reserved, null on 1.8: wheel 1 tyre temperature (MIGRATION_1_9 8.3)."},
-        {"name": "w2_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 2 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
+        {"name": "w2_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 2 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
         {"name": "w2_slip_long", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLongitudinalSlip", "build_scoped": true, "desc": "Wheel 2 longitudinal slip (WheelGetLongitudinalSlip), raw engine value."},
         {"name": "w2_slip_lat", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLateralSlip", "build_scoped": true, "desc": "Wheel 2 lateral slip (WheelGetLateralSlip), raw engine value."},
         {"name": "w2_material", "type": "str", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelGetContactMaterial", "desc": "Wheel 2 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter."},
         {"name": "w2_temp_c", "type": "float", "unit": "degC", "required": false, "reserved": true, "desc": "Reserved, null on 1.8: wheel 2 tyre temperature (MIGRATION_1_9 8.3)."},
-        {"name": "w3_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 3 (engine index; 0=axle0 left, 1=axle0 right, 2=axle1 left, 3=axle1 right) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
+        {"name": "w3_contact", "type": "bool", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelHasContact", "desc": "Wheel 3 (engine index; its axle and side come from the vehicle card, built from the E-04 wheel names: 1.8 exposes only WheelGetName) has ground contact (WheelHasContact). Empty when i >= wheel_count."},
         {"name": "w3_slip_long", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLongitudinalSlip", "build_scoped": true, "desc": "Wheel 3 longitudinal slip (WheelGetLongitudinalSlip), raw engine value."},
         {"name": "w3_slip_lat", "type": "float", "unit": "1", "required": false, "source": "VehicleWheeledSimulation.WheelGetLateralSlip", "build_scoped": true, "desc": "Wheel 3 lateral slip (WheelGetLateralSlip), raw engine value."},
         {"name": "w3_material", "type": "str", "unit": "-", "required": false, "source": "VehicleWheeledSimulation.WheelGetContactMaterial", "desc": "Wheel 3 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter."},
         {"name": "w3_temp_c", "type": "float", "unit": "degC", "required": false, "reserved": true, "desc": "Reserved, null on 1.8: wheel 3 tyre temperature (MIGRATION_1_9 8.3)."},
-        {"name": "road_key", "type": "str", "unit": "-", "required": false, "tbd": "TBD-9", "desc": "Key of the closest engine road in the E-08a dump's key format (TBD-9); empty when no road is found."},
+        {"name": "road_key", "type": "str", "unit": "-", "required": false, "tbd": "TBD-9", "desc": "Key of the closest engine road, <n_pts>/<x0>:<z0>/<x1>:<z1> exactly as the E-08a dump writes it (TBD-9); empty when no road is found."},
         {"name": "road_dist_m", "type": "float", "unit": "m", "required": false, "desc": "Distance to the closest road (RoadNetworkManager.GetClosestRoad)."},
         {"name": "road_width_m", "type": "float", "unit": "m", "required": false, "desc": "BaseRoad.GetWidth() of the closest road."},
         {"name": "lane_lat_err_m", "type": "float", "unit": "m", "required": false, "sign": "right+", "desc": "Lane-relative signed lateral error: ego offset from the active route's driving line, positive = ego right of the line. Computed by the driver interface; empty without an active route."},
@@ -388,7 +423,7 @@
         {"name": "moon_phase01", "type": "float", "unit": "1", "required": true, "desc": "Moon phase (0 new, 1 full) from GetCurrentSunMoonDirAndPhase."},
         {"name": "sun_elev_deg", "type": "float", "unit": "deg", "required": true, "desc": "Sun elevation above the horizon from sun_dir (the sign convention of sun_dir is checked at T0-MIN: a noon session must give a positive elevation)."},
         {"name": "traffic_n", "type": "int", "unit": "-", "required": true, "desc": "Number of live traffic vehicles (0 until T2)."},
-        {"name": "traffic_slots", "type": "str", "unit": "-", "required": false, "desc": "Traffic slots as 'slot_id:entity_id' pairs joined by ';' (no commas); empty when traffic_n = 0."}
+        {"name": "traffic_slots", "type": "str", "unit": "-", "required": false, "desc": "Traffic vehicles as 'veh_slot_id:entity_id' pairs joined by ';' (no commas); empty when traffic_n = 0."}
       ]
     },
     "hf": {
@@ -443,8 +478,8 @@
         {"name": "slot_id", "type": "int", "unit": "slot", "required": true, "key": true, "desc": "Image slot, 0-based, +1 per row. Slots advance only while the ego is live and the camera current."},
         {"name": "episode_id", "type": "int", "unit": "-", "required": true, "desc": "As in ctl."},
         {"name": "ego_slot_id", "type": "int", "unit": "-", "required": true, "desc": "As in telemetry."},
-        {"name": "requested_world_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-2", "desc": "World time of the slot on the image_hz grid (TBD-2)."},
-        {"name": "issue_status", "type": "enum", "unit": "-", "required": true, "enum": ["issued", "skipped_busy"], "tbd": "TBD-2", "desc": "issued, or skipped_busy when the previous request was still in flight at the slot (TBD-2); a skipped slot counts as missing in C10."},
+        {"name": "requested_world_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-2", "desc": "Due time of the slot's grid point: world_time_ms of physics_step 0 + g x 1000 / image_hz - clocks.img_lead_ms (section 6, TBD-2)."},
+        {"name": "issue_status", "type": "enum", "unit": "-", "required": true, "enum": ["issued", "skipped_busy", "make_failed"], "tbd": "TBD-2", "desc": "issued; skipped_busy when the previous request was still in flight and younger than clocks.img_inflight_timeout_ms at the slot; make_failed when System.MakeScreenshot returned false (the issue fields are kept). Skipped and failed slots count as missing in C10 (TBD-2)."},
         {"name": "issue_world_ms", "type": "int", "unit": "ms", "required": false, "desc": "World time of the frame the request was issued in (the first frame at or after the slot). Empty when skipped."},
         {"name": "issue_render_frame", "type": "int", "unit": "frame", "required": false, "desc": "render_frame of that frame. Empty when skipped."},
         {"name": "issue_physics_step", "type": "int", "unit": "step", "required": false, "desc": "last_physics_step at issue. Empty when skipped."},
@@ -467,9 +502,9 @@
         {"name": "physics_step", "type": "int", "unit": "step", "required": true, "desc": "physics_step of the last completed step when the event was recorded."},
         {"name": "render_frame", "type": "int", "unit": "frame", "required": true, "desc": "render_frame when the event was recorded."},
         {"name": "world_time_ms", "type": "int", "unit": "ms", "required": true, "desc": "As in ctl."},
-        {"name": "kind", "type": "enum", "unit": "-", "required": true, "enum": ["session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "camera_reset", "dc_stop", "script_error", "veh_cfg_override"], "desc": "Event kind (veh_cfg_override is reserved, null on 1.8)."},
-        {"name": "slot_id", "type": "int", "unit": "-", "required": true, "desc": "Subject vehicle slot, -1 when none."},
-        {"name": "payload", "type": "str", "unit": "-", "required": false, "desc": "Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason."}
+        {"name": "kind", "type": "enum", "unit": "-", "required": true, "enum": ["session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"], "desc": "Event kind (veh_cfg_override is reserved, null on 1.8)."},
+        {"name": "veh_slot_id", "type": "int", "unit": "-", "required": true, "desc": "Subject vehicle slot (ego_slot_id or a traffic slot), -1 when none; named veh_slot_id so a join by column name never meets img.slot_id."},
+        {"name": "payload", "type": "str", "unit": "-", "required": false, "desc": "Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason, img_timeout img_slot_id."}
       ]
     },
     "episodes": {
@@ -517,13 +552,13 @@
       "status": "reserved",
       "written_in": "EOnPostSimulate",
       "cadence": "telemetry steps, one row per live traffic vehicle (from DD-4, T2; absent before)",
-      "key": ["physics_step", "slot_id"],
+      "key": ["physics_step", "veh_slot_id"],
       "key_step": null,
       "dir": "traffic",
       "chunk_max_rows": 2000,
       "fields": [
         {"name": "physics_step", "type": "int", "unit": "step", "required": true, "key": true, "desc": "Telemetry step of the row (same cadence as telemetry)."},
-        {"name": "slot_id", "type": "int", "unit": "-", "required": true, "key": true, "desc": "Traffic vehicle slot (never reused)."},
+        {"name": "veh_slot_id", "type": "int", "unit": "-", "required": true, "key": true, "desc": "Traffic vehicle slot (never reused)."},
         {"name": "entity_id", "type": "str", "unit": "-", "required": true, "desc": "IEntity.GetID() token, constant per slot (C35)."},
         {"name": "prefab", "type": "str", "unit": "-", "required": true, "desc": "Prefab resource name."},
         {"name": "pos_x", "type": "float", "unit": "m", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle position, x component."},
@@ -532,7 +567,7 @@
         {"name": "fwd_x", "type": "float", "unit": "1", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle forward axis, x component."},
         {"name": "fwd_y", "type": "float", "unit": "1", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle forward axis, y component."},
         {"name": "fwd_z", "type": "float", "unit": "1", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle forward axis, z component."},
-        {"name": "speed_mps", "type": "float", "unit": "m/s", "required": true, "desc": "GetSpeedKmh() / 3.6."}
+        {"name": "speed_engine_mps", "type": "float", "unit": "m/s", "required": true, "desc": "GetSpeedKmh() / 3.6 (unsigned)."}
       ]
     }
   },
@@ -575,7 +610,7 @@
         {"name": "acc_long_mps2", "type": "float", "unit": "m/s2", "required": true, "desc": "acc_local_z: achieved longitudinal acceleration."},
         {"name": "acc_lat_mps2", "type": "float", "unit": "m/s2", "required": true, "sign": "right+", "desc": "acc_local_x: achieved lateral acceleration, right-positive."},
         {"name": "kappa_realised", "type": "float", "unit": "1/m", "required": false, "sign": "right+", "desc": "yaw_rate_rps / speed_fwd_mps when abs(speed_fwd_mps) > 3 m/s, else empty."},
-        {"name": "dir_state", "type": "int", "unit": "-", "required": true, "enum": [-1, 0, 1], "tbd": "TBD-7", "desc": "Drive direction from the gear through the vehicle card: +1 forward gear, 0 neutral, -1 reverse (TBD-7)."},
+        {"name": "dir_state", "type": "int", "unit": "-", "required": true, "enum": [-1, 0, 1], "tbd": "TBD-7", "desc": "Drive direction from the gear through the vehicle card: +1 forward gear, 0 neutral, -1 reverse (TBD-7); forward-only in T0-MIN (section 7)."},
         {"name": "delta_eff_rad", "type": "float", "unit": "rad", "required": false, "sign": "right+", "build_scoped": true, "reserved": true, "desc": "Reserved: bicycle-equivalent road-wheel angle from wheel_angle_l/r; C15's steer_eff once it exists. kappa = tan(delta_eff)/L holds only for abs(a_lat) <= 1 m/s2 [target]."}
       ]
     },
@@ -599,7 +634,9 @@
         {"name": "man_right", "type": "int", "unit": "-", "required": true, "enum": [0, 1], "desc": "Next maneuver within 200 m is a right turn."},
         {"name": "man_follow", "type": "int", "unit": "-", "required": true, "enum": [0, 1], "desc": "No maneuver within 200 m (follow the road)."},
         {"name": "d_man", "type": "float", "unit": "m", "required": true, "range": [0, 200], "desc": "Distance to the next maneuver, 0-200; 200 with man_follow."},
-        {"name": "d_stop", "type": "float", "unit": "m", "required": true, "range": [0, 200], "desc": "Distance to the next commanded stop, 0-200; 200 = none."}
+        {"name": "d_stop", "type": "float", "unit": "m", "required": true, "range": [0, 200], "desc": "Distance to the next stop (nav_v1: route_end only), 0-200; 200 = none."},
+        {"name": "dist_to_route_m", "type": "float", "unit": "m", "required": true, "eval_only": true, "desc": "Horizontal distance from the pose to its projection inside the progress window (drivedit_nav)."},
+        {"name": "nav_valid", "type": "int", "unit": "-", "required": true, "enum": [0, 1], "desc": "0 when dist_to_route_m > 30 m (the r2 1.3 route-deviation limit): the route points are then meaningless and the builder sets policy_valid and wm_valid to 0."}
       ]
     },
     "road": {
@@ -611,6 +648,21 @@
         {"name": "matched_road_id", "type": "str", "unit": "-", "required": false, "tbd": "TBD-9", "desc": "Generator polyline matched to road_key by E-08b (Hausdorff <= 2 m); empty when unmatched."},
         {"name": "road_class", "type": "enum", "unit": "-", "required": true, "enum": ["asphalt_e01", "asphalt_e02", "asphalt_e03", "dirt", "trail", "cobblestone", "concrete", "unmatched"], "desc": "Class inherited from the matched generator; unmatched roads are not drivable."},
         {"name": "region", "type": "enum", "unit": "-", "required": true, "enum": ["train", "val_l", "buffer", "k_val", "k_rep", "everon"], "eval_only": true, "desc": "Region of the ego position per splits_v2 (C24)."}
+      ]
+    },
+    "decision_index": {
+      "by": "dataset builder (DD-11) from the timing rules",
+      "per": "decision step",
+      "key": ["decision_step"],
+      "fields": [
+        {"name": "decision_step", "type": "int", "unit": "step", "required": true, "key": true, "desc": "P_t: physics_step of decision step t (P_t mod physics_steps_per_decision == 0)."},
+        {"name": "hl_seq", "type": "int", "unit": "-", "required": true, "desc": "ctl.hl_seq at P_t + 1: the decision applied over steps (P_t, P_t + physics_steps_per_decision]."},
+        {"name": "obs_slot_id", "type": "int", "unit": "slot", "required": false, "desc": "img.slot_id of obs_t; empty when no image qualifies."},
+        {"name": "obs_captured_render_frame", "type": "int", "unit": "frame", "required": false, "desc": "img_resolved.captured_render_frame of obs_t."},
+        {"name": "obs_last_physics_step", "type": "int", "unit": "step", "required": false, "desc": "hf.last_physics_step of that frame (<= P_t)."},
+        {"name": "obs_age_steps", "type": "int", "unit": "step", "required": false, "desc": "P_t - obs_last_physics_step: the realised image age in physics steps."},
+        {"name": "obs_age_ms", "type": "int", "unit": "ms", "required": false, "desc": "world_time_ms of P_t minus hf.world_time_ms of the captured frame."},
+        {"name": "obs_valid", "type": "bool", "unit": "-", "required": true, "desc": "1 when an image qualifies and is at most one image period old; 0 sets wm_valid and policy_valid to 0."}
       ]
     }
   },
@@ -641,15 +693,15 @@
         {"name": "trial.duration_s", "type": "float", "unit": "s", "required": true, "desc": "Planned capture length after warm-up."},
         {"name": "exe.kind", "type": "enum", "unit": "-", "required": true, "enum": ["wb", "cl", "cld"], "desc": "wb (Workbench), cl (ArmaReforgerSteam client), cld (Diag client)."},
         {"name": "exe.instance", "type": "str", "unit": "-", "required": true, "desc": "Instance tag i00..i99 (Workbench: i00)."},
-        {"name": "exe.cli", "type": "object", "unit": "-", "required": true, "desc": "Every -dc* command-line parameter seen (System.GetCLIParam)."},
+        {"name": "exe.cli", "type": "object", "unit": "-", "required": true, "desc": "The named -dc* parameters read with System.GetCLIParam, name -> value: dcLaunchId, dcTrial (and any later named -dc* parameter). 1.8 cannot list command-line parameters, so unnamed ones are never recorded."},
         {"name": "engine.build_version", "type": "str", "unit": "-", "required": true, "desc": "GetGame().GetBuildVersion() at start (repeated at end)."},
         {"name": "engine.build_time", "type": "str", "unit": "-", "required": true, "desc": "GetGame().GetBuildTime()."},
         {"name": "engine.fixed_time_slice_s", "type": "float", "unit": "s", "required": true, "tbd": "TBD-1", "desc": "BaseWorld.GetFixedTimeSlice() (TBD-1)."},
         {"name": "pin.pin_id", "type": "str", "unit": "-", "required": true, "desc": "Pin id from the launch record (e.g. 1.8.0.13; 1.9 later)."},
         {"name": "pin.pin_sha256", "type": "str", "unit": "-", "required": true, "desc": "sha256 of the pin file, from the launch record."},
-        {"name": "pin.build_key", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a). null only while launch records are dd-launch/1; the harvester then fills it from the pin before validation, and C02 refuses a session without one."},
+        {"name": "pin.build_key", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a) from a dd-launch/2 record; null while launch records are dd-launch/1. session.json is never edited after it is written: the harvester then writes build_key (from the pin) into its sidecar harvest.json, and C02 reads it from there and refuses a session that has neither."},
         {"name": "pin.channel", "type": "enum", "unit": "-", "required": true, "enum": ["stable", "experimental"], "desc": "stable or experimental (dd-launch/1 records: stable)."},
-        {"name": "pin.launch_id", "type": "str", "unit": "-", "required": true, "desc": "-dcLaunchId; joins the launch record in E:\\DriveDiT\\pin\\launches."},
+        {"name": "pin.launch_id", "type": "str", "unit": "-", "required": true, "desc": "-dcLaunchId (launch_mode cli) or the id of the matched record (wb_escape); joins the launch record in E:\\DriveDiT\\pin\\launches."},
         {"name": "pin.launch_schema", "type": "str", "unit": "-", "required": true, "desc": "Schema of the launch record read (dd-launch/1, later /2)."},
         {"name": "pin.game_buildid", "type": "int", "unit": "-", "required": true, "desc": "Game Steam buildid from the launch record."},
         {"name": "pin.tools_buildid", "type": "int", "unit": "-", "required": true, "desc": "Tools Steam buildid from the launch record."},
@@ -680,6 +732,8 @@
         {"name": "clocks.physics_steps_per_decision", "type": "int", "unit": "step", "required": true, "tbd": "TBD-1", "desc": "Physics steps per HL decision (TBD-1)."},
         {"name": "clocks.decision_hz", "type": "float", "unit": "1/s", "required": true, "desc": "HL decision rate (10)."},
         {"name": "clocks.image_hz", "type": "float", "unit": "1/s", "required": true, "tbd": "TBD-2", "desc": "Image slot rate (TBD-2; default 10)."},
+        {"name": "clocks.img_inflight_timeout_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-2", "desc": "Real-time limit after which a request in flight stops blocking the next slot (TBD-2; default 2000)."},
+        {"name": "clocks.img_lead_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-2", "desc": "Image grid lead: grid point g is due img_lead_ms before the world time of decision step g at image_hz = decision_hz (TBD-2; default 0, set from the E-05/E-06 capture offsets)."},
         {"name": "clocks.chunk_max_s", "type": "float", "unit": "s", "required": true, "desc": "World-time bound on a chunk (10)."},
         {"name": "rig.rig_id", "type": "str", "unit": "-", "required": true, "desc": "vehicle + mount + vFOV + writer + source class + render-settings hash (r2 3.4)."},
         {"name": "rig.rig_name", "type": "str", "unit": "-", "required": true, "desc": "e.g. R1-S105."},
@@ -701,7 +755,12 @@
         {"name": "rig.render_settings", "type": "object", "unit": "-", "required": true, "tbd": "TBD-8", "desc": "VideoUserSettings + DisplayUserSettings dump (TBD-8)."},
         {"name": "rig.render_settings_hash", "type": "str", "unit": "-", "required": true, "desc": "Hash of that dump (C30)."},
         {"name": "env_initial", "type": "object", "unit": "-", "required": true, "desc": "{weather_state, rain, fog, wetness, tod_h, date, day_auto_advance}."},
-        {"name": "launch_guard", "type": "object", "unit": "-", "required": true, "desc": "{cli_seen, record_path, profile_root_ok}: how the guard passed."}
+        {"name": "launch_guard.launch_mode", "type": "enum", "unit": "-", "required": true, "enum": ["cli", "wb_escape"], "desc": "How the launch guard passed: cli (-dcLaunchId visible) or wb_escape (Workbench Play without a visible command line; section 5.1)."},
+        {"name": "launch_guard.record_path", "type": "str", "unit": "-", "required": true, "desc": "The matched record, $profile:dc_launch/launch_<id>.json."},
+        {"name": "launch_guard.record_launch_id", "type": "str", "unit": "-", "required": true, "desc": "launch_id inside the matched record (equals pin.launch_id)."},
+        {"name": "launch_guard.cli_seen", "type": "bool", "unit": "-", "required": true, "desc": "1 when System.GetCLIParam saw -dcLaunchId or -profile (E-11)."},
+        {"name": "launch_guard.profile_root_ok", "type": "bool", "unit": "-", "required": true, "desc": "1: -profile (when visible) and the resolved $profile lie inside E:\\DriveDiT."},
+        {"name": "launch_guard.escape_binding", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "wb_escape only: process_start (the record was written by the launch that started this Workbench; the default) or newest_after_deploy (binding switched off for one Play); null in cli mode."}
       ]
     },
     "session_end.json": {
@@ -718,17 +777,17 @@
         {"name": "end.physics_step", "type": "int", "unit": "step", "required": true, "desc": "Last physics_step."},
         {"name": "end.render_frame", "type": "int", "unit": "frame", "required": true, "desc": "Last render_frame."},
         {"name": "pin.pin_id", "type": "str", "unit": "-", "required": true, "desc": "Repeated from session.json; C02 requires equality."},
-        {"name": "pin.build_key", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "Repeated from session.json (same null rule as there)."},
+        {"name": "pin.build_key", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "Repeated from session.json (same null rule; the harvester's harvest.json then carries it)."},
         {"name": "engine.build_version", "type": "str", "unit": "-", "required": true, "desc": "GetBuildVersion() read again at the end; C02 requires it to equal the start value."},
         {"name": "counts", "type": "object", "unit": "-", "required": true, "desc": "Per stream: {rows, chunks, last_key} of committed data."},
-        {"name": "images", "type": "object", "unit": "-", "required": true, "desc": "{requested, issued, skipped_busy}."},
+        {"name": "images", "type": "object", "unit": "-", "required": true, "desc": "{requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3)."},
         {"name": "episodes", "type": "int", "unit": "-", "required": true, "desc": "Number of episode rows committed."},
-        {"name": "heartbeats", "type": "int", "unit": "-", "required": true, "desc": "Number of heartbeat writes."}
+        {"name": "heartbeats", "type": "int", "unit": "-", "required": true, "desc": "Number of heartbeat rows appended."}
       ]
     },
-    "heartbeat.txt": {
+    "heartbeat.csv": {
       "format": "csv",
-      "written": "overwritten every 5 s (header + one row)",
+      "written": "<session>/heartbeat.csv: the header when the session starts, then one row appended every 5 s with one open-APPEND-write-close cycle (E-19 c11); never rewritten in place; readers take the last complete row",
       "fields": [
         {"name": "unix_s", "type": "int", "unit": "s", "required": true, "desc": "Wall time."},
         {"name": "world_ms", "type": "int", "unit": "ms", "required": true, "desc": "world_time_ms."},

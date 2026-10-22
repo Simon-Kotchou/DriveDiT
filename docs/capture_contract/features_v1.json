@@ -12,7 +12,7 @@
     "eval_only": "evaluation, stratification and bookkeeping; never an input and never a target"
   },
   "roles": {
-    "world_model": "the DriveDiT world model: a transition is (obs_t, action_cmd executed over [t, t+dt), obs_t+1)",
+    "world_model": "the DriveDiT world model: a transition is (obs_t, action_cmd applied over physics steps (P_t, P_t + N], obs_t+1)",
     "policy": "the driving policy: predicts action_label at t from inputs at <= t, with action history <= t-1",
     "teacher": "a privileged or bidirectional teacher used only for training (never deployed)"
   },
@@ -21,10 +21,15 @@
     "decision_hz": 10,
     "physics_steps_per_decision": 6,
     "tbd": "TBD-1",
-    "decision_step_rule": "decision step t is the physics step P_t with P_t mod physics_steps_per_decision == 0",
-    "zero": "offset 0 = the value at t; for action_cmd and action_exec, the command executed over [t, t+dt)",
+    "decision_step_rule": "decision step t is the physics step P_t with P_t mod physics_steps_per_decision == 0; the HL decides in EOnPostSimulate of P_t from the state after step P_t, and the command applies in steps P_t + 1 .. P_t + N (N = physics_steps_per_decision; streams JSON timing)",
+    "zero": "offset 0 = the value at t: for state, nav and image the state after step P_t; for action_cmd and action_exec the command applied over steps (P_t, P_t + N]",
     "max_offset": "an input may use offsets <= max_offset; null with input true = unbounded within the clip (teacher only)",
-    "subsample_5hz": "every second decision step (r2 3.5)"
+    "fallback_5hz": {
+      "rule": "at image_hz 5 (TBD-2 fallback) the HL decision rate drops to 5 Hz, because the decision interval is the training interval (r2 3.5); tensor names stay, action_cmd stays [T,3]",
+      "decision_hz": 5,
+      "physics_steps_per_decision": 12,
+      "shapes": {"action_exec": ["T", 12, 4]}
+    }
   },
   "rules": [
     "Only student_input channels reach a deployed model (L3); the builder (DD-11) enforces the offsets and C24 checks them (DD-5).",
@@ -78,7 +83,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose captured frame has last_physics_step <= P_t; t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period.",
+      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose captured frame has last_physics_step <= P_t; t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period. The builder records the realised age per decision step (derived decision_index).",
       "channels": [
         {"name": "image_r", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Red."},
         {"name": "image_g", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Green."},
@@ -95,7 +100,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "Values at <= t only. The world model is never conditioned on realised future state.",
+      "rule": "Values at <= t only: telemetry_export at P_t, the state after step P_t, which holds no step of action_cmd_t. The world model is never conditioned on realised future state.",
       "channels": [
         {"name": "speed_mps", "unit": "m/s", "source": "telemetry_export.speed_fwd_mps", "absolute": false, "build_scoped": false, "desc": "Signed forward speed."},
         {"name": "yaw_rate_rps", "unit": "rad/s", "source": "telemetry_export.yaw_rate_rps", "absolute": false, "build_scoped": false, "sign": "right+", "tbd": "TBD-5", "desc": "Yaw rate, right-positive."},
@@ -113,7 +118,7 @@
         "policy": {"input": true, "max_offset": -1, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "What was executed over [t, t+dt) through llc_v1: ctl.hl_* at P_t. World model: conditioning at offset 0. Policy: history only (offset <= -1).",
+      "rule": "What was executed through llc_v1 over steps (P_t, P_t + N]: ctl.hl_* at P_t + 1, the command decided in EOnPostSimulate of P_t. World model: conditioning at offset 0. Policy: history only (offset <= -1).",
       "channels": [
         {"name": "kappa_target", "unit": "1/m", "source": "ctl.hl_kappa", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Curvature target, right-positive."},
         {"name": "a_target", "unit": "m/s2", "source": "ctl.hl_accel", "absolute": false, "build_scoped": false, "desc": "Desired acceleration."},
@@ -130,7 +135,7 @@
         "policy": {"input": false, "max_offset": null, "target": true},
         "teacher": {"input": false, "max_offset": null, "target": false}
       },
-      "rule": "The expert's HL command at t: ctl.exp_*_now at P_t. Equals action_cmd in mode E; differs in N/D. The policy's prediction target; never an input.",
+      "rule": "The expert's HL command at t: ctl.exp_*_now at P_t, evaluated on the state after step P_t (the state the policy sees). Equals action_cmd in mode E; differs in N/D. The policy's prediction target; never an input.",
       "channels": [
         {"name": "label_kappa_target", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Expert curvature target."},
         {"name": "label_a_target", "unit": "m/s2", "source": "ctl.exp_accel_now", "absolute": false, "build_scoped": false, "desc": "Expert acceleration target."},
@@ -148,7 +153,7 @@
         "policy": {"input": true, "max_offset": -1, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "Optional diagnostic / world-model ablation: the 60 Hz llc output and input_post over [t, t+dt) (physics_steps_per_decision rows, TBD-1). Raw engine inputs: build-scoped, never pooled across builds. Policy: history only.",
+      "rule": "Optional diagnostic / world-model ablation: the 60 Hz llc output and input_post of the ctl rows P_t + 1 .. P_t + N (physics_steps_per_decision rows, TBD-1; 12 at the 5 Hz fallback). Raw engine inputs: build-scoped, never pooled across builds. Policy: history only.",
       "channels": [
         {"name": "exec_steer_cmd", "unit": "1", "source": "ctl_export.steer_cmd", "absolute": false, "build_scoped": true, "sign": "right+", "tbd": "TBD-5", "desc": "Commanded steering, contract sign."},
         {"name": "exec_throttle", "unit": "1", "source": "ctl.llc_throttle", "absolute": false, "build_scoped": true, "desc": "Throttle."},
@@ -166,7 +171,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "drivedit_nav.nav_v1(route, pose) at P_t (one function for the harvester, the builder and the bridge; C22). Distance-based route points, never time-based or hindsight goals (RT-C03).",
+      "rule": "drivedit_nav.nav_v1(route, pose) at the pose of P_t (one function for the harvester, the builder and the bridge; C22). Distance-based route points, never time-based or hindsight goals (RT-C03). nav_valid 0 (more than 30 m off the route) sets policy_valid and wm_valid to 0.",
       "channels": [
         {"name": "p20_x", "unit": "m", "source": "nav.p20_x", "absolute": false, "build_scoped": false, "desc": "Route point 20 m ahead, ego forward."},
         {"name": "p20_y", "unit": "m", "source": "nav.p20_y", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route point 20 m ahead, ego right."},
@@ -209,8 +214,8 @@
       },
       "rule": "Loss and sampling masks; never a model input and never a prediction target.",
       "channels": [
-        {"name": "policy_valid", "unit": "-", "source": "builder", "absolute": false, "build_scoped": false, "desc": "0 for X/A rows, perception-limited reactions failing the visibility test, missing images (C29)."},
-        {"name": "wm_valid", "unit": "-", "source": "builder", "absolute": false, "build_scoped": false, "desc": "0 across gaps, fiducial failures, teleports."},
+        {"name": "policy_valid", "unit": "-", "source": "ctl.react_visible", "absolute": false, "build_scoped": false, "desc": "Built by the builder: 0 for X/A rows, while a reaction to an actor with ctl.react_visible 0 lasts (the in-engine visibility test of r2 3.1; reserved until DD-4/DD-7), for nav_valid 0 and for decision steps without a valid image (decision_index.obs_valid 0, C29)."},
+        {"name": "wm_valid", "unit": "-", "source": "builder", "absolute": false, "build_scoped": false, "desc": "0 across gaps, fiducial failures, teleports, nav_valid 0 and decision_index.obs_valid 0."},
         {"name": "warmup", "unit": "-", "source": "events.kind=warmup_end", "absolute": false, "build_scoped": false, "desc": "1 during the session warm-up."},
         {"name": "env_transition", "unit": "-", "source": "events.kind=env_change", "absolute": false, "build_scoped": false, "desc": "1 for 15 s after an environment change."},
         {"name": "teleport", "unit": "-", "source": "events.kind=teleport", "absolute": false, "build_scoped": false, "desc": "1 at a teleport or respawn."}
@@ -333,7 +338,7 @@
         {"name": "split", "unit": "-", "source": "route split tag", "absolute": true, "build_scoped": false, "desc": "Split of the episode."},
         {"name": "session_id", "unit": "-", "source": "session.json session_id", "absolute": true, "build_scoped": false, "desc": "Session id."},
         {"name": "pin_id", "unit": "-", "source": "session.json pin.pin_id", "absolute": true, "build_scoped": false, "desc": "Pin id; never a model-visible build token."},
-        {"name": "build_key", "unit": "-", "source": "session.json pin.build_key", "absolute": true, "build_scoped": false, "desc": "Build identity; never a model-visible build token."},
+        {"name": "build_key", "unit": "-", "source": "session.json pin.build_key, else the harvester's harvest.json", "absolute": true, "build_scoped": false, "desc": "Build identity; never a model-visible build token."},
         {"name": "exp_now_60hz", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "60 Hz expert re-evaluation, diagnostics only."}
       ]
     }

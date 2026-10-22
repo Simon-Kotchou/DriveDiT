@@ -21,7 +21,10 @@ python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out tests/fixtures/
 
 `tests/test_dc2_reader.py` checks that the committed files equal a fresh generation, so a generator change must come
 with the regenerated fixture. `--kind golden_5hz` writes the same session at the TBD-2 fallback (image_hz =
-decision_hz = 5, N = 12); the tests generate it, it is not committed.
+decision_hz = 5, N = 12); the tests generate it, it is not committed. `--kind client_1408` (DD-6-min) writes the
+golden drive as a packaged client captures it: exe `cl`, instance `i01`, source class `client_1408x720`, 1408x720
+images (a 1280x720 core between two 64 px bands) and a dd-launch/1 record of exe `client`; `tests/test_harvest.py`
+generates it, it is not committed.
 
 The synthetic session uses the TBD defaults of contract dc-2.0: 60 Hz physics, k = 3, N = 6, image_hz 10,
 img_lead_ms 0, `frames/f_<slot:08d>.png`, steer_sign -1, yaw_axis_sign +1. Its images are 256x240 `wb_viewport`

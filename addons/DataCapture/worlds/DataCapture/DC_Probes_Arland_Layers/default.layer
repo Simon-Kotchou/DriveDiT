@@ -165,6 +165,13 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_iProjMarkersPerFrame 16
    m_fProjMaxDistM 150
   }
+  DC_RoadDump "{DC4A50B300000006}" {
+   m_fTileM 256
+   m_iTilesPerFrame 4
+   m_fAabbMinY -500
+   m_fAabbMaxY 2000
+   m_iCapSuspect 64
+  }
  }
  coords 2759.086 80.111 1664.452
  m_bAllowFactionChange 0

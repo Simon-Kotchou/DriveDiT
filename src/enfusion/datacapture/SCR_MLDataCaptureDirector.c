@@ -16,6 +16,11 @@
 //     seat, join the group), retrying up to m_iSeatAttempts times; only if every attempt fails it falls back to
 //     walk-in boarding (driver spawned on foot at the spawn point, the group AI walks it to its car). The first
 //     waypoint is assigned only once the driver exists, so a seated group drives straight away;
+//   - keeps every capture group simulated wherever the camera is (1.8 deactivates AI at max LOD, about 1 km or more
+//     from every observer): pins its agents to full AI LOD (AIAgent.SetPermanentLOD(0), group PreventMaxLOD, CRITICAL
+//     spawn importance; m_bPinDriverLOD) and puts a temporary local observer on its vehicle
+//     (ObserversSystem.InsertObserverSP; m_bVehicleObservers). Both are undone when the director stops. The seated,
+//     statistics and boarding-window lines log the agent count, dormancy, observer range and per-agent LOD;
 //   - after each completed waypoint assigns a different one, never the current one and never one within 2x the
 //     completion radius of the vehicle or of the current target; when no target qualifies the group gets none and
 //     the choice is retried (no fallback to an excluded target);
@@ -101,6 +106,10 @@ class SCR_MLDataCaptureGroupState
 	int m_iSeatAttemptsMade;		//!< direct seating attempts made so far
 	float m_fNextSeatAttemptAtMs = -1;	//!< world time of the next direct seating attempt, -1 = none pending
 	bool m_bDrivingStarted;			//!< the first waypoint was assigned (only once the driver exists)
+
+	bool m_bLODPinned;				//!< PinGroupLOD ran and ReleaseGroup has not undone it yet
+	int m_iImportanceBeforePin = -1;	//!< group spawn importance before the pin, -1 = not saved
+	bool m_bObserverAdded;			//!< a temporary local observer follows the vehicle (ObserversSystem.InsertObserverSP)
 
 	bool m_bDriverSeated;			//!< a living character sits in the pilot seat (latest monitor or readiness tick)
 	float m_fFirstSeatedS = -1;		//!< director time [s] when a seated driver was first seen, -1 = never
@@ -204,6 +213,15 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 	[Attribute("1000", UIWidgets.Slider, "Delay between direct seating attempts [ms]", "200 10000 100", category: "Boarding")]
 	protected int m_iSeatRetryMs;
+
+	[Attribute("1", UIWidgets.CheckBox, "Keep every capture driver at full AI LOD: AIAgent.SetPermanentLOD(0) on the group's agents, PreventMaxLOD on the group and CRITICAL spawn importance (the 1.9 vanilla logistic-driver pin). Without it, AI about 1 km or more from every observer is deactivated and cannot drive", category: "Boarding")]
+	protected bool m_bPinDriverLOD;
+
+	[Attribute("1", UIWidgets.CheckBox, "Add a temporary local observer on every capture vehicle (ObserversSystem.InsertObserverSP), so cars far from the camera stay simulated; removed when the director stops", category: "Boarding")]
+	protected bool m_bVehicleObservers;
+
+	//! ObserversSystem SP key of group k's vehicle observer: OBSERVER_KEY_BASE + k (no vanilla script inserts SP observers)
+	static const int OBSERVER_KEY_BASE = 4400;
 
 	// === DRIVING ===
 	[Attribute("30", UIWidgets.Slider, "Waypoint completion radius [m]", "5 100 1", category: "Driving")]
@@ -351,6 +369,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		RegisterDebugMenus();
 		InitializeEnvironment();
 		CollectDriveTargets();
+		Print(string.Format("[DataCapture] AI LOD: max LOD %1 (agents are deactivated there); driver LOD pin %2, vehicle observers %3", AIAgent.GetMaxLOD(), m_bPinDriverLOD, m_bVehicleObservers), LogLevel.NORMAL);
 
 		if (m_aDriveTargets.IsEmpty())
 		{
@@ -423,12 +442,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			}
 		}
 
+		// During OnDelete (world teardown) only unsubscribe and drop the observers; the LOD pin dies with the agents.
+		ObserversSystem observers = GetObserversSystem();
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
 			state.m_fNextAssignAtMs = -1;
 			state.m_fNextSeatAttemptAtMs = -1;
 			if (state.m_Group)
 				state.m_Group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
+
+			ReleaseGroup(state, observers, stopCollector);
 		}
 
 		if (stopCollector && m_Collector && m_Collector.IsCapturing())
@@ -623,8 +646,164 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		group.GetOnWaypointCompleted().Insert(OnWaypointCompleted); // invoker params: AIWaypoint wp (server only)
 
 		Print(string.Format("[DataCapture] Group %1 spawned at %2 for vehicle %3 with %4 waypoints", groupId, spawnName, vehicleName, state.m_aWaypoints.Count()), LogLevel.NORMAL);
+
+		// Before the driver exists, so it is pinned as it joins (GetOnAgentAdded).
+		PinGroupLOD(state);
+		AddVehicleObserver(state);
+		Print(string.Format("[DataCapture] Group %1: lod_pin=%2 (permanent LOD 0, max LOD prevented, importance CRITICAL), observer=%3 on %4 (key %5)", groupId, state.m_bLODPinned, state.m_bObserverAdded, vehicleName, OBSERVER_KEY_BASE + groupId), LogLevel.NORMAL);
+
 		TrySeatDriver(state);
 		ReportSpawnProgress();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Keeps the group's driver at full AI LOD for the whole capture: the 1.9.0.10 vanilla logistic-driver pin
+	//! (SCR_TransportUnitComponent.SetGroupLifecyclePinned), built only from calls that exist unchanged in 1.8.0.13.
+	//! CRITICAL importance keeps ChimeraAIWorld eviction from picking the group, and a permanent LOD pin also makes
+	//! SCR_AIGroup.HasPermanentLodMember hold it. Runs before the driver exists; GetOnAgentAdded pins it as it joins.
+	protected void PinGroupLOD(SCR_MLDataCaptureGroupState state)
+	{
+		SCR_AIGroup group = state.m_Group;
+		if (!m_bPinDriverLOD || !group || state.m_bLODPinned)
+			return;
+
+		state.m_bLODPinned = true;
+		state.m_iImportanceBeforePin = group.GetImportance();
+		group.SetImportance(SCR_EAISpawnImportance.CRITICAL);
+
+		// The group is an AIAgent too and its behaviour tree runs the waypoints. PreventMaxLOD does not lift an agent
+		// that already is at max LOD, so step it down first (SCR_ResupplyTaskSolver.PreventMaxLOD, 1.8).
+		int maxLOD = AIAgent.GetMaxLOD();
+		if (group.GetLOD() == maxLOD)
+			group.SetLOD(maxLOD - 1);
+
+		group.PreventMaxLOD();
+		group.GetOnAgentAdded().Insert(OnDriverAgentAdded);
+		PinAgents(group);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void PinAgents(SCR_AIGroup group)
+	{
+		if (!group)
+			return;
+
+		array<AIAgent> agents = {};
+		group.GetAgents(agents);
+		foreach (AIAgent agent : agents)
+		{
+			if (agent)
+				agent.SetPermanentLOD(0);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroup.GetOnAgentAdded() handler of pinned groups; the invoker passes only the agent (SCR_AIGroup.OnAgentAdded).
+	protected void OnDriverAgentAdded(AIAgent agent)
+	{
+		if (agent)
+			agent.SetPermanentLOD(0);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Puts a temporary local observer on the group's vehicle. With an entity, x/z are a local offset, so 0, 0 is the
+	//! car itself (Game/generated/System/ObserversSystem.c). The ManualCamera is the only other observer, and once a
+	//! session starts SCR_MLScreenshotCapture attaches it to the first registered car.
+	protected void AddVehicleObserver(SCR_MLDataCaptureGroupState state)
+	{
+		if (!m_bVehicleObservers || state.m_bObserverAdded || !state.m_Vehicle)
+			return;
+
+		ObserversSystem observers = GetObserversSystem();
+		if (!observers)
+		{
+			Print(string.Format("[DataCapture] WARNING: group %1: no ObserversSystem in this world - no observer on %2, a car far from the camera may not be simulated", state.m_iGroupId, state.m_Vehicle.GetName()), LogLevel.WARNING);
+			return;
+		}
+
+		observers.InsertObserverSP(OBSERVER_KEY_BASE + state.m_iGroupId, 0, 0, state.m_Vehicle);
+		state.m_bObserverAdded = true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected ObserversSystem GetObserversSystem()
+	{
+		ArmaReforgerScripted game = GetGame();
+		if (!game)
+			return null;
+
+		ChimeraWorld world = ChimeraWorld.CastFrom(game.GetWorld());
+		if (!world)
+			return null;
+
+		return ObserversSystem.Cast(world.FindSystem(ObserversSystem));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Undoes PinGroupLOD (only with restoreLOD; not during world teardown) and removes the vehicle observer. Idempotent.
+	protected void ReleaseGroup(SCR_MLDataCaptureGroupState state, ObserversSystem observers, bool restoreLOD)
+	{
+		SCR_AIGroup group = state.m_Group;
+		if (state.m_bLODPinned)
+		{
+			state.m_bLODPinned = false;
+			if (group)
+			{
+				group.GetOnAgentAdded().Remove(OnDriverAgentAdded);
+				if (restoreLOD)
+				{
+					array<AIAgent> agents = {};
+					group.GetAgents(agents);
+					foreach (AIAgent agent : agents)
+					{
+						if (agent)
+							agent.SetPermanentLOD(-1);
+					}
+
+					group.AllowMaxLOD();
+					if (state.m_iImportanceBeforePin != -1)
+						group.SetImportance(state.m_iImportanceBeforePin);
+				}
+			}
+		}
+
+		if (state.m_bObserverAdded)
+		{
+			state.m_bObserverAdded = false;
+			if (observers)
+				observers.RemoveObserverSP(OBSERVER_KEY_BASE + state.m_iGroupId);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One-line diagnostics of a group: how its driver boarded, agent count, dormancy, whether an observer is within
+	//! 1 km, the group's LOD, per-agent LOD / max / permanent LOD / activation, and whether the pilot seat is taken.
+	protected string DescribeGroup(SCR_MLDataCaptureGroupState state)
+	{
+		string text = "boarding=" + typename.EnumToString(SCR_EMLDataCaptureBoarding, state.m_eBoarding);
+		SCR_AIGroup group = state.m_Group;
+		if (group)
+		{
+			text += string.Format(" agents=%1 dormant=%2 observer_1km=%3 group_lod=%4", group.GetAgentsCount(), group.IsDormant(), group.HasObserverInRange(1000), group.GetLOD());
+
+			array<AIAgent> agents = {};
+			group.GetAgents(agents);
+			foreach (AIAgent agent : agents)
+			{
+				if (agent)
+					text += string.Format(" [lod=%1/%2 perm=%3 active=%4]", agent.GetLOD(), AIAgent.GetMaxLOD(), agent.GetPermanentLOD(), agent.IsAIActivated());
+			}
+		}
+		else
+		{
+			text += " group=deleted";
+		}
+
+		bool pilot;
+		if (state.m_Vehicle)
+			pilot = state.m_Vehicle.GetPilot() != null;
+
+		return text + string.Format(" pilot=%1 lod_pin=%2 observer=%3", pilot, state.m_bLODPinned, state.m_bObserverAdded);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -663,7 +842,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		{
 			state.m_Driver = driver;
 			state.m_eBoarding = SCR_EMLDataCaptureBoarding.DIRECT;
-			Print(string.Format("[DataCapture] Group %1: driver spawned in the pilot seat of %2 (direct seating, attempt %3/%4)", state.m_iGroupId, vehicleName, state.m_iSeatAttemptsMade, m_iSeatAttempts), LogLevel.NORMAL);
+			if (state.m_bLODPinned)
+				PinAgents(state.m_Group);	// again after the join, in case the agent-added event came first
+
+			Print(string.Format("[DataCapture] Group %1: driver spawned in the pilot seat of %2 (direct seating, attempt %3/%4) %5", state.m_iGroupId, vehicleName, state.m_iSeatAttemptsMade, m_iSeatAttempts, DescribeGroup(state)), LogLevel.NORMAL);
 			StartDriving(state);
 			return;
 		}
@@ -706,7 +888,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		state.m_Driver = driver;
 		state.m_eBoarding = SCR_EMLDataCaptureBoarding.WALK_IN;
-		Print(string.Format("[DataCapture] WARNING: group %1: driver spawned on foot at %2 - it has to walk to %3 and get in (walk-in fallback)", state.m_iGroupId, state.m_SpawnPoint.GetName(), state.m_Vehicle.GetName()), LogLevel.WARNING);
+		if (state.m_bLODPinned)
+			PinAgents(state.m_Group);
+
+		Print(string.Format("[DataCapture] WARNING: group %1: driver spawned on foot at %2 - it has to walk to %3 and get in (walk-in fallback) %4", state.m_iGroupId, state.m_SpawnPoint.GetName(), state.m_Vehicle.GetName(), DescribeGroup(state)), LogLevel.WARNING);
 		StartDriving(state);
 	}
 
@@ -938,7 +1123,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 				if (!state.m_bSeatedLogged)
 				{
 					state.m_bSeatedLogged = true;
-					Print(string.Format("[DataCapture] Group %1: driver seated in %2 (first seen %3 s after the director start, boarding=%4)", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1), typename.EnumToString(SCR_EMLDataCaptureBoarding, state.m_eBoarding)), LogLevel.NORMAL);
+					Print(string.Format("[DataCapture] Group %1: driver seated in %2 (first seen %3 s after the director start) %4", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1), DescribeGroup(state)), LogLevel.NORMAL);
 				}
 			}
 
@@ -992,6 +1177,31 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			}
 
 			FinishReadiness(string.Format("[DataCapture] ERROR: readiness timeout after %1 s: %2/%3 drivers seated (groups without a seated driver:%4) - collector session NOT started", elapsedS.ToString(-1, 1), seated, m_iMaxAIGroups, notSeated));
+			LogMissingGroups(LogLevel.ERROR);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One line per configured group without a seated driver: why it failed to start, or its DescribeGroup state.
+	protected void LogMissingGroups(LogLevel level)
+	{
+		for (int groupId = 1; groupId <= m_iMaxAIGroups; groupId++)
+		{
+			SCR_MLDataCaptureGroupState state = FindGroup(groupId);
+			if (!state)
+			{
+				Print(string.Format("[DataCapture]   group %1: failed to start (see 'group %1 skipped')", groupId), level);
+				continue;
+			}
+
+			if (state.m_bDriverSeated)
+				continue;
+
+			string vehicleName = "deleted vehicle";
+			if (state.m_Vehicle)
+				vehicleName = state.m_Vehicle.GetName();
+
+			Print(string.Format("[DataCapture]   group %1 (%2): no seated driver, %3", groupId, vehicleName, DescribeGroup(state)), level);
 		}
 	}
 
@@ -1109,9 +1319,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		Print(string.Format("Director time: %1 min, groups: %2/%3, waypoints completed: %4", minutes.ToString(-1, 1), m_aGroups.Count(), m_iMaxAIGroups, m_iTotalWaypointsCompleted), LogLevel.NORMAL);
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			Print(string.Format("Group %1: distance=%2 m max_speed=%3 km/h waypoints=%4 stuck_resets=%5 target=%6 driver_seated=%7",
+			Print(string.Format("Group %1: distance=%2 m max_speed=%3 km/h waypoints=%4 stuck_resets=%5 target=%6 driver_seated=%7 %8",
 				state.m_iGroupId, state.m_fDistance.ToString(-1, 1), state.m_fMaxSpeed.ToString(-1, 1), state.m_iWaypointsCompleted,
-				state.m_iStuckResets, state.GetCurrentTargetId(), state.m_bDriverSeated), LogLevel.NORMAL);
+				state.m_iStuckResets, state.GetCurrentTargetId(), state.m_bDriverSeated, DescribeGroup(state)), LogLevel.NORMAL);
 		}
 		Print("==========================================", LogLevel.NORMAL);
 	}

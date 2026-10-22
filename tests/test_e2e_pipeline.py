@@ -32,56 +32,26 @@ def test_configuration():
 
 
 def test_data_loading(config):
-    """Test data loading with synthetic data."""
+    """Data loading on the dc-2.0 golden fixture through data/dc2/reader.py.
+
+    The invented telemetry.csv this test used to write (to /tmp, on the C: drive here) is gone (CR-109, DD-5-min):
+    it followed no writer's schema, and the legacy EnfusionDataset now refuses a CSV without its columns.
+    """
     print("\n=== Testing Data Loading ===")
-    from data.enfusion_loader import EnfusionDataset, EnfusionDatasetConfig
-
-    # Create synthetic test data directory (Enfusion session structure)
-    test_dir = "/tmp/drivedit_test_data"
-    session_dir = os.path.join(test_dir, "session_0001")
-    frames_dir = os.path.join(session_dir, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
-
-    # Create a minimal CSV file (telemetry.csv)
-    csv_path = os.path.join(session_dir, "telemetry.csv")
-    with open(csv_path, 'w') as f:
-        f.write("frame_id,timestamp,pos_x,pos_y,pos_z,rot_x,rot_y,rot_z,speed,steering,throttle,brake,gear,rpm\n")
-        for i in range(20):
-            f.write(f"{i},{i*0.2:.3f},{i*0.5},{0},{0},{0},{i*0.01},{0},{10+i*0.1},{0.1},{0.5},{0},{3},{2000}\n")
-
-    # Create dummy frame images
-    import numpy as np
-    for i in range(20):
-        img = np.random.randint(0, 255, (config.image_size, config.image_size, 3), dtype=np.uint8)
-        img_path = os.path.join(frames_dir, f"frame_{i:06d}.png")
-        try:
-            import cv2
-            cv2.imwrite(img_path, img)
-        except ImportError:
-            # Fallback: create empty file
-            with open(img_path, 'wb') as f:
-                f.write(b'\x00' * 1000)
-
-    # Test dataset creation with correct API
+    import importlib.util
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib.util.spec_from_file_location("dc2_reader", os.path.join(repo, "data", "dc2", "reader.py"))
+    reader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reader)
+    fixtures = os.path.join(repo, "tests", "fixtures", "capture_dc2")
     try:
-        dataset_config = EnfusionDatasetConfig(
-            sequence_length=4,
-            image_size=(config.image_size, config.image_size),
-            load_depth=False,
-            load_scene=False
-        )
-        dataset = EnfusionDataset(
-            data_root=test_dir,
-            config=dataset_config,
-            split="train"
-        )
-        print(f"  Dataset created with {len(dataset)} samples")
-
-        if len(dataset) > 0:
-            sample = dataset[0]
-            print(f"  Sample keys: {list(sample.keys())}")
-            if 'frames' in sample:
-                print(f"  Frames shape: {sample['frames'].shape}")
+        session = reader.open_session(
+            os.path.join(fixtures, "golden", "arland_T0b_20261025T091512Z_wb_i00_5e00"),
+            vehicle_card=os.path.join(fixtures, "cards", "S105_synthetic.json"))
+        valid = [d for d in session.decisions if d["masks"]["wm_valid"]]
+        image = session.load_image(valid[0]["obs_slot_id"])
+        print(f"  dc-2.0 golden: {len(session.decisions)} decision steps, {len(valid)} wm-valid, "
+              f"{len(session.segments)} segments, image {tuple(image.shape)}")
         print("  ✓ Data loading works")
         return True
     except Exception as e:

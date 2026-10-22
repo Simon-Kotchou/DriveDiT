@@ -1,0 +1,6 @@
+{
+  "variant": "reused_slot",
+  "fails": ["C35"],
+  "generate": "python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out <dir under /mnt/e or /dev/shm> --variant reused_slot",
+  "description": "from physics step 450 (episode 1) the ego entity id changes while ego_slot_id stays 1: a reused vehicle slot"
+}

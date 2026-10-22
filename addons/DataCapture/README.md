@@ -258,3 +258,5 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e20 | render-settings dump | < 1 s | `e20_settings.py <play_dir> [--compare <client play_dir>] [--profile-dir <dir>]` |
 | e19 | writer return values | < 5 s | `e19_write.py <play_dir>` |
 | e19kill | taskkill consistency (opt-in) | until killed, max 300 s | `e19_write.py [<e19 play_dir>] --kill <play_dir>` |
+| e01 | Mode A actuation identification | ~6 min | `e01_actuation.py e01 <play_dir>` |
+| e02a | first-pass steer -> kappa | ~10-15 min | `e01_actuation.py e02a <play_dir>` |

@@ -52,6 +52,46 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_sE20EngineModules "VideoUserSettings,DisplayUserSettings"
    m_sE20GameModules "SCR_VideoSettings"
   }
+  DC_ProbeSequences "{DC4A50B300000003}" {
+   m_vAreaStart 1495.4 0 2620
+   m_fAreaHeadingDeg 0.11
+   m_fAreaLengthM 1100
+   m_fAreaHalfWidthM 25
+   m_fAreaMarginM 3
+   m_fMaxAreaReliefM 5
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSpeedKp 0.08
+   m_fSpeedKi 0.02
+   m_fBrakeScale 0.5
+   m_fSpeedTolKmh 1
+   m_fMoveCheckThrottle 0.5
+   m_fMoveCheckS 5
+   m_fMoveCheckMinKmh 3
+   m_fPrbsAmplitude 0.3
+   m_fPrbsSpeedKmh 20
+   m_fPrbsBitS 0.2
+   m_iPrbsOrder 7
+   m_iPrbsSeed 1
+   m_fReversalAmplitude 0.3
+   m_fReversalPeriodS 2
+   m_iReversalCount 6
+   m_sThrottleSteps "0.3,0.6,1.0"
+   m_fThrottleHoldS 6
+   m_fBrakeFromKmh 40
+   m_sBrakeSteps "0.3,0.6,1.0"
+   m_fGearObserveThrottle 0.7
+   m_fGearObserveS 15
+   m_sGearSequence "2,3,4,3,2"
+   m_fGearHoldS 3
+   m_fGearScriptedThrottle 0.4
+   m_fGearClutchDipS 0
+   m_sE02aGrid "15:-0.5,-0.25,0.1,0.25,0.5;30:-0.25,-0.12,0.05,0.12,0.25;50:-0.12,-0.06,0.03,0.06,0.12"
+   m_fE02aReachS 25
+   m_fE02aHoldS 8
+   m_fE02aMaxTurnDeg 330
+   m_iAssumedSteerSign -1
+  }
  }
  coords 2759.086 80.111 1664.452
  m_bAllowFactionChange 0

@@ -32,3 +32,4 @@ script src/enfusion/datacapture/DC_LaunchGuard.c
 script src/enfusion/datacapture/DC_ProbeCsv.c
 script src/enfusion/datacapture/DC_ProbeRunner.c
 script src/enfusion/datacapture/DC_ProbeEngine.c
+script src/enfusion/datacapture/DC_ProbeSequences.c

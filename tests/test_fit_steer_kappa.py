@@ -74,7 +74,9 @@ class Truth:
     gain(v) x c(t - delay) + offset with a first-order lag tau; a longitudinal dead time; throttle 3 m/s2 per unit,
     brake 8 m/s2 per unit; an automatic gearbox that shifts up every 20 km/h (input gear 3, 4, 5, 6)."""
 
-    def __init__(self, steer_sign=-1, delay=4, tau=0.1, offset=0.001, long_delay=6):
+    def __init__(self, steer_sign=-1, delay=4, tau=0.1, offset=0.001, long_delay=6, input_rate=None):
+        self.input_rate = input_rate      # an engine-side steering rate limit on the input [1/s], None = echo
+        self.steer_input = 0.0
         self.steer_sign = steer_sign
         self.delay = delay
         self.alpha = 1.0 - math.exp(-DT / tau)
@@ -95,7 +97,12 @@ class Truth:
     def run(self, phase, segment, n, steer=0.0, throttle=0.0, brake=0.0, gear=-1, handbrake=False, hold=-1.0,
             speed=None):
         self.step += 1
-        self.steer_hist.append(steer)
+        if self.input_rate is None:
+            self.steer_input = steer
+        else:
+            limit = self.input_rate * DT
+            self.steer_input += max(-limit, min(limit, steer - self.steer_input))
+        self.steer_hist.append(self.steer_input)
         self.long_hist.append((throttle, brake, handbrake))
         delayed = self.steer_hist[-1 - self.delay] if len(self.steer_hist) > self.delay else 0.0
         thr, brk, hb = self.long_hist[-1 - self.long_delay] if len(self.long_hist) > self.long_delay else (0, 1, True)
@@ -123,7 +130,7 @@ class Truth:
             "cmd_handbrake": int(handbrake), "speed_hold_kmh": "%.3f" % hold,
             "input_pre_steer": "%.4f" % steer, "input_pre_throttle": "%.4f" % throttle,
             "input_pre_brake": "%.4f" % brake, "input_pre_clutch": "1.0000", "input_pre_gear": cur,
-            "input_pre_handbrake": int(handbrake), "input_post_steer": "%.4f" % steer,
+            "input_pre_handbrake": int(handbrake), "input_post_steer": "%.4f" % self.steer_input,
             "input_post_throttle": "%.4f" % throttle, "input_post_brake": "%.4f" % brake,
             "input_post_clutch": "1.0000", "input_post_gear": cur, "input_post_handbrake": int(handbrake),
             "cur_gear": cur, "fut_gear": cur, "rpm": "%.1f" % (900 + 40 * kmh), "engine_on": 1,
@@ -136,10 +143,10 @@ class Truth:
         return kmh
 
 
-def header(probe, build_key="bk-test-1", pin="1.8.0.13", map_id="arland"):
+def header(probe, build_key="bk-test-1", pin="1.8.0.13", map_id="arland", prefab=None):
     return {"schema": "dc-probe-run/1", "probe": probe, "launch.id": LAUNCH_ID, "launch.pin_id": pin,
             "launch.build_key": build_key, "engine.fixed_time_slice_s": "%.6f" % DT, "world.map_id": map_id,
-            "ego.prefab": fit.PREFABS["S105"], "params.dt_s": "%.6f" % DT}
+            "ego.prefab": prefab or fit.PREFABS["S105"], "params.dt_s": "%.6f" % DT}
 
 
 FOOTER = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
@@ -237,7 +244,10 @@ def build_e01(play_dir, truth, **head):
         "e01_steps": (STEP_COLUMNS, truth.rows), "e01_phases": (PHASE_COLUMNS, phases)}, FOOTER)
 
 
-def build_e02a(play_dir, truth, starve_speed=None, **head):
+def build_e02a(play_dir, truth, starve_speed=None, starved=(), **head):
+    """Cells at 15/30/50 km/h x 5 levels. A starved cell (every cell from the third on at starve_speed, and the
+    (km/h, level index) pairs of starved) never reaches its speed: as DC_ProbeSequences writes it, no excite segment,
+    an empty excite_start_step and result no_speed."""
     grid = {15: (-0.5, -0.25, 0.1, 0.25, 0.5), 30: (-0.25, -0.12, 0.05, 0.12, 0.25),
             50: (-0.12, -0.06, 0.03, 0.06, 0.12)}
     cells = []
@@ -251,19 +261,20 @@ def build_e02a(play_dir, truth, starve_speed=None, **head):
             for _ in range(30):
                 truth.run(name, "settle", n, brake=1.0, handbrake=True)
                 n += 1
-            starved = kmh == starve_speed and i >= 2
-            hold = kmh - 5 if starved else kmh
+            no_speed = (kmh == starve_speed and i >= 2) or (kmh, i) in starved
             for _ in range(90):
-                truth.run(name, "accel", n, throttle=0.3, hold=kmh, speed=hold / 3.6)
+                truth.run(name, "accel", n, throttle=0.3, hold=kmh, speed=(kmh - 5 if no_speed else kmh) / 3.6)
                 n += 1
-            excite = truth.step + 1
-            for _ in range(480):
-                truth.run(name, "excite", n, steer=steer, throttle=0.2, hold=kmh, speed=hold / 3.6)
-                n += 1
+            excite = None
+            if not no_speed:
+                excite = truth.step + 1
+                for _ in range(480):
+                    truth.run(name, "excite", n, steer=steer, throttle=0.2, hold=kmh, speed=kmh / 3.6)
+                    n += 1
             truth.run(name, "stop", n, brake=1.0, speed=0.0)
             cells.append({"cell_idx": idx, "target_kmh": "%.3f" % kmh, "steer": "%.4f" % steer, "start_step": start,
                           "excite_start_step": excite, "end_step": truth.step,
-                          "result": "no_speed" if starved else "ok", "note": ""})
+                          "result": "no_speed" if no_speed else "ok", "note": ""})
     probe_common.write_synthetic_play(play_dir, header("e02a", **head), {
         "e02a_steps": (STEP_COLUMNS, truth.rows), "e02a_cells": (CELL_COLUMNS, cells)}, FOOTER)
 
@@ -409,7 +420,7 @@ class FitTests(unittest.TestCase):
         self.assertAlmostEqual(lon["brake"]["per_mps2"], 1.0 / 8.0, delta=0.02)
         self.assertEqual(lon["throttle"]["delay_steps"], 6)
         self.assertEqual(card["llc_v1"]["throttle_per_mps2"], lon["throttle"]["per_mps2"])
-        self.assertEqual(card["llc_v1"]["steer_rate_per_s"], fit.LLC_DEFAULT_RATE)
+        self.assertEqual(card["llc_v1"]["steer_rate_per_s"], 0.0)
         self.assertEqual(card["gearbox"]["mode"], "automatic")
         self.assertEqual(card["gear_indices_forward"], [3, 4, 5, 6])
         self.assertIsNone(card["gear_index_neutral"])
@@ -428,6 +439,36 @@ class FitTests(unittest.TestCase):
         self.assertEqual(card["signs"]["steer_sign"], 1)
         for v, g in zip(card["kappa_ss"]["speeds_mps"], card["kappa_ss"]["kappa_per_steer"]):
             self.assertAlmostEqual(g, gain(v), delta=0.02 * gain(v))
+
+    def test_engine_rate_limit_is_identified(self):
+        e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_09")
+        e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_09")
+        build_e01(e01, Truth(input_rate=1.0))
+        build_e02a(e02a, Truth(input_rate=1.0))
+        out = os.path.join(self.tmp, "limited.json")
+        code, text = run_fit(["--e01", e01, "--e02a", e02a, "--out", out])
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            card = json.load(f)
+        raw = card["actuator"]["raw_engine_path"]
+        self.assertFalse(raw["input_echo"])
+        self.assertAlmostEqual(raw["steer_rate_limit_per_s"], 1.0, delta=0.01)
+        self.assertEqual(card["llc_v1"]["steer_rate_per_s"], 0.0)       # the identity: never stacks (CC-08)
+
+    def test_a_cell_that_never_reached_its_speed(self):
+        e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_10")
+        build_e02a(e02a, Truth(), starved={(30, 4)})
+        out = os.path.join(self.tmp, "one_failed_cell.json")
+        code, text = run_fit(["--e01", self.e01, "--e02a", e02a, "--out", out])
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            card = json.load(f)
+        fits = {f["target_kmh"]: f["valid_cells"] for f in card["kappa_ss"]["fits"]}
+        self.assertEqual(fits, {15.0: 5, 30.0: 4, 50.0: 5})
+        failed = [c for c in card["kappa_ss"]["cells"] if c["result"] == "no_speed"]
+        self.assertEqual(len(failed), 1)
+        self.assertNotIn("valid", failed[0])
+        self.assertEqual(len(card["actuator"]["raw_engine_path"]["bins"]), 1 + 14)    # PRBS + the cells with a step
 
     def test_build_key_comes_from_the_headers_or_the_argument(self):
         e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_03")
@@ -449,6 +490,22 @@ class FitTests(unittest.TestCase):
         code, text = run_fit(["--e01", self.e01, "--e02a", e02a])
         self.assertEqual(code, 2, text)
         self.assertIn("one pin", text)
+
+    def test_plays_of_two_vehicles_are_refused(self):
+        e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_08")
+        build_e02a(e02a, Truth(), prefab="{259EE7B78C51B624}Prefabs/Vehicles/Wheeled/UAZ469/UAZ469.et")
+        code, text = run_fit(["--e01", self.e01, "--e02a", e02a])
+        self.assertEqual(code, 2, text)
+        self.assertIn("one vehicle", text)
+
+    def test_scripted_gearbox_arguments_are_checked(self):
+        args = type("Args", (), {"scripted_gears": "3,4,5", "upshift_mps": "5,10", "downshift_mps": "4,8"})()
+        self.assertEqual(fit.scripted_gearbox(args, [3, 4, 5, 6]), ([3, 4, 5], [5.0, 10.0], [4.0, 8.0]))
+        for gears, up, down in (("3,4,5", "5", "4"), ("3,4", "5", "6"), ("3,4,5", "10,5", "4,3"), ("3,9", "5", "4"),
+                                ("3,x", "5", "4")):
+            bad = type("Args", (), {"scripted_gears": gears, "upshift_mps": up, "downshift_mps": down})()
+            with self.assertRaises(fit.Refusal, msg=(gears, up, down)):
+                fit.scripted_gearbox(bad, [3, 4, 5, 6])
 
     def test_unusable_e02a_is_refused(self):
         e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_05")
@@ -505,8 +562,8 @@ class FitTests(unittest.TestCase):
             self.assertTrue(text.endswith("}\n"))
             text.encode("ascii")
             card = json.loads(text)
-            for key in fit.ENGINE_ARRAY_KEYS:
-                self.assertEqual(text.count('"%s":' % key), 1, key)
+            for key in fit.ENGINE_SCANNED_KEYS:
+                self.assertEqual(text.count('"%s"' % key), 1, key)         # DC_JsonScan.FindValue's rule
             self.assertEqual(scan_numbers(text, "speeds_mps"), card["kappa_ss"]["speeds_mps"])
             self.assertEqual(scan_numbers(text, "kappa_per_steer"), card["kappa_ss"]["kappa_per_steer"])
             self.assertEqual(scan_numbers(text, "kappa_offset"), card["kappa_ss"]["kappa_offset"])
@@ -530,11 +587,14 @@ class FitTests(unittest.TestCase):
         self.assertEqual(sorted(re.findall(r'ReadContextNumber\(context, "(\w+)"', body)), sorted(LLC_KEYS))
         arrays = re.findall(r'DC_JsonScan\.ReadNumbers\(text, "(\w+)"', source)
         self.assertEqual(sorted(arrays), sorted(fit.ENGINE_ARRAY_KEYS))
+        scanned = re.findall(r'DC_JsonScan\.(?:ReadStrings|IsNull)\(text, "(\w+)"', source)
+        self.assertEqual(sorted(scanned), sorted(set(fit.ENGINE_SCANNED_KEYS) - set(fit.ENGINE_ARRAY_KEYS)))
         with open(CARD, "r", encoding="ascii") as f:
             card = json.load(f)
         for key in re.findall(r'context\.ReadValue\("(\w+)"', source.split("class DC_VehicleCard", 1)[1].split(
                 "class DC_LLCv1", 1)[0]):
-            self.assertTrue(key in card or key in card["signs"] or key in card["gearbox"], key)
+            self.assertTrue(key in card or key in card["signs"] or key in card["gearbox"]
+                            or key in card["actuator"]["raw_engine_path"], key)
 
     def test_enforce_sha256(self):
         with open(LLC_SOURCE, "r", encoding="ascii") as f:

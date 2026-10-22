@@ -693,7 +693,6 @@ class DC_ExpertDriver : DC_DriverInterface
 	// episode
 	protected bool m_bInEpisode;
 	protected int m_iEpisodes;
-	protected int m_iEpisodeId = -1;
 	protected int m_iEpisodeStartMs;
 	protected int m_iLastEndMs = -1;
 	protected int m_iDecisionStep = -1;
@@ -834,7 +833,6 @@ class DC_ExpertDriver : DC_DriverInterface
 		info.m_fStyleAlatMaxMps2 = m_fAlatMaxMps2;
 
 		m_bInEpisode = true;
-		m_iEpisodeId = episodeId;
 		m_iEpisodeStartMs = now;
 		m_iDecisionStep = -1;
 		m_iSlowSinceMs = -1;
@@ -1047,7 +1045,7 @@ class DC_ExpertDriver : DC_DriverInterface
 			return false;
 		}
 
-		m_sUseClass = DC_LLCv1.ReadUseClass(pinId, failure);
+		m_sUseClass = DC_LLCv1.ReadUseClass(pinId, ctx.GetBuildKey(), failure);
 		if (m_sUseClass.IsEmpty())
 		{
 			failure = "use_class unknown: " + failure + " (a placeholder card needs a qualification use_class)";

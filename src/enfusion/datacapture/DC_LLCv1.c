@@ -23,8 +23,9 @@
 //              forward-only (the core fails the session first); llc_v1 brakes.
 //   gearbox    the card's gearbox mode (E-04 / E-01): "automatic" = no SetGear and clutch 1 (llc_gear and llc_clutch
 //              empty), as the probe kit's speed hold; "scripted" = SetGear every step to the card's forward gears
-//              by speed with hysteresis, clutch 1. Forward gears only: no neutral or reverse logic until their
-//              indices are measured (TBD-7).
+//              by speed with hysteresis, clutch 1; every scripted gear must be one of the card's measured
+//              gear_indices_forward. Forward gears only: no neutral or reverse logic until their indices are
+//              measured (TBD-7).
 //
 // VEHICLE CARD (tools/ident/cards/<pin_id>/<vehicle>.json in the repo, deployed to Configs/ident/cards/; r3 scope note)
 //   - loaded once per session (DC_VehicleCard.Load); its sha256 (over the file bytes, the value the DD-5-min reader
@@ -35,16 +36,18 @@
 //     probe), refused at any other use_class, production included; status "identified" needs the identification
 //     session ids and a build_key;
 //   - limiter rule (CC-08, M3): llc's own rate limiter is the identity or strictly slower than the engine's
-//     identified steering rate limit, so the two never stack; the card stores the identified actuator structure
-//     (raw engine path and full llc path, per speed and amplitude bin), llc_v1 reads only what it needs.
+//     identified steering rate limit, so the two never stack; an identified engine path that shapes the input
+//     (input_echo false) without an identified limit allows only the identity. The card stores the identified
+//     actuator structure (raw engine path and full llc path, per speed and amplitude bin); llc_v1 reads only what it
+//     needs. The first-pass fit writes the identity limiter.
 //
 // PROVENANCE: llc_sha = sha256 of this source file as deployed (DC_Sha256 over its bytes; DC_ExpertDriver reads it),
 // so session.json control.llc_sha names the exact controller; VERSION is "llc_v1".
 //
 // HELPERS: DC_Sha256 (FIPS 180-4 over ASCII text; Enforce has no hash API with a published algorithm, string.Hash()
-// is an engine hash), DC_TextFile (whole-file reads, 7-bit ASCII only), DC_JsonScan (flat number arrays of a JSON
-// text: JsonLoadContext reads the scalar keys, but its handling of JSON number arrays is not verified on 1.8, so the
-// arrays are scanned with string.ToFloat and checked by the caller).
+// is an engine hash), DC_TextFile (whole-file reads, 7-bit ASCII only), DC_JsonScan (flat number and plain-string
+// arrays and null values of a JSON text: JsonLoadContext reads the scalar keys, but its handling of JSON arrays and
+// of null is not verified on 1.8, so those are scanned with string APIs and checked by the caller).
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -334,6 +337,7 @@ class DC_JsonScan
 	static const int CHAR_LF = 10;
 	static const int CHAR_CR = 13;
 	static const int CHAR_SPACE = 32;
+	static const int CHAR_QUOTE = 34;
 	static const int CHAR_COMMA = 44;
 	static const int CHAR_COLON = 58;
 	static const int CHAR_OPEN = 91;		//!< '['
@@ -445,6 +449,66 @@ class DC_JsonScan
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! "key": ["text", ...] of plain strings (no escape sequences; an empty array gives none). false (failure) when
+	//! the key is missing or repeated, or the value is not such an array
+	static bool ReadStrings(string text, string key, notnull array<string> values, out string failure)
+	{
+		values.Clear();
+		int index = FindValue(text, key);
+		if (index < 0 || !Expect(text, index, CHAR_OPEN, index))
+		{
+			failure = "\"" + key + "\" is missing, repeated or not an array";
+			return false;
+		}
+
+		int after;
+		if (Expect(text, index, CHAR_CLOSE, after))
+		{
+			failure = string.Empty;
+			return true;
+		}
+
+		while (true)
+		{
+			int close = -1;
+			if (Expect(text, index, CHAR_QUOTE, index))
+				close = text.IndexOfFrom(index, "\"");
+
+			string item;
+			if (close >= 0)
+				item = text.Substring(index, close - index);
+
+			if (close < 0 || item.Contains("\\"))
+			{
+				failure = string.Format("\"%1\" item %2 is not a plain string", key, values.Count());
+				return false;
+			}
+
+			values.Insert(item);
+			index = close + 1;
+			if (Expect(text, index, CHAR_CLOSE, index))
+				break;
+
+			if (!Expect(text, index, CHAR_COMMA, index))
+			{
+				failure = string.Format("\"%1\" item %2 is not followed by ',' or ']'", key, values.Count() - 1);
+				return false;
+			}
+		}
+
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true when "key" occurs once and its value is the literal null
+	static bool IsNull(string text, string key)
+	{
+		int index = FindValue(text, key);
+		return index >= 0 && index + 4 <= text.Length() && text.Substring(index, 4) == "null";
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! A JSON number of an open JsonLoadContext object as float: written as a decimal or as an integer (the
 	//! DC_Session.ReadNumber rule)
 	static bool ReadContextNumber(notnull JsonLoadContext context, string key, out float value)
@@ -488,6 +552,9 @@ class DC_VehicleCard
 	bool m_bSignsMeasured;
 	string m_sGearbox;					//!< automatic or scripted (E-04 / E-01)
 	float m_fEngineSteerRateLimit;		//!< identified engine steering rate limit [1/s]; <= 0 = none (or unknown on a placeholder)
+	bool m_bInputEchoKnown;				//!< actuator.raw_engine_path.input_echo is true or false (null on a placeholder)
+	bool m_bInputEcho;					//!< the engine passes the steering input through unchanged (E-01)
+	ref array<float> m_aForwardGears = {};	//!< gear_indices_forward (E-01; empty on a placeholder)
 
 	// kappa_ss: steady-state curvature per contract steer by speed (E-02a)
 	ref array<float> m_aSpeedsMps = {};
@@ -548,13 +615,15 @@ class DC_VehicleCard
 			return false;
 		}
 
+		// build_key null (a placeholder) and the session ids by the scanner: how JsonLoadContext reads a JSON null
+		// into a string, or an array of strings, is not verified on 1.8
 		string buildKey;
-		if (context.DoesKeyExist("build_key") && context.ReadValue("build_key", buildKey))
+		if (!DC_JsonScan.IsNull(text, "build_key") && context.DoesKeyExist("build_key") && context.ReadValue("build_key", buildKey))
 			m_sBuildKey = buildKey.Trim();
 
-		if (!context.ReadValue("identification_sessions", m_aSessions))
+		if (!DC_JsonScan.ReadStrings(text, "identification_sessions", m_aSessions, failure))
 		{
-			failure = path + ": identification_sessions must be an array of session ids";
+			failure = path + ": " + failure;
 			return false;
 		}
 
@@ -592,7 +661,11 @@ class DC_VehicleCard
 		if (!DC_JsonScan.ReadNumbers(text, "upshift_mps", m_aUpshiftMps, failure))
 			return false;
 
-		return DC_JsonScan.ReadNumbers(text, "downshift_mps", m_aDownshiftMps, failure);
+		if (!DC_JsonScan.ReadNumbers(text, "downshift_mps", m_aDownshiftMps, failure))
+			return false;
+
+		m_bInputEchoKnown = !DC_JsonScan.IsNull(text, "input_echo");
+		return DC_JsonScan.ReadNumbers(text, "gear_indices_forward", m_aForwardGears, failure);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -626,7 +699,8 @@ class DC_VehicleCard
 			return false;
 		}
 
-		// actuator.raw_engine_path.steer_rate_limit_per_s: a number, or null when none was found (or unknown)
+		// actuator.raw_engine_path: steer_rate_limit_per_s a number, or null when none was found (or unknown);
+		// input_echo true, false, or null when unknown
 		m_fEngineSteerRateLimit = 0;
 		if (context.StartObject("actuator"))
 		{
@@ -635,6 +709,9 @@ class DC_VehicleCard
 				float limit;
 				if (DC_JsonScan.ReadContextNumber(context, "steer_rate_limit_per_s", limit))
 					m_fEngineSteerRateLimit = limit;
+
+				if (m_bInputEchoKnown && !context.ReadValue("input_echo", m_bInputEcho))
+					m_bInputEchoKnown = false;
 
 				context.EndObject();
 			}
@@ -782,6 +859,16 @@ class DC_VehicleCard
 			}
 		}
 
+		// forward-only (TBD-7): every scripted gear is a measured forward gear index, never neutral or reverse
+		foreach (float gear : m_aScriptedGears)
+		{
+			if (gear < 0 || gear != Math.Round(gear) || m_aForwardGears.Find(gear) < 0)
+			{
+				failure = string.Format("scripted gear %1 is not one of gear_indices_forward (the forward gears E-01 measured)", gear);
+				return false;
+			}
+		}
+
 		failure = string.Empty;
 		return true;
 	}
@@ -886,19 +973,30 @@ class DC_LLCv1
 			return false;
 		}
 
+		// an engine path that shapes the input without an identified limit leaves only the identity
+		if (!card.IsPlaceholder() && card.m_bInputEchoKnown && !card.m_bInputEcho && card.m_fEngineSteerRateLimit <= 0 && card.m_fSteerRatePerS > 0)
+		{
+			failure = "the engine shapes the steering input (input_echo false) but no limit was identified: llc steer_rate_per_s must be 0 (the identity)";
+			return false;
+		}
+
 		failure = string.Empty;
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! use_class of this session's launch record, read as DC_LaunchGuard reads it (the driver context does not carry
-	//! it): the -dcLaunchId record, else (Workbench escape) the newest record of this exe. Empty (failure) when no
-	//! record can be read or the record names another pin than the session
-	static string ReadUseClass(string sessionPinId, out string failure)
+	//! it): the -dcLaunchId record, else (Workbench escape) the newest record of this exe, which must not be younger
+	//! than this Workbench start (the guard's G15: a record written later belongs to another start and could carry
+	//! another class than the one session.json is stamped with). Empty (failure) when no record can be read, it names
+	//! another pin or build_key than the session, or the escape record is younger than the process. The exact record
+	//! needs DC_DriverContext.GetUseClass() (an interface addition for the T0-MIN integration)
+	static string ReadUseClass(string sessionPinId, string sessionBuildKey, out string failure)
 	{
 		string launchId;
 		string path;
-		if (System.GetCLIParam(DC_LaunchGuard.CLI_LAUNCH_ID, launchId) && DC_LaunchGuard.IsValidLaunchId(launchId.Trim()))
+		bool cli = System.GetCLIParam(DC_LaunchGuard.CLI_LAUNCH_ID, launchId) && DC_LaunchGuard.IsValidLaunchId(launchId.Trim());
+		if (cli)
 			path = DC_LaunchGuard.LAUNCH_DIR + "/launch_" + launchId.Trim() + ".json";
 		else
 			path = DC_LaunchGuard.FindNewestLaunchRecord(DC_LaunchGuard.GetExpectedExe());
@@ -910,9 +1008,17 @@ class DC_LLCv1
 			return string.Empty;
 		}
 
-		if (info.m_sPinId != sessionPinId)
+		if (info.m_sPinId != sessionPinId || info.m_sBuildKey != sessionBuildKey)
 		{
-			failure = "launch record " + path + " names pin " + info.m_sPinId + ", the session " + sessionPinId;
+			failure = "launch record " + path + " names pin " + info.m_sPinId + " build_key '" + info.m_sBuildKey + "', the session " + sessionPinId + " '" + sessionBuildKey + "'";
+			return string.Empty;
+		}
+
+		int recordUnix = DC_LaunchGuard.UtcTextToUnix(info.m_sRecordUtc);
+		int processStartUnix = System.GetUnixTime() - System.GetTickCount() / 1000;
+		if (!cli && (recordUnix < 0 || recordUnix - processStartUnix > DC_LaunchGuard.LAUNCH_CLOCK_SLACK_S))
+		{
+			failure = "the newest launch record " + path + " was written after this Workbench started (utc '" + info.m_sRecordUtc + "'): it is not this session's";
 			return string.Empty;
 		}
 

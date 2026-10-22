@@ -22,14 +22,16 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
                excite within 1 km/h of the target, |a_lat| <= 4 m/s2; e01_actuation.cell_kappa / fit_line), at the mean
                steady speed of the cells; a > 0 required. usable = every speed has >= 3 valid cells and R2 >= 0.9 (the
                probe kit's E-02a criterion; E-02Q at T3 is the real qualification).
+  vehicle      every play drove the same ego prefab (run header ego.prefab), the card's vehicle when it is known.
   actuator     the CC-08 structure of the raw engine path (MIGRATION_1_9 6.1; first pass, one build):
                  E-01 PRBS (20 km/h, amplitude 0.3): competing structures pure delay (kappa = G c(t - d) + b) and delay
                  + first order (time constant tau), each fitted on the first half of the excite and scored on the
                  held-out second half; the lower held-out error wins (BIC breaks a tie within 1 %);
                  E-02a cells (one bin per speed and amplitude): the step response of the cell (steer 0 -> s at the
                  excite start) with both structures, chosen by BIC;
-               input_echo = input_pre_steer equals cmd_steer (+-1e-3) on every step after a command change; otherwise
-               the largest input_post_steer change per second is recorded as the engine steering rate limit. The full
+               input_echo = input_pre_steer and input_post_steer equal cmd_steer (+-1e-3) on every step whose command
+               was held; otherwise the largest input_post_steer change per second while it still lags its command is
+               recorded as the engine steering rate limit (a rate limit, or a lag's initial slope). The full
                llc path (kappa target -> kappa realised) needs llc_v1 sessions and stays null here (CC-08, DD-7-ident).
   longitudinal throttle_per_mps2 and brake_per_mps2 = 1 / the slope through the origin of the acc_l_z response to the
                E-01 throttle and brake steps (after their onset delay: throttle while below 15 km/h, brake while above
@@ -37,16 +39,17 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
   gearbox      "automatic" when E-01's gear_observe shifts up by itself (the e01_actuation.py rule), else "scripted",
                which needs --scripted-gears / --upshift-mps / --downshift-mps (forward gears only, TBD-7);
                gear_indices_forward = the input_post_gear values seen while driving forward (>= 5 km/h); neutral and
-               reverse stay null (forward-only until a probe measures them).
+               reverse stay null (forward-only until a probe measures them); scripted gears must be among them.
   llc_v1       the controller parameters of DC_LLCv1 (LLC_DEFAULTS) with the fitted throttle and brake gains; the llc
-               rate limiter is strictly slower than an identified engine limit (CC-08 rule), else 4 /s.
+               steering rate limiter is the identity (CC-08: it never stacks with an engine limit).
 
 THE CARD (drivedit.vehicle_card/1): card_id, vehicle, prefab, status (identified | placeholder), pin_id, build_key,
 identification_sessions (<probe>/<launch_id>/<play>), signs, gear_indices_forward / gear_index_neutral /
 gear_index_reverse (read by the DD-5-min reader for dir_state), gearbox, kappa_ss, actuator {raw_engine_path,
 full_llc_path}, longitudinal, llc_v1, mode_a, fit. llc_v1 (DC_VehicleCard) reads signs, gearbox.mode, the kappa_ss and
-gearbox arrays, actuator.raw_engine_path.steer_rate_limit_per_s and llc_v1; the arrays it scans by key name
-(ENGINE_ARRAY_KEYS) occur once in the file, and no number uses an exponent (string.ToFloat).
+gearbox arrays, actuator.raw_engine_path.steer_rate_limit_per_s and llc_v1; the keys it scans by name
+(ENGINE_SCANNED_KEYS: the number arrays, identification_sessions and build_key) occur once in the file, and no
+number uses an exponent (string.ToFloat).
 
 An identified card needs complete plays (run_footer status complete) of one pin and one build_key (from the run
 headers, or --build-key when the headers carry none: dd-launch/1), a usable E-02a fit and every identification above;
@@ -78,7 +81,9 @@ CARD_SCHEMA = "drivedit.vehicle_card/1"
 CARDS_DIR = os.path.join(REPO, "tools", "ident", "cards")
 DEFAULT_VEHICLE = "S105"
 PREFABS = {"S105": "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et"}
-ENGINE_ARRAY_KEYS = ("speeds_mps", "kappa_per_steer", "kappa_offset", "scripted_gears", "upshift_mps", "downshift_mps")
+ENGINE_ARRAY_KEYS = ("speeds_mps", "kappa_per_steer", "kappa_offset", "scripted_gears", "upshift_mps", "downshift_mps",
+                     "gear_indices_forward")
+ENGINE_SCANNED_KEYS = ENGINE_ARRAY_KEYS + ("identification_sessions", "build_key", "input_echo")
 
 # E-02a "usable" criterion and steady window: the probe kit's defaults (e01_actuation.py analyse_e02a)
 MIN_CELLS = 3
@@ -98,14 +103,12 @@ THROTTLE_FIT_MAX_KMH = 15.0
 BRAKE_FIT_MIN_KMH = 3.0
 LONG_MAX_LAG_STEPS = 120
 GEAR_MIN_SHARE = 0.01
-LLC_DEFAULT_RATE = 4.0          # llc steering rate limiter [1/s] when the engine shows none
-LLC_RATE_MARGIN = 0.8           # llc rate = this x an identified engine limit (strictly slower, CC-08)
 
 # Controller parameters of llc_v1 that are not identified (versioned with DC_LLCv1.c; tuned on the scratch
 # simulation of DD7_IMPL.md, to be re-checked on the first T0-MIN loop sessions)
 LLC_DEFAULTS = (
     ("steer_max", 1.0),
-    ("steer_rate_per_s", LLC_DEFAULT_RATE),
+    ("steer_rate_per_s", 0.0),         # the identity: never stacks with an engine limit (CC-08); DD-7-ident may slow it
     ("steer_lag_tau_s", 0.03),
     ("kappa_trim_gain", 0.0),
     ("kappa_trim_max", 0.1),
@@ -184,6 +187,39 @@ def session_id(play):
     if not launch_id:
         raise Refusal("%s: run header has no launch.id" % play.dir)
     return "%s/%s/%s" % (play.probe, launch_id, os.path.basename(play.dir))
+
+
+def vehicle_prefab(plays, vehicle):
+    """The one ego prefab every play drove (run header ego.prefab), the vehicle's when it is known."""
+    prefabs = sorted({p.header.get("ego.prefab", "") for p in plays})
+    if len(prefabs) != 1 or not prefabs[0]:
+        raise Refusal("the plays drove the ego prefabs %s: a card is fitted from one vehicle" % prefabs)
+    expected = PREFABS.get(vehicle)
+    if expected and prefabs[0] != expected:
+        raise Refusal("the plays drove %s, card %s is %s" % (prefabs[0], vehicle, expected))
+    return prefabs[0]
+
+
+def scripted_gearbox(args, forward):
+    """(gears, upshift, downshift) of --scripted-gears / --upshift-mps / --downshift-mps, checked as llc_v1 checks a
+    card (DC_VehicleCard.CheckGearbox): n >= 1 forward gears, n - 1 up and down shift speeds, down < up, up
+    increasing; every gear one the plays drove forward in."""
+    try:
+        gears = [int(v) for v in args.scripted_gears.split(",")]
+        up = [float(v) for v in args.upshift_mps.split(",") if v.strip()]
+        down = [float(v) for v in args.downshift_mps.split(",") if v.strip()]
+    except ValueError as e:
+        raise Refusal("scripted gearbox arguments: %s" % e)
+    ok = gears and len(up) == len(gears) - 1 and len(down) == len(gears) - 1
+    ok = ok and all(d < u for d, u in zip(down, up)) and all(b > a for a, b in zip(up, up[1:]))
+    if not ok:
+        raise Refusal("scripted gearbox: n >= 1 gears, n - 1 upshift and downshift speeds, downshift < upshift, "
+                      "upshifts increasing (got %s / %s / %s)" % (gears, up, down))
+    unseen = [g for g in gears if g not in forward]
+    if unseen:
+        raise Refusal("scripted gears %s were not seen while driving forward (gear_indices_forward %s)"
+                      % (unseen, forward))
+    return gears, up, down
 
 
 def build_identity(plays, build_key_arg):
@@ -366,24 +402,28 @@ def fit_prbs(steps, steer_sign, dt):
 
 
 def input_rate(steps, dt):
-    """(input_echo, steer_rate_limit_per_s): input_pre_steer (read right after the setter) vs cmd_steer on every step;
-    a non-echo input's largest input_post_steer change per second."""
+    """(input_echo, steer_rate_limit_per_s). The input echoes when input_pre_steer (read right after the setter) and
+    input_post_steer (after the step) both equal cmd_steer within ECHO_TOL on every step whose command was unchanged
+    since the previous step (the e01_actuation.py inputs_recorded rule). Otherwise the engine shapes the input, and
+    the limit is the largest input_post_steer change per second on the steps where it still lags its command: a
+    rate limit there, or the initial slope of a lag (llc_v1 then stays slower than that)."""
     worst = 0.0
-    max_rate = 0.0
+    rates = []
     previous = None
     for row in steps.rows:
         step = int(row["physics_step"])
         cmd = e01_actuation.num(row["cmd_steer"])
         pre = e01_actuation.num(row["input_pre_steer"])
         post = e01_actuation.num(row["input_post_steer"])
-        if previous is not None and previous[0] == step - 1 and cmd is not None and pre is not None:
-            worst = max(worst, abs(pre - cmd))
-            if post is not None and previous[1] is not None:
-                max_rate = max(max_rate, abs(post - previous[1]) / dt)
-        previous = (step, post)
+        consecutive = previous is not None and previous[0] == step - 1
+        if consecutive and None not in (cmd, pre, post) and previous[1] == cmd:
+            worst = max(worst, abs(pre - cmd), abs(post - cmd))
+        if consecutive and None not in (cmd, post, previous[2]) and abs(post - cmd) > ECHO_TOL:
+            rates.append(abs(post - previous[2]) / dt)
+        previous = (step, cmd, post)
     if worst <= ECHO_TOL:
         return True, None
-    return False, max_rate
+    return False, (max(rates) if rates else None)
 
 
 def fit_longitudinal(steps, phases_csv):
@@ -478,7 +518,8 @@ def fit_kappa_ss(play, steer_sign, dt):
                 by_speed.setdefault(target, []).append((steer_sign * steer, kappa, v))
                 entry["valid"] = True
         cell_rows.append(entry)
-        response = step_response(steps, phase, int(cell["excite_start_step"]), steer_sign, dt)
+        excite = probe_common.to_int(cell["excite_start_step"])         # empty when the cell never reached it
+        response = step_response(steps, phase, excite, steer_sign, dt) if excite is not None else None
         if response is not None:
             bins.append({"source": "E-02a %s" % phase, "target_kmh": target, "amplitude": abs(steer),
                          "steer": steer, "structures": response})
@@ -528,13 +569,13 @@ def step_response(steps, phase, excite_start, steer_sign, dt):
 # the card
 
 
-def llc_parameters(longitudinal, engine_rate_limit):
+def llc_parameters(longitudinal):
+    """llc_v1's parameters: LLC_DEFAULTS with the fitted throttle and brake gains. The steering rate limiter stays the
+    identity, which satisfies the CC-08 rule whatever the engine path does (echo, a rate limit, a lag)."""
     params = dict(LLC_DEFAULTS)
     if longitudinal:
         params["throttle_per_mps2"] = longitudinal["throttle"]["per_mps2"]
         params["brake_per_mps2"] = longitudinal["brake"]["per_mps2"]
-    if engine_rate_limit:
-        params["steer_rate_per_s"] = min(LLC_DEFAULT_RATE, LLC_RATE_MARGIN * engine_rate_limit)
     return params
 
 
@@ -546,6 +587,7 @@ def build_identified(args):
     if e04_play:
         plays.append(e04_play)
     pin_id, build_key = build_identity(plays, args.build_key)
+    prefab = vehicle_prefab(plays, args.vehicle)
     dt = probe_common.to_float(e01_play.header.get("engine.fixed_time_slice_s"))
     if not dt or dt <= 0:
         raise Refusal("E-01 run header has no engine.fixed_time_slice_s")
@@ -577,18 +619,17 @@ def build_identified(args):
         if not (args.scripted_gears and args.upshift_mps and args.downshift_mps):
             raise Refusal("E-01 says a scripted gearbox is needed: pass --scripted-gears, --upshift-mps and "
                           "--downshift-mps (forward gears only)")
-        gearbox["scripted_gears"] = [int(v) for v in args.scripted_gears.split(",")]
-        gearbox["upshift_mps"] = [float(v) for v in args.upshift_mps.split(",")]
-        gearbox["downshift_mps"] = [float(v) for v in args.downshift_mps.split(",")]
     if not forward:
         raise Refusal("no forward gear index seen while driving (input_post_gear >= 5 km/h)")
+    if not automatic:
+        gearbox["scripted_gears"], gearbox["upshift_mps"], gearbox["downshift_mps"] = scripted_gearbox(args, forward)
     vehicle = args.vehicle
     sessions = [session_id(p) for p in plays]
     return {
         "schema": CARD_SCHEMA,
         "card_id": vehicle,
         "vehicle": vehicle,
-        "prefab": e01_play.header.get("ego.prefab") or PREFABS.get(vehicle, ""),
+        "prefab": prefab,
         "status": "identified",
         "pin_id": pin_id,
         "build_key": build_key,
@@ -615,7 +656,7 @@ def build_identified(args):
                               "note": "kappa target -> kappa realised needs llc_v1 sessions (CC-08, DD-7-ident)"},
         },
         "longitudinal": longitudinal,
-        "llc_v1": llc_parameters(longitudinal, engine_rate),
+        "llc_v1": llc_parameters(longitudinal),
         "mode_a": {"force_enable_simulation": force_enable_simulation(phases_csv)},
         "fit": {"dt_s": dt, "min_cells": MIN_CELLS, "min_r2": MIN_R2, "max_alat_mps2": MAX_ALAT,
                 "usable": True},
@@ -659,7 +700,7 @@ def build_placeholder(args):
                               "note": "kappa target -> kappa realised needs llc_v1 sessions (CC-08, DD-7-ident)"},
         },
         "longitudinal": None,
-        "llc_v1": llc_parameters(None, None),
+        "llc_v1": llc_parameters(None),
         "mode_a": {"force_enable_simulation": None},
         "fit": None,
     }
@@ -695,10 +736,10 @@ def exponent_numbers(value):
 def card_text(card):
     cleaned = clean(card)
     text = json.dumps(cleaned, indent=2, ensure_ascii=True) + "\n"
-    for key in ENGINE_ARRAY_KEYS:
-        if text.count('"%s":' % key) != 1:
-            raise Refusal("the card names %s %d times; llc_v1 scans it by key and needs it once"
-                          % (key, text.count('"%s":' % key)))
+    for key in ENGINE_SCANNED_KEYS:
+        if text.count('"%s"' % key) != 1:
+            raise Refusal("the card names \"%s\" %d times; llc_v1 scans it by key and needs it once"
+                          % (key, text.count('"%s"' % key)))
     if exponent_numbers(cleaned):
         raise Refusal("card numbers %s use an exponent; llc_v1 reads numbers with string.ToFloat"
                       % exponent_numbers(cleaned)[:3])

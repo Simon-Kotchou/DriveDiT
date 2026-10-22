@@ -67,7 +67,7 @@
   "longitudinal": null,
   "llc_v1": {
     "steer_max": 1.0,
-    "steer_rate_per_s": 4.0,
+    "steer_rate_per_s": 0.0,
     "steer_lag_tau_s": 0.03,
     "kappa_trim_gain": 0.0,
     "kappa_trim_max": 0.1,

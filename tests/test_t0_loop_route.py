@@ -140,7 +140,7 @@ class LoopRouteTest(unittest.TestCase):
 
     def test_dc_route_reads_it(self):
         text = self.raw.decode("ascii")
-        self.assertEqual(text.count('"polyline":'), 1)
+        self.assertEqual(text.count('"polyline"'), 1)          # DC_JsonScan.FindValue needs the key once
         self.assertEqual(self.obj["source"]["n_points"], len(self.obj["polyline"]))
         self.assertIsNone(re.search(r"[0-9]e[-+]?[0-9]", text.split('"polyline":', 1)[1].split("]]", 1)[0]))
         self.assertAlmostEqual(self.obj["length_m"], self.route.length_m, delta=0.05)

@@ -455,6 +455,18 @@ class FitTests(unittest.TestCase):
         self.assertAlmostEqual(raw["steer_rate_limit_per_s"], 1.0, delta=0.01)
         self.assertEqual(card["llc_v1"]["steer_rate_per_s"], 0.0)       # the identity: never stacks (CC-08)
 
+    def test_a_fast_engine_limit_is_not_an_echo(self):
+        # 18 /s: a 0.6 command step takes two physics steps, so the input lags on the change step only (RX-1)
+        e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_11")
+        build_e01(e01, Truth(input_rate=18.0))
+        out = os.path.join(self.tmp, "fast_limit.json")
+        code, text = run_fit(["--e01", e01, "--e02a", self.e02a, "--out", out])
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            raw = json.load(f)["actuator"]["raw_engine_path"]
+        self.assertFalse(raw["input_echo"])
+        self.assertAlmostEqual(raw["steer_rate_limit_per_s"], 18.0, delta=0.1)
+
     def test_a_cell_that_never_reached_its_speed(self):
         e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_10")
         build_e02a(e02a, Truth(), starved={(30, 4)})

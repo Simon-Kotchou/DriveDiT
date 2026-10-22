@@ -29,8 +29,8 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
                  held-out second half; the lower held-out error wins (BIC breaks a tie within 1 %);
                  E-02a cells (one bin per speed and amplitude): the step response of the cell (steer 0 -> s at the
                  excite start) with both structures, chosen by BIC;
-               input_echo = input_pre_steer and input_post_steer equal cmd_steer (+-1e-3) on every step whose command
-               was held; otherwise the largest input_post_steer change per second while it still lags its command is
+               input_echo = input_pre_steer and input_post_steer equal cmd_steer (+-1e-3) on every step (command
+               changes included); otherwise the largest input_post_steer change per second while it still lags its command is
                recorded as the engine steering rate limit (a rate limit, or a lag's initial slope). The full
                llc path (kappa target -> kappa realised) needs llc_v1 sessions and stays null here (CC-08, DD-7-ident).
   longitudinal throttle_per_mps2 and brake_per_mps2 = 1 / the slope through the origin of the acc_l_z response to the
@@ -403,10 +403,10 @@ def fit_prbs(steps, steer_sign, dt):
 
 def input_rate(steps, dt):
     """(input_echo, steer_rate_limit_per_s). The input echoes when input_pre_steer (read right after the setter) and
-    input_post_steer (after the step) both equal cmd_steer within ECHO_TOL on every step whose command was unchanged
-    since the previous step (the e01_actuation.py inputs_recorded rule). Otherwise the engine shapes the input, and
-    the limit is the largest input_post_steer change per second on the steps where it still lags its command: a
-    rate limit there, or the initial slope of a lag (llc_v1 then stays slower than that)."""
+    input_post_steer (after the step) both equal cmd_steer within ECHO_TOL on every step, the steps of a command
+    change included (a fast limit shows only there: one lagging step). Otherwise the engine shapes the input, and the
+    limit is the largest input_post_steer change per second on the steps where it still lags its command: a rate
+    limit there, or the initial slope of a lag."""
     worst = 0.0
     rates = []
     previous = None
@@ -415,12 +415,12 @@ def input_rate(steps, dt):
         cmd = e01_actuation.num(row["cmd_steer"])
         pre = e01_actuation.num(row["input_pre_steer"])
         post = e01_actuation.num(row["input_post_steer"])
-        consecutive = previous is not None and previous[0] == step - 1
-        if consecutive and None not in (cmd, pre, post) and previous[1] == cmd:
+        if None not in (cmd, pre, post):
             worst = max(worst, abs(pre - cmd), abs(post - cmd))
-        if consecutive and None not in (cmd, post, previous[2]) and abs(post - cmd) > ECHO_TOL:
-            rates.append(abs(post - previous[2]) / dt)
-        previous = (step, cmd, post)
+        consecutive = previous is not None and previous[0] == step - 1
+        if consecutive and None not in (cmd, post, previous[1]) and abs(post - cmd) > ECHO_TOL:
+            rates.append(abs(post - previous[1]) / dt)
+        previous = (step, post)
     if worst <= ECHO_TOL:
         return True, None
     return False, (max(rates) if rates else None)

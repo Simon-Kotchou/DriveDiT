@@ -986,11 +986,12 @@ class DC_LLCv1
 
 	//------------------------------------------------------------------------------------------------
 	//! use_class of this session's launch record, read as DC_LaunchGuard reads it (the driver context does not carry
-	//! it): the -dcLaunchId record, else (Workbench escape) the newest record of this exe, which must not be younger
-	//! than this Workbench start (the guard's G15: a record written later belongs to another start and could carry
-	//! another class than the one session.json is stamped with). Empty (failure) when no record can be read, it names
-	//! another pin or build_key than the session, or the escape record is younger than the process. The exact record
-	//! needs DC_DriverContext.GetUseClass() (an interface addition for the T0-MIN integration)
+	//! it): the -dcLaunchId record, else (Workbench escape) the newest record of this exe, which must lie in this
+	//! Workbench start's window (the guard's G15: a record of another start could carry another class than the one
+	//! session.json is stamped with). Empty (failure) when no record can be read, it names another pin or build_key
+	//! than the session, or the escape record is outside the window. In the escape this is the guard's own rule, not
+	//! the identity of its record: that needs DC_DriverContext.GetUseClass() (an interface addition for the T0-MIN
+	//! integration)
 	static string ReadUseClass(string sessionPinId, string sessionBuildKey, out string failure)
 	{
 		string launchId;
@@ -1014,11 +1015,14 @@ class DC_LLCv1
 			return string.Empty;
 		}
 
+		// the escape record must lie in the guard's G15 window of this Workbench start (at most LAUNCH_LEAD_MAX_S before
+		// it, not after it), as DC_LaunchGuard.EvaluateEscape requires of the record it accepted
 		int recordUnix = DC_LaunchGuard.UtcTextToUnix(info.m_sRecordUtc);
 		int processStartUnix = System.GetUnixTime() - System.GetTickCount() / 1000;
-		if (!cli && (recordUnix < 0 || recordUnix - processStartUnix > DC_LaunchGuard.LAUNCH_CLOCK_SLACK_S))
+		int leadS = processStartUnix - recordUnix;
+		if (!cli && (recordUnix < 0 || leadS > DC_LaunchGuard.LAUNCH_LEAD_MAX_S || leadS < -DC_LaunchGuard.LAUNCH_CLOCK_SLACK_S))
 		{
-			failure = "the newest launch record " + path + " was written after this Workbench started (utc '" + info.m_sRecordUtc + "'): it is not this session's";
+			failure = "the newest launch record " + path + " (utc '" + info.m_sRecordUtc + "') is not in this Workbench start's window: it is not this session's";
 			return string.Empty;
 		}
 

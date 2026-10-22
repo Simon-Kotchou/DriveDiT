@@ -85,6 +85,38 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_iBandPx 64
    m_sScreenshotSuffixes ".png,.bmp.png,.bmp,.jpg,noext"
   }
+  DC_ExpertDriver "{DC4A50B400000006}" {
+   m_sCardId "S105"
+   m_sCardRoots "$DataCapture:Configs/ident/cards/,Configs/ident/cards/"
+   m_sSourceRoots "$DataCapture:Scripts/Game/DataCapture/,Scripts/Game/DataCapture/"
+   m_sDefaultRouteId "arland_t0_loop"
+   m_sRouteRoots "$DataCapture:Configs/routes/,Configs/routes/"
+   m_sAllowedSplits "train"
+   m_fCruiseKmh 40
+   m_fAlatMaxMps2 2.75
+   m_fAccelMaxMps2 1.5
+   m_fBrakeMaxMps2 4
+   m_fProfileDecelMps2 2
+   m_fSpeedGain 1
+   m_fSpeedPreviewS 1
+   m_fLookaheadS 0.9
+   m_fLookaheadMinM 6
+   m_fLookaheadMaxM 15
+   m_fKappaMax 0.2
+   m_fEndToleranceM 5
+   m_fStopKmh 1
+   m_fDeviationM 6
+   m_fStuckS 10
+   m_fStuckKmh 2
+   m_fEpisodeTimeoutS 480
+   m_fRolloverDeg 60
+   m_fEngineOffS 2
+   m_iMaxEpisodes 0
+   m_fEpisodeGapS 3
+   m_fStartMaxDistM 8
+   m_fStartMaxHeadingDeg 30
+   m_fStartMaxKmh 1
+  }
  }
  coords 2759.086 80.111 1664.452
  m_bAllowFactionChange 0

@@ -56,3 +56,6 @@ script src/enfusion/datacapture/DC_ImageScheduler.c
 script src/enfusion/datacapture/DC_LLCv1.c
 script src/enfusion/datacapture/DC_ExpertHL.c
 config addons/DataCapture/Configs/routes/arland_t0_loop.json
+# The vehicle card llc_v1 loads for the session's pin (Configs/ident/cards/<pin_id>/S105.json). PLACEHOLDER until the
+# E-01 / E-02a fit (qualification use only); DC_ExpertDriver is attached to GameMode_DataCapture on DC_Arland with it.
+config tools/ident/cards/1.8.0.13/S105.json

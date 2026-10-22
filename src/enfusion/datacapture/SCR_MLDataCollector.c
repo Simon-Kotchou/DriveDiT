@@ -17,11 +17,13 @@
 //   - SCR_MLDataCaptureDirector: starts the session (see SESSION START)
 //
 // SESSION START:
-//   Nothing is captured on a timer or by entity name any more. The driving director on the same game mode
-//   registers each vehicle by entity (RegisterVehicle) once a driver sits in it, keeps its current drive target
-//   up to date (SetVehicleWaypoint) and calls StartSession() exactly once, when every configured driver is seated.
-//   When the game mode or the game ends it calls StopSession(), which stops the capture timer and finalizes the
-//   session. Edit-mode (World Editor) instances do nothing.
+//   Nothing is captured on a timer or by entity name any more. The driving director on the same game mode calls
+//   StartSession() exactly once: when every configured driver is seated, or when its boarding window ends with at
+//   least its minimum of seated drivers. Right before that it registers the vehicles with a seated driver by entity
+//   (RegisterVehicle, in group-id order; vehicle_id = registration index), and afterwards it keeps their current
+//   drive target up to date (SetVehicleWaypoint). It registers nothing after StartSession, because session_info.txt
+//   lists the tracked vehicles once, at the start. When the game mode or the game ends it calls StopSession(), which
+//   stops the capture timer and finalizes the session. Edit-mode (World Editor) instances do nothing.
 //
 // SESSION METADATA: StartSession() writes session_info.txt with data_class (m_sDataClass, default smoke_bootstrap:
 //   sessions from the DD-1 bootstrap world are smoke data, tagged harvest=never and never copied into training
@@ -155,9 +157,10 @@ class SCR_MLDataCollector: ScriptComponent
 
     //------------------------------------------------------------------------
     // Start the capture session for the vehicles registered so far. Called once by SCR_MLDataCaptureDirector
-    // when every configured driver is seated. Returns false (and starts nothing) if a session is already
-    // running, no vehicle is registered or the session files cannot be created. mapName defaults to the
-    // loaded world file; weather and timeOfDay (hours, -1 = unknown) only go into session_info.txt.
+    // when its drivers are seated (all of them, or its minimum when the boarding window ends). Returns false
+    // (and starts nothing) if a session is already running, no vehicle is registered or the session files
+    // cannot be created. mapName defaults to the loaded world file; weather and timeOfDay (hours, -1 = unknown)
+    // only go into session_info.txt.
     bool StartSession(string mapName = "", string weather = "", float timeOfDay = -1)
     {
         if (m_bSessionInitialized)

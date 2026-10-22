@@ -48,3 +48,81 @@ which backs the old file up first.
   loaded.
 - `python3 -I -B tools/check_layer.py addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer` checks a
   hand-edited layer statically (quoted vectors, braces, userScript, entity list) before you deploy it.
+
+## What a Play does
+
+`SCR_MLDataCaptureDirector` and `SCR_MLDataCollector` sit on `GameMode_DataCapture`. On Play, the director does this
+for each group k = 1..5:
+
+1. It spawns an **empty** group (`Group_US_Base`) at `AI_Spawn_k`.
+2. It puts **one** driver (`Character_US_Rifleman`) straight into `AI_Car_k`'s driver seat. This is the vanilla Game
+   Master "crewed" call `BaseCompartmentSlot.SpawnCharacterInCompartment`. Nobody walks to the car, so it works at
+   any distance from the camera.
+   - A failed attempt is retried up to 3 times, 1 s apart.
+   - Only after that does the driver spawn on foot at `AI_Spawn_k` and walk to the car (walk-in fallback).
+3. It keeps the group simulated wherever the camera is. 1.8 deactivates AI about 1 km or more from every observer.
+   - The group is pinned to full AI LOD: `SetPermanentLOD(0)`, `PreventMaxLOD`, `CRITICAL` importance.
+   - A temporary observer is put on the car (`ObserversSystem.InsertObserverSP`).
+   - Both are undone when the director stops.
+4. It sends the car between the `AI_Drive_Target_N` markers, starting once the driver exists.
+
+The collector session starts as soon as all 5 drivers are seated. Otherwise it starts when the boarding window
+ends, with the cars that have a driver by then. With no driver, or fewer than the minimum, it logs an ERROR and starts
+no session.
+
+Vehicles are registered in group order right before the session starts, so `vehicle_id` is k-1 when all 5 are
+seated. Otherwise the ids are listed in the `starting the collector session with N vehicles: V0=AI_Car_1 ...` line and
+in `session_info.txt`. A car that gets its driver later keeps driving but is not captured in that session.
+
+Director attributes in the layer (the defaults need no layer change):
+
+| Attribute | Default | Meaning |
+|---|---|---|
+| `m_sGroupPrefab` | `Group_US_Base` | Empty group per car. A prefab with unit slots logs a WARNING (extra soldiers on foot) |
+| `m_sDriverPrefab` | `Character_US_Rifleman` | The driver |
+| `m_iSeatAttempts` / `m_iSeatRetryMs` | 3 / 1000 | Direct seating attempts before walk-in boarding |
+| `m_bPinDriverLOD` | 1 | Full AI LOD pin |
+| `m_bVehicleObservers` | 1 | One temporary observer per car (SP keys 4400 + k) |
+| `m_iBoardingWindowMs` | 60000 | Window after `Spawned N/M groups`. The session starts when all are seated, or when the window ends |
+| `m_iMinSeatedGroups` | 1 | Seated cars needed when the window ends. Set it to `m_iMaxAIGroups` for the old all-or-nothing gate |
+
+### Expected `[DataCapture]` lines in console.log
+
+Booleans may print as `1`/`0` or as `true`/`false`.
+
+1. `Director started (OnGameModeStart)`, then `AI LOD: max LOD <n> ...; driver LOD pin 1, vehicle observers 1`.
+2. For each group, about 2 s apart:
+   - `Group k spawned at AI_Spawn_k for vehicle AI_Car_k with 20 waypoints`;
+   - `Group k: lod_pin=1 ..., observer=1 on AI_Car_k (key 440k)`;
+   - `Group k: driver spawned in the pilot seat of AI_Car_k (direct seating, attempt 1/3) boarding=DIRECT agents=1 ... [lod=<l>/<max> perm=0 active=1] pilot=1 ...`;
+   - `Group k waypoint none -> N`.
+3. `Spawned 5/5 groups - boarding window 60 s: ...`.
+4. Five `Group k: driver seated in AI_Car_k (first seen X s after the director start) ...` lines, each with `pilot=1`
+   and `[lod=0/<max> perm=0 active=1]`. The statistics block every 60 s repeats this per group, and groups 3-5 must
+   show `distance` > 0.
+5. `All 5 drivers seated after X s - starting the collector session with 5 vehicles: V0=AI_Car_1 ... V4=AI_Car_5`. Then:
+   - five `[MLDataCollector] Registered vehicle: AI_Car_k (index k-1)` lines;
+   - `[MLDataCollector] Session initialized: $profile:DrivingData/session_<n>`;
+   - `Session started. Tracking 5 vehicles`.
+
+   With fewer than 5 cars seated, this line is instead:
+   - `WARNING: boarding window of 60 s ended with S/5 drivers seated (minimum 1) - starting the session without groups: ...`,
+     followed by one line per missing group;
+   - then `S/5 drivers seated after X s - starting the collector session with S vehicles: ...`.
+6. Signs of trouble:
+   - `direct seating attempt i/3 ... failed (pilot seat occupant=... accessible=...)`;
+   - `falling back to walk-in boarding`;
+   - `ERROR: boarding window of 60 s ended with no seated driver ... - collector session NOT started`.
+
+### Where the captures are
+
+The collector writes to `$profile:DrivingData/session_<n>/`, where `<n>` is the world time in ms at the session
+start.
+- With the E: profile (`wb_R1.bat`, `-profile E:\DriveDiT\wb_profile`) this is
+  **`E:\DriveDiT\wb_profile\profile\DrivingData\session_<n>\`**, which is
+  `/mnt/e/DriveDiT/wb_profile/profile/DrivingData/` in WSL.
+- Each session holds `session_info.txt` (written at the start: `data_class=smoke_bootstrap`, `harvest=never`, the
+  build stamp and `vehicle_<id>=AI_Car_k`), `telemetry.csv` (one row per car per 200 ms) and, after Stop,
+  `summary.txt`.
+- No session means no `DrivingData` folder at all.
+- If console.log shows the profile under OneDrive, sessions land on C: instead. Stop and relaunch with `wb_R1.bat`.

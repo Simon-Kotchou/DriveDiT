@@ -932,11 +932,11 @@ class DC_ProbeMarkers : DC_ProbeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! One marker heightM above the ground at pointXZ. \return empty on success, else the failure
-	protected string PlaceMarker(notnull BaseWorld world, Resource prefab, string set, vector pointXZ, float heightM)
+	protected string PlaceMarker(notnull BaseWorld world, Resource prefab, string markerSet, vector pointXZ, float heightM)
 	{
 		DC_ProbeMarker marker = new DC_ProbeMarker();
 		marker.m_iId = m_aMarkers.Count();
-		marker.m_sSet = set;
+		marker.m_sSet = markerSet;
 		float groundY = world.GetSurfaceY(pointXZ[0], pointXZ[2]);
 
 		if (m_eMarkerKind == DC_EProbeMarkerKind.PREFAB)

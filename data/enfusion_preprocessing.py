@@ -56,6 +56,19 @@ class EnfusionTelemetryConfig:
     max_rotation_jump: float = 90.0  # Max rotation change (degrees)
 
 
+class MissingTelemetryColumnError(ValueError):
+    """A telemetry CSV lacks a column the parser needs; the message names the column(s)."""
+
+    def __init__(self, csv_path, columns):
+        self.csv_path = str(csv_path)
+        self.columns = list(columns)
+        super().__init__(
+            f"telemetry CSV {self.csv_path} lacks required column '{self.columns[0]}' "
+            f"(missing: {', '.join(self.columns)}); dc-2.0 sessions are read by data/dc2/reader.py "
+            f"(docs/capture_contract/dc-2.0.md section 14)"
+        )
+
+
 class EnfusionTelemetryParser:
     """Parser for Enfusion telemetry CSV files."""
 
@@ -68,6 +81,12 @@ class EnfusionTelemetryParser:
         """
         self.config = config or EnfusionTelemetryConfig()
 
+    def required_columns(self) -> List[str]:
+        """Every CSV column parse_csv reads."""
+        cfg = self.config
+        return ([cfg.timestamp_col] + list(cfg.position_cols) + list(cfg.rotation_cols) + list(cfg.velocity_cols)
+                + [cfg.throttle_col, cfg.brake_col, cfg.steering_col, cfg.speed_col, cfg.gear_col, cfg.rpm_col])
+
     def parse_csv(self, csv_path: Union[str, Path]) -> Dict[str, np.ndarray]:
         """
         Parse telemetry CSV file.
@@ -77,6 +96,9 @@ class EnfusionTelemetryParser:
 
         Returns:
             Dictionary of telemetry arrays
+
+        Raises:
+            MissingTelemetryColumnError: the header lacks a column of required_columns(); the message names it.
         """
         csv_path = Path(csv_path)
         if not csv_path.exists():
@@ -95,43 +117,43 @@ class EnfusionTelemetryParser:
             'rpm': []
         }
 
+        cfg = self.config
         with open(csv_path, 'r', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
 
+            # A missing column is an error naming it, never a column of zeros (CR-081). Neither the dc-1.0
+            # writer's telemetry.csv nor a dc-2.0 stream has these columns; dc-2.0 sessions are read by
+            # data/dc2/reader.py.
+            missing = [col for col in self.required_columns() if col not in (reader.fieldnames or [])]
+            if missing:
+                raise MissingTelemetryColumnError(csv_path, missing)
+
             for row in reader:
+                # Parse the whole row first and append only a complete one, so a bad or truncated row never
+                # leaves the arrays at different lengths (CR-093).
                 try:
-                    # Parse timestamp
-                    data['timestamp'].append(float(row.get(self.config.timestamp_col, 0)))
-
-                    # Parse position
-                    pos = [
-                        float(row.get(col, 0)) for col in self.config.position_cols
-                    ]
-                    data['position'].append(pos)
-
-                    # Parse rotation
-                    rot = [
-                        float(row.get(col, 0)) for col in self.config.rotation_cols
-                    ]
-                    data['rotation'].append(rot)
-
-                    # Parse velocity
-                    vel = [
-                        float(row.get(col, 0)) for col in self.config.velocity_cols
-                    ]
-                    data['velocity'].append(vel)
-
-                    # Parse control signals
-                    data['throttle'].append(float(row.get(self.config.throttle_col, 0)))
-                    data['brake'].append(float(row.get(self.config.brake_col, 0)))
-                    data['steering'].append(float(row.get(self.config.steering_col, 0)))
-                    data['speed'].append(float(row.get(self.config.speed_col, 0)))
-                    data['gear'].append(int(row.get(self.config.gear_col, 0)))
-                    data['rpm'].append(float(row.get(self.config.rpm_col, 0)))
-
+                    timestamp = float(row[cfg.timestamp_col])
+                    pos = [float(row[col]) for col in cfg.position_cols]
+                    rot = [float(row[col]) for col in cfg.rotation_cols]
+                    vel = [float(row[col]) for col in cfg.velocity_cols]
+                    controls = {
+                        'throttle': float(row[cfg.throttle_col]),
+                        'brake': float(row[cfg.brake_col]),
+                        'steering': float(row[cfg.steering_col]),
+                        'speed': float(row[cfg.speed_col]),
+                        'gear': int(row[cfg.gear_col]),
+                        'rpm': float(row[cfg.rpm_col]),
+                    }
                 except (ValueError, TypeError) as e:
-                    warnings.warn(f"Skipping malformed row: {e}")
+                    warnings.warn(f"Skipping malformed row {reader.line_num}: {e}")
                     continue
+
+                data['timestamp'].append(timestamp)
+                data['position'].append(pos)
+                data['rotation'].append(rot)
+                data['velocity'].append(vel)
+                for key, value in controls.items():
+                    data[key].append(value)
 
         # Convert to numpy arrays
         result = {}

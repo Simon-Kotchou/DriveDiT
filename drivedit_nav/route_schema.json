@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "drivedit.route/1",
   "title": "DriveDiT route (capture contract dc-2.0, nav_v1)",
-  "description": "One route schema for nav_v1, the T0 loop (DD-7-min), the route sampler (DD-7) and C17 (DD-5-min). Coordinates are Enfusion world metres: x east, y up, z north. The polyline is the driving line (already offset to the lane); along-route distances s_m are horizontal (x, z) arc length from the first point. drivedit_nav.validate_route also checks what this schema cannot: segment lengths >= 0.01 m, s_m within the route length, the closed-route tolerance (1 m) and a declared length_m (0.05 m).",
+  "description": "DRAFT with capture contract dc-2.0 (freezes with it; any later change is nav_v2). One route schema for nav_v1, the T0 loop (DD-7-min), the route sampler (DD-7) and C17 (DD-5-min). Coordinates are Enfusion world metres: x east, y up, z north. The polyline is the driving line (already offset to the lane); along-route distances s_m are horizontal (x, z) arc length from the first point. drivedit_nav.validate_route also checks what this schema cannot: segment lengths >= 0.01 m, s_m within the route length, the route_end stop at the route end (0.05 m), the closed-route tolerance (1 m) and a declared length_m (0.05 m).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "route_id", "map_id", "split", "nav_version", "lane_side", "closed", "polyline", "maneuvers", "stops"],
@@ -35,15 +35,16 @@
     },
     "stops": {
       "type": "array",
-      "description": "Commanded stops in non-decreasing s_m. A stop at the route end is the same command (kind route_end). nav_v1 gives d_stop = 200 when none is within 200 m.",
+      "description": "nav_v1 has terminal stops only: exactly one stop, of kind route_end, at the route end (validate_route checks the position). nav_v1 gives d_stop = 200 while it is more than 200 m ahead. Commanded stops that the ego leaves again (with a logged stop_release command) and dwell times are nav_v2.",
+      "minItems": 1,
+      "maxItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["s_m", "kind"],
         "properties": {
           "s_m": {"type": "number", "minimum": 0},
-          "kind": {"enum": ["route_end", "commanded"]},
-          "dwell_s": {"type": "number", "minimum": 0}
+          "kind": {"enum": ["route_end"]}
         }
       }
     },

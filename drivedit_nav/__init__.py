@@ -6,6 +6,9 @@ closed-loop bridge all call this package, so the three paths agree exactly (C22)
 
 Routes follow route_schema.json (drivedit.route/1). load_route refuses Everon routes, and any path under heldout/ or a
 SEALED directory, unless it is called on the sealed evaluation path with sealed_eval=True.
+
+DRAFT with capture contract dc-2.0: nav_v1 and the route schema freeze with the contract; any later change of nav
+behaviour or of the schema is nav_v2 (dc-2.0.md section 0).
 """
 
 from .nav_v1 import (
@@ -15,6 +18,7 @@ from .nav_v1 import (
     NAV_CHANNELS,
     NAV_VERSION,
     PROGRESS_WINDOW_M,
+    ROUTE_DEVIATION_M,
     ROUTE_SCHEMA_FILE,
     ROUTE_SCHEMA_ID,
     Pose,
@@ -34,8 +38,8 @@ from .nav_v1 import (
 )
 
 __all__ = [
-    "D_MAX_M", "LOOKAHEAD_M", "MAP_SPLITS", "NAV_CHANNELS", "NAV_VERSION", "PROGRESS_WINDOW_M", "ROUTE_SCHEMA_FILE",
-    "ROUTE_SCHEMA_ID", "Pose", "Route", "RouteError", "SealedMapError", "canonical_json", "load_route",
-    "nav_sequence", "nav_v1", "nav_vector", "pose_from_transform", "route_from_dict", "to_ego", "to_legacy_6d",
-    "validate_route",
+    "D_MAX_M", "LOOKAHEAD_M", "MAP_SPLITS", "NAV_CHANNELS", "NAV_VERSION", "PROGRESS_WINDOW_M", "ROUTE_DEVIATION_M",
+    "ROUTE_SCHEMA_FILE", "ROUTE_SCHEMA_ID", "Pose", "Route", "RouteError", "SealedMapError", "canonical_json",
+    "load_route", "nav_sequence", "nav_v1", "nav_vector", "pose_from_transform", "route_from_dict", "to_ego",
+    "to_legacy_6d", "validate_route",
 ]

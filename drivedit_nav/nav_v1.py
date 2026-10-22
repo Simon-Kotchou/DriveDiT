@@ -1,5 +1,9 @@
 """nav_v1: the shared route-point function of capture contract dc-2.0 (DD-11-min).
 
+DRAFT with dc-2.0 (docs/capture_contract/dc-2.0.md, status line): nav_v1 freezes with the contract. After the freeze
+any change of behaviour (progress window, lookahead, maneuver window, stop clearance, route-deviation limit) or of
+route_schema.json is nav_v2 with its own nav_version; nav_v1 output never changes in place.
+
     from drivedit_nav import load_route, nav_v1
     route = load_route("routes/arland_t0_loop.json")
     nav = nav_v1(route, (x, z, heading_rad))                       # first call of an episode: progress 0
@@ -19,7 +23,12 @@ Conventions (docs/capture_contract/dc-2.0.md section 7):
 
 Output channels (features_v1 tensor `nav`, in this order): p20_x, p20_y, p40_x, p40_y, man_left, man_straight,
 man_right, man_follow, d_man, d_stop. Also returned, outside the tensor: p10_x, p10_y (ablation only), progress_m and
-dist_to_route_m (eval-only bookkeeping).
+dist_to_route_m (eval-only bookkeeping), and nav_valid: 0 when dist_to_route_m exceeds the 30 m route-deviation limit
+(r2 1.3), where the route points mean nothing (the builder then masks the step). A non-finite pose raises.
+
+Stops: nav_v1 knows terminal stops only. Every route has exactly one stop, of kind route_end, at the route end. A
+stop the ego must leave again needs a release every caller sees (a logged stop_release nav command); that, the
+commanded stop kind and dwell times are nav_v2.
 
 Ordered progress (r2 1.3): the pose is projected onto the route only inside a window of +-30 m along the route around
 the previous progress, and progress never decreases. That is what keeps a figure-eight or a loop crossing on the
@@ -42,6 +51,7 @@ D_MAX_M = 200.0                 # d_man and d_stop saturate here; 200 = nothing 
 LOOKAHEAD_M = (20.0, 40.0)      # p20, p40 (the tensor)
 ABLATION_LOOKAHEAD_M = 10.0     # p10 (logged for ablations only)
 PROGRESS_WINDOW_M = 30.0        # ordered-progress search window, each side of the previous progress
+ROUTE_DEVIATION_M = 30.0        # r2 1.3: beyond this distance from the route the nav output is not valid
 STOP_CLEAR_M = 2.0              # a stop stays pending until progress passes it by this much
 MIN_SEGMENT_M = 0.01            # consecutive polyline points closer than this are rejected
 CLOSED_TOL_M = 1.0              # first and last point of a closed route lie within this distance
@@ -50,7 +60,8 @@ LENGTH_TOL_M = 0.05             # a declared length_m must match the computed le
 NAV_CHANNELS = ("p20_x", "p20_y", "p40_x", "p40_y", "man_left", "man_straight", "man_right", "man_follow",
                 "d_man", "d_stop")
 MANEUVER_TYPES = ("left", "straight", "right")
-STOP_KINDS = ("route_end", "commanded")
+STOP_KINDS = ("route_end",)    # terminal stops only; commanded stops with a release are nav_v2
+MARK_KEYS = {"maneuvers": ("s_m", "type", "junction_id"), "stops": ("s_m", "kind")}
 LANE_SIDES = ("right", "center", "mixed")
 MAP_SPLITS = {
     "arland": ("train", "val_l", "a0", "a_stress"),
@@ -106,14 +117,14 @@ def validate_route(obj):
         errors.append("schema must be %r" % ROUTE_SCHEMA_ID)
     if not _route_id_ok(obj["route_id"]):
         errors.append("route_id must match [a-z0-9][a-z0-9_.-]{0,63}")
-    if obj["map_id"] not in MAP_SPLITS:
+    if not isinstance(obj["map_id"], str) or obj["map_id"] not in MAP_SPLITS:
         errors.append("map_id must be one of %s (canonical ids, not terrain names)" % ", ".join(MAP_SPLITS))
-    elif obj["split"] not in MAP_SPLITS[obj["map_id"]]:
+    elif not isinstance(obj["split"], str) or obj["split"] not in MAP_SPLITS[obj["map_id"]]:
         errors.append("split %r is not a split of map %r (allowed: %s)"
                       % (obj["split"], obj["map_id"], ", ".join(MAP_SPLITS[obj["map_id"]])))
     if obj["nav_version"] != NAV_VERSION:
         errors.append("nav_version must be %r" % NAV_VERSION)
-    if obj["lane_side"] not in LANE_SIDES:
+    if not isinstance(obj["lane_side"], str) or obj["lane_side"] not in LANE_SIDES:
         errors.append("lane_side must be one of %s" % ", ".join(LANE_SIDES))
     if not isinstance(obj["closed"], bool):
         errors.append("closed must be true or false")
@@ -139,10 +150,18 @@ def validate_route(obj):
             errors.append("length_m %r differs from the polyline length %.3f m" % (obj["length_m"], length))
     errors += _check_marks(obj["maneuvers"], "maneuvers", "type", MANEUVER_TYPES, length, strict=True)
     errors += _check_marks(obj["stops"], "stops", "kind", STOP_KINDS, length, strict=False)
+    if isinstance(obj["maneuvers"], list):
+        for i, m in enumerate(obj["maneuvers"]):
+            if isinstance(m, dict) and "junction_id" in m and not isinstance(m["junction_id"], str):
+                errors.append("maneuvers[%d].junction_id must be a string" % i)
     if isinstance(obj["stops"], list):
-        for i, st in enumerate(obj["stops"]):
-            if isinstance(st, dict) and "dwell_s" in st and not (_is_number(st["dwell_s"]) and st["dwell_s"] >= 0):
-                errors.append("stops[%d].dwell_s must be a number >= 0" % i)
+        # nav_v1 has terminal stops only: exactly one route_end stop, at the route end
+        ends = [st for st in obj["stops"] if isinstance(st, dict) and st.get("kind") == "route_end"]
+        if len(obj["stops"]) != 1 or len(ends) != 1:
+            errors.append("stops must hold exactly one stop, of kind route_end (nav_v1 has terminal stops only)")
+        elif not _is_number(ends[0].get("s_m")) or abs(ends[0]["s_m"] - length) > LENGTH_TOL_M:
+            errors.append("the route_end stop must lie at the route end (s_m %r, length %.3f m)"
+                          % (ends[0].get("s_m"), length))
     for k in ("source",):
         if k in obj and not isinstance(obj[k], dict):
             errors.append("%s must be an object" % k)
@@ -161,10 +180,10 @@ def _check_marks(marks, name, kind_key, kinds, length, strict):
         if not isinstance(m, dict) or "s_m" not in m or kind_key not in m:
             errors.append("%s[%d] needs s_m and %s" % (name, i, kind_key))
             continue
-        extra = set(m) - {"s_m", kind_key, "junction_id", "dwell_s"}
+        extra = set(m) - set(MARK_KEYS[name])
         if extra:
             errors.append("%s[%d]: unknown keys %s" % (name, i, ", ".join(sorted(extra))))
-        if m[kind_key] not in kinds:
+        if not isinstance(m[kind_key], str) or m[kind_key] not in kinds:
             errors.append("%s[%d].%s must be one of %s" % (name, i, kind_key, ", ".join(kinds)))
         s = m["s_m"]
         if not _is_number(s) or s < 0 or s > length + LENGTH_TOL_M:
@@ -278,12 +297,17 @@ def pose_from_transform(pos, fwd):
 
 
 def _as_pose(pose):
+    """Pose of any accepted form; ValueError when x, z or the heading is not finite (NaN or inf)."""
     if isinstance(pose, Pose):
-        return pose
-    if isinstance(pose, dict):
-        return Pose(float(pose["x"]), float(pose["z"]), float(pose["heading_rad"]))
-    x, z, h = pose
-    return Pose(float(x), float(z), float(h))
+        p = pose
+    elif isinstance(pose, dict):
+        p = Pose(float(pose["x"]), float(pose["z"]), float(pose["heading_rad"]))
+    else:
+        x, z, h = pose
+        p = Pose(float(x), float(z), float(h))
+    if not (math.isfinite(p.x) and math.isfinite(p.z) and math.isfinite(p.heading_rad)):
+        raise ValueError("pose %r is not finite" % (pose,))
+    return p
 
 
 def to_ego(pose, x, z):
@@ -300,7 +324,8 @@ def nav_v1(route, pose, progress_m=None):
     pose        Pose, (x, z, heading_rad) or {"x", "z", "heading_rad"}; heading as in the module docstring
     progress_m  the progress returned by the previous call of this episode; None = episode start (0 m)
 
-    Returns a dict with NAV_CHANNELS plus p10_x, p10_y, progress_m and dist_to_route_m.
+    Returns a dict with NAV_CHANNELS plus p10_x, p10_y, progress_m, dist_to_route_m and nav_valid (0 when the pose is
+    more than ROUTE_DEVIATION_M from its projection inside the progress window). ValueError for a non-finite pose.
     """
     p = _as_pose(pose)
     prev = 0.0 if progress_m is None else float(progress_m)
@@ -334,6 +359,7 @@ def nav_v1(route, pose, progress_m=None):
     out["d_stop"] = d_stop
     out["progress_m"] = s
     out["dist_to_route_m"] = dist
+    out["nav_valid"] = 1 if dist <= ROUTE_DEVIATION_M else 0
     return out
 
 

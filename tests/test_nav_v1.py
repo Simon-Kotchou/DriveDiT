@@ -46,8 +46,12 @@ def tmp_base():
     raise unittest.SkipTest("no TMPDIR on /dev/shm or /mnt/e and no writable /dev/shm; not using the system temp dir")
 
 
-def route_dict(xz, map_id="arland", split="train", maneuvers=(), stops=(), closed=False, route_id="test_route",
+def route_dict(xz, map_id="arland", split="train", maneuvers=(), stops=None, closed=False, route_id="test_route",
                y=12.5):
+    """A route dict; stops None = the one route_end stop at the end of the polyline (nav_v1 has terminal stops only)."""
+    if stops is None:
+        length = sum(math.hypot(xz[i][0] - xz[i - 1][0], xz[i][1] - xz[i - 1][1]) for i in range(1, len(xz)))
+        stops = [(length, "route_end")]
     return {
         "schema": "drivedit.route/1",
         "route_id": route_id,
@@ -136,6 +140,47 @@ class StraightRouteTest(unittest.TestCase):
         self.assertAlmostEqual(left["p20_y"], 1.5, delta=1e-9)
         self.assertAlmostEqual(right["p20_x"], 20.0, delta=1e-9)
         self.assertAlmostEqual(right["dist_to_route_m"], 1.5, delta=1e-9)
+
+    def test_progress_window_is_30_m(self):
+        self.assertEqual(drivedit_nav.PROGRESS_WINDOW_M, 30.0)
+        self.assertEqual(drivedit_nav.ROUTE_DEVIATION_M, 30.0)
+        route = route_from_dict(route_dict(straight_xz()))
+        # a pose 50 m ahead of the previous progress: progress may move by the window only, and the pose is 20 m
+        # from that projection (still valid); 100 m ahead it is 70 m away (nav_valid 0)
+        nav = nav_v1(route, route_pose(route, 250.0), progress_m=200.0)
+        self.assertAlmostEqual(nav["progress_m"], 230.0, delta=1e-9)
+        self.assertAlmostEqual(nav["dist_to_route_m"], 20.0, delta=1e-9)
+        self.assertEqual(nav["nav_valid"], 1)
+        far = nav_v1(route, route_pose(route, 300.0), progress_m=200.0)
+        self.assertAlmostEqual(far["progress_m"], 230.0, delta=1e-9)
+        self.assertEqual(far["nav_valid"], 0)
+
+    def test_far_from_the_route_is_not_valid(self):
+        route = route_from_dict(route_dict(straight_xz()))
+        first = nav_v1(route, route_pose(route, 500.0))     # first call of an episode far from the route start
+        self.assertEqual(first["nav_valid"], 0)
+        self.assertAlmostEqual(first["dist_to_route_m"], 470.0, delta=1e-6)
+        aside = nav_v1(route, route_pose(route, 300.0, lateral=31.0), progress_m=299.0)
+        self.assertEqual(aside["nav_valid"], 0)
+        near = nav_v1(route, route_pose(route, 300.0, lateral=29.0), progress_m=299.0)
+        self.assertEqual(near["nav_valid"], 1)
+
+    def test_non_finite_pose_raises(self):
+        route = route_from_dict(route_dict(straight_xz()))
+        for bad in (float("nan"), float("inf"), -float("inf")):
+            for pose in ((bad, 10.0, 0.0), (100.0, bad, 0.0), (100.0, 10.0, bad), Pose(bad, 10.0, 0.0),
+                         {"x": 100.0, "z": 10.0, "heading_rad": bad}):
+                with self.assertRaises(ValueError, msg=repr(pose)):
+                    nav_v1(route, pose, progress_m=0.0)
+
+    def test_lookahead_never_wraps_on_a_closed_route(self):
+        square = [(0.0, 0.0), (0.0, 100.0), (100.0, 100.0), (100.0, 0.0), (0.0, 0.0)]
+        route = route_from_dict(route_dict(square, closed=True, route_id="test_square"))
+        nav = nav_v1(route, route_pose(route, 395.0), progress_m=394.0)
+        # 5 m before the end, heading west: p20 clamps at the end point 5 m ahead instead of wrapping 15 m north
+        self.assertAlmostEqual(nav["p20_x"], 5.0, delta=1e-9)
+        self.assertAlmostEqual(nav["p20_y"], 0.0, delta=1e-9)
+        self.assertAlmostEqual(nav["p40_x"], 5.0, delta=1e-9)
 
     def test_lookahead_clamped_at_route_end(self):
         route = route_from_dict(route_dict(straight_xz(length=100.0)))
@@ -240,21 +285,31 @@ class LoopCrossingTest(unittest.TestCase):
 
 
 class CommandsTest(unittest.TestCase):
-    def test_d_stop_is_200_without_stop(self):
+    def test_d_stop_is_200_while_the_route_end_is_far(self):
         route = route_from_dict(route_dict(straight_xz()))
-        for s in (0.0, 300.0, 990.0):
+        for s in (0.0, 300.0, 799.0):
             nav = nav_v1(route, route_pose(route, s), progress_m=max(s - 1.0, 0.0))
             self.assertEqual(nav["d_stop"], D_MAX_M)
             self.assertEqual(nav["d_stop"], 200.0)
 
-    def test_d_stop_with_stops(self):
-        route = route_from_dict(route_dict(straight_xz(), stops=[(450.0, "commanded"), (1000.0, "route_end")]))
-        cases = [(300.0, 150.0), (200.0, 200.0), (449.0, 1.0), (451.0, 0.0), (453.0, 200.0), (850.0, 150.0),
-                 (999.5, 0.5)]
+    def test_d_stop_counts_down_to_the_route_end(self):
+        route = route_from_dict(route_dict(straight_xz()))
+        cases = [(300.0, 200.0), (800.0, 200.0), (850.0, 150.0), (999.5, 0.5), (1000.0, 0.0)]
         for s, want in cases:
             nav = nav_v1(route, route_pose(route, s), progress_m=max(s - 1.0, 0.0))
             self.assertAlmostEqual(nav["d_stop"], want, delta=1e-6, msg=s)
             self.assertLessEqual(nav["d_stop"], 200.0)
+
+    def test_only_terminal_stops(self):
+        # a stop the ego must leave again has no release in nav_v1: commanded stops and dwell are nav_v2
+        self.assertEqual(NAVMOD.STOP_KINDS, ("route_end",))
+        mid = route_dict(straight_xz(), stops=[(450.0, "commanded"), (1000.0, "route_end")])
+        self.assertTrue(validate_route(mid))
+        dwell = route_dict(straight_xz())
+        dwell["stops"][0]["dwell_s"] = 5.0
+        self.assertTrue(validate_route(dwell))
+        with self.assertRaises(RouteError):
+            route_from_dict(mid)
 
     def test_maneuvers(self):
         route = route_from_dict(route_dict(straight_xz(), maneuvers=[(380.0, "right"), (700.0, "straight"),
@@ -286,7 +341,7 @@ class CommandsTest(unittest.TestCase):
 class DeterminismTest(unittest.TestCase):
     def test_bit_identical(self):
         obj = route_dict(figure_eight_xz(), closed=True, maneuvers=[(150.0, "left"), (600.0, "right")],
-                         stops=[(500.0, "commanded")], route_id="test_det")
+                         route_id="test_det")
         reordered = dict(reversed(list(copy.deepcopy(obj).items())))
         round_trip = json.loads(json.dumps(obj))
         routes = [route_from_dict(obj), route_from_dict(reordered), route_from_dict(round_trip)]
@@ -318,21 +373,55 @@ class RouteSchemaTest(unittest.TestCase):
         obj["source"] = {"generator": "test"}
         self.assertEqual(validate_route(obj), [])
 
+    MUTATIONS = {
+        "dwell_s on a stop": lambda o: o["stops"][0].update(dwell_s=3.0),
+        "commanded stop": lambda o: o["stops"].insert(0, {"s_m": 100.0, "kind": "commanded"}),
+        "junction_id on a stop": lambda o: o["stops"][0].update(junction_id="j1"),
+        "dwell_s on a maneuver": lambda o: o["maneuvers"][0].update(dwell_s=1.0),
+        "junction_id not a string": lambda o: o["maneuvers"][0].update(junction_id=7),
+        "no stop": lambda o: o.update(stops=[]),
+        "two route_end stops": lambda o: o["stops"].append({"s_m": 200.0, "kind": "route_end"}),
+        "list as map_id": lambda o: o.update(map_id=["arland"]),
+        "unknown key": lambda o: o.update(goal_x=3.0),
+        "bad maneuver": lambda o: o.update(maneuvers=[{"s_m": 50.0, "type": "u_turn"}]),
+        "terrain name as map_id": lambda o: o.update(map_id="cain"),
+    }
+
+    def test_validators_agree(self):
+        """Every mutation the JSON schema can express is refused by both validate_route and the schema."""
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("jsonschema is not installed; validate_route alone is checked in test_invalid")
+        with open(drivedit_nav.ROUTE_SCHEMA_FILE, encoding="ascii") as f:
+            v = jsonschema.Draft202012Validator(json.load(f))
+        for label, mutate in self.MUTATIONS.items():
+            obj = self.good()
+            mutate(obj)
+            self.assertTrue(validate_route(obj), label)
+            self.assertTrue(list(v.iter_errors(obj)), label)
+
+    def test_route_end_must_be_at_the_end(self):
+        obj = self.good()
+        obj["stops"] = [{"s_m": 150.0, "kind": "route_end"}]
+        self.assertTrue(validate_route(obj))
+        obj["stops"] = [{"s_m": 200.03, "kind": "route_end"}]
+        self.assertEqual(validate_route(obj), [])
+
     def test_invalid(self):
-        mutations = {
-            "terrain name as map_id": lambda o: o.update(map_id="cain"),
+        mutations = dict(self.MUTATIONS)
+        mutations.update({
             "split of another map": lambda o: o.update(split="k_val"),
             "unsorted maneuvers": lambda o: o.update(maneuvers=[{"s_m": 150.0, "type": "right"},
                                                                 {"s_m": 100.0, "type": "left"}]),
             "repeated point": lambda o: o["polyline"].insert(3, list(o["polyline"][2])),
-            "unknown key": lambda o: o.update(goal_x=3.0),
             "closed with a 200 m gap": lambda o: o.update(closed=True),
             "wrong length": lambda o: o.update(length_m=210.0),
             "stop beyond the end": lambda o: o.update(stops=[{"s_m": 250.0, "kind": "route_end"}]),
-            "bad maneuver": lambda o: o.update(maneuvers=[{"s_m": 50.0, "type": "u_turn"}]),
             "one point": lambda o: o.update(polyline=[[0.0, 0.0, 0.0]]),
             "nav version": lambda o: o.update(nav_version="nav_v0"),
-        }
+            "route_end before the end": lambda o: o.update(stops=[{"s_m": 150.0, "kind": "route_end"}]),
+        })
         cases = {}
         for label, mutate in mutations.items():
             obj = self.good()
@@ -358,12 +447,13 @@ class RouteSchemaTest(unittest.TestCase):
         try:
             import jsonschema
         except ImportError:
-            return  # the structural checks above still ran; the full validator is optional
+            self.skipTest("jsonschema is not installed (the structural checks above ran)")
         jsonschema.Draft202012Validator.check_schema(schema)
         v = jsonschema.Draft202012Validator(schema)
         self.assertEqual(list(v.iter_errors(self.good())), [])
         for mutate in (lambda o: o.update(map_id="eden"), lambda o: o.update(split="everon_test"),
-                       lambda o: o.update(extra=1), lambda o: o["stops"].append({"s_m": 1.0, "kind": "maybe"})):
+                       lambda o: o.update(extra=1), lambda o: o["stops"].append({"s_m": 1.0, "kind": "maybe"}),
+                       lambda o: o["stops"][0].update(kind="commanded")):
             obj = self.good()
             mutate(obj)
             self.assertTrue(list(v.iter_errors(obj)))

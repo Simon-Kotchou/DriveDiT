@@ -12,14 +12,21 @@ rem    ACTIVE is valid and the Steam appmanifests and the installed files of BOT
 rem    Arma Reforger Tools match that pin, and AutoUpdateBehavior is "1" ("Only update this game
 rem    when I launch it"). On success it writes E:\DriveDiT\pin\launches\launch_ID.json and
 rem    prints only the launch id. The launch logic names no game version.
-rem 3. Starts the Workbench exe directly. The working directory is the Workbench dir, as in a
-rem    Steam launch (its steam_appid.txt holds 1874910).
+rem 3. Copies that record to WB_PROFILE\profile\dc_launch\launch_ID.json and checks the copy byte
+rem    for byte. In Workbench $profile is the -profile folder plus \profile, and DC_LaunchGuard
+rem    (ticket DD-4-probe) writes nothing unless it finds $profile:dc_launch/launch_ID.json for
+rem    the id it was given.
+rem 4. Starts the Workbench exe directly, passing the launch id as -dcLaunchId. The working
+rem    directory is the Workbench dir, as in a Steam launch (its steam_appid.txt holds 1874910).
 rem
 rem UNVERIFIED (capture program 4.2 item 2): that a direct exe launch never makes Steam update
 rem or relaunch the app. Steam must be running.
 rem UNVERIFIED (FIX_PLAN step 4, gate P-01): that Workbench honours -profile. After the first
 rem start, check console.log for "Adding relative directory 'E:\DriveDiT\wb_profile\profile'".
-rem Args (Appendix B and FIX_PLAN step 4a): -profile, -gproj, -addonsDir, -forceUpdate, -maxFPS 60.
+rem Args (Appendix B and FIX_PLAN step 4a): -profile, -gproj, -addonsDir, -forceUpdate, -maxFPS 60,
+rem -dcLaunchId (custom; the capture scripts read it with System.GetCLIParam, capture program 3.9).
+rem UNVERIFIED (probe E-11): that Workbench Play mode sees its own command line. The copied record
+rem is what DC_LaunchGuard checks either way.
 rem -addonsDir: a direct exe launch does not get the game install's addons dir the way a Steam launch
 rem does, so ArmaReforger.gproj (58D0FB3206B6F859) is "not found" and Workbench exits with "Cannot
 rem initialize game project settings" (measured 2026-10-21 18:50, first wb_R1.bat launch). GAME_ADDONS
@@ -85,8 +92,27 @@ if not exist "%DD_LAUNCHES%\launch_%LID%.json" (
   goto :fail
 )
 
+rem Copy the record into the Workbench profile for DC_LaunchGuard. The id is new for every launch,
+rem so an existing copy is refused rather than overwritten. fc /b proves the copy is identical.
+set "WB_DC_LAUNCH=%WB_PROFILE%\profile\dc_launch"
+if not exist "%WB_DC_LAUNCH%\" mkdir "%WB_DC_LAUNCH%"
+if not exist "%WB_DC_LAUNCH%\" (
+  set "DD_ERR=Cannot create %WB_DC_LAUNCH%. Workbench was not started."
+  goto :fail
+)
+if exist "%WB_DC_LAUNCH%\launch_%LID%.json" (
+  set "DD_ERR=A copy of launch record %LID% already exists in %WB_DC_LAUNCH%. Workbench was not started."
+  goto :fail
+)
+copy "%DD_LAUNCHES%\launch_%LID%.json" "%WB_DC_LAUNCH%\launch_%LID%.json" >nul
+fc /b "%DD_LAUNCHES%\launch_%LID%.json" "%WB_DC_LAUNCH%\launch_%LID%.json" >nul 2>nul
+if errorlevel 1 (
+  set "DD_ERR=Could not copy launch record %LID% to %WB_DC_LAUNCH% - the copy is missing or differs. Workbench was not started."
+  goto :fail
+)
+
 echo Pin OK. Launch id %LID%
-start "" /D "%WB_DIR%" "%WB_EXE%" -profile "%WB_PROFILE%" -gproj "%WB_GPROJ%" -addonsDir "%GAME_ADDONS%" -forceUpdate -maxFPS 60
+start "" /D "%WB_DIR%" "%WB_EXE%" -profile "%WB_PROFILE%" -gproj "%WB_GPROJ%" -addonsDir "%GAME_ADDONS%" -forceUpdate -maxFPS 60 -dcLaunchId %LID%
 endlocal
 exit /b 0
 

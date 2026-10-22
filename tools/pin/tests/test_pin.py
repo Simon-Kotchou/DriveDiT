@@ -1046,6 +1046,20 @@ class LaunchPathTests(PinnedCase):
                                                         os.path.basename(REAL_LAUNCH_PATHS[app]["install"])),
                              REAL_LAUNCH_PATHS[app]["install"])
 
+    def test_launchers_forward_the_launch_id(self):
+        # DC_LaunchGuard (DD-4-probe) writes nothing without -dcLaunchId and $profile:dc_launch/launch_<id>.json.
+        def bat_text(name):
+            with open(os.path.join(LAUNCH_DIR, name), "rb") as fh:
+                return fh.read().decode("ascii")
+        for name in ("wb_R1.bat", "client_R1_i01.bat"):
+            starts = [l for l in bat_text(name).splitlines() if l.startswith('start "" ')]
+            self.assertEqual(len(starts), 1, name)
+            self.assertIn(" -dcLaunchId %LID%", starts[0], name)
+        wb = bat_text("wb_R1.bat")
+        self.assertIn('set "WB_DC_LAUNCH=%WB_PROFILE%\\profile\\dc_launch"', wb)
+        self.assertIn('fc /b "%DD_LAUNCHES%\\launch_%LID%.json" "%WB_DC_LAUNCH%\\launch_%LID%.json"', wb)
+        self.assertLess(wb.index("fc /b"), wb.index('start "" '))
+
 
 class RollbackTests(PinnedCase):
     """AP-1: after a restore, the original pin stays refused (sub-second mtimes are gone); the restored installs are

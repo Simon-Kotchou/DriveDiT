@@ -8,9 +8,14 @@
 //
 // WHAT IT DOES (authority only, play mode only)
 //   - sets the initial time of day and weather;
-//   - for every configured group id k = 1..m_iMaxAIGroups: spawns m_sGroupPrefab at <m_sSpawnPointPrefix>k, hands
-//     it the placed vehicle <m_sVehiclePrefix>k and gives it its own forced-move waypoints on every
-//     <m_sDriveTargetPrefix>N marker; each waypoint keeps its original marker id N;
+//   - for every configured group id k = 1..m_iMaxAIGroups: spawns the empty group m_sGroupPrefab at
+//     <m_sSpawnPointPrefix>k, hands it the placed vehicle <m_sVehiclePrefix>k and gives it its own forced-move
+//     waypoints on every <m_sDriveTargetPrefix>N marker; each waypoint keeps its original marker id N;
+//   - seats the group's single driver (m_sDriverPrefab) straight into the vehicle's pilot seat with the vanilla Game
+//     Master "crewed" call (BaseCompartmentSlot.SpawnCharacterInCompartment: spawn, activate AI, teleport into the
+//     seat, join the group), retrying up to m_iSeatAttempts times; only if every attempt fails it falls back to
+//     walk-in boarding (driver spawned on foot at the spawn point, the group AI walks it to its car). The first
+//     waypoint is assigned only once the driver exists, so a seated group drives straight away;
 //   - after each completed waypoint assigns a different one, never the current one and never one within 2x the
 //     completion radius of the vehicle or of the current target; when no target qualifies the group gets none and
 //     the choice is retried (no fallback to an excluded target);
@@ -30,13 +35,14 @@
 // OnGameModeStart; both paths go through the same idempotent StartDirector(), so at most one of them starts it.
 //
 // Call queue: at most one entry per director function is ever pending (one repeating spawn tick, one repeating
-// monitor tick that also runs the per-group waypoint assignments, one readiness poll, one fallback timer), so a
-// single ScriptCallQueue.Remove per function in StopDirector() clears everything the director queued.
+// monitor tick that also runs the per-group seating retries and waypoint assignments, one readiness poll, one
+// fallback timer), so a single ScriptCallQueue.Remove per function in StopDirector() clears everything the director
+// queued.
 //
-// Failure handling: a group whose spawn point, vehicle, vehicle simulation, group prefab or waypoint prefab is
-// missing or invalid is skipped with an ERROR before anything is spawned for it (no shared-car or shared-spawn
-// fallback). Every callback resolves its group through SCR_MLDataCaptureGroupState records keyed by group id,
-// never by array position.
+// Failure handling: a group whose spawn point, vehicle, vehicle simulation, pilot seat, group prefab, driver prefab
+// or waypoint prefab is missing or invalid is skipped with an ERROR before anything is spawned for it (no shared-car
+// or shared-spawn fallback). Every callback resolves its group through SCR_MLDataCaptureGroupState records keyed by
+// group id, never by array position.
 // ============================================================================
 
 #ifdef ENABLE_DIAG
@@ -50,6 +56,16 @@ modded enum SCR_DebugMenuID
 	DEBUGUI_MLDATACAPTURE_AI_INPUTS
 }
 #endif
+
+//------------------------------------------------------------------------------------------------
+//! How a group's driver got into its vehicle.
+enum SCR_EMLDataCaptureBoarding
+{
+	PENDING,	//!< direct seating attempts still running
+	DIRECT,		//!< spawned straight into the pilot seat (BaseCompartmentSlot.SpawnCharacterInCompartment)
+	WALK_IN,	//!< fallback: spawned on foot at the spawn point, the group AI boards the car
+	FAILED		//!< no driver could be spawned for this group
+}
 
 //------------------------------------------------------------------------------------------------
 //! One forced-move waypoint of one group, spawned on drive-target marker <prefix><m_iTargetId>.
@@ -79,6 +95,12 @@ class SCR_MLDataCaptureGroupState
 	IEntity m_SpawnPoint;
 	ref array<ref SCR_MLDataCaptureWaypoint> m_aWaypoints = {};
 	int m_iCurrentWaypoint = -1;	//!< index into m_aWaypoints, -1 = none assigned yet
+
+	IEntity m_Driver;				//!< the driver character this director spawned for the group, null = none (yet)
+	SCR_EMLDataCaptureBoarding m_eBoarding = SCR_EMLDataCaptureBoarding.PENDING;
+	int m_iSeatAttemptsMade;		//!< direct seating attempts made so far
+	float m_fNextSeatAttemptAtMs = -1;	//!< world time of the next direct seating attempt, -1 = none pending
+	bool m_bDrivingStarted;			//!< the first waypoint was assigned (only once the driver exists)
 
 	bool m_bDriverSeated;			//!< a living character sits in the pilot seat (latest monitor or readiness tick)
 	float m_fFirstSeatedS = -1;		//!< director time [s] when a seated driver was first seen, -1 = never
@@ -140,7 +162,7 @@ class SCR_MLDataCaptureGroupState
 }
 
 //------------------------------------------------------------------------------------------------
-[ComponentEditorProps(category: "GameScripted/DataCapture", description: "Spawns AI drivers into the placed capture vehicles, drives them between drive-target markers and starts the SCR_MLDataCollector session once every driver is seated")]
+[ComponentEditorProps(category: "GameScripted/DataCapture", description: "Seats one AI driver directly in each placed capture vehicle, drives them between drive-target markers and starts the SCR_MLDataCollector session once the drivers are seated")]
 class SCR_MLDataCaptureDirectorClass : SCR_BaseGameModeComponentClass
 {
 }
@@ -164,14 +186,24 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	[Attribute("20", UIWidgets.Slider, "Highest drive-target marker id to look for (missing ids are skipped, the others keep their id)", "1 100 1", category: "Groups")]
 	protected int m_iMaxDriveTargets;
 
-	[Attribute("{35681BE27C302FF5}Prefabs/Groups/BLUFOR/GreenBerets/Group_US_GreenBeret_SentryTeam.et", UIWidgets.ResourcePickerThumbnail, "AI group prefab spawned at each spawn point", "et", category: "Groups")]
+	[Attribute("{EACD97CF4A702FAE}Prefabs/Groups/BLUFOR/Group_US_Base.et", UIWidgets.ResourcePickerThumbnail, "Empty AI group prefab (no unit slots) spawned at each spawn point; the director adds one driver to it. Its faction must match the driver prefab", "et", category: "Groups")]
 	protected ResourceName m_sGroupPrefab;
+
+	[Attribute("{26A9756790131354}Prefabs/Characters/Factions/BLUFOR/US_Army/Character_US_Rifleman.et", UIWidgets.ResourcePickerThumbnail, "Character prefab put into each vehicle's driver seat (vanilla default pilot of the M151A2 and M998)", "et", category: "Groups")]
+	protected ResourceName m_sDriverPrefab;
 
 	[Attribute("{06E1B6EBD480C6E0}Prefabs/AI/Waypoints/AIWaypoint_ForcedMove.et", UIWidgets.ResourcePickerThumbnail, "Waypoint prefab spawned on each drive-target marker (must be an AIWaypoint)", "et", category: "Groups")]
 	protected ResourceName m_sWaypointPrefab;
 
 	[Attribute("2000", UIWidgets.Slider, "Delay between group spawns [ms]; group k spawns k times this after the start", "0 10000 100", category: "Groups")]
 	protected int m_iSpawnStaggerMs;
+
+	// === BOARDING ===
+	[Attribute("3", UIWidgets.Slider, "Attempts to spawn the driver straight into the vehicle's pilot seat before falling back to walk-in boarding", "1 10 1", category: "Boarding")]
+	protected int m_iSeatAttempts;
+
+	[Attribute("1000", UIWidgets.Slider, "Delay between direct seating attempts [ms]", "200 10000 100", category: "Boarding")]
+	protected int m_iSeatRetryMs;
 
 	// === DRIVING ===
 	[Attribute("30", UIWidgets.Slider, "Waypoint completion radius [m]", "5 100 1", category: "Driving")]
@@ -394,6 +426,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
 			state.m_fNextAssignAtMs = -1;
+			state.m_fNextSeatAttemptAtMs = -1;
 			if (state.m_Group)
 				state.m_Group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
 		}
@@ -528,6 +561,20 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 		}
 
+		// GameCode/Vehicle/Vehicle.c:104, the primary pilot (driver) compartment
+		if (!vehicle.GetPilotCompartmentSlot())
+		{
+			FailGroup(groupId, "'" + vehicleName + "' has no pilot compartment");
+			return;
+		}
+
+		Resource driverResource = Resource.Load(m_sDriverPrefab);
+		if (!driverResource || !driverResource.IsValid())
+		{
+			FailGroup(groupId, "invalid driver prefab '" + m_sDriverPrefab + "'");
+			return;
+		}
+
 		Resource waypointResource = Resource.Load(m_sWaypointPrefab);
 		if (!waypointResource || !waypointResource.IsValid())
 		{
@@ -565,13 +612,113 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		// Publish the record only now that all of its resources exist.
 		m_aGroups.Insert(state);
 
+		// The group should start empty: unit slots are queued as extra members on foot (SCR_AIGroup.EOnInit ->
+		// RequestSpawn) that the group would also try to board.
+		if (group.m_aUnitPrefabSlots && !group.m_aUnitPrefabSlots.IsEmpty())
+			Print(string.Format("[DataCapture] WARNING: group %1: group prefab '%2' has %3 unit slots - they spawn on foot next to the seated driver; use an empty group prefab such as Group_US_Base", groupId, m_sGroupPrefab, group.m_aUnitPrefabSlots.Count()), LogLevel.WARNING);
+
+		// Redundant once a driver is seated (seating registers the vehicle with the group), kept for walk-in boarding.
 		array<string> vehicleNames = {vehicleName};
 		group.AddVehiclesStatic(vehicleNames); // Game/Entities/SCR_AIGroup.c:1847, unchanged since 1.6
 		group.GetOnWaypointCompleted().Insert(OnWaypointCompleted); // invoker params: AIWaypoint wp (server only)
-		AssignNextWaypoint(state);
 
 		Print(string.Format("[DataCapture] Group %1 spawned at %2 for vehicle %3 with %4 waypoints", groupId, spawnName, vehicleName, state.m_aWaypoints.Count()), LogLevel.NORMAL);
+		TrySeatDriver(state);
 		ReportSpawnProgress();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One direct seating attempt: spawns m_sDriverPrefab straight into the vehicle's pilot seat and adds it to the
+	//! group. BaseCompartmentSlot.SpawnCharacterInCompartment (GameCode/Vehicle/BaseCompartmentSlot.c:328, the Game
+	//! Master "crewed" and ScenarioFramework QRF path) spawns the character, activates its AI, seats it with
+	//! CompartmentAccessComponent.GetInVehicle(forceTeleport = true) and calls AIGroup.AddAgent; it returns null and
+	//! deletes the character when the seat cannot be taken. Walking is not needed, so the distance to the camera does
+	//! not matter. On failure the next attempt is due m_iSeatRetryMs later (run by MonitorVehicles); after
+	//! m_iSeatAttempts failures the group falls back to walk-in boarding.
+	protected void TrySeatDriver(SCR_MLDataCaptureGroupState state)
+	{
+		state.m_fNextSeatAttemptAtMs = -1;
+		if (!m_bActive || state.m_eBoarding != SCR_EMLDataCaptureBoarding.PENDING)
+			return;
+
+		if (!state.m_Group || !state.m_Vehicle)
+		{
+			state.m_eBoarding = SCR_EMLDataCaptureBoarding.FAILED;
+			Print(string.Format("[DataCapture] ERROR: group %1: its group or vehicle was deleted before a driver was seated - no driver", state.m_iGroupId), LogLevel.ERROR);
+			return;
+		}
+
+		state.m_iSeatAttemptsMade++;
+		string vehicleName = state.m_Vehicle.GetName();
+		PilotCompartmentSlot pilotSlot = state.m_Vehicle.GetPilotCompartmentSlot();
+		IEntity driver;
+		if (pilotSlot)
+		{
+			// inout: with a non-null group the character joins it and no new group is created
+			AIGroup aiGroup = state.m_Group;
+			driver = pilotSlot.SpawnCharacterInCompartment(m_sDriverPrefab, aiGroup);
+		}
+
+		if (driver)
+		{
+			state.m_Driver = driver;
+			state.m_eBoarding = SCR_EMLDataCaptureBoarding.DIRECT;
+			Print(string.Format("[DataCapture] Group %1: driver spawned in the pilot seat of %2 (direct seating, attempt %3/%4)", state.m_iGroupId, vehicleName, state.m_iSeatAttemptsMade, m_iSeatAttempts), LogLevel.NORMAL);
+			StartDriving(state);
+			return;
+		}
+
+		string reason = "no pilot compartment";
+		if (pilotSlot)
+			reason = string.Format("pilot seat occupant=%1 accessible=%2", pilotSlot.GetOccupant(), pilotSlot.IsCompartmentAccessible());
+
+		if (state.m_iSeatAttemptsMade < m_iSeatAttempts)
+		{
+			state.m_fNextSeatAttemptAtMs = GetGame().GetWorld().GetWorldTime() + m_iSeatRetryMs;
+			Print(string.Format("[DataCapture] WARNING: group %1: direct seating attempt %2/%3 into %4 failed (%5) - retrying in %6 ms", state.m_iGroupId, state.m_iSeatAttemptsMade, m_iSeatAttempts, vehicleName, reason, m_iSeatRetryMs), LogLevel.WARNING);
+			return;
+		}
+
+		Print(string.Format("[DataCapture] WARNING: group %1: direct seating into %2 failed %3 times (%4) - falling back to walk-in boarding", state.m_iGroupId, vehicleName, state.m_iSeatAttemptsMade, reason), LogLevel.WARNING);
+		StartWalkInBoarding(state);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fallback after direct seating failed: spawns the driver on foot at the group's spawn point and adds it to the
+	//! group (SCR_AIGroup.AddAIEntityToGroup activates its AI), then starts the waypoints. The group owns its vehicle
+	//! through AddVehiclesStatic, so the vanilla group AI walks the driver to the car and gets in before it drives.
+	protected void StartWalkInBoarding(SCR_MLDataCaptureGroupState state)
+	{
+		IEntity driver;
+		Resource driverResource = Resource.Load(m_sDriverPrefab);
+		if (driverResource && driverResource.IsValid() && state.m_SpawnPoint)
+			driver = GetGame().SpawnEntityPrefab(driverResource, GetGame().GetWorld(), MakeSpawnParams(state.m_SpawnPoint.GetOrigin()));
+
+		if (!driver || !state.m_Group || !state.m_Group.AddAIEntityToGroup(driver))
+		{
+			if (driver)
+				SCR_EntityHelper.DeleteEntityAndChildren(driver);
+
+			state.m_eBoarding = SCR_EMLDataCaptureBoarding.FAILED;
+			Print(string.Format("[DataCapture] ERROR: group %1: walk-in fallback failed: could not spawn '%2' at its spawn point or add it to the group - no driver", state.m_iGroupId, m_sDriverPrefab), LogLevel.ERROR);
+			return;
+		}
+
+		state.m_Driver = driver;
+		state.m_eBoarding = SCR_EMLDataCaptureBoarding.WALK_IN;
+		Print(string.Format("[DataCapture] WARNING: group %1: driver spawned on foot at %2 - it has to walk to %3 and get in (walk-in fallback)", state.m_iGroupId, state.m_SpawnPoint.GetName(), state.m_Vehicle.GetName()), LogLevel.WARNING);
+		StartDriving(state);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Assigns the group's first waypoint once it has a driver.
+	protected void StartDriving(SCR_MLDataCaptureGroupState state)
+	{
+		if (state.m_bDrivingStarted)
+			return;
+
+		state.m_bDrivingStarted = true;
+		AssignNextWaypoint(state);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -791,7 +938,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 				if (!state.m_bSeatedLogged)
 				{
 					state.m_bSeatedLogged = true;
-					Print(string.Format("[DataCapture] Group %1: driver seated in %2 (first seen %3 s after the director start)", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1)), LogLevel.NORMAL);
+					Print(string.Format("[DataCapture] Group %1: driver seated in %2 (first seen %3 s after the director start, boarding=%4)", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1), typename.EnumToString(SCR_EMLDataCaptureBoarding, state.m_eBoarding)), LogLevel.NORMAL);
 				}
 			}
 
@@ -870,6 +1017,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			// Occupancy for stuck recovery is re-read here, so it does not depend on the readiness poll having run
 			// or still running, and it drops when the driver leaves or dies.
 			UpdateOccupancy(state, elapsedS);
+
+			if (state.m_fNextSeatAttemptAtMs >= 0 && nowMs >= state.m_fNextSeatAttemptAtMs)
+				TrySeatDriver(state);
 
 			if (state.m_fNextAssignAtMs >= 0 && nowMs >= state.m_fNextAssignAtMs)
 				AssignNextWaypoint(state);

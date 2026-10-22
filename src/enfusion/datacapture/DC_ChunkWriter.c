@@ -13,7 +13,9 @@
 //   - only then is the commit line chunk_id,first_key,last_key,n_rows,n_bytes appended to commit.csv by one
 //     open-APPEND-write-close cycle (E-19 c11), or through the handle kept open for the session (keepCommitOpen, the
 //     e19kill e19_commit.csv pattern). commit.csv gets its header when Open creates it. A row is acknowledged only
-//     when its chunk's commit line was written;
+//     when its chunk's commit line was written; with verifyLength commit.csv must also hold exactly the bytes written
+//     so far (header and every line, read back through the handle kept open or a READ handle on the closed file)
+//     before the rows of the line are counted, and a log kept open is read back once more after its close;
 //   - the first short or failed write latches HasFailed(): nothing is written or acknowledged afterwards, the owner
 //     reports it (DC_Session.FailWrite) and the session ends with script_error:write_fail. Every failure message
 //     carries the requested and the returned byte counts. WriteLine is never used (it appends CR LF).
@@ -44,6 +46,7 @@ class DC_ChunkWriter : DC_SessionStream
 	protected bool m_bKeepCommitOpen;
 	protected bool m_bVerifyLength;
 	protected ref FileHandle m_CommitFile;			//!< only with keepCommitOpen
+	protected int m_iCommitBytes;					//!< commit.csv bytes written so far (verifyLength)
 	protected bool m_bOpen;
 	protected bool m_bClosed;
 	protected bool m_bFailed;
@@ -115,12 +118,13 @@ class DC_ChunkWriter : DC_SessionStream
 			return Fail(string.Format("short or failed write of the %1 header: FileHandle.Write returned %2 of %3 bytes", m_sCommitPath, written, expected));
 		}
 
+		m_iCommitBytes = expected;
 		if (m_bKeepCommitOpen)
 			m_CommitFile = file;
 		else
 			file.Close();
 
-		return true;
+		return VerifyCommitLength();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -196,14 +200,7 @@ class DC_ChunkWriter : DC_SessionStream
 
 		if (m_bVerifyLength)
 		{
-			int lengthClosed = -1;
-			FileHandle check = FileIO.OpenFile(path, FileMode.READ);
-			if (check)
-			{
-				lengthClosed = check.GetLength();
-				check.Close();
-			}
-
+			int lengthClosed = DC_Session.ReadFileLength(path);
 			if (lengthClosed != expected)
 				return Fail(string.Format("%1 has %2 bytes after the close, %3 were written", path, lengthClosed, expected));
 		}
@@ -221,7 +218,8 @@ class DC_ChunkWriter : DC_SessionStream
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One commit line: an open-APPEND-write-close cycle, or a Write through the handle kept open (TBD-3)
+	//! One commit line: an open-APPEND-write-close cycle, or a Write through the handle kept open (TBD-3); with
+	//! verifyLength the log's length is read back before the line counts
 	protected bool AppendCommitLine(string line)
 	{
 		string data = line + "\n";
@@ -235,7 +233,8 @@ class DC_ChunkWriter : DC_SessionStream
 			if (keptWritten != expected)
 				return Fail(string.Format("short or failed write of a %1 line: FileHandle.Write returned %2 of %3 bytes", m_sCommitPath, keptWritten, expected));
 
-			return true;
+			m_iCommitBytes += expected;
+			return VerifyCommitLength();
 		}
 
 		FileHandle file = FileIO.OpenFile(m_sCommitPath, FileMode.APPEND);
@@ -247,11 +246,33 @@ class DC_ChunkWriter : DC_SessionStream
 		if (written != expected)
 			return Fail(string.Format("short or failed write of a %1 line: FileHandle.Write returned %2 of %3 bytes", m_sCommitPath, written, expected));
 
-		return true;
+		m_iCommitBytes += expected;
+		return VerifyCommitLength();
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Commits what is buffered and closes the commit log. Idempotent. \return false when any write failed
+	//! TBD-3 fallback (verifyLength): commit.csv must hold exactly the bytes written so far, read back through the
+	//! handle kept open (its GetLength; E-19 c03 records what it reports) or a READ handle on the closed file
+	protected bool VerifyCommitLength()
+	{
+		if (!m_bVerifyLength)
+			return true;
+
+		int length;
+		if (m_CommitFile)
+			length = m_CommitFile.GetLength();
+		else
+			length = DC_Session.ReadFileLength(m_sCommitPath);
+
+		if (length == m_iCommitBytes)
+			return true;
+
+		return Fail(string.Format("%1 has %2 bytes, %3 were written (TBD-3 length check)", m_sCommitPath, length, m_iCommitBytes));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Commits what is buffered and closes the commit log (a log kept open is read back once more after its close
+	//! with verifyLength). Idempotent. \return false when any write failed
 	override bool Close()
 	{
 		if (m_bClosed)
@@ -261,7 +282,17 @@ class DC_ChunkWriter : DC_SessionStream
 			Flush();
 
 		m_bClosed = true;
+		if (!m_CommitFile)
+			return !m_bFailed;
+
 		CloseCommitFile();
+		if (!m_bVerifyLength || m_bFailed)
+			return !m_bFailed;
+
+		int lengthClosed = DC_Session.ReadFileLength(m_sCommitPath);
+		if (lengthClosed != m_iCommitBytes)
+			Fail(string.Format("%1 has %2 bytes after its close, %3 were written (TBD-3 length check)", m_sCommitPath, lengthClosed, m_iCommitBytes));
+
 		return !m_bFailed;
 	}
 

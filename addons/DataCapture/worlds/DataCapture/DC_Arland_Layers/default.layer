@@ -43,6 +43,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_sRequiredProfileRoot "E:/DriveDiT"
    m_bAllowWorkbenchWithoutLaunchId 0
    m_bEscapeBindToProcessStart 1
+   m_fTelemetryMaxPeriodS 0.05
    m_fImageHz 10
    m_iImgInflightTimeoutMs 2000
    m_iImgLeadMs 0

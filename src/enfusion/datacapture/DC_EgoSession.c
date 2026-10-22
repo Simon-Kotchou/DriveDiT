@@ -11,14 +11,15 @@
 //   - registers it in the slot registry (DC_VehicleRegistry: slot id + IEntity.GetID() token; the ego slot is fixed
 //     for the whole session and every episode);
 //   - Mode A as in DD-4-probe: DC_ActuatorModeA (persistent handbrake off, engine started), parked (brake 1 and
-//     handbrake), handed to DC_StreamRecorder (the one actuation path, r3 P1);
+//     handbrake) and parked again on every readiness poll of the settle, handed to DC_StreamRecorder (the one
+//     actuation path, r3 P1), which re-applies the park on every physics step without a held command;
 //   - ready after m_fSettleS of world time with the ego alive and slower than m_fSettleMaxKmh. A spawn failure or an
 //     ego lost during the settle refuses readiness; DC_Session's timeout refuses it too (ERROR, no directory).
 //
 // CAPTURE
-//   - liveness and identity at the top of every frame and every physics step (before any row): the entity exists, is
-//     not deleted or destroyed, and still carries the registered GetID token. A loss before the first ctl row ends
-//     the session with zero_ego (0 rows, 0 images), later with ego_lost;
+//   - liveness and identity at the top of every frame and before and after the simulation of every physics step
+//     (before any row of it): the entity exists, is not deleted or destroyed, and still carries the registered GetID
+//     token. A loss before the first ctl row ends the session with zero_ego (0 rows, 0 images), later with ego_lost;
 //   - episodes: at a decision step (physics_step mod N == 0) after warmup_end, while no episode runs and the session
 //     is not stopping, the driver's BeginEpisode is asked in OnStepPre (so the rows of that step carry the episode;
 //     the null driver never begins one). A termination the driver reports, or the planned end, ends the episode at
@@ -215,6 +216,8 @@ class DC_EgoSession : DC_SessionModule
 			return false;
 		}
 
+		// Mode A: the park is applied again on every poll (no physics step is dispatched before the open)
+		m_Actuator.Park();
 		float settledS = (GetGame().GetWorld().GetWorldTime() - m_fSpawnWorldMs) / 1000;
 		if (settledS < m_fSettleS)
 		{
@@ -285,8 +288,12 @@ class DC_EgoSession : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Liveness and identity again after the simulation, before any row of the step (order 10: before the streams)
 	override void OnStepPost(int physicsStep, float timeSlice, int worldMs)
 	{
+		if (!CheckEgo())
+			return;
+
 		m_iLastWorldMs = worldMs;
 		if (m_iEpisodeId >= 0 && physicsStep == m_iEpisodeStartStep)
 			m_iEpisodeStartWorldMs = worldMs;
@@ -366,7 +373,8 @@ class DC_EgoSession : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Fails the session when the ego is lost: zero_ego before the first ctl row, ego_lost after it
+	//! Fails the session when the ego is lost: zero_ego before the first ctl row (DC_StreamRecorder.HasCtlRow), ego_lost
+	//! after it
 	protected bool CheckEgo()
 	{
 		string failure;
@@ -374,7 +382,7 @@ class DC_EgoSession : DC_SessionModule
 			return true;
 
 		string reason = DC_Session.END_EGO_LOST;
-		if (m_Session.GetLastPostStep() < 0)
+		if (!m_Recorder || !m_Recorder.HasCtlRow())
 			reason = DC_Session.END_ZERO_EGO;
 
 		m_Session.Fail(reason, failure);

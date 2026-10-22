@@ -1,0 +1,62 @@
+{
+  "contract_version": "dc-2.0",
+  "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00",
+  "status": "ok",
+  "end_reason": "duration",
+  "end": {
+    "unix_s": 1792919726,
+    "utc": "2026-10-25T09:15:26Z",
+    "world_ms": 13000,
+    "physics_step": 779,
+    "render_frame": 262681
+  },
+  "pin": {
+    "pin_id": "1.8.0.13",
+    "build_key": null
+  },
+  "engine": {
+    "build_version": "1.8.0.13"
+  },
+  "counts": {
+    "ctl": {
+      "rows": 780,
+      "chunks": 2,
+      "last_key": 779
+    },
+    "telemetry": {
+      "rows": 260,
+      "chunks": 2,
+      "last_key": 777
+    },
+    "hf": {
+      "rows": 782,
+      "chunks": 2,
+      "last_key": 262681
+    },
+    "img": {
+      "rows": 130,
+      "chunks": 2,
+      "last_key": 129
+    },
+    "events": {
+      "rows": 7,
+      "chunks": 2,
+      "last_key": 6
+    },
+    "episodes": {
+      "rows": 2,
+      "chunks": 2,
+      "last_key": 1
+    }
+  },
+  "images": {
+    "requested": 130,
+    "issued": 130,
+    "skipped_busy": 0,
+    "make_failed": 0,
+    "timed_out": 0,
+    "pending_at_end": 0
+  },
+  "episodes": 2,
+  "heartbeats": 2
+}

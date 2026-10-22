@@ -1,0 +1,158 @@
+{
+  "contract_version": "dc-2.0",
+  "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00",
+  "created_utc": "2026-10-25T09:15:12Z",
+  "start": {
+    "unix_s": 1792919712,
+    "local_hms": "09:15:12",
+    "engine_world_ms": 183250,
+    "render_frame": 261900
+  },
+  "map": {
+    "map_id": "arland",
+    "terrain": "Arland",
+    "world_file": "worlds/DataCapture/DC_Arland.ent",
+    "root_world": "{A9806AF617972E97}worlds/Arland/Arland.ent",
+    "fingerprint": {
+      "size_m": 4096.0,
+      "latitude_deg": 47.411,
+      "ok": true
+    }
+  },
+  "trial": {
+    "trial_id": "T0b",
+    "source": "cli",
+    "conf": {
+      "trial_id": "T0b",
+      "route": "golden_s_curve_v1",
+      "seed": 0,
+      "warmup_s": 2.0,
+      "synthetic": true
+    },
+    "seed": 0,
+    "warmup_s": 2.0,
+    "duration_s": 11.0
+  },
+  "exe": {
+    "kind": "wb",
+    "instance": "i00",
+    "cli": {
+      "dcLaunchId": "20261025T091412Z-wb-5e00",
+      "dcTrial": "T0b"
+    }
+  },
+  "engine": {
+    "build_version": "1.8.0.13",
+    "build_time": "synthetic",
+    "fixed_time_slice_s": 0.016666666666666666
+  },
+  "pin": {
+    "pin_id": "1.8.0.13",
+    "pin_sha256": "81ec5025f780e73786400682464cff01974c83716e7eecd300d475f303485321",
+    "build_key": null,
+    "channel": "stable",
+    "launch_id": "20261025T091412Z-wb-5e00",
+    "launch_schema": "dd-launch/1",
+    "game_buildid": 24903726,
+    "tools_buildid": 24870687
+  },
+  "use_class": "dev",
+  "addon": {
+    "addon_id": "DataCapture",
+    "addon_guid": "SYNTHETIC-ADDON-GUID",
+    "git_sha": "b3cc0475bb78a5026098858e9889acf666d31062",
+    "git_branch": "synthetic",
+    "git_dirty": false,
+    "content_sha256": "a04dc6c38580462e46df7968a7d91a006455989bb839a6c9c1cf5fb4c4551a47",
+    "manifest_sha256": "99d35512273e0bf7ceb7a67b0ec97805a5c6cfb2b30a8852e5c452c6cf6a108f",
+    "deploy_utc": "2026-10-25T08:15:12Z",
+    "target_pin": null
+  },
+  "control": {
+    "actuation_mode": "A",
+    "llc_sha": "0f35470f5f317db49cd20b9b2b440c628c6e24e447655074de19e8191d2ef68d",
+    "expert_sha": "c284ad05d219825294b612d5207f5dfe1af9096122bf055bbdd522ea635d680e",
+    "vehicle_card_id": "S105_synthetic",
+    "vehicle_card_sha": "b38e1a641a38d3180128906aa277521e07d0adafa7f1b3237e132d5b5105ab62",
+    "steer_sign": -1,
+    "yaw_axis_sign": 1,
+    "steering_geometry": "unknown_on_1.8"
+  },
+  "authority": {
+    "standalone": true,
+    "rpl_ok": true
+  },
+  "versions": {
+    "features_version": "features_v1",
+    "nav_version": "nav_v1"
+  },
+  "clocks": {
+    "telemetry_every_k": 3,
+    "physics_steps_per_decision": 6,
+    "decision_hz": 10.0,
+    "image_hz": 10.0,
+    "img_inflight_timeout_ms": 2000,
+    "img_lead_ms": 0,
+    "chunk_max_s": 10.0
+  },
+  "rig": {
+    "rig_id": "R1-S105-synthetic-256x240",
+    "rig_name": "R1-S105",
+    "ego_prefab": "synthetic/S105.et",
+    "mount": {
+      "fwd_m": 1.8,
+      "up_m": 1.5,
+      "right_m": 0.0,
+      "pitch_deg": -4.0
+    },
+    "vfov_deg": 50.0,
+    "writer": "MakeScreenshot",
+    "source_class": "wb_viewport",
+    "capture_wh": [
+      256,
+      240
+    ],
+    "core_wh": [
+      128,
+      240
+    ],
+    "band_px": 64,
+    "derivative_wh": [
+      512,
+      288
+    ],
+    "derivative_codec": "jpeg_q95",
+    "fiducial": {
+      "version": "v2",
+      "bits": 18,
+      "patches": 6,
+      "bits_per_patch": 3,
+      "patch_px": 32,
+      "mirrored": true
+    },
+    "dpi_scale": 1.0,
+    "render_settings": {
+      "synthetic": true,
+      "VideoUserSettings": {},
+      "DisplayUserSettings": {}
+    },
+    "render_settings_hash": "d3ad62e9925b12b849601c2f573ef48ab55612d88e7ef0ec399fe1e4ed3d7875"
+  },
+  "env_initial": {
+    "weather_state": "Clear",
+    "rain": 0.0,
+    "fog": 0.0,
+    "wetness": 0.0,
+    "tod_h": 12.0,
+    "date": "1989-08-20",
+    "day_auto_advance": false
+  },
+  "launch_guard": {
+    "launch_mode": "cli",
+    "record_path": "$profile:dc_launch/launch_20261025T091412Z-wb-5e00.json",
+    "record_launch_id": "20261025T091412Z-wb-5e00",
+    "cli_seen": true,
+    "profile_root_ok": true,
+    "escape_binding": null
+  }
+}

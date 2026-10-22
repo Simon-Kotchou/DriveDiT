@@ -1,0 +1,151 @@
+{
+  "schema": "dd-launch/1",
+  "launch_id": "20261025T091412Z-wb-5e00",
+  "status": "ok",
+  "utc": "2026-10-25T09:15:12Z",
+  "exe": "wb",
+  "instance": null,
+  "pin": {
+    "path": "synthetic/pin_1.8.0.13.json",
+    "pin_id": "1.8.0.13",
+    "sha256": "81ec5025f780e73786400682464cff01974c83716e7eecd300d475f303485321",
+    "resolved_by": "active-pointer",
+    "pointer": "synthetic/ACTIVE"
+  },
+  "observed": {
+    "game": {
+      "appid": 1874880,
+      "buildid": 24903726,
+      "target_buildid": 24903726,
+      "auto_update_behavior": "1"
+    },
+    "tools": {
+      "appid": 1874910,
+      "buildid": 24870687,
+      "target_buildid": 24870687,
+      "auto_update_behavior": "1"
+    }
+  },
+  "checks": [
+    {
+      "name": "game.acf",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.appid",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.buildid",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.target_buildid",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.auto_update_behavior",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.state_flags",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.depots",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.steam_appid_txt",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.binaries",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.paks",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "game.launch_path",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.acf",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.appid",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.buildid",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.target_buildid",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.auto_update_behavior",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.state_flags",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.depots",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.steam_appid_txt",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.binaries",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.paks",
+      "ok": true,
+      "detail": "synthetic"
+    },
+    {
+      "name": "tools.launch_path",
+      "ok": true,
+      "detail": "synthetic"
+    }
+  ],
+  "host": {
+    "hostname": "synthetic",
+    "wsl_distro": null,
+    "python": "synthetic"
+  },
+  "argv": [
+    "--pin-active",
+    "--exe",
+    "wb"
+  ]
+}

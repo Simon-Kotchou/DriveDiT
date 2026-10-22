@@ -1,0 +1,12412 @@
+{
+ "clocks": {
+  "decision_hz": 10.0,
+  "image_hz": 10.0,
+  "img_lead_ms": 0,
+  "physics_steps_per_decision": 6,
+  "telemetry_every_k": 3
+ },
+ "contract_version": "dc-2.0",
+ "counts": {
+  "ctl": 780,
+  "episodes": 2,
+  "events": 7,
+  "hf": 782,
+  "img": 130,
+  "telemetry": 260
+ },
+ "decision_steps": [
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 0,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": null,
+   "obs_age_steps": null,
+   "obs_captured_render_frame": null,
+   "obs_last_physics_step": null,
+   "obs_slot_id": null,
+   "obs_valid": 0,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 6,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261903,
+   "obs_last_physics_step": 1,
+   "obs_slot_id": 0,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 12,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261909,
+   "obs_last_physics_step": 7,
+   "obs_slot_id": 1,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 18,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261915,
+   "obs_last_physics_step": 13,
+   "obs_slot_id": 2,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 24,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261921,
+   "obs_last_physics_step": 19,
+   "obs_slot_id": 3,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 30,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261927,
+   "obs_last_physics_step": 25,
+   "obs_slot_id": 4,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 36,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261933,
+   "obs_last_physics_step": 31,
+   "obs_slot_id": 5,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 42,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261939,
+   "obs_last_physics_step": 37,
+   "obs_slot_id": 6,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 48,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261945,
+   "obs_last_physics_step": 43,
+   "obs_slot_id": 7,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 54,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261951,
+   "obs_last_physics_step": 49,
+   "obs_slot_id": 8,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 60,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261957,
+   "obs_last_physics_step": 55,
+   "obs_slot_id": 9,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 66,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261963,
+   "obs_last_physics_step": 61,
+   "obs_slot_id": 10,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 72,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261969,
+   "obs_last_physics_step": 67,
+   "obs_slot_id": 11,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 78,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261975,
+   "obs_last_physics_step": 73,
+   "obs_slot_id": 12,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 84,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261981,
+   "obs_last_physics_step": 79,
+   "obs_slot_id": 13,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 90,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261987,
+   "obs_last_physics_step": 85,
+   "obs_slot_id": 14,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 96,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261993,
+   "obs_last_physics_step": 91,
+   "obs_slot_id": 15,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 102,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 261999,
+   "obs_last_physics_step": 97,
+   "obs_slot_id": 16,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 108,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262005,
+   "obs_last_physics_step": 103,
+   "obs_slot_id": 17,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 114,
+   "episode_id": -1,
+   "hl_seq": -1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262011,
+   "obs_last_physics_step": 109,
+   "obs_slot_id": 18,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.005747,
+     0.666667,
+     0.0,
+     0.005747
+    ],
+    [
+     0.01114,
+     0.666667,
+     0.0,
+     0.01114
+    ],
+    [
+     0.015603,
+     0.666667,
+     0.0,
+     0.015603
+    ],
+    [
+     0.019297,
+     0.666667,
+     0.0,
+     0.019297
+    ],
+    [
+     0.022354,
+     0.666667,
+     0.0,
+     0.022354
+    ],
+    [
+     0.024884,
+     0.666667,
+     0.0,
+     0.024884
+    ]
+   ],
+   "action_label": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "decision_step": 120,
+   "episode_id": 0,
+   "hl_seq": 0,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262017,
+   "obs_last_physics_step": 115,
+   "obs_slot_id": 19,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.00561,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.027042,
+     0.666667,
+     0.0,
+     0.027042
+    ],
+    [
+     0.028828,
+     0.666667,
+     0.0,
+     0.028828
+    ],
+    [
+     0.030306,
+     0.666667,
+     0.0,
+     0.030306
+    ],
+    [
+     0.031529,
+     0.666667,
+     0.0,
+     0.031529
+    ],
+    [
+     0.032542,
+     0.666667,
+     0.0,
+     0.032542
+    ],
+    [
+     0.033379,
+     0.666667,
+     0.0,
+     0.033379
+    ]
+   ],
+   "action_label": [
+    0.00561,
+    2.0,
+    1
+   ],
+   "decision_step": 126,
+   "episode_id": 0,
+   "hl_seq": 1,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262023,
+   "obs_last_physics_step": 121,
+   "obs_slot_id": 20,
+   "obs_valid": 1,
+   "state": [
+    0.1996,
+    0.000621,
+    1.9917,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005742,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.034224,
+     0.666667,
+     0.0,
+     0.034224
+    ],
+    [
+     0.034923,
+     0.666667,
+     0.0,
+     0.034923
+    ],
+    [
+     0.035502,
+     0.666667,
+     0.0,
+     0.035502
+    ],
+    [
+     0.03598,
+     0.666667,
+     0.0,
+     0.03598
+    ],
+    [
+     0.036377,
+     0.666667,
+     0.0,
+     0.036377
+    ],
+    [
+     0.036704,
+     0.666667,
+     0.0,
+     0.036704
+    ]
+   ],
+   "action_label": [
+    0.005742,
+    2.0,
+    1
+   ],
+   "decision_step": 132,
+   "episode_id": 0,
+   "hl_seq": 2,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262029,
+   "obs_last_physics_step": 127,
+   "obs_slot_id": 21,
+   "obs_valid": 1,
+   "state": [
+    0.3982,
+    0.001828,
+    1.9817,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005941,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.037205,
+     0.666667,
+     0.0,
+     0.037205
+    ],
+    [
+     0.037619,
+     0.666667,
+     0.0,
+     0.037619
+    ],
+    [
+     0.037961,
+     0.666667,
+     0.0,
+     0.037961
+    ],
+    [
+     0.038245,
+     0.666667,
+     0.0,
+     0.038245
+    ],
+    [
+     0.038479,
+     0.666667,
+     0.0,
+     0.038479
+    ],
+    [
+     0.038674,
+     0.666667,
+     0.0,
+     0.038674
+    ]
+   ],
+   "action_label": [
+    0.005941,
+    2.0,
+    1
+   ],
+   "decision_step": 138,
+   "episode_id": 0,
+   "hl_seq": 3,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262035,
+   "obs_last_physics_step": 133,
+   "obs_slot_id": 22,
+   "obs_valid": 1,
+   "state": [
+    0.5958,
+    0.003099,
+    1.9719,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006205,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.039138,
+     0.666667,
+     0.0,
+     0.039138
+    ],
+    [
+     0.039522,
+     0.666667,
+     0.0,
+     0.039522
+    ],
+    [
+     0.03984,
+     0.666667,
+     0.0,
+     0.03984
+    ],
+    [
+     0.040103,
+     0.666667,
+     0.0,
+     0.040103
+    ],
+    [
+     0.040321,
+     0.666667,
+     0.0,
+     0.040321
+    ],
+    [
+     0.040501,
+     0.666667,
+     0.0,
+     0.040501
+    ]
+   ],
+   "action_label": [
+    0.006205,
+    2.0,
+    1
+   ],
+   "decision_step": 144,
+   "episode_id": 0,
+   "hl_seq": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262041,
+   "obs_last_physics_step": 139,
+   "obs_slot_id": 23,
+   "obs_valid": 1,
+   "state": [
+    0.7924,
+    0.004407,
+    1.962,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006529,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.041023,
+     0.666667,
+     0.0,
+     0.041023
+    ],
+    [
+     0.041455,
+     0.666667,
+     0.0,
+     0.041455
+    ],
+    [
+     0.041813,
+     0.666667,
+     0.0,
+     0.041813
+    ],
+    [
+     0.042109,
+     0.666667,
+     0.0,
+     0.042109
+    ],
+    [
+     0.042354,
+     0.666667,
+     0.0,
+     0.042354
+    ],
+    [
+     0.042556,
+     0.666667,
+     0.0,
+     0.042556
+    ]
+   ],
+   "action_label": [
+    0.006529,
+    2.0,
+    1
+   ],
+   "decision_step": 150,
+   "episode_id": 0,
+   "hl_seq": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262047,
+   "obs_last_physics_step": 145,
+   "obs_slot_id": 24,
+   "obs_valid": 1,
+   "state": [
+    0.988,
+    0.005805,
+    1.9522,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006908,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.04316,
+     0.666667,
+     0.0,
+     0.04316
+    ],
+    [
+     0.043659,
+     0.666667,
+     0.0,
+     0.043659
+    ],
+    [
+     0.044072,
+     0.666667,
+     0.0,
+     0.044072
+    ],
+    [
+     0.044414,
+     0.666667,
+     0.0,
+     0.044414
+    ],
+    [
+     0.044697,
+     0.666667,
+     0.0,
+     0.044697
+    ],
+    [
+     0.044931,
+     0.666667,
+     0.0,
+     0.044931
+    ]
+   ],
+   "action_label": [
+    0.006908,
+    2.0,
+    1
+   ],
+   "decision_step": 156,
+   "episode_id": 0,
+   "hl_seq": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262053,
+   "obs_last_physics_step": 151,
+   "obs_slot_id": 25,
+   "obs_valid": 1,
+   "state": [
+    1.1827,
+    0.007343,
+    1.9425,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.007333,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.045612,
+     0.666667,
+     0.0,
+     0.045612
+    ],
+    [
+     0.046177,
+     0.666667,
+     0.0,
+     0.046177
+    ],
+    [
+     0.046644,
+     0.666667,
+     0.0,
+     0.046644
+    ],
+    [
+     0.04703,
+     0.666667,
+     0.0,
+     0.04703
+    ],
+    [
+     0.04735,
+     0.666667,
+     0.0,
+     0.04735
+    ],
+    [
+     0.047614,
+     0.666667,
+     0.0,
+     0.047614
+    ]
+   ],
+   "action_label": [
+    0.007333,
+    2.0,
+    1
+   ],
+   "decision_step": 162,
+   "episode_id": 0,
+   "hl_seq": 7,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262059,
+   "obs_last_physics_step": 157,
+   "obs_slot_id": 26,
+   "obs_valid": 1,
+   "state": [
+    1.3763,
+    0.009059,
+    1.9328,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.007952,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.048545,
+     0.666667,
+     0.0,
+     0.048545
+    ],
+    [
+     0.049315,
+     0.666667,
+     0.0,
+     0.049315
+    ],
+    [
+     0.049952,
+     0.666667,
+     0.0,
+     0.049952
+    ],
+    [
+     0.050479,
+     0.666667,
+     0.0,
+     0.050479
+    ],
+    [
+     0.050915,
+     0.666667,
+     0.0,
+     0.050915
+    ],
+    [
+     0.051277,
+     0.666667,
+     0.0,
+     0.051277
+    ]
+   ],
+   "action_label": [
+    0.007952,
+    2.0,
+    1
+   ],
+   "decision_step": 168,
+   "episode_id": 0,
+   "hl_seq": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262065,
+   "obs_last_physics_step": 163,
+   "obs_slot_id": 27,
+   "obs_valid": 1,
+   "state": [
+    1.5691,
+    0.010978,
+    1.9231,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.008616,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.052339,
+     0.666667,
+     0.0,
+     0.052339
+    ],
+    [
+     0.053219,
+     0.666667,
+     0.0,
+     0.053219
+    ],
+    [
+     0.053947,
+     0.666667,
+     0.0,
+     0.053947
+    ],
+    [
+     0.054549,
+     0.666667,
+     0.0,
+     0.054549
+    ],
+    [
+     0.055048,
+     0.666667,
+     0.0,
+     0.055048
+    ],
+    [
+     0.05546,
+     0.666667,
+     0.0,
+     0.05546
+    ]
+   ],
+   "action_label": [
+    0.008616,
+    2.0,
+    1
+   ],
+   "decision_step": 174,
+   "episode_id": 0,
+   "hl_seq": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262071,
+   "obs_last_physics_step": 169,
+   "obs_slot_id": 28,
+   "obs_valid": 1,
+   "state": [
+    1.7608,
+    0.013298,
+    1.9136,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.009304,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.056593,
+     0.666667,
+     0.0,
+     0.056593
+    ],
+    [
+     0.05753,
+     0.666667,
+     0.0,
+     0.05753
+    ],
+    [
+     0.058306,
+     0.666667,
+     0.0,
+     0.058306
+    ],
+    [
+     0.058948,
+     0.666667,
+     0.0,
+     0.058948
+    ],
+    [
+     0.059479,
+     0.666667,
+     0.0,
+     0.059479
+    ],
+    [
+     0.059919,
+     0.666667,
+     0.0,
+     0.059919
+    ]
+   ],
+   "action_label": [
+    0.009304,
+    2.0,
+    1
+   ],
+   "decision_step": 180,
+   "episode_id": 0,
+   "hl_seq": 10,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262077,
+   "obs_last_physics_step": 175,
+   "obs_slot_id": 29,
+   "obs_valid": 1,
+   "state": [
+    1.9516,
+    0.015972,
+    1.904,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.010229,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.061346,
+     0.666667,
+     0.0,
+     0.061346
+    ],
+    [
+     0.062527,
+     0.666667,
+     0.0,
+     0.062527
+    ],
+    [
+     0.063505,
+     0.666667,
+     0.0,
+     0.063505
+    ],
+    [
+     0.064314,
+     0.666667,
+     0.0,
+     0.064314
+    ],
+    [
+     0.064983,
+     0.666667,
+     0.0,
+     0.064983
+    ],
+    [
+     0.065537,
+     0.666667,
+     0.0,
+     0.065537
+    ]
+   ],
+   "action_label": [
+    0.010229,
+    2.0,
+    1
+   ],
+   "decision_step": 186,
+   "episode_id": 0,
+   "hl_seq": 11,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262083,
+   "obs_last_physics_step": 181,
+   "obs_slot_id": 30,
+   "obs_valid": 1,
+   "state": [
+    2.1415,
+    0.018963,
+    1.8945,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.011156,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.067061,
+     0.666667,
+     0.0,
+     0.067061
+    ],
+    [
+     0.068322,
+     0.666667,
+     0.0,
+     0.068322
+    ],
+    [
+     0.069365,
+     0.666667,
+     0.0,
+     0.069365
+    ],
+    [
+     0.070229,
+     0.666667,
+     0.0,
+     0.070229
+    ],
+    [
+     0.070943,
+     0.666667,
+     0.0,
+     0.070943
+    ],
+    [
+     0.071535,
+     0.666667,
+     0.0,
+     0.071535
+    ]
+   ],
+   "action_label": [
+    0.011156,
+    2.0,
+    1
+   ],
+   "decision_step": 192,
+   "episode_id": 0,
+   "hl_seq": 12,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262089,
+   "obs_last_physics_step": 187,
+   "obs_slot_id": 31,
+   "obs_valid": 1,
+   "state": [
+    2.3304,
+    0.0226,
+    1.8851,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.012251,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.073283,
+     0.666667,
+     0.0,
+     0.073283
+    ],
+    [
+     0.074729,
+     0.666667,
+     0.0,
+     0.074729
+    ],
+    [
+     0.075926,
+     0.666667,
+     0.0,
+     0.075926
+    ],
+    [
+     0.076917,
+     0.666667,
+     0.0,
+     0.076917
+    ],
+    [
+     0.077737,
+     0.666667,
+     0.0,
+     0.077737
+    ],
+    [
+     0.078415,
+     0.666667,
+     0.0,
+     0.078415
+    ]
+   ],
+   "action_label": [
+    0.012251,
+    2.0,
+    1
+   ],
+   "decision_step": 198,
+   "episode_id": 0,
+   "hl_seq": 13,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262095,
+   "obs_last_physics_step": 193,
+   "obs_slot_id": 32,
+   "obs_valid": 1,
+   "state": [
+    2.5183,
+    0.026687,
+    1.8756,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.013384,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.08028,
+     0.666667,
+     0.0,
+     0.08028
+    ],
+    [
+     0.081823,
+     0.666667,
+     0.0,
+     0.081823
+    ],
+    [
+     0.0831,
+     0.666667,
+     0.0,
+     0.0831
+    ],
+    [
+     0.084157,
+     0.666667,
+     0.0,
+     0.084157
+    ],
+    [
+     0.085031,
+     0.666667,
+     0.0,
+     0.085031
+    ],
+    [
+     0.085755,
+     0.666667,
+     0.0,
+     0.085755
+    ]
+   ],
+   "action_label": [
+    0.013384,
+    2.0,
+    1
+   ],
+   "decision_step": 204,
+   "episode_id": 0,
+   "hl_seq": 14,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262101,
+   "obs_last_physics_step": 199,
+   "obs_slot_id": 33,
+   "obs_valid": 1,
+   "state": [
+    2.7053,
+    0.031455,
+    1.8663,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.014695,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.08786,
+     0.666667,
+     0.0,
+     0.08786
+    ],
+    [
+     0.089603,
+     0.666667,
+     0.0,
+     0.089603
+    ],
+    [
+     0.091044,
+     0.666667,
+     0.0,
+     0.091044
+    ],
+    [
+     0.092238,
+     0.666667,
+     0.0,
+     0.092238
+    ],
+    [
+     0.093225,
+     0.666667,
+     0.0,
+     0.093225
+    ],
+    [
+     0.094042,
+     0.666667,
+     0.0,
+     0.094042
+    ]
+   ],
+   "action_label": [
+    0.014695,
+    2.0,
+    1
+   ],
+   "decision_step": 210,
+   "episode_id": 0,
+   "hl_seq": 15,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262107,
+   "obs_last_physics_step": 205,
+   "obs_slot_id": 34,
+   "obs_valid": 1,
+   "state": [
+    2.8914,
+    0.036795,
+    1.857,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.016005,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.096225,
+     0.666667,
+     0.0,
+     0.096225
+    ],
+    [
+     0.098031,
+     0.666667,
+     0.0,
+     0.098031
+    ],
+    [
+     0.099526,
+     0.666667,
+     0.0,
+     0.099526
+    ],
+    [
+     0.100762,
+     0.666667,
+     0.0,
+     0.100762
+    ],
+    [
+     0.101786,
+     0.666667,
+     0.0,
+     0.101786
+    ],
+    [
+     0.102633,
+     0.666667,
+     0.0,
+     0.102633
+    ]
+   ],
+   "action_label": [
+    0.016005,
+    2.0,
+    1
+   ],
+   "decision_step": 216,
+   "episode_id": 0,
+   "hl_seq": 16,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262113,
+   "obs_last_physics_step": 211,
+   "obs_slot_id": 35,
+   "obs_valid": 1,
+   "state": [
+    3.0766,
+    0.042965,
+    1.8477,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.017512,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.105066,
+     0.666667,
+     0.0,
+     0.105066
+    ],
+    [
+     0.10708,
+     0.666667,
+     0.0,
+     0.10708
+    ],
+    [
+     0.108746,
+     0.666667,
+     0.0,
+     0.108746
+    ],
+    [
+     0.110125,
+     0.666667,
+     0.0,
+     0.110125
+    ],
+    [
+     0.111266,
+     0.666667,
+     0.0,
+     0.111266
+    ],
+    [
+     0.11221,
+     0.666667,
+     0.0,
+     0.11221
+    ]
+   ],
+   "action_label": [
+    0.017512,
+    2.0,
+    1
+   ],
+   "decision_step": 222,
+   "episode_id": 0,
+   "hl_seq": 17,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262119,
+   "obs_last_physics_step": 217,
+   "obs_slot_id": 36,
+   "obs_valid": 1,
+   "state": [
+    3.2608,
+    0.049728,
+    1.8385,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.019049,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.114759,
+     0.666667,
+     0.0,
+     0.114759
+    ],
+    [
+     0.116869,
+     0.666667,
+     0.0,
+     0.116869
+    ],
+    [
+     0.118615,
+     0.666667,
+     0.0,
+     0.118615
+    ],
+    [
+     0.12006,
+     0.666667,
+     0.0,
+     0.12006
+    ],
+    [
+     0.121255,
+     0.666667,
+     0.0,
+     0.121255
+    ],
+    [
+     0.122245,
+     0.666667,
+     0.0,
+     0.122245
+    ]
+   ],
+   "action_label": [
+    0.019049,
+    2.0,
+    1
+   ],
+   "decision_step": 228,
+   "episode_id": 0,
+   "hl_seq": 18,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262125,
+   "obs_last_physics_step": 223,
+   "obs_slot_id": 37,
+   "obs_valid": 1,
+   "state": [
+    3.4441,
+    0.057457,
+    1.8293,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.020603,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.12485,
+     0.666667,
+     0.0,
+     0.12485
+    ],
+    [
+     0.127006,
+     0.666667,
+     0.0,
+     0.127006
+    ],
+    [
+     0.12879,
+     0.666667,
+     0.0,
+     0.12879
+    ],
+    [
+     0.130267,
+     0.666667,
+     0.0,
+     0.130267
+    ],
+    [
+     0.131489,
+     0.666667,
+     0.0,
+     0.131489
+    ],
+    [
+     0.132501,
+     0.666667,
+     0.0,
+     0.132501
+    ]
+   ],
+   "action_label": [
+    0.020603,
+    2.0,
+    1
+   ],
+   "decision_step": 234,
+   "episode_id": 0,
+   "hl_seq": 19,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262131,
+   "obs_last_physics_step": 229,
+   "obs_slot_id": 38,
+   "obs_valid": 1,
+   "state": [
+    3.6265,
+    0.065942,
+    1.8202,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.022291,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.135278,
+     0.666667,
+     0.0,
+     0.135278
+    ],
+    [
+     0.137576,
+     0.666667,
+     0.0,
+     0.137576
+    ],
+    [
+     0.139478,
+     0.666667,
+     0.0,
+     0.139478
+    ],
+    [
+     0.141052,
+     0.666667,
+     0.0,
+     0.141052
+    ],
+    [
+     0.142354,
+     0.666667,
+     0.0,
+     0.142354
+    ],
+    [
+     0.143433,
+     0.666667,
+     0.0,
+     0.143433
+    ]
+   ],
+   "action_label": [
+    0.022291,
+    2.0,
+    1
+   ],
+   "decision_step": 240,
+   "episode_id": 0,
+   "hl_seq": 20,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262137,
+   "obs_last_physics_step": 235,
+   "obs_slot_id": 39,
+   "obs_valid": 1,
+   "state": [
+    3.808,
+    0.075085,
+    1.8111,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.024016,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.146307,
+     0.666667,
+     0.0,
+     0.146307
+    ],
+    [
+     0.148686,
+     0.666667,
+     0.0,
+     0.148686
+    ],
+    [
+     0.150654,
+     0.666667,
+     0.0,
+     0.150654
+    ],
+    [
+     0.152284,
+     0.666667,
+     0.0,
+     0.152284
+    ],
+    [
+     0.153632,
+     0.666667,
+     0.0,
+     0.153632
+    ],
+    [
+     0.154748,
+     0.666667,
+     0.0,
+     0.154748
+    ]
+   ],
+   "action_label": [
+    0.024016,
+    2.0,
+    1
+   ],
+   "decision_step": 246,
+   "episode_id": 0,
+   "hl_seq": 21,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262143,
+   "obs_last_physics_step": 241,
+   "obs_slot_id": 40,
+   "obs_valid": 1,
+   "state": [
+    3.9886,
+    0.085168,
+    1.8021,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.025735,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.157648,
+     0.666667,
+     0.0,
+     0.157648
+    ],
+    [
+     0.160048,
+     0.666667,
+     0.0,
+     0.160048
+    ],
+    [
+     0.162034,
+     0.666667,
+     0.0,
+     0.162034
+    ],
+    [
+     0.163678,
+     0.666667,
+     0.0,
+     0.163678
+    ],
+    [
+     0.165039,
+     0.666667,
+     0.0,
+     0.165039
+    ],
+    [
+     0.166165,
+     0.666667,
+     0.0,
+     0.166165
+    ]
+   ],
+   "action_label": [
+    0.025735,
+    2.0,
+    1
+   ],
+   "decision_step": 252,
+   "episode_id": 0,
+   "hl_seq": 22,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262149,
+   "obs_last_physics_step": 247,
+   "obs_slot_id": 41,
+   "obs_valid": 1,
+   "state": [
+    4.1683,
+    0.096061,
+    1.7931,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.027441,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.169057,
+     0.666667,
+     0.0,
+     0.169057
+    ],
+    [
+     0.171451,
+     0.666667,
+     0.0,
+     0.171451
+    ],
+    [
+     0.173433,
+     0.666667,
+     0.0,
+     0.173433
+    ],
+    [
+     0.175072,
+     0.666667,
+     0.0,
+     0.175072
+    ],
+    [
+     0.176429,
+     0.666667,
+     0.0,
+     0.176429
+    ],
+    [
+     0.177552,
+     0.666667,
+     0.0,
+     0.177552
+    ]
+   ],
+   "action_label": [
+    0.027441,
+    2.0,
+    1
+   ],
+   "decision_step": 258,
+   "episode_id": 0,
+   "hl_seq": 23,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262155,
+   "obs_last_physics_step": 253,
+   "obs_slot_id": 42,
+   "obs_valid": 1,
+   "state": [
+    4.3471,
+    0.107608,
+    1.7841,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.029121,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.180412,
+     0.666667,
+     0.0,
+     0.180412
+    ],
+    [
+     0.182778,
+     0.666667,
+     0.0,
+     0.182778
+    ],
+    [
+     0.184736,
+     0.666667,
+     0.0,
+     0.184736
+    ],
+    [
+     0.186357,
+     0.666667,
+     0.0,
+     0.186357
+    ],
+    [
+     0.187699,
+     0.666667,
+     0.0,
+     0.187699
+    ],
+    [
+     0.188809,
+     0.666667,
+     0.0,
+     0.188809
+    ]
+   ],
+   "action_label": [
+    0.029121,
+    2.0,
+    1
+   ],
+   "decision_step": 264,
+   "episode_id": 0,
+   "hl_seq": 24,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262161,
+   "obs_last_physics_step": 259,
+   "obs_slot_id": 43,
+   "obs_valid": 1,
+   "state": [
+    4.525,
+    0.119724,
+    1.7752,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.030766,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.191619,
+     0.666667,
+     0.0,
+     0.191619
+    ],
+    [
+     0.193945,
+     0.666667,
+     0.0,
+     0.193945
+    ],
+    [
+     0.19587,
+     0.666667,
+     0.0,
+     0.19587
+    ],
+    [
+     0.197463,
+     0.666667,
+     0.0,
+     0.197463
+    ],
+    [
+     0.198781,
+     0.666667,
+     0.0,
+     0.198781
+    ],
+    [
+     0.199872,
+     0.666667,
+     0.0,
+     0.199872
+    ]
+   ],
+   "action_label": [
+    0.030766,
+    2.0,
+    1
+   ],
+   "decision_step": 270,
+   "episode_id": 0,
+   "hl_seq": 25,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262167,
+   "obs_last_physics_step": 265,
+   "obs_slot_id": 44,
+   "obs_valid": 1,
+   "state": [
+    4.702,
+    0.132332,
+    1.7664,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.03236,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.202607,
+     0.666667,
+     0.0,
+     0.202607
+    ],
+    [
+     0.20487,
+     0.666667,
+     0.0,
+     0.20487
+    ],
+    [
+     0.206742,
+     0.666667,
+     0.0,
+     0.206742
+    ],
+    [
+     0.208292,
+     0.666667,
+     0.0,
+     0.208292
+    ],
+    [
+     0.209575,
+     0.666667,
+     0.0,
+     0.209575
+    ],
+    [
+     0.210637,
+     0.666667,
+     0.0,
+     0.210637
+    ]
+   ],
+   "action_label": [
+    0.03236,
+    2.0,
+    1
+   ],
+   "decision_step": 276,
+   "episode_id": 0,
+   "hl_seq": 26,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262173,
+   "obs_last_physics_step": 271,
+   "obs_slot_id": 45,
+   "obs_valid": 1,
+   "state": [
+    4.8781,
+    0.145371,
+    1.7576,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.034046,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.213454,
+     0.666667,
+     0.0,
+     0.213454
+    ],
+    [
+     0.215785,
+     0.666667,
+     0.0,
+     0.215785
+    ],
+    [
+     0.217715,
+     0.666667,
+     0.0,
+     0.217715
+    ],
+    [
+     0.219312,
+     0.666667,
+     0.0,
+     0.219312
+    ],
+    [
+     0.220633,
+     0.666667,
+     0.0,
+     0.220633
+    ],
+    [
+     0.221727,
+     0.666667,
+     0.0,
+     0.221727
+    ]
+   ],
+   "action_label": [
+    0.034046,
+    2.0,
+    1
+   ],
+   "decision_step": 282,
+   "episode_id": 0,
+   "hl_seq": 27,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262179,
+   "obs_last_physics_step": 277,
+   "obs_slot_id": 46,
+   "obs_valid": 1,
+   "state": [
+    5.0533,
+    0.158742,
+    1.7488,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.035837,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.22469,
+     0.666667,
+     0.0,
+     0.22469
+    ],
+    [
+     0.227143,
+     0.666667,
+     0.0,
+     0.227143
+    ],
+    [
+     0.229172,
+     0.666667,
+     0.0,
+     0.229172
+    ],
+    [
+     0.230852,
+     0.666667,
+     0.0,
+     0.230852
+    ],
+    [
+     0.232242,
+     0.666667,
+     0.0,
+     0.232242
+    ],
+    [
+     0.233392,
+     0.666667,
+     0.0,
+     0.233392
+    ]
+   ],
+   "action_label": [
+    0.035837,
+    2.0,
+    1
+   ],
+   "decision_step": 288,
+   "episode_id": 0,
+   "hl_seq": 28,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262185,
+   "obs_last_physics_step": 283,
+   "obs_slot_id": 47,
+   "obs_valid": 1,
+   "state": [
+    5.2277,
+    0.172904,
+    1.7401,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.037287,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.236011,
+     0.666667,
+     0.0,
+     0.236011
+    ],
+    [
+     0.238178,
+     0.666667,
+     0.0,
+     0.238178
+    ],
+    [
+     0.239971,
+     0.666667,
+     0.0,
+     0.239971
+    ],
+    [
+     0.241455,
+     0.666667,
+     0.0,
+     0.241455
+    ],
+    [
+     0.242684,
+     0.666667,
+     0.0,
+     0.242684
+    ],
+    [
+     0.2437,
+     0.666667,
+     0.0,
+     0.2437
+    ]
+   ],
+   "action_label": [
+    0.037287,
+    2.0,
+    1
+   ],
+   "decision_step": 294,
+   "episode_id": 0,
+   "hl_seq": 29,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262191,
+   "obs_last_physics_step": 289,
+   "obs_slot_id": 48,
+   "obs_valid": 1,
+   "state": [
+    5.4012,
+    0.188079,
+    1.7314,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.038512,
+    1.940933,
+    1
+   ],
+   "action_exec": [
+    [
+     0.24595,
+     0.646978,
+     0.0,
+     0.24595
+    ],
+    [
+     0.247812,
+     0.646978,
+     0.0,
+     0.247812
+    ],
+    [
+     0.249353,
+     0.646978,
+     0.0,
+     0.249353
+    ],
+    [
+     0.250628,
+     0.646978,
+     0.0,
+     0.250628
+    ],
+    [
+     0.251683,
+     0.646978,
+     0.0,
+     0.251683
+    ],
+    [
+     0.252556,
+     0.646978,
+     0.0,
+     0.252556
+    ]
+   ],
+   "action_label": [
+    0.038512,
+    1.940933,
+    1
+   ],
+   "decision_step": 300,
+   "episode_id": 0,
+   "hl_seq": 30,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262197,
+   "obs_last_physics_step": 295,
+   "obs_slot_id": 49,
+   "obs_valid": 1,
+   "state": [
+    5.5738,
+    0.202702,
+    1.7227,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.03943,
+    1.80823,
+    1
+   ],
+   "action_exec": [
+    [
+     0.254334,
+     0.602743,
+     0.0,
+     0.254334
+    ],
+    [
+     0.255806,
+     0.602743,
+     0.0,
+     0.255806
+    ],
+    [
+     0.257024,
+     0.602743,
+     0.0,
+     0.257024
+    ],
+    [
+     0.258031,
+     0.602743,
+     0.0,
+     0.258031
+    ],
+    [
+     0.258866,
+     0.602743,
+     0.0,
+     0.258866
+    ],
+    [
+     0.259556,
+     0.602743,
+     0.0,
+     0.259556
+    ]
+   ],
+   "action_label": [
+    0.03943,
+    1.80823,
+    1
+   ],
+   "decision_step": 306,
+   "episode_id": 0,
+   "hl_seq": 31,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262203,
+   "obs_last_physics_step": 301,
+   "obs_slot_id": 50,
+   "obs_valid": 1,
+   "state": [
+    5.7397,
+    0.216395,
+    1.6553,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.040142,
+    1.686784,
+    1
+   ],
+   "action_exec": [
+    [
+     0.260946,
+     0.562261,
+     0.0,
+     0.260946
+    ],
+    [
+     0.262096,
+     0.562261,
+     0.0,
+     0.262096
+    ],
+    [
+     0.263047,
+     0.562261,
+     0.0,
+     0.263047
+    ],
+    [
+     0.263835,
+     0.562261,
+     0.0,
+     0.263835
+    ],
+    [
+     0.264487,
+     0.562261,
+     0.0,
+     0.264487
+    ],
+    [
+     0.265027,
+     0.562261,
+     0.0,
+     0.265027
+    ]
+   ],
+   "action_label": [
+    0.040142,
+    1.686784,
+    1
+   ],
+   "decision_step": 312,
+   "episode_id": 0,
+   "hl_seq": 32,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262209,
+   "obs_last_physics_step": 307,
+   "obs_slot_id": 51,
+   "obs_valid": 1,
+   "state": [
+    5.8915,
+    0.228394,
+    1.5149,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.040658,
+    1.575639,
+    1
+   ],
+   "action_exec": [
+    [
+     0.266065,
+     0.525213,
+     0.0,
+     0.266065
+    ],
+    [
+     0.266925,
+     0.525213,
+     0.0,
+     0.266925
+    ],
+    [
+     0.267637,
+     0.525213,
+     0.0,
+     0.267637
+    ],
+    [
+     0.268226,
+     0.525213,
+     0.0,
+     0.268226
+    ],
+    [
+     0.268713,
+     0.525213,
+     0.0,
+     0.268713
+    ],
+    [
+     0.269116,
+     0.525213,
+     0.0,
+     0.269116
+    ]
+   ],
+   "action_label": [
+    0.040658,
+    1.575639,
+    1
+   ],
+   "decision_step": 318,
+   "episode_id": 0,
+   "hl_seq": 33,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262215,
+   "obs_last_physics_step": 313,
+   "obs_slot_id": 52,
+   "obs_valid": 1,
+   "state": [
+    6.0305,
+    0.238816,
+    1.3864,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041022,
+    1.473922,
+    1
+   ],
+   "action_exec": [
+    [
+     0.269869,
+     0.491307,
+     0.0,
+     0.269869
+    ],
+    [
+     0.270492,
+     0.491307,
+     0.0,
+     0.270492
+    ],
+    [
+     0.271007,
+     0.491307,
+     0.0,
+     0.271007
+    ],
+    [
+     0.271434,
+     0.491307,
+     0.0,
+     0.271434
+    ],
+    [
+     0.271787,
+     0.491307,
+     0.0,
+     0.271787
+    ],
+    [
+     0.272079,
+     0.491307,
+     0.0,
+     0.272079
+    ]
+   ],
+   "action_label": [
+    0.041022,
+    1.473922,
+    1
+   ],
+   "decision_step": 324,
+   "episode_id": 0,
+   "hl_seq": 34,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262221,
+   "obs_last_physics_step": 319,
+   "obs_slot_id": 53,
+   "obs_valid": 1,
+   "state": [
+    6.1576,
+    0.247713,
+    1.2688,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041283,
+    1.380833,
+    1
+   ],
+   "action_exec": [
+    [
+     0.27262,
+     0.460278,
+     0.0,
+     0.27262
+    ],
+    [
+     0.273068,
+     0.460278,
+     0.0,
+     0.273068
+    ],
+    [
+     0.273439,
+     0.460278,
+     0.0,
+     0.273439
+    ],
+    [
+     0.273746,
+     0.460278,
+     0.0,
+     0.273746
+    ],
+    [
+     0.273999,
+     0.460278,
+     0.0,
+     0.273999
+    ],
+    [
+     0.27421,
+     0.460278,
+     0.0,
+     0.27421
+    ]
+   ],
+   "action_label": [
+    0.041283,
+    1.380833,
+    1
+   ],
+   "decision_step": 330,
+   "episode_id": 0,
+   "hl_seq": 35,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262227,
+   "obs_last_physics_step": 325,
+   "obs_slot_id": 54,
+   "obs_valid": 1,
+   "state": [
+    6.274,
+    0.255262,
+    1.1612,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041427,
+    1.29564,
+    1
+   ],
+   "action_exec": [
+    [
+     0.27455,
+     0.43188,
+     0.0,
+     0.27455
+    ],
+    [
+     0.274831,
+     0.43188,
+     0.0,
+     0.274831
+    ],
+    [
+     0.275064,
+     0.43188,
+     0.0,
+     0.275064
+    ],
+    [
+     0.275257,
+     0.43188,
+     0.0,
+     0.275257
+    ],
+    [
+     0.275417,
+     0.43188,
+     0.0,
+     0.275417
+    ],
+    [
+     0.275549,
+     0.43188,
+     0.0,
+     0.275549
+    ]
+   ],
+   "action_label": [
+    0.041427,
+    1.29564,
+    1
+   ],
+   "decision_step": 336,
+   "episode_id": 0,
+   "hl_seq": 36,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262233,
+   "obs_last_physics_step": 331,
+   "obs_slot_id": 55,
+   "obs_valid": 1,
+   "state": [
+    6.3805,
+    0.261709,
+    1.0627,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041533,
+    1.217673,
+    1
+   ],
+   "action_exec": [
+    [
+     0.27578,
+     0.405891,
+     0.0,
+     0.27578
+    ],
+    [
+     0.275971,
+     0.405891,
+     0.0,
+     0.275971
+    ],
+    [
+     0.27613,
+     0.405891,
+     0.0,
+     0.27613
+    ],
+    [
+     0.276261,
+     0.405891,
+     0.0,
+     0.276261
+    ],
+    [
+     0.276369,
+     0.405891,
+     0.0,
+     0.276369
+    ],
+    [
+     0.276459,
+     0.405891,
+     0.0,
+     0.276459
+    ]
+   ],
+   "action_label": [
+    0.041533,
+    1.217673,
+    1
+   ],
+   "decision_step": 342,
+   "episode_id": 0,
+   "hl_seq": 37,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262239,
+   "obs_last_physics_step": 337,
+   "obs_slot_id": 56,
+   "obs_valid": 1,
+   "state": [
+    6.4779,
+    0.267077,
+    0.9726,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041544,
+    1.146319,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276545,
+     0.382106,
+     0.0,
+     0.276545
+    ],
+    [
+     0.276616,
+     0.382106,
+     0.0,
+     0.276616
+    ],
+    [
+     0.276675,
+     0.382106,
+     0.0,
+     0.276675
+    ],
+    [
+     0.276723,
+     0.382106,
+     0.0,
+     0.276723
+    ],
+    [
+     0.276763,
+     0.382106,
+     0.0,
+     0.276763
+    ],
+    [
+     0.276797,
+     0.382106,
+     0.0,
+     0.276797
+    ]
+   ],
+   "action_label": [
+    0.041544,
+    1.146319,
+    1
+   ],
+   "decision_step": 348,
+   "episode_id": 0,
+   "hl_seq": 38,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262245,
+   "obs_last_physics_step": 343,
+   "obs_slot_id": 57,
+   "obs_valid": 1,
+   "state": [
+    6.5671,
+    0.271715,
+    0.8901,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041556,
+    1.081018,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276839,
+     0.360339,
+     0.0,
+     0.276839
+    ],
+    [
+     0.276874,
+     0.360339,
+     0.0,
+     0.276874
+    ],
+    [
+     0.276903,
+     0.360339,
+     0.0,
+     0.276903
+    ],
+    [
+     0.276927,
+     0.360339,
+     0.0,
+     0.276927
+    ],
+    [
+     0.276947,
+     0.360339,
+     0.0,
+     0.276947
+    ],
+    [
+     0.276963,
+     0.360339,
+     0.0,
+     0.276963
+    ]
+   ],
+   "action_label": [
+    0.041556,
+    1.081018,
+    1
+   ],
+   "decision_step": 354,
+   "episode_id": 0,
+   "hl_seq": 39,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262251,
+   "obs_last_physics_step": 349,
+   "obs_slot_id": 58,
+   "obs_valid": 1,
+   "state": [
+    6.6487,
+    0.275488,
+    0.8146,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041486,
+    1.021257,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276896,
+     0.340419,
+     0.0,
+     0.276896
+    ],
+    [
+     0.276841,
+     0.340419,
+     0.0,
+     0.276841
+    ],
+    [
+     0.276795,
+     0.340419,
+     0.0,
+     0.276795
+    ],
+    [
+     0.276757,
+     0.340419,
+     0.0,
+     0.276757
+    ],
+    [
+     0.276725,
+     0.340419,
+     0.0,
+     0.276725
+    ],
+    [
+     0.276699,
+     0.340419,
+     0.0,
+     0.276699
+    ]
+   ],
+   "action_label": [
+    0.041486,
+    1.021257,
+    1
+   ],
+   "decision_step": 360,
+   "episode_id": 0,
+   "hl_seq": 40,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262257,
+   "obs_last_physics_step": 355,
+   "obs_slot_id": 59,
+   "obs_valid": 1,
+   "state": [
+    6.7234,
+    0.278805,
+    0.7455,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.04145,
+    0.966564,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276636,
+     0.322188,
+     0.0,
+     0.276636
+    ],
+    [
+     0.276584,
+     0.322188,
+     0.0,
+     0.276584
+    ],
+    [
+     0.276541,
+     0.322188,
+     0.0,
+     0.276541
+    ],
+    [
+     0.276505,
+     0.322188,
+     0.0,
+     0.276505
+    ],
+    [
+     0.276475,
+     0.322188,
+     0.0,
+     0.276475
+    ],
+    [
+     0.276451,
+     0.322188,
+     0.0,
+     0.276451
+    ]
+   ],
+   "action_label": [
+    0.04145,
+    0.966564,
+    1
+   ],
+   "decision_step": 366,
+   "episode_id": 0,
+   "hl_seq": 41,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262263,
+   "obs_last_physics_step": 361,
+   "obs_slot_id": 60,
+   "obs_valid": 1,
+   "state": [
+    6.7918,
+    0.281421,
+    0.6822,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041336,
+    0.91651,
+    1
+   ],
+   "action_exec": [
+    [
+     0.2763,
+     0.305503,
+     0.0,
+     0.2763
+    ],
+    [
+     0.276174,
+     0.305503,
+     0.0,
+     0.276174
+    ],
+    [
+     0.276071,
+     0.305503,
+     0.0,
+     0.276071
+    ],
+    [
+     0.275985,
+     0.305503,
+     0.0,
+     0.275985
+    ],
+    [
+     0.275914,
+     0.305503,
+     0.0,
+     0.275914
+    ],
+    [
+     0.275855,
+     0.305503,
+     0.0,
+     0.275855
+    ]
+   ],
+   "action_label": [
+    0.041336,
+    0.91651,
+    1
+   ],
+   "decision_step": 372,
+   "episode_id": 0,
+   "hl_seq": 42,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262269,
+   "obs_last_physics_step": 367,
+   "obs_slot_id": 61,
+   "obs_valid": 1,
+   "state": [
+    6.8544,
+    0.283803,
+    0.6244,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041277,
+    0.870702,
+    1
+   ],
+   "action_exec": [
+    [
+     0.275739,
+     0.290234,
+     0.0,
+     0.275739
+    ],
+    [
+     0.275642,
+     0.290234,
+     0.0,
+     0.275642
+    ],
+    [
+     0.275563,
+     0.290234,
+     0.0,
+     0.275563
+    ],
+    [
+     0.275497,
+     0.290234,
+     0.0,
+     0.275497
+    ],
+    [
+     0.275442,
+     0.290234,
+     0.0,
+     0.275442
+    ],
+    [
+     0.275397,
+     0.290234,
+     0.0,
+     0.275397
+    ]
+   ],
+   "action_label": [
+    0.041277,
+    0.870702,
+    1
+   ],
+   "decision_step": 378,
+   "episode_id": 0,
+   "hl_seq": 43,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262275,
+   "obs_last_physics_step": 373,
+   "obs_slot_id": 62,
+   "obs_valid": 1,
+   "state": [
+    6.9116,
+    0.285597,
+    0.5714,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041141,
+    0.82878,
+    1
+   ],
+   "action_exec": [
+    [
+     0.275203,
+     0.27626,
+     0.0,
+     0.275203
+    ],
+    [
+     0.275043,
+     0.27626,
+     0.0,
+     0.275043
+    ],
+    [
+     0.27491,
+     0.27626,
+     0.0,
+     0.27491
+    ],
+    [
+     0.274801,
+     0.27626,
+     0.0,
+     0.274801
+    ],
+    [
+     0.27471,
+     0.27626,
+     0.0,
+     0.27471
+    ],
+    [
+     0.274635,
+     0.27626,
+     0.0,
+     0.274635
+    ]
+   ],
+   "action_label": [
+    0.041141,
+    0.82878,
+    1
+   ],
+   "decision_step": 384,
+   "episode_id": 0,
+   "hl_seq": 44,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262281,
+   "obs_last_physics_step": 379,
+   "obs_slot_id": 63,
+   "obs_valid": 1,
+   "state": [
+    6.964,
+    0.28732,
+    0.5229,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.039918,
+    0.790414,
+    1
+   ],
+   "action_exec": [
+    [
+     0.273167,
+     0.263471,
+     0.0,
+     0.273167
+    ],
+    [
+     0.271952,
+     0.263471,
+     0.0,
+     0.271952
+    ],
+    [
+     0.270947,
+     0.263471,
+     0.0,
+     0.270947
+    ],
+    [
+     0.270115,
+     0.263471,
+     0.0,
+     0.270115
+    ],
+    [
+     0.269426,
+     0.263471,
+     0.0,
+     0.269426
+    ],
+    [
+     0.268856,
+     0.263471,
+     0.0,
+     0.268856
+    ]
+   ],
+   "action_label": [
+    0.039918,
+    0.790414,
+    1
+   ],
+   "decision_step": 390,
+   "episode_id": 0,
+   "hl_seq": 45,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262287,
+   "obs_last_physics_step": 385,
+   "obs_slot_id": 64,
+   "obs_valid": 1,
+   "state": [
+    7.012,
+    0.288531,
+    0.4786,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.037596,
+    0.755302,
+    1
+   ],
+   "action_exec": [
+    [
+     0.265716,
+     0.251767,
+     0.0,
+     0.265716
+    ],
+    [
+     0.263116,
+     0.251767,
+     0.0,
+     0.263116
+    ],
+    [
+     0.260965,
+     0.251767,
+     0.0,
+     0.260965
+    ],
+    [
+     0.259185,
+     0.251767,
+     0.0,
+     0.259185
+    ],
+    [
+     0.257712,
+     0.251767,
+     0.0,
+     0.257712
+    ],
+    [
+     0.256492,
+     0.251767,
+     0.0,
+     0.256492
+    ]
+   ],
+   "action_label": [
+    0.037596,
+    0.755302,
+    1
+   ],
+   "decision_step": 396,
+   "episode_id": 0,
+   "hl_seq": 46,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262293,
+   "obs_last_physics_step": 391,
+   "obs_slot_id": 65,
+   "obs_valid": 1,
+   "state": [
+    7.0559,
+    0.284258,
+    0.438,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.034263,
+    0.723168,
+    1
+   ],
+   "action_exec": [
+    [
+     0.251653,
+     0.241056,
+     0.0,
+     0.251653
+    ],
+    [
+     0.247648,
+     0.241056,
+     0.0,
+     0.247648
+    ],
+    [
+     0.244333,
+     0.241056,
+     0.0,
+     0.244333
+    ],
+    [
+     0.24159,
+     0.241056,
+     0.0,
+     0.24159
+    ],
+    [
+     0.23932,
+     0.241056,
+     0.0,
+     0.23932
+    ],
+    [
+     0.237441,
+     0.241056,
+     0.0,
+     0.237441
+    ]
+   ],
+   "action_label": [
+    0.034263,
+    0.723168,
+    1
+   ],
+   "decision_step": 402,
+   "episode_id": 0,
+   "hl_seq": 47,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262299,
+   "obs_last_physics_step": 397,
+   "obs_slot_id": 66,
+   "obs_valid": 1,
+   "state": [
+    7.096,
+    0.272755,
+    0.4008,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.03027,
+    0.69376,
+    1
+   ],
+   "action_exec": [
+    [
+     0.231694,
+     0.231253,
+     0.0,
+     0.231694
+    ],
+    [
+     0.226539,
+     0.231253,
+     0.0,
+     0.226539
+    ],
+    [
+     0.222274,
+     0.231253,
+     0.0,
+     0.222274
+    ],
+    [
+     0.218743,
+     0.231253,
+     0.0,
+     0.218743
+    ],
+    [
+     0.215822,
+     0.231253,
+     0.0,
+     0.215822
+    ],
+    [
+     0.213404,
+     0.231253,
+     0.0,
+     0.213404
+    ]
+   ],
+   "action_label": [
+    0.03027,
+    0.69376,
+    1
+   ],
+   "decision_step": 408,
+   "episode_id": 0,
+   "hl_seq": 48,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262305,
+   "obs_last_physics_step": 403,
+   "obs_slot_id": 67,
+   "obs_valid": 1,
+   "state": [
+    7.1328,
+    0.253825,
+    0.3668,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.025704,
+    0.666847,
+    1
+   ],
+   "action_exec": [
+    [
+     0.207656,
+     0.222282,
+     0.0,
+     0.207656
+    ],
+    [
+     0.201909,
+     0.222282,
+     0.0,
+     0.201909
+    ],
+    [
+     0.196643,
+     0.222282,
+     0.0,
+     0.196643
+    ],
+    [
+     0.192284,
+     0.222282,
+     0.0,
+     0.192284
+    ],
+    [
+     0.188677,
+     0.222282,
+     0.0,
+     0.188677
+    ],
+    [
+     0.185691,
+     0.222282,
+     0.0,
+     0.185691
+    ]
+   ],
+   "action_label": [
+    0.025704,
+    0.666847,
+    1
+   ],
+   "decision_step": 414,
+   "episode_id": 0,
+   "hl_seq": 49,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262311,
+   "obs_last_physics_step": 409,
+   "obs_slot_id": 68,
+   "obs_valid": 1,
+   "state": [
+    7.1664,
+    0.229223,
+    0.3357,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    0.020829,
+    0.642216,
+    1
+   ],
+   "decision_step": 420,
+   "episode_id": 0,
+   "hl_seq": 49,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262317,
+   "obs_last_physics_step": 415,
+   "obs_slot_id": 69,
+   "obs_valid": 1,
+   "state": [
+    7.1972,
+    0.200327,
+    0.3072,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 426,
+   "episode_id": -1,
+   "hl_seq": 49,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262323,
+   "obs_last_physics_step": 421,
+   "obs_slot_id": 70,
+   "obs_valid": 1,
+   "state": [
+    7.1613,
+    0.0,
+    -0.3584,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 432,
+   "episode_id": -1,
+   "hl_seq": 49,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 1,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262329,
+   "obs_last_physics_step": 427,
+   "obs_slot_id": 71,
+   "obs_valid": 1,
+   "state": [
+    7.1256,
+    0.0,
+    -0.3566,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 438,
+   "episode_id": -1,
+   "hl_seq": 49,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 1,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262335,
+   "obs_last_physics_step": 433,
+   "obs_slot_id": 72,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 444,
+   "episode_id": -1,
+   "hl_seq": 49,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262341,
+   "obs_last_physics_step": 439,
+   "obs_slot_id": 73,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.005747,
+     0.666667,
+     0.0,
+     0.005747
+    ],
+    [
+     0.01114,
+     0.666667,
+     0.0,
+     0.01114
+    ],
+    [
+     0.015603,
+     0.666667,
+     0.0,
+     0.015603
+    ],
+    [
+     0.019297,
+     0.666667,
+     0.0,
+     0.019297
+    ],
+    [
+     0.022354,
+     0.666667,
+     0.0,
+     0.022354
+    ],
+    [
+     0.024884,
+     0.666667,
+     0.0,
+     0.024884
+    ]
+   ],
+   "action_label": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "decision_step": 450,
+   "episode_id": 1,
+   "hl_seq": 50,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262347,
+   "obs_last_physics_step": 445,
+   "obs_slot_id": 74,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.00561,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.027042,
+     0.666667,
+     0.0,
+     0.027042
+    ],
+    [
+     0.028828,
+     0.666667,
+     0.0,
+     0.028828
+    ],
+    [
+     0.030306,
+     0.666667,
+     0.0,
+     0.030306
+    ],
+    [
+     0.031529,
+     0.666667,
+     0.0,
+     0.031529
+    ],
+    [
+     0.032542,
+     0.666667,
+     0.0,
+     0.032542
+    ],
+    [
+     0.033379,
+     0.666667,
+     0.0,
+     0.033379
+    ]
+   ],
+   "action_label": [
+    0.00561,
+    2.0,
+    1
+   ],
+   "decision_step": 456,
+   "episode_id": 1,
+   "hl_seq": 51,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262353,
+   "obs_last_physics_step": 451,
+   "obs_slot_id": 75,
+   "obs_valid": 1,
+   "state": [
+    0.1996,
+    0.000621,
+    1.9917,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005742,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.034224,
+     0.666667,
+     0.0,
+     0.034224
+    ],
+    [
+     0.034923,
+     0.666667,
+     0.0,
+     0.034923
+    ],
+    [
+     0.035502,
+     0.666667,
+     0.0,
+     0.035502
+    ],
+    [
+     0.03598,
+     0.666667,
+     0.0,
+     0.03598
+    ],
+    [
+     0.036377,
+     0.666667,
+     0.0,
+     0.036377
+    ],
+    [
+     0.036704,
+     0.666667,
+     0.0,
+     0.036704
+    ]
+   ],
+   "action_label": [
+    0.005742,
+    2.0,
+    1
+   ],
+   "decision_step": 462,
+   "episode_id": 1,
+   "hl_seq": 52,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262359,
+   "obs_last_physics_step": 457,
+   "obs_slot_id": 76,
+   "obs_valid": 1,
+   "state": [
+    0.3982,
+    0.001828,
+    1.9817,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005941,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.037205,
+     0.666667,
+     0.0,
+     0.037205
+    ],
+    [
+     0.037619,
+     0.666667,
+     0.0,
+     0.037619
+    ],
+    [
+     0.037961,
+     0.666667,
+     0.0,
+     0.037961
+    ],
+    [
+     0.038245,
+     0.666667,
+     0.0,
+     0.038245
+    ],
+    [
+     0.038479,
+     0.666667,
+     0.0,
+     0.038479
+    ],
+    [
+     0.038674,
+     0.666667,
+     0.0,
+     0.038674
+    ]
+   ],
+   "action_label": [
+    0.005941,
+    2.0,
+    1
+   ],
+   "decision_step": 468,
+   "episode_id": 1,
+   "hl_seq": 53,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262365,
+   "obs_last_physics_step": 463,
+   "obs_slot_id": 77,
+   "obs_valid": 1,
+   "state": [
+    0.5958,
+    0.003099,
+    1.9719,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006205,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.039138,
+     0.666667,
+     0.0,
+     0.039138
+    ],
+    [
+     0.039522,
+     0.666667,
+     0.0,
+     0.039522
+    ],
+    [
+     0.03984,
+     0.666667,
+     0.0,
+     0.03984
+    ],
+    [
+     0.040103,
+     0.666667,
+     0.0,
+     0.040103
+    ],
+    [
+     0.040321,
+     0.666667,
+     0.0,
+     0.040321
+    ],
+    [
+     0.040501,
+     0.666667,
+     0.0,
+     0.040501
+    ]
+   ],
+   "action_label": [
+    0.006205,
+    2.0,
+    1
+   ],
+   "decision_step": 474,
+   "episode_id": 1,
+   "hl_seq": 54,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262371,
+   "obs_last_physics_step": 469,
+   "obs_slot_id": 78,
+   "obs_valid": 1,
+   "state": [
+    0.7924,
+    0.004407,
+    1.962,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006529,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.041023,
+     0.666667,
+     0.0,
+     0.041023
+    ],
+    [
+     0.041455,
+     0.666667,
+     0.0,
+     0.041455
+    ],
+    [
+     0.041813,
+     0.666667,
+     0.0,
+     0.041813
+    ],
+    [
+     0.042109,
+     0.666667,
+     0.0,
+     0.042109
+    ],
+    [
+     0.042354,
+     0.666667,
+     0.0,
+     0.042354
+    ],
+    [
+     0.042556,
+     0.666667,
+     0.0,
+     0.042556
+    ]
+   ],
+   "action_label": [
+    0.006529,
+    2.0,
+    1
+   ],
+   "decision_step": 480,
+   "episode_id": 1,
+   "hl_seq": 55,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262377,
+   "obs_last_physics_step": 475,
+   "obs_slot_id": 79,
+   "obs_valid": 1,
+   "state": [
+    0.988,
+    0.005805,
+    1.9522,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006908,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.04316,
+     0.666667,
+     0.0,
+     0.04316
+    ],
+    [
+     0.043659,
+     0.666667,
+     0.0,
+     0.043659
+    ],
+    [
+     0.044072,
+     0.666667,
+     0.0,
+     0.044072
+    ],
+    [
+     0.044414,
+     0.666667,
+     0.0,
+     0.044414
+    ],
+    [
+     0.044697,
+     0.666667,
+     0.0,
+     0.044697
+    ],
+    [
+     0.044931,
+     0.666667,
+     0.0,
+     0.044931
+    ]
+   ],
+   "action_label": [
+    0.006908,
+    2.0,
+    1
+   ],
+   "decision_step": 486,
+   "episode_id": 1,
+   "hl_seq": 56,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262383,
+   "obs_last_physics_step": 481,
+   "obs_slot_id": 80,
+   "obs_valid": 1,
+   "state": [
+    1.1827,
+    0.007343,
+    1.9425,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.007333,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.045612,
+     0.666667,
+     0.0,
+     0.045612
+    ],
+    [
+     0.046177,
+     0.666667,
+     0.0,
+     0.046177
+    ],
+    [
+     0.046644,
+     0.666667,
+     0.0,
+     0.046644
+    ],
+    [
+     0.04703,
+     0.666667,
+     0.0,
+     0.04703
+    ],
+    [
+     0.04735,
+     0.666667,
+     0.0,
+     0.04735
+    ],
+    [
+     0.047614,
+     0.666667,
+     0.0,
+     0.047614
+    ]
+   ],
+   "action_label": [
+    0.007333,
+    2.0,
+    1
+   ],
+   "decision_step": 492,
+   "episode_id": 1,
+   "hl_seq": 57,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262389,
+   "obs_last_physics_step": 487,
+   "obs_slot_id": 81,
+   "obs_valid": 1,
+   "state": [
+    1.3763,
+    0.009059,
+    1.9328,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.007952,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.048545,
+     0.666667,
+     0.0,
+     0.048545
+    ],
+    [
+     0.049315,
+     0.666667,
+     0.0,
+     0.049315
+    ],
+    [
+     0.049952,
+     0.666667,
+     0.0,
+     0.049952
+    ],
+    [
+     0.050479,
+     0.666667,
+     0.0,
+     0.050479
+    ],
+    [
+     0.050915,
+     0.666667,
+     0.0,
+     0.050915
+    ],
+    [
+     0.051277,
+     0.666667,
+     0.0,
+     0.051277
+    ]
+   ],
+   "action_label": [
+    0.007952,
+    2.0,
+    1
+   ],
+   "decision_step": 498,
+   "episode_id": 1,
+   "hl_seq": 58,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262395,
+   "obs_last_physics_step": 493,
+   "obs_slot_id": 82,
+   "obs_valid": 1,
+   "state": [
+    1.5691,
+    0.010978,
+    1.9231,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.008616,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.052339,
+     0.666667,
+     0.0,
+     0.052339
+    ],
+    [
+     0.053219,
+     0.666667,
+     0.0,
+     0.053219
+    ],
+    [
+     0.053947,
+     0.666667,
+     0.0,
+     0.053947
+    ],
+    [
+     0.054549,
+     0.666667,
+     0.0,
+     0.054549
+    ],
+    [
+     0.055048,
+     0.666667,
+     0.0,
+     0.055048
+    ],
+    [
+     0.05546,
+     0.666667,
+     0.0,
+     0.05546
+    ]
+   ],
+   "action_label": [
+    0.008616,
+    2.0,
+    1
+   ],
+   "decision_step": 504,
+   "episode_id": 1,
+   "hl_seq": 59,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262401,
+   "obs_last_physics_step": 499,
+   "obs_slot_id": 83,
+   "obs_valid": 1,
+   "state": [
+    1.7608,
+    0.013298,
+    1.9136,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.009304,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.056593,
+     0.666667,
+     0.0,
+     0.056593
+    ],
+    [
+     0.05753,
+     0.666667,
+     0.0,
+     0.05753
+    ],
+    [
+     0.058306,
+     0.666667,
+     0.0,
+     0.058306
+    ],
+    [
+     0.058948,
+     0.666667,
+     0.0,
+     0.058948
+    ],
+    [
+     0.059479,
+     0.666667,
+     0.0,
+     0.059479
+    ],
+    [
+     0.059919,
+     0.666667,
+     0.0,
+     0.059919
+    ]
+   ],
+   "action_label": [
+    0.009304,
+    2.0,
+    1
+   ],
+   "decision_step": 510,
+   "episode_id": 1,
+   "hl_seq": 60,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262407,
+   "obs_last_physics_step": 505,
+   "obs_slot_id": 84,
+   "obs_valid": 1,
+   "state": [
+    1.9516,
+    0.015972,
+    1.904,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.010229,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.061346,
+     0.666667,
+     0.0,
+     0.061346
+    ],
+    [
+     0.062527,
+     0.666667,
+     0.0,
+     0.062527
+    ],
+    [
+     0.063505,
+     0.666667,
+     0.0,
+     0.063505
+    ],
+    [
+     0.064314,
+     0.666667,
+     0.0,
+     0.064314
+    ],
+    [
+     0.064983,
+     0.666667,
+     0.0,
+     0.064983
+    ],
+    [
+     0.065537,
+     0.666667,
+     0.0,
+     0.065537
+    ]
+   ],
+   "action_label": [
+    0.010229,
+    2.0,
+    1
+   ],
+   "decision_step": 516,
+   "episode_id": 1,
+   "hl_seq": 61,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262413,
+   "obs_last_physics_step": 511,
+   "obs_slot_id": 85,
+   "obs_valid": 1,
+   "state": [
+    2.1415,
+    0.018963,
+    1.8945,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.011156,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.067061,
+     0.666667,
+     0.0,
+     0.067061
+    ],
+    [
+     0.068322,
+     0.666667,
+     0.0,
+     0.068322
+    ],
+    [
+     0.069365,
+     0.666667,
+     0.0,
+     0.069365
+    ],
+    [
+     0.070229,
+     0.666667,
+     0.0,
+     0.070229
+    ],
+    [
+     0.070943,
+     0.666667,
+     0.0,
+     0.070943
+    ],
+    [
+     0.071535,
+     0.666667,
+     0.0,
+     0.071535
+    ]
+   ],
+   "action_label": [
+    0.011156,
+    2.0,
+    1
+   ],
+   "decision_step": 522,
+   "episode_id": 1,
+   "hl_seq": 62,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262419,
+   "obs_last_physics_step": 517,
+   "obs_slot_id": 86,
+   "obs_valid": 1,
+   "state": [
+    2.3304,
+    0.0226,
+    1.8851,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.012251,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.073283,
+     0.666667,
+     0.0,
+     0.073283
+    ],
+    [
+     0.074729,
+     0.666667,
+     0.0,
+     0.074729
+    ],
+    [
+     0.075926,
+     0.666667,
+     0.0,
+     0.075926
+    ],
+    [
+     0.076917,
+     0.666667,
+     0.0,
+     0.076917
+    ],
+    [
+     0.077737,
+     0.666667,
+     0.0,
+     0.077737
+    ],
+    [
+     0.078415,
+     0.666667,
+     0.0,
+     0.078415
+    ]
+   ],
+   "action_label": [
+    0.012251,
+    2.0,
+    1
+   ],
+   "decision_step": 528,
+   "episode_id": 1,
+   "hl_seq": 63,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262425,
+   "obs_last_physics_step": 523,
+   "obs_slot_id": 87,
+   "obs_valid": 1,
+   "state": [
+    2.5183,
+    0.026687,
+    1.8756,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.013384,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.08028,
+     0.666667,
+     0.0,
+     0.08028
+    ],
+    [
+     0.081823,
+     0.666667,
+     0.0,
+     0.081823
+    ],
+    [
+     0.0831,
+     0.666667,
+     0.0,
+     0.0831
+    ],
+    [
+     0.084157,
+     0.666667,
+     0.0,
+     0.084157
+    ],
+    [
+     0.085031,
+     0.666667,
+     0.0,
+     0.085031
+    ],
+    [
+     0.085755,
+     0.666667,
+     0.0,
+     0.085755
+    ]
+   ],
+   "action_label": [
+    0.013384,
+    2.0,
+    1
+   ],
+   "decision_step": 534,
+   "episode_id": 1,
+   "hl_seq": 64,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262431,
+   "obs_last_physics_step": 529,
+   "obs_slot_id": 88,
+   "obs_valid": 1,
+   "state": [
+    2.7053,
+    0.031455,
+    1.8663,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.014695,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.08786,
+     0.666667,
+     0.0,
+     0.08786
+    ],
+    [
+     0.089603,
+     0.666667,
+     0.0,
+     0.089603
+    ],
+    [
+     0.091044,
+     0.666667,
+     0.0,
+     0.091044
+    ],
+    [
+     0.092238,
+     0.666667,
+     0.0,
+     0.092238
+    ],
+    [
+     0.093225,
+     0.666667,
+     0.0,
+     0.093225
+    ],
+    [
+     0.094042,
+     0.666667,
+     0.0,
+     0.094042
+    ]
+   ],
+   "action_label": [
+    0.014695,
+    2.0,
+    1
+   ],
+   "decision_step": 540,
+   "episode_id": 1,
+   "hl_seq": 65,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262437,
+   "obs_last_physics_step": 535,
+   "obs_slot_id": 89,
+   "obs_valid": 1,
+   "state": [
+    2.8914,
+    0.036795,
+    1.857,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.016005,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.096225,
+     0.666667,
+     0.0,
+     0.096225
+    ],
+    [
+     0.098031,
+     0.666667,
+     0.0,
+     0.098031
+    ],
+    [
+     0.099526,
+     0.666667,
+     0.0,
+     0.099526
+    ],
+    [
+     0.100762,
+     0.666667,
+     0.0,
+     0.100762
+    ],
+    [
+     0.101786,
+     0.666667,
+     0.0,
+     0.101786
+    ],
+    [
+     0.102633,
+     0.666667,
+     0.0,
+     0.102633
+    ]
+   ],
+   "action_label": [
+    0.016005,
+    2.0,
+    1
+   ],
+   "decision_step": 546,
+   "episode_id": 1,
+   "hl_seq": 66,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262443,
+   "obs_last_physics_step": 541,
+   "obs_slot_id": 90,
+   "obs_valid": 1,
+   "state": [
+    3.0766,
+    0.042965,
+    1.8477,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.017512,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.105066,
+     0.666667,
+     0.0,
+     0.105066
+    ],
+    [
+     0.10708,
+     0.666667,
+     0.0,
+     0.10708
+    ],
+    [
+     0.108746,
+     0.666667,
+     0.0,
+     0.108746
+    ],
+    [
+     0.110125,
+     0.666667,
+     0.0,
+     0.110125
+    ],
+    [
+     0.111266,
+     0.666667,
+     0.0,
+     0.111266
+    ],
+    [
+     0.11221,
+     0.666667,
+     0.0,
+     0.11221
+    ]
+   ],
+   "action_label": [
+    0.017512,
+    2.0,
+    1
+   ],
+   "decision_step": 552,
+   "episode_id": 1,
+   "hl_seq": 67,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262449,
+   "obs_last_physics_step": 547,
+   "obs_slot_id": 91,
+   "obs_valid": 1,
+   "state": [
+    3.2608,
+    0.049728,
+    1.8385,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.019049,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.114759,
+     0.666667,
+     0.0,
+     0.114759
+    ],
+    [
+     0.116869,
+     0.666667,
+     0.0,
+     0.116869
+    ],
+    [
+     0.118615,
+     0.666667,
+     0.0,
+     0.118615
+    ],
+    [
+     0.12006,
+     0.666667,
+     0.0,
+     0.12006
+    ],
+    [
+     0.121255,
+     0.666667,
+     0.0,
+     0.121255
+    ],
+    [
+     0.122245,
+     0.666667,
+     0.0,
+     0.122245
+    ]
+   ],
+   "action_label": [
+    0.019049,
+    2.0,
+    1
+   ],
+   "decision_step": 558,
+   "episode_id": 1,
+   "hl_seq": 68,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262455,
+   "obs_last_physics_step": 553,
+   "obs_slot_id": 92,
+   "obs_valid": 1,
+   "state": [
+    3.4441,
+    0.057457,
+    1.8293,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.020603,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.12485,
+     0.666667,
+     0.0,
+     0.12485
+    ],
+    [
+     0.127006,
+     0.666667,
+     0.0,
+     0.127006
+    ],
+    [
+     0.12879,
+     0.666667,
+     0.0,
+     0.12879
+    ],
+    [
+     0.130267,
+     0.666667,
+     0.0,
+     0.130267
+    ],
+    [
+     0.131489,
+     0.666667,
+     0.0,
+     0.131489
+    ],
+    [
+     0.132501,
+     0.666667,
+     0.0,
+     0.132501
+    ]
+   ],
+   "action_label": [
+    0.020603,
+    2.0,
+    1
+   ],
+   "decision_step": 564,
+   "episode_id": 1,
+   "hl_seq": 69,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262461,
+   "obs_last_physics_step": 559,
+   "obs_slot_id": 93,
+   "obs_valid": 1,
+   "state": [
+    3.6265,
+    0.065942,
+    1.8202,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.022291,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.135278,
+     0.666667,
+     0.0,
+     0.135278
+    ],
+    [
+     0.137576,
+     0.666667,
+     0.0,
+     0.137576
+    ],
+    [
+     0.139478,
+     0.666667,
+     0.0,
+     0.139478
+    ],
+    [
+     0.141052,
+     0.666667,
+     0.0,
+     0.141052
+    ],
+    [
+     0.142354,
+     0.666667,
+     0.0,
+     0.142354
+    ],
+    [
+     0.143433,
+     0.666667,
+     0.0,
+     0.143433
+    ]
+   ],
+   "action_label": [
+    0.022291,
+    2.0,
+    1
+   ],
+   "decision_step": 570,
+   "episode_id": 1,
+   "hl_seq": 70,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262467,
+   "obs_last_physics_step": 565,
+   "obs_slot_id": 94,
+   "obs_valid": 1,
+   "state": [
+    3.808,
+    0.075085,
+    1.8111,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.024016,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.146307,
+     0.666667,
+     0.0,
+     0.146307
+    ],
+    [
+     0.148686,
+     0.666667,
+     0.0,
+     0.148686
+    ],
+    [
+     0.150654,
+     0.666667,
+     0.0,
+     0.150654
+    ],
+    [
+     0.152284,
+     0.666667,
+     0.0,
+     0.152284
+    ],
+    [
+     0.153632,
+     0.666667,
+     0.0,
+     0.153632
+    ],
+    [
+     0.154748,
+     0.666667,
+     0.0,
+     0.154748
+    ]
+   ],
+   "action_label": [
+    0.024016,
+    2.0,
+    1
+   ],
+   "decision_step": 576,
+   "episode_id": 1,
+   "hl_seq": 71,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262473,
+   "obs_last_physics_step": 571,
+   "obs_slot_id": 95,
+   "obs_valid": 1,
+   "state": [
+    3.9886,
+    0.085168,
+    1.8021,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.025735,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.157648,
+     0.666667,
+     0.0,
+     0.157648
+    ],
+    [
+     0.160048,
+     0.666667,
+     0.0,
+     0.160048
+    ],
+    [
+     0.162034,
+     0.666667,
+     0.0,
+     0.162034
+    ],
+    [
+     0.163678,
+     0.666667,
+     0.0,
+     0.163678
+    ],
+    [
+     0.165039,
+     0.666667,
+     0.0,
+     0.165039
+    ],
+    [
+     0.166165,
+     0.666667,
+     0.0,
+     0.166165
+    ]
+   ],
+   "action_label": [
+    0.025735,
+    2.0,
+    1
+   ],
+   "decision_step": 582,
+   "episode_id": 1,
+   "hl_seq": 72,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262479,
+   "obs_last_physics_step": 577,
+   "obs_slot_id": 96,
+   "obs_valid": 1,
+   "state": [
+    4.1683,
+    0.096061,
+    1.7931,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.027441,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.169057,
+     0.666667,
+     0.0,
+     0.169057
+    ],
+    [
+     0.171451,
+     0.666667,
+     0.0,
+     0.171451
+    ],
+    [
+     0.173433,
+     0.666667,
+     0.0,
+     0.173433
+    ],
+    [
+     0.175072,
+     0.666667,
+     0.0,
+     0.175072
+    ],
+    [
+     0.176429,
+     0.666667,
+     0.0,
+     0.176429
+    ],
+    [
+     0.177552,
+     0.666667,
+     0.0,
+     0.177552
+    ]
+   ],
+   "action_label": [
+    0.027441,
+    2.0,
+    1
+   ],
+   "decision_step": 588,
+   "episode_id": 1,
+   "hl_seq": 73,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262485,
+   "obs_last_physics_step": 583,
+   "obs_slot_id": 97,
+   "obs_valid": 1,
+   "state": [
+    4.3471,
+    0.107608,
+    1.7841,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.029121,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.180412,
+     0.666667,
+     0.0,
+     0.180412
+    ],
+    [
+     0.182778,
+     0.666667,
+     0.0,
+     0.182778
+    ],
+    [
+     0.184736,
+     0.666667,
+     0.0,
+     0.184736
+    ],
+    [
+     0.186357,
+     0.666667,
+     0.0,
+     0.186357
+    ],
+    [
+     0.187699,
+     0.666667,
+     0.0,
+     0.187699
+    ],
+    [
+     0.188809,
+     0.666667,
+     0.0,
+     0.188809
+    ]
+   ],
+   "action_label": [
+    0.029121,
+    2.0,
+    1
+   ],
+   "decision_step": 594,
+   "episode_id": 1,
+   "hl_seq": 74,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262491,
+   "obs_last_physics_step": 589,
+   "obs_slot_id": 98,
+   "obs_valid": 1,
+   "state": [
+    4.525,
+    0.119724,
+    1.7752,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.030766,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.191619,
+     0.666667,
+     0.0,
+     0.191619
+    ],
+    [
+     0.193945,
+     0.666667,
+     0.0,
+     0.193945
+    ],
+    [
+     0.19587,
+     0.666667,
+     0.0,
+     0.19587
+    ],
+    [
+     0.197463,
+     0.666667,
+     0.0,
+     0.197463
+    ],
+    [
+     0.198781,
+     0.666667,
+     0.0,
+     0.198781
+    ],
+    [
+     0.199872,
+     0.666667,
+     0.0,
+     0.199872
+    ]
+   ],
+   "action_label": [
+    0.030766,
+    2.0,
+    1
+   ],
+   "decision_step": 600,
+   "episode_id": 1,
+   "hl_seq": 75,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262497,
+   "obs_last_physics_step": 595,
+   "obs_slot_id": 99,
+   "obs_valid": 1,
+   "state": [
+    4.702,
+    0.132332,
+    1.7664,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.03236,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.202607,
+     0.666667,
+     0.0,
+     0.202607
+    ],
+    [
+     0.20487,
+     0.666667,
+     0.0,
+     0.20487
+    ],
+    [
+     0.206742,
+     0.666667,
+     0.0,
+     0.206742
+    ],
+    [
+     0.208292,
+     0.666667,
+     0.0,
+     0.208292
+    ],
+    [
+     0.209575,
+     0.666667,
+     0.0,
+     0.209575
+    ],
+    [
+     0.210637,
+     0.666667,
+     0.0,
+     0.210637
+    ]
+   ],
+   "action_label": [
+    0.03236,
+    2.0,
+    1
+   ],
+   "decision_step": 606,
+   "episode_id": 1,
+   "hl_seq": 76,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262503,
+   "obs_last_physics_step": 601,
+   "obs_slot_id": 100,
+   "obs_valid": 1,
+   "state": [
+    4.8781,
+    0.145371,
+    1.7576,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.034046,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.213454,
+     0.666667,
+     0.0,
+     0.213454
+    ],
+    [
+     0.215785,
+     0.666667,
+     0.0,
+     0.215785
+    ],
+    [
+     0.217715,
+     0.666667,
+     0.0,
+     0.217715
+    ],
+    [
+     0.219312,
+     0.666667,
+     0.0,
+     0.219312
+    ],
+    [
+     0.220633,
+     0.666667,
+     0.0,
+     0.220633
+    ],
+    [
+     0.221727,
+     0.666667,
+     0.0,
+     0.221727
+    ]
+   ],
+   "action_label": [
+    0.034046,
+    2.0,
+    1
+   ],
+   "decision_step": 612,
+   "episode_id": 1,
+   "hl_seq": 77,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262509,
+   "obs_last_physics_step": 607,
+   "obs_slot_id": 101,
+   "obs_valid": 1,
+   "state": [
+    5.0533,
+    0.158742,
+    1.7488,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.035837,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.22469,
+     0.666667,
+     0.0,
+     0.22469
+    ],
+    [
+     0.227143,
+     0.666667,
+     0.0,
+     0.227143
+    ],
+    [
+     0.229172,
+     0.666667,
+     0.0,
+     0.229172
+    ],
+    [
+     0.230852,
+     0.666667,
+     0.0,
+     0.230852
+    ],
+    [
+     0.232242,
+     0.666667,
+     0.0,
+     0.232242
+    ],
+    [
+     0.233392,
+     0.666667,
+     0.0,
+     0.233392
+    ]
+   ],
+   "action_label": [
+    0.035837,
+    2.0,
+    1
+   ],
+   "decision_step": 618,
+   "episode_id": 1,
+   "hl_seq": 78,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262515,
+   "obs_last_physics_step": 613,
+   "obs_slot_id": 102,
+   "obs_valid": 1,
+   "state": [
+    5.2277,
+    0.172904,
+    1.7401,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.037287,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.236011,
+     0.666667,
+     0.0,
+     0.236011
+    ],
+    [
+     0.238178,
+     0.666667,
+     0.0,
+     0.238178
+    ],
+    [
+     0.239971,
+     0.666667,
+     0.0,
+     0.239971
+    ],
+    [
+     0.241455,
+     0.666667,
+     0.0,
+     0.241455
+    ],
+    [
+     0.242684,
+     0.666667,
+     0.0,
+     0.242684
+    ],
+    [
+     0.2437,
+     0.666667,
+     0.0,
+     0.2437
+    ]
+   ],
+   "action_label": [
+    0.037287,
+    2.0,
+    1
+   ],
+   "decision_step": 624,
+   "episode_id": 1,
+   "hl_seq": 79,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262521,
+   "obs_last_physics_step": 619,
+   "obs_slot_id": 103,
+   "obs_valid": 1,
+   "state": [
+    5.4012,
+    0.188079,
+    1.7314,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.038512,
+    1.940933,
+    1
+   ],
+   "action_exec": [
+    [
+     0.24595,
+     0.646978,
+     0.0,
+     0.24595
+    ],
+    [
+     0.247812,
+     0.646978,
+     0.0,
+     0.247812
+    ],
+    [
+     0.249353,
+     0.646978,
+     0.0,
+     0.249353
+    ],
+    [
+     0.250628,
+     0.646978,
+     0.0,
+     0.250628
+    ],
+    [
+     0.251683,
+     0.646978,
+     0.0,
+     0.251683
+    ],
+    [
+     0.252556,
+     0.646978,
+     0.0,
+     0.252556
+    ]
+   ],
+   "action_label": [
+    0.038512,
+    1.940933,
+    1
+   ],
+   "decision_step": 630,
+   "episode_id": 1,
+   "hl_seq": 80,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262527,
+   "obs_last_physics_step": 625,
+   "obs_slot_id": 104,
+   "obs_valid": 1,
+   "state": [
+    5.5738,
+    0.202702,
+    1.7227,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.03943,
+    1.80823,
+    1
+   ],
+   "action_exec": [
+    [
+     0.254334,
+     0.602743,
+     0.0,
+     0.254334
+    ],
+    [
+     0.255806,
+     0.602743,
+     0.0,
+     0.255806
+    ],
+    [
+     0.257024,
+     0.602743,
+     0.0,
+     0.257024
+    ],
+    [
+     0.258031,
+     0.602743,
+     0.0,
+     0.258031
+    ],
+    [
+     0.258866,
+     0.602743,
+     0.0,
+     0.258866
+    ],
+    [
+     0.259556,
+     0.602743,
+     0.0,
+     0.259556
+    ]
+   ],
+   "action_label": [
+    0.03943,
+    1.80823,
+    1
+   ],
+   "decision_step": 636,
+   "episode_id": 1,
+   "hl_seq": 81,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262533,
+   "obs_last_physics_step": 631,
+   "obs_slot_id": 105,
+   "obs_valid": 1,
+   "state": [
+    5.7397,
+    0.216395,
+    1.6553,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.040142,
+    1.686784,
+    1
+   ],
+   "action_exec": [
+    [
+     0.260946,
+     0.562261,
+     0.0,
+     0.260946
+    ],
+    [
+     0.262096,
+     0.562261,
+     0.0,
+     0.262096
+    ],
+    [
+     0.263047,
+     0.562261,
+     0.0,
+     0.263047
+    ],
+    [
+     0.263835,
+     0.562261,
+     0.0,
+     0.263835
+    ],
+    [
+     0.264487,
+     0.562261,
+     0.0,
+     0.264487
+    ],
+    [
+     0.265027,
+     0.562261,
+     0.0,
+     0.265027
+    ]
+   ],
+   "action_label": [
+    0.040142,
+    1.686784,
+    1
+   ],
+   "decision_step": 642,
+   "episode_id": 1,
+   "hl_seq": 82,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262539,
+   "obs_last_physics_step": 637,
+   "obs_slot_id": 106,
+   "obs_valid": 1,
+   "state": [
+    5.8915,
+    0.228394,
+    1.5149,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.040658,
+    1.575639,
+    1
+   ],
+   "action_exec": [
+    [
+     0.266065,
+     0.525213,
+     0.0,
+     0.266065
+    ],
+    [
+     0.266925,
+     0.525213,
+     0.0,
+     0.266925
+    ],
+    [
+     0.267637,
+     0.525213,
+     0.0,
+     0.267637
+    ],
+    [
+     0.268226,
+     0.525213,
+     0.0,
+     0.268226
+    ],
+    [
+     0.268713,
+     0.525213,
+     0.0,
+     0.268713
+    ],
+    [
+     0.269116,
+     0.525213,
+     0.0,
+     0.269116
+    ]
+   ],
+   "action_label": [
+    0.040658,
+    1.575639,
+    1
+   ],
+   "decision_step": 648,
+   "episode_id": 1,
+   "hl_seq": 83,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262545,
+   "obs_last_physics_step": 643,
+   "obs_slot_id": 107,
+   "obs_valid": 1,
+   "state": [
+    6.0305,
+    0.238816,
+    1.3864,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041022,
+    1.473922,
+    1
+   ],
+   "action_exec": [
+    [
+     0.269869,
+     0.491307,
+     0.0,
+     0.269869
+    ],
+    [
+     0.270492,
+     0.491307,
+     0.0,
+     0.270492
+    ],
+    [
+     0.271007,
+     0.491307,
+     0.0,
+     0.271007
+    ],
+    [
+     0.271434,
+     0.491307,
+     0.0,
+     0.271434
+    ],
+    [
+     0.271787,
+     0.491307,
+     0.0,
+     0.271787
+    ],
+    [
+     0.272079,
+     0.491307,
+     0.0,
+     0.272079
+    ]
+   ],
+   "action_label": [
+    0.041022,
+    1.473922,
+    1
+   ],
+   "decision_step": 654,
+   "episode_id": 1,
+   "hl_seq": 84,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262551,
+   "obs_last_physics_step": 649,
+   "obs_slot_id": 108,
+   "obs_valid": 1,
+   "state": [
+    6.1576,
+    0.247713,
+    1.2688,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041283,
+    1.380833,
+    1
+   ],
+   "action_exec": [
+    [
+     0.27262,
+     0.460278,
+     0.0,
+     0.27262
+    ],
+    [
+     0.273068,
+     0.460278,
+     0.0,
+     0.273068
+    ],
+    [
+     0.273439,
+     0.460278,
+     0.0,
+     0.273439
+    ],
+    [
+     0.273746,
+     0.460278,
+     0.0,
+     0.273746
+    ],
+    [
+     0.273999,
+     0.460278,
+     0.0,
+     0.273999
+    ],
+    [
+     0.27421,
+     0.460278,
+     0.0,
+     0.27421
+    ]
+   ],
+   "action_label": [
+    0.041283,
+    1.380833,
+    1
+   ],
+   "decision_step": 660,
+   "episode_id": 1,
+   "hl_seq": 85,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262557,
+   "obs_last_physics_step": 655,
+   "obs_slot_id": 109,
+   "obs_valid": 1,
+   "state": [
+    6.274,
+    0.255262,
+    1.1612,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041427,
+    1.29564,
+    1
+   ],
+   "action_exec": [
+    [
+     0.27455,
+     0.43188,
+     0.0,
+     0.27455
+    ],
+    [
+     0.274831,
+     0.43188,
+     0.0,
+     0.274831
+    ],
+    [
+     0.275064,
+     0.43188,
+     0.0,
+     0.275064
+    ],
+    [
+     0.275257,
+     0.43188,
+     0.0,
+     0.275257
+    ],
+    [
+     0.275417,
+     0.43188,
+     0.0,
+     0.275417
+    ],
+    [
+     0.275549,
+     0.43188,
+     0.0,
+     0.275549
+    ]
+   ],
+   "action_label": [
+    0.041427,
+    1.29564,
+    1
+   ],
+   "decision_step": 666,
+   "episode_id": 1,
+   "hl_seq": 86,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262563,
+   "obs_last_physics_step": 661,
+   "obs_slot_id": 110,
+   "obs_valid": 1,
+   "state": [
+    6.3805,
+    0.261709,
+    1.0627,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041533,
+    1.217673,
+    1
+   ],
+   "action_exec": [
+    [
+     0.27578,
+     0.405891,
+     0.0,
+     0.27578
+    ],
+    [
+     0.275971,
+     0.405891,
+     0.0,
+     0.275971
+    ],
+    [
+     0.27613,
+     0.405891,
+     0.0,
+     0.27613
+    ],
+    [
+     0.276261,
+     0.405891,
+     0.0,
+     0.276261
+    ],
+    [
+     0.276369,
+     0.405891,
+     0.0,
+     0.276369
+    ],
+    [
+     0.276459,
+     0.405891,
+     0.0,
+     0.276459
+    ]
+   ],
+   "action_label": [
+    0.041533,
+    1.217673,
+    1
+   ],
+   "decision_step": 672,
+   "episode_id": 1,
+   "hl_seq": 87,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262569,
+   "obs_last_physics_step": 667,
+   "obs_slot_id": 111,
+   "obs_valid": 1,
+   "state": [
+    6.4779,
+    0.267077,
+    0.9726,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041544,
+    1.146319,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276545,
+     0.382106,
+     0.0,
+     0.276545
+    ],
+    [
+     0.276616,
+     0.382106,
+     0.0,
+     0.276616
+    ],
+    [
+     0.276675,
+     0.382106,
+     0.0,
+     0.276675
+    ],
+    [
+     0.276723,
+     0.382106,
+     0.0,
+     0.276723
+    ],
+    [
+     0.276763,
+     0.382106,
+     0.0,
+     0.276763
+    ],
+    [
+     0.276797,
+     0.382106,
+     0.0,
+     0.276797
+    ]
+   ],
+   "action_label": [
+    0.041544,
+    1.146319,
+    1
+   ],
+   "decision_step": 678,
+   "episode_id": 1,
+   "hl_seq": 88,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262575,
+   "obs_last_physics_step": 673,
+   "obs_slot_id": 112,
+   "obs_valid": 1,
+   "state": [
+    6.5671,
+    0.271715,
+    0.8901,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041556,
+    1.081018,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276839,
+     0.360339,
+     0.0,
+     0.276839
+    ],
+    [
+     0.276874,
+     0.360339,
+     0.0,
+     0.276874
+    ],
+    [
+     0.276903,
+     0.360339,
+     0.0,
+     0.276903
+    ],
+    [
+     0.276927,
+     0.360339,
+     0.0,
+     0.276927
+    ],
+    [
+     0.276947,
+     0.360339,
+     0.0,
+     0.276947
+    ],
+    [
+     0.276963,
+     0.360339,
+     0.0,
+     0.276963
+    ]
+   ],
+   "action_label": [
+    0.041556,
+    1.081018,
+    1
+   ],
+   "decision_step": 684,
+   "episode_id": 1,
+   "hl_seq": 89,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262581,
+   "obs_last_physics_step": 679,
+   "obs_slot_id": 113,
+   "obs_valid": 1,
+   "state": [
+    6.6487,
+    0.275488,
+    0.8146,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041486,
+    1.021257,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276896,
+     0.340419,
+     0.0,
+     0.276896
+    ],
+    [
+     0.276841,
+     0.340419,
+     0.0,
+     0.276841
+    ],
+    [
+     0.276795,
+     0.340419,
+     0.0,
+     0.276795
+    ],
+    [
+     0.276757,
+     0.340419,
+     0.0,
+     0.276757
+    ],
+    [
+     0.276725,
+     0.340419,
+     0.0,
+     0.276725
+    ],
+    [
+     0.276699,
+     0.340419,
+     0.0,
+     0.276699
+    ]
+   ],
+   "action_label": [
+    0.041486,
+    1.021257,
+    1
+   ],
+   "decision_step": 690,
+   "episode_id": 1,
+   "hl_seq": 90,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262587,
+   "obs_last_physics_step": 685,
+   "obs_slot_id": 114,
+   "obs_valid": 1,
+   "state": [
+    6.7234,
+    0.278805,
+    0.7455,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.04145,
+    0.966564,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276636,
+     0.322188,
+     0.0,
+     0.276636
+    ],
+    [
+     0.276584,
+     0.322188,
+     0.0,
+     0.276584
+    ],
+    [
+     0.276541,
+     0.322188,
+     0.0,
+     0.276541
+    ],
+    [
+     0.276505,
+     0.322188,
+     0.0,
+     0.276505
+    ],
+    [
+     0.276475,
+     0.322188,
+     0.0,
+     0.276475
+    ],
+    [
+     0.276451,
+     0.322188,
+     0.0,
+     0.276451
+    ]
+   ],
+   "action_label": [
+    0.04145,
+    0.966564,
+    1
+   ],
+   "decision_step": 696,
+   "episode_id": 1,
+   "hl_seq": 91,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262593,
+   "obs_last_physics_step": 691,
+   "obs_slot_id": 115,
+   "obs_valid": 1,
+   "state": [
+    6.7918,
+    0.281421,
+    0.6822,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041336,
+    0.91651,
+    1
+   ],
+   "action_exec": [
+    [
+     0.2763,
+     0.305503,
+     0.0,
+     0.2763
+    ],
+    [
+     0.276174,
+     0.305503,
+     0.0,
+     0.276174
+    ],
+    [
+     0.276071,
+     0.305503,
+     0.0,
+     0.276071
+    ],
+    [
+     0.275985,
+     0.305503,
+     0.0,
+     0.275985
+    ],
+    [
+     0.275914,
+     0.305503,
+     0.0,
+     0.275914
+    ],
+    [
+     0.275855,
+     0.305503,
+     0.0,
+     0.275855
+    ]
+   ],
+   "action_label": [
+    0.041336,
+    0.91651,
+    1
+   ],
+   "decision_step": 702,
+   "episode_id": 1,
+   "hl_seq": 92,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262599,
+   "obs_last_physics_step": 697,
+   "obs_slot_id": 116,
+   "obs_valid": 1,
+   "state": [
+    6.8544,
+    0.283803,
+    0.6244,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041277,
+    0.870702,
+    1
+   ],
+   "action_exec": [
+    [
+     0.275739,
+     0.290234,
+     0.0,
+     0.275739
+    ],
+    [
+     0.275642,
+     0.290234,
+     0.0,
+     0.275642
+    ],
+    [
+     0.275563,
+     0.290234,
+     0.0,
+     0.275563
+    ],
+    [
+     0.275497,
+     0.290234,
+     0.0,
+     0.275497
+    ],
+    [
+     0.275442,
+     0.290234,
+     0.0,
+     0.275442
+    ],
+    [
+     0.275397,
+     0.290234,
+     0.0,
+     0.275397
+    ]
+   ],
+   "action_label": [
+    0.041277,
+    0.870702,
+    1
+   ],
+   "decision_step": 708,
+   "episode_id": 1,
+   "hl_seq": 93,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262605,
+   "obs_last_physics_step": 703,
+   "obs_slot_id": 117,
+   "obs_valid": 1,
+   "state": [
+    6.9116,
+    0.285597,
+    0.5714,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041141,
+    0.82878,
+    1
+   ],
+   "action_exec": [
+    [
+     0.275203,
+     0.27626,
+     0.0,
+     0.275203
+    ],
+    [
+     0.275043,
+     0.27626,
+     0.0,
+     0.275043
+    ],
+    [
+     0.27491,
+     0.27626,
+     0.0,
+     0.27491
+    ],
+    [
+     0.274801,
+     0.27626,
+     0.0,
+     0.274801
+    ],
+    [
+     0.27471,
+     0.27626,
+     0.0,
+     0.27471
+    ],
+    [
+     0.274635,
+     0.27626,
+     0.0,
+     0.274635
+    ]
+   ],
+   "action_label": [
+    0.041141,
+    0.82878,
+    1
+   ],
+   "decision_step": 714,
+   "episode_id": 1,
+   "hl_seq": 94,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262611,
+   "obs_last_physics_step": 709,
+   "obs_slot_id": 118,
+   "obs_valid": 1,
+   "state": [
+    6.964,
+    0.28732,
+    0.5229,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.039918,
+    0.790414,
+    1
+   ],
+   "action_exec": [
+    [
+     0.273167,
+     0.263471,
+     0.0,
+     0.273167
+    ],
+    [
+     0.271952,
+     0.263471,
+     0.0,
+     0.271952
+    ],
+    [
+     0.270947,
+     0.263471,
+     0.0,
+     0.270947
+    ],
+    [
+     0.270115,
+     0.263471,
+     0.0,
+     0.270115
+    ],
+    [
+     0.269426,
+     0.263471,
+     0.0,
+     0.269426
+    ],
+    [
+     0.268856,
+     0.263471,
+     0.0,
+     0.268856
+    ]
+   ],
+   "action_label": [
+    0.039918,
+    0.790414,
+    1
+   ],
+   "decision_step": 720,
+   "episode_id": 1,
+   "hl_seq": 95,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262617,
+   "obs_last_physics_step": 715,
+   "obs_slot_id": 119,
+   "obs_valid": 1,
+   "state": [
+    7.012,
+    0.288531,
+    0.4786,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.037596,
+    0.755302,
+    1
+   ],
+   "action_exec": [
+    [
+     0.265716,
+     0.251767,
+     0.0,
+     0.265716
+    ],
+    [
+     0.263116,
+     0.251767,
+     0.0,
+     0.263116
+    ],
+    [
+     0.260965,
+     0.251767,
+     0.0,
+     0.260965
+    ],
+    [
+     0.259185,
+     0.251767,
+     0.0,
+     0.259185
+    ],
+    [
+     0.257712,
+     0.251767,
+     0.0,
+     0.257712
+    ],
+    [
+     0.256492,
+     0.251767,
+     0.0,
+     0.256492
+    ]
+   ],
+   "action_label": [
+    0.037596,
+    0.755302,
+    1
+   ],
+   "decision_step": 726,
+   "episode_id": 1,
+   "hl_seq": 96,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262623,
+   "obs_last_physics_step": 721,
+   "obs_slot_id": 120,
+   "obs_valid": 1,
+   "state": [
+    7.0559,
+    0.284258,
+    0.438,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.034263,
+    0.723168,
+    1
+   ],
+   "action_exec": [
+    [
+     0.251653,
+     0.241056,
+     0.0,
+     0.251653
+    ],
+    [
+     0.247648,
+     0.241056,
+     0.0,
+     0.247648
+    ],
+    [
+     0.244333,
+     0.241056,
+     0.0,
+     0.244333
+    ],
+    [
+     0.24159,
+     0.241056,
+     0.0,
+     0.24159
+    ],
+    [
+     0.23932,
+     0.241056,
+     0.0,
+     0.23932
+    ],
+    [
+     0.237441,
+     0.241056,
+     0.0,
+     0.237441
+    ]
+   ],
+   "action_label": [
+    0.034263,
+    0.723168,
+    1
+   ],
+   "decision_step": 732,
+   "episode_id": 1,
+   "hl_seq": 97,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262629,
+   "obs_last_physics_step": 727,
+   "obs_slot_id": 121,
+   "obs_valid": 1,
+   "state": [
+    7.096,
+    0.272755,
+    0.4008,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.03027,
+    0.69376,
+    1
+   ],
+   "action_exec": [
+    [
+     0.231694,
+     0.231253,
+     0.0,
+     0.231694
+    ],
+    [
+     0.226539,
+     0.231253,
+     0.0,
+     0.226539
+    ],
+    [
+     0.222274,
+     0.231253,
+     0.0,
+     0.222274
+    ],
+    [
+     0.218743,
+     0.231253,
+     0.0,
+     0.218743
+    ],
+    [
+     0.215822,
+     0.231253,
+     0.0,
+     0.215822
+    ],
+    [
+     0.213404,
+     0.231253,
+     0.0,
+     0.213404
+    ]
+   ],
+   "action_label": [
+    0.03027,
+    0.69376,
+    1
+   ],
+   "decision_step": 738,
+   "episode_id": 1,
+   "hl_seq": 98,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262635,
+   "obs_last_physics_step": 733,
+   "obs_slot_id": 122,
+   "obs_valid": 1,
+   "state": [
+    7.1328,
+    0.253825,
+    0.3668,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.025704,
+    0.666847,
+    1
+   ],
+   "action_exec": [
+    [
+     0.207656,
+     0.222282,
+     0.0,
+     0.207656
+    ],
+    [
+     0.201909,
+     0.222282,
+     0.0,
+     0.201909
+    ],
+    [
+     0.196643,
+     0.222282,
+     0.0,
+     0.196643
+    ],
+    [
+     0.192284,
+     0.222282,
+     0.0,
+     0.192284
+    ],
+    [
+     0.188677,
+     0.222282,
+     0.0,
+     0.188677
+    ],
+    [
+     0.185691,
+     0.222282,
+     0.0,
+     0.185691
+    ]
+   ],
+   "action_label": [
+    0.025704,
+    0.666847,
+    1
+   ],
+   "decision_step": 744,
+   "episode_id": 1,
+   "hl_seq": 99,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262641,
+   "obs_last_physics_step": 739,
+   "obs_slot_id": 123,
+   "obs_valid": 1,
+   "state": [
+    7.1664,
+    0.229223,
+    0.3357,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    0.020829,
+    0.642216,
+    1
+   ],
+   "decision_step": 750,
+   "episode_id": 1,
+   "hl_seq": 99,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262647,
+   "obs_last_physics_step": 745,
+   "obs_slot_id": 124,
+   "obs_valid": 1,
+   "state": [
+    7.1972,
+    0.200327,
+    0.3072,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 756,
+   "episode_id": -1,
+   "hl_seq": 99,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262653,
+   "obs_last_physics_step": 751,
+   "obs_slot_id": 125,
+   "obs_valid": 1,
+   "state": [
+    7.1613,
+    0.0,
+    -0.3584,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 762,
+   "episode_id": -1,
+   "hl_seq": 99,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262659,
+   "obs_last_physics_step": 757,
+   "obs_slot_id": 126,
+   "obs_valid": 1,
+   "state": [
+    7.1256,
+    0.0,
+    -0.3566,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 768,
+   "episode_id": -1,
+   "hl_seq": 99,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262665,
+   "obs_last_physics_step": 763,
+   "obs_slot_id": 127,
+   "obs_valid": 1,
+   "state": [
+    7.09,
+    0.0,
+    -0.3548,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     -0.0
+    ],
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 774,
+   "episode_id": -1,
+   "hl_seq": 99,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 83,
+   "obs_age_steps": 5,
+   "obs_captured_render_frame": 262671,
+   "obs_last_physics_step": 769,
+   "obs_slot_id": 128,
+   "obs_valid": 1,
+   "state": [
+    7.0547,
+    0.0,
+    -0.353,
+    0
+   ]
+  }
+ ],
+ "img_resolved": [
+  {
+   "captured_render_frame": 261903,
+   "fid_ok": 1,
+   "file": "frames/f_00000000.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 0
+  },
+  {
+   "captured_render_frame": 261909,
+   "fid_ok": 1,
+   "file": "frames/f_00000001.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 1
+  },
+  {
+   "captured_render_frame": 261915,
+   "fid_ok": 1,
+   "file": "frames/f_00000002.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 2
+  },
+  {
+   "captured_render_frame": 261921,
+   "fid_ok": 1,
+   "file": "frames/f_00000003.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 3
+  },
+  {
+   "captured_render_frame": 261927,
+   "fid_ok": 1,
+   "file": "frames/f_00000004.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 4
+  },
+  {
+   "captured_render_frame": 261933,
+   "fid_ok": 1,
+   "file": "frames/f_00000005.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 5
+  },
+  {
+   "captured_render_frame": 261939,
+   "fid_ok": 1,
+   "file": "frames/f_00000006.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 6
+  },
+  {
+   "captured_render_frame": 261945,
+   "fid_ok": 1,
+   "file": "frames/f_00000007.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 7
+  },
+  {
+   "captured_render_frame": 261951,
+   "fid_ok": 1,
+   "file": "frames/f_00000008.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 8
+  },
+  {
+   "captured_render_frame": 261957,
+   "fid_ok": 1,
+   "file": "frames/f_00000009.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 9
+  },
+  {
+   "captured_render_frame": 261963,
+   "fid_ok": 1,
+   "file": "frames/f_00000010.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 10
+  },
+  {
+   "captured_render_frame": 261969,
+   "fid_ok": 1,
+   "file": "frames/f_00000011.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 11
+  },
+  {
+   "captured_render_frame": 261975,
+   "fid_ok": 1,
+   "file": "frames/f_00000012.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 12
+  },
+  {
+   "captured_render_frame": 261981,
+   "fid_ok": 1,
+   "file": "frames/f_00000013.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 13
+  },
+  {
+   "captured_render_frame": 261987,
+   "fid_ok": 1,
+   "file": "frames/f_00000014.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 14
+  },
+  {
+   "captured_render_frame": 261993,
+   "fid_ok": 1,
+   "file": "frames/f_00000015.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 15
+  },
+  {
+   "captured_render_frame": 261999,
+   "fid_ok": 1,
+   "file": "frames/f_00000016.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 16
+  },
+  {
+   "captured_render_frame": 262005,
+   "fid_ok": 1,
+   "file": "frames/f_00000017.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 17
+  },
+  {
+   "captured_render_frame": 262011,
+   "fid_ok": 1,
+   "file": "frames/f_00000018.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 18
+  },
+  {
+   "captured_render_frame": 262017,
+   "fid_ok": 1,
+   "file": "frames/f_00000019.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 19
+  },
+  {
+   "captured_render_frame": 262023,
+   "fid_ok": 1,
+   "file": "frames/f_00000020.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 20
+  },
+  {
+   "captured_render_frame": 262029,
+   "fid_ok": 1,
+   "file": "frames/f_00000021.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 21
+  },
+  {
+   "captured_render_frame": 262035,
+   "fid_ok": 1,
+   "file": "frames/f_00000022.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 22
+  },
+  {
+   "captured_render_frame": 262041,
+   "fid_ok": 1,
+   "file": "frames/f_00000023.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 23
+  },
+  {
+   "captured_render_frame": 262047,
+   "fid_ok": 1,
+   "file": "frames/f_00000024.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 24
+  },
+  {
+   "captured_render_frame": 262053,
+   "fid_ok": 1,
+   "file": "frames/f_00000025.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 25
+  },
+  {
+   "captured_render_frame": 262059,
+   "fid_ok": 1,
+   "file": "frames/f_00000026.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 26
+  },
+  {
+   "captured_render_frame": 262065,
+   "fid_ok": 1,
+   "file": "frames/f_00000027.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 27
+  },
+  {
+   "captured_render_frame": 262071,
+   "fid_ok": 1,
+   "file": "frames/f_00000028.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 28
+  },
+  {
+   "captured_render_frame": 262077,
+   "fid_ok": 1,
+   "file": "frames/f_00000029.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 29
+  },
+  {
+   "captured_render_frame": 262083,
+   "fid_ok": 1,
+   "file": "frames/f_00000030.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 30
+  },
+  {
+   "captured_render_frame": 262089,
+   "fid_ok": 1,
+   "file": "frames/f_00000031.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 31
+  },
+  {
+   "captured_render_frame": 262095,
+   "fid_ok": 1,
+   "file": "frames/f_00000032.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 32
+  },
+  {
+   "captured_render_frame": 262101,
+   "fid_ok": 1,
+   "file": "frames/f_00000033.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 33
+  },
+  {
+   "captured_render_frame": 262107,
+   "fid_ok": 1,
+   "file": "frames/f_00000034.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 34
+  },
+  {
+   "captured_render_frame": 262113,
+   "fid_ok": 1,
+   "file": "frames/f_00000035.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 35
+  },
+  {
+   "captured_render_frame": 262119,
+   "fid_ok": 1,
+   "file": "frames/f_00000036.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 36
+  },
+  {
+   "captured_render_frame": 262125,
+   "fid_ok": 1,
+   "file": "frames/f_00000037.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 37
+  },
+  {
+   "captured_render_frame": 262131,
+   "fid_ok": 1,
+   "file": "frames/f_00000038.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 38
+  },
+  {
+   "captured_render_frame": 262137,
+   "fid_ok": 1,
+   "file": "frames/f_00000039.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 39
+  },
+  {
+   "captured_render_frame": 262143,
+   "fid_ok": 1,
+   "file": "frames/f_00000040.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 40
+  },
+  {
+   "captured_render_frame": 262149,
+   "fid_ok": 1,
+   "file": "frames/f_00000041.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 41
+  },
+  {
+   "captured_render_frame": 262155,
+   "fid_ok": 1,
+   "file": "frames/f_00000042.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 42
+  },
+  {
+   "captured_render_frame": 262161,
+   "fid_ok": 1,
+   "file": "frames/f_00000043.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 43
+  },
+  {
+   "captured_render_frame": 262167,
+   "fid_ok": 1,
+   "file": "frames/f_00000044.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 44
+  },
+  {
+   "captured_render_frame": 262173,
+   "fid_ok": 1,
+   "file": "frames/f_00000045.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 45
+  },
+  {
+   "captured_render_frame": 262179,
+   "fid_ok": 1,
+   "file": "frames/f_00000046.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 46
+  },
+  {
+   "captured_render_frame": 262185,
+   "fid_ok": 1,
+   "file": "frames/f_00000047.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 47
+  },
+  {
+   "captured_render_frame": 262191,
+   "fid_ok": 1,
+   "file": "frames/f_00000048.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 48
+  },
+  {
+   "captured_render_frame": 262197,
+   "fid_ok": 1,
+   "file": "frames/f_00000049.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 49
+  },
+  {
+   "captured_render_frame": 262203,
+   "fid_ok": 1,
+   "file": "frames/f_00000050.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 50
+  },
+  {
+   "captured_render_frame": 262209,
+   "fid_ok": 1,
+   "file": "frames/f_00000051.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 51
+  },
+  {
+   "captured_render_frame": 262215,
+   "fid_ok": 1,
+   "file": "frames/f_00000052.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 52
+  },
+  {
+   "captured_render_frame": 262221,
+   "fid_ok": 1,
+   "file": "frames/f_00000053.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 53
+  },
+  {
+   "captured_render_frame": 262227,
+   "fid_ok": 1,
+   "file": "frames/f_00000054.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 54
+  },
+  {
+   "captured_render_frame": 262233,
+   "fid_ok": 1,
+   "file": "frames/f_00000055.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 55
+  },
+  {
+   "captured_render_frame": 262239,
+   "fid_ok": 1,
+   "file": "frames/f_00000056.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 56
+  },
+  {
+   "captured_render_frame": 262245,
+   "fid_ok": 1,
+   "file": "frames/f_00000057.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 57
+  },
+  {
+   "captured_render_frame": 262251,
+   "fid_ok": 1,
+   "file": "frames/f_00000058.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 58
+  },
+  {
+   "captured_render_frame": 262257,
+   "fid_ok": 1,
+   "file": "frames/f_00000059.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 59
+  },
+  {
+   "captured_render_frame": 262263,
+   "fid_ok": 1,
+   "file": "frames/f_00000060.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 60
+  },
+  {
+   "captured_render_frame": 262269,
+   "fid_ok": 1,
+   "file": "frames/f_00000061.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 61
+  },
+  {
+   "captured_render_frame": 262275,
+   "fid_ok": 1,
+   "file": "frames/f_00000062.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 62
+  },
+  {
+   "captured_render_frame": 262281,
+   "fid_ok": 1,
+   "file": "frames/f_00000063.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 63
+  },
+  {
+   "captured_render_frame": 262287,
+   "fid_ok": 1,
+   "file": "frames/f_00000064.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 64
+  },
+  {
+   "captured_render_frame": 262293,
+   "fid_ok": 1,
+   "file": "frames/f_00000065.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 65
+  },
+  {
+   "captured_render_frame": 262299,
+   "fid_ok": 1,
+   "file": "frames/f_00000066.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 66
+  },
+  {
+   "captured_render_frame": 262305,
+   "fid_ok": 1,
+   "file": "frames/f_00000067.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 67
+  },
+  {
+   "captured_render_frame": 262311,
+   "fid_ok": 1,
+   "file": "frames/f_00000068.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 68
+  },
+  {
+   "captured_render_frame": 262317,
+   "fid_ok": 1,
+   "file": "frames/f_00000069.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 69
+  },
+  {
+   "captured_render_frame": 262323,
+   "fid_ok": 1,
+   "file": "frames/f_00000070.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 70
+  },
+  {
+   "captured_render_frame": 262329,
+   "fid_ok": 1,
+   "file": "frames/f_00000071.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 71
+  },
+  {
+   "captured_render_frame": 262335,
+   "fid_ok": 1,
+   "file": "frames/f_00000072.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 72
+  },
+  {
+   "captured_render_frame": 262341,
+   "fid_ok": 1,
+   "file": "frames/f_00000073.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 73
+  },
+  {
+   "captured_render_frame": 262347,
+   "fid_ok": 1,
+   "file": "frames/f_00000074.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 74
+  },
+  {
+   "captured_render_frame": 262353,
+   "fid_ok": 1,
+   "file": "frames/f_00000075.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 75
+  },
+  {
+   "captured_render_frame": 262359,
+   "fid_ok": 1,
+   "file": "frames/f_00000076.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 76
+  },
+  {
+   "captured_render_frame": 262365,
+   "fid_ok": 1,
+   "file": "frames/f_00000077.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 77
+  },
+  {
+   "captured_render_frame": 262371,
+   "fid_ok": 1,
+   "file": "frames/f_00000078.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 78
+  },
+  {
+   "captured_render_frame": 262377,
+   "fid_ok": 1,
+   "file": "frames/f_00000079.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 79
+  },
+  {
+   "captured_render_frame": 262383,
+   "fid_ok": 1,
+   "file": "frames/f_00000080.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 80
+  },
+  {
+   "captured_render_frame": 262389,
+   "fid_ok": 1,
+   "file": "frames/f_00000081.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 81
+  },
+  {
+   "captured_render_frame": 262395,
+   "fid_ok": 1,
+   "file": "frames/f_00000082.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 82
+  },
+  {
+   "captured_render_frame": 262401,
+   "fid_ok": 1,
+   "file": "frames/f_00000083.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 83
+  },
+  {
+   "captured_render_frame": 262407,
+   "fid_ok": 1,
+   "file": "frames/f_00000084.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 84
+  },
+  {
+   "captured_render_frame": 262413,
+   "fid_ok": 1,
+   "file": "frames/f_00000085.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 85
+  },
+  {
+   "captured_render_frame": 262419,
+   "fid_ok": 1,
+   "file": "frames/f_00000086.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 86
+  },
+  {
+   "captured_render_frame": 262425,
+   "fid_ok": 1,
+   "file": "frames/f_00000087.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 87
+  },
+  {
+   "captured_render_frame": 262431,
+   "fid_ok": 1,
+   "file": "frames/f_00000088.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 88
+  },
+  {
+   "captured_render_frame": 262437,
+   "fid_ok": 1,
+   "file": "frames/f_00000089.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 89
+  },
+  {
+   "captured_render_frame": 262443,
+   "fid_ok": 1,
+   "file": "frames/f_00000090.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 90
+  },
+  {
+   "captured_render_frame": 262449,
+   "fid_ok": 1,
+   "file": "frames/f_00000091.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 91
+  },
+  {
+   "captured_render_frame": 262455,
+   "fid_ok": 1,
+   "file": "frames/f_00000092.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 92
+  },
+  {
+   "captured_render_frame": 262461,
+   "fid_ok": 1,
+   "file": "frames/f_00000093.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 93
+  },
+  {
+   "captured_render_frame": 262467,
+   "fid_ok": 1,
+   "file": "frames/f_00000094.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 94
+  },
+  {
+   "captured_render_frame": 262473,
+   "fid_ok": 1,
+   "file": "frames/f_00000095.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 95
+  },
+  {
+   "captured_render_frame": 262479,
+   "fid_ok": 1,
+   "file": "frames/f_00000096.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 96
+  },
+  {
+   "captured_render_frame": 262485,
+   "fid_ok": 1,
+   "file": "frames/f_00000097.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 97
+  },
+  {
+   "captured_render_frame": 262491,
+   "fid_ok": 1,
+   "file": "frames/f_00000098.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 98
+  },
+  {
+   "captured_render_frame": 262497,
+   "fid_ok": 1,
+   "file": "frames/f_00000099.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 99
+  },
+  {
+   "captured_render_frame": 262503,
+   "fid_ok": 1,
+   "file": "frames/f_00000100.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 100
+  },
+  {
+   "captured_render_frame": 262509,
+   "fid_ok": 1,
+   "file": "frames/f_00000101.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 101
+  },
+  {
+   "captured_render_frame": 262515,
+   "fid_ok": 1,
+   "file": "frames/f_00000102.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 102
+  },
+  {
+   "captured_render_frame": 262521,
+   "fid_ok": 1,
+   "file": "frames/f_00000103.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 103
+  },
+  {
+   "captured_render_frame": 262527,
+   "fid_ok": 1,
+   "file": "frames/f_00000104.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 104
+  },
+  {
+   "captured_render_frame": 262533,
+   "fid_ok": 1,
+   "file": "frames/f_00000105.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 105
+  },
+  {
+   "captured_render_frame": 262539,
+   "fid_ok": 1,
+   "file": "frames/f_00000106.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 106
+  },
+  {
+   "captured_render_frame": 262545,
+   "fid_ok": 1,
+   "file": "frames/f_00000107.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 107
+  },
+  {
+   "captured_render_frame": 262551,
+   "fid_ok": 1,
+   "file": "frames/f_00000108.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 108
+  },
+  {
+   "captured_render_frame": 262557,
+   "fid_ok": 1,
+   "file": "frames/f_00000109.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 109
+  },
+  {
+   "captured_render_frame": 262563,
+   "fid_ok": 1,
+   "file": "frames/f_00000110.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 110
+  },
+  {
+   "captured_render_frame": 262569,
+   "fid_ok": 1,
+   "file": "frames/f_00000111.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 111
+  },
+  {
+   "captured_render_frame": 262575,
+   "fid_ok": 1,
+   "file": "frames/f_00000112.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 112
+  },
+  {
+   "captured_render_frame": 262581,
+   "fid_ok": 1,
+   "file": "frames/f_00000113.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 113
+  },
+  {
+   "captured_render_frame": 262587,
+   "fid_ok": 1,
+   "file": "frames/f_00000114.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 114
+  },
+  {
+   "captured_render_frame": 262593,
+   "fid_ok": 1,
+   "file": "frames/f_00000115.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 115
+  },
+  {
+   "captured_render_frame": 262599,
+   "fid_ok": 1,
+   "file": "frames/f_00000116.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 116
+  },
+  {
+   "captured_render_frame": 262605,
+   "fid_ok": 1,
+   "file": "frames/f_00000117.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 117
+  },
+  {
+   "captured_render_frame": 262611,
+   "fid_ok": 1,
+   "file": "frames/f_00000118.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 118
+  },
+  {
+   "captured_render_frame": 262617,
+   "fid_ok": 1,
+   "file": "frames/f_00000119.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 119
+  },
+  {
+   "captured_render_frame": 262623,
+   "fid_ok": 1,
+   "file": "frames/f_00000120.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 120
+  },
+  {
+   "captured_render_frame": 262629,
+   "fid_ok": 1,
+   "file": "frames/f_00000121.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 121
+  },
+  {
+   "captured_render_frame": 262635,
+   "fid_ok": 1,
+   "file": "frames/f_00000122.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 122
+  },
+  {
+   "captured_render_frame": 262641,
+   "fid_ok": 1,
+   "file": "frames/f_00000123.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 123
+  },
+  {
+   "captured_render_frame": 262647,
+   "fid_ok": 1,
+   "file": "frames/f_00000124.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 124
+  },
+  {
+   "captured_render_frame": 262653,
+   "fid_ok": 1,
+   "file": "frames/f_00000125.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 125
+  },
+  {
+   "captured_render_frame": 262659,
+   "fid_ok": 1,
+   "file": "frames/f_00000126.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 126
+  },
+  {
+   "captured_render_frame": 262665,
+   "fid_ok": 1,
+   "file": "frames/f_00000127.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 127
+  },
+  {
+   "captured_render_frame": 262671,
+   "fid_ok": 1,
+   "file": "frames/f_00000128.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 128
+  },
+  {
+   "captured_render_frame": 262677,
+   "fid_ok": 1,
+   "file": "frames/f_00000129.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 129
+  }
+ ],
+ "pixels": {
+  "slots": [
+   {
+    "core": [
+     [
+      [
+       0.435294,
+       0.596078,
+       0.588235,
+       0.490196,
+       0.596078,
+       0.552941,
+       0.32549,
+       0.4
+      ],
+      [
+       0.470588,
+       0.631373,
+       0.623529,
+       0.52549,
+       0.631373,
+       0.588235,
+       0.360784,
+       0.435294
+      ],
+      [
+       0.490196,
+       0.65098,
+       0.643137,
+       0.545098,
+       0.65098,
+       0.607843,
+       0.380392,
+       0.454902
+      ],
+      [
+       0.482353,
+       0.643137,
+       0.635294,
+       0.537255,
+       0.643137,
+       0.6,
+       0.372549,
+       0.447059
+      ],
+      [
+       0.454902,
+       0.615686,
+       0.607843,
+       0.509804,
+       0.615686,
+       0.572549,
+       0.345098,
+       0.419608
+      ],
+      [
+       0.415686,
+       0.576471,
+       0.568627,
+       0.470588,
+       0.576471,
+       0.533333,
+       0.305882,
+       0.380392
+      ],
+      [
+       0.388235,
+       0.54902,
+       0.541176,
+       0.443137,
+       0.54902,
+       0.505882,
+       0.278431,
+       0.352941
+      ],
+      [
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549
+      ],
+      [
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647
+      ],
+      [
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216
+      ],
+      [
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843
+      ],
+      [
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451
+      ],
+      [
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294
+      ],
+      [
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804
+      ],
+      [
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392
+      ]
+     ],
+     [
+      [
+       0.396078,
+       0.556863,
+       0.54902,
+       0.45098,
+       0.556863,
+       0.513725,
+       0.286275,
+       0.360784
+      ],
+      [
+       0.431373,
+       0.592157,
+       0.584314,
+       0.486275,
+       0.592157,
+       0.54902,
+       0.321569,
+       0.396078
+      ],
+      [
+       0.45098,
+       0.611765,
+       0.603922,
+       0.505882,
+       0.611765,
+       0.568627,
+       0.341176,
+       0.415686
+      ],
+      [
+       0.443137,
+       0.603922,
+       0.596078,
+       0.498039,
+       0.603922,
+       0.560784,
+       0.333333,
+       0.407843
+      ],
+      [
+       0.415686,
+       0.576471,
+       0.568627,
+       0.470588,
+       0.576471,
+       0.533333,
+       0.305882,
+       0.380392
+      ],
+      [
+       0.376471,
+       0.537255,
+       0.529412,
+       0.431373,
+       0.537255,
+       0.494118,
+       0.266667,
+       0.341176
+      ],
+      [
+       0.34902,
+       0.509804,
+       0.501961,
+       0.403922,
+       0.509804,
+       0.466667,
+       0.239216,
+       0.313725
+      ],
+      [
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333
+      ],
+      [
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431
+      ],
+      [
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4
+      ],
+      [
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627
+      ],
+      [
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235
+      ],
+      [
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078
+      ],
+      [
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588
+      ],
+      [
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176
+      ]
+     ],
+     [
+      [
+       0.337255,
+       0.498039,
+       0.490196,
+       0.392157,
+       0.498039,
+       0.454902,
+       0.227451,
+       0.301961
+      ],
+      [
+       0.372549,
+       0.533333,
+       0.52549,
+       0.427451,
+       0.533333,
+       0.490196,
+       0.262745,
+       0.337255
+      ],
+      [
+       0.392157,
+       0.552941,
+       0.545098,
+       0.447059,
+       0.552941,
+       0.509804,
+       0.282353,
+       0.356863
+      ],
+      [
+       0.384314,
+       0.545098,
+       0.537255,
+       0.439216,
+       0.545098,
+       0.501961,
+       0.27451,
+       0.34902
+      ],
+      [
+       0.356863,
+       0.517647,
+       0.509804,
+       0.411765,
+       0.517647,
+       0.47451,
+       0.247059,
+       0.321569
+      ],
+      [
+       0.317647,
+       0.478431,
+       0.470588,
+       0.372549,
+       0.478431,
+       0.435294,
+       0.207843,
+       0.282353
+      ],
+      [
+       0.290196,
+       0.45098,
+       0.443137,
+       0.345098,
+       0.45098,
+       0.407843,
+       0.180392,
+       0.254902
+      ],
+      [
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451
+      ],
+      [
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608
+      ],
+      [
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176
+      ],
+      [
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804
+      ],
+      [
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412
+      ],
+      [
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255
+      ],
+      [
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765
+      ],
+      [
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353
+      ]
+     ]
+    ],
+    "slot_id": 0
+   },
+   {
+    "core": [
+     [
+      [
+       0.564706,
+       0.505882,
+       0.443137,
+       0.556863,
+       0.45098,
+       0.25098,
+       0.392157,
+       0.533333
+      ],
+      [
+       0.568627,
+       0.509804,
+       0.447059,
+       0.560784,
+       0.454902,
+       0.254902,
+       0.396078,
+       0.537255
+      ],
+      [
+       0.596078,
+       0.537255,
+       0.47451,
+       0.588235,
+       0.482353,
+       0.282353,
+       0.423529,
+       0.564706
+      ],
+      [
+       0.635294,
+       0.576471,
+       0.513725,
+       0.627451,
+       0.521569,
+       0.321569,
+       0.462745,
+       0.603922
+      ],
+      [
+       0.666667,
+       0.607843,
+       0.545098,
+       0.658824,
+       0.552941,
+       0.352941,
+       0.494118,
+       0.635294
+      ],
+      [
+       0.67451,
+       0.615686,
+       0.552941,
+       0.666667,
+       0.560784,
+       0.360784,
+       0.501961,
+       0.643137
+      ],
+      [
+       0.658824,
+       0.6,
+       0.537255,
+       0.65098,
+       0.545098,
+       0.345098,
+       0.486275,
+       0.627451
+      ],
+      [
+       0.411765,
+       0.411765,
+       0.411765,
+       0.411765,
+       0.411765,
+       0.411765,
+       0.411765,
+       0.411765
+      ],
+      [
+       0.501961,
+       0.501961,
+       0.501961,
+       0.501961,
+       0.501961,
+       0.501961,
+       0.501961,
+       0.501961
+      ],
+      [
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922
+      ],
+      [
+       0.443137,
+       0.443137,
+       0.443137,
+       0.443137,
+       0.443137,
+       0.443137,
+       0.443137,
+       0.443137
+      ],
+      [
+       0.247059,
+       0.247059,
+       0.247059,
+       0.247059,
+       0.247059,
+       0.247059,
+       0.247059,
+       0.247059
+      ],
+      [
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608
+      ],
+      [
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451
+      ],
+      [
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176
+      ]
+     ],
+     [
+      [
+       0.52549,
+       0.466667,
+       0.403922,
+       0.517647,
+       0.411765,
+       0.211765,
+       0.352941,
+       0.494118
+      ],
+      [
+       0.529412,
+       0.470588,
+       0.407843,
+       0.521569,
+       0.415686,
+       0.215686,
+       0.356863,
+       0.498039
+      ],
+      [
+       0.556863,
+       0.498039,
+       0.435294,
+       0.54902,
+       0.443137,
+       0.243137,
+       0.384314,
+       0.52549
+      ],
+      [
+       0.596078,
+       0.537255,
+       0.47451,
+       0.588235,
+       0.482353,
+       0.282353,
+       0.423529,
+       0.564706
+      ],
+      [
+       0.627451,
+       0.568627,
+       0.505882,
+       0.619608,
+       0.513725,
+       0.313725,
+       0.454902,
+       0.596078
+      ],
+      [
+       0.635294,
+       0.576471,
+       0.513725,
+       0.627451,
+       0.521569,
+       0.321569,
+       0.462745,
+       0.603922
+      ],
+      [
+       0.619608,
+       0.560784,
+       0.498039,
+       0.611765,
+       0.505882,
+       0.305882,
+       0.447059,
+       0.588235
+      ],
+      [
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549
+      ],
+      [
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745
+      ],
+      [
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706
+      ],
+      [
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922
+      ],
+      [
+       0.207843,
+       0.207843,
+       0.207843,
+       0.207843,
+       0.207843,
+       0.207843,
+       0.207843,
+       0.207843
+      ],
+      [
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392
+      ],
+      [
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294
+      ],
+      [
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961
+      ]
+     ],
+     [
+      [
+       0.466667,
+       0.407843,
+       0.345098,
+       0.458824,
+       0.352941,
+       0.152941,
+       0.294118,
+       0.435294
+      ],
+      [
+       0.470588,
+       0.411765,
+       0.34902,
+       0.462745,
+       0.356863,
+       0.156863,
+       0.298039,
+       0.439216
+      ],
+      [
+       0.498039,
+       0.439216,
+       0.376471,
+       0.490196,
+       0.384314,
+       0.184314,
+       0.32549,
+       0.466667
+      ],
+      [
+       0.537255,
+       0.478431,
+       0.415686,
+       0.529412,
+       0.423529,
+       0.223529,
+       0.364706,
+       0.505882
+      ],
+      [
+       0.568627,
+       0.509804,
+       0.447059,
+       0.560784,
+       0.454902,
+       0.254902,
+       0.396078,
+       0.537255
+      ],
+      [
+       0.576471,
+       0.517647,
+       0.454902,
+       0.568627,
+       0.462745,
+       0.262745,
+       0.403922,
+       0.545098
+      ],
+      [
+       0.560784,
+       0.501961,
+       0.439216,
+       0.552941,
+       0.447059,
+       0.247059,
+       0.388235,
+       0.529412
+      ],
+      [
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725
+      ],
+      [
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922,
+       0.403922
+      ],
+      [
+       0.305882,
+       0.305882,
+       0.305882,
+       0.305882,
+       0.305882,
+       0.305882,
+       0.305882,
+       0.305882
+      ],
+      [
+       0.345098,
+       0.345098,
+       0.345098,
+       0.345098,
+       0.345098,
+       0.345098,
+       0.345098,
+       0.345098
+      ],
+      [
+       0.14902,
+       0.14902,
+       0.14902,
+       0.14902,
+       0.14902,
+       0.14902,
+       0.14902,
+       0.14902
+      ],
+      [
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569
+      ],
+      [
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471
+      ],
+      [
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137
+      ]
+     ]
+    ],
+    "slot_id": 43
+   },
+   {
+    "core": [
+     [
+      [
+       0.486275,
+       0.647059,
+       0.603922,
+       0.529412,
+       0.643137,
+       0.556863,
+       0.345098,
+       0.466667
+      ],
+      [
+       0.45098,
+       0.611765,
+       0.568627,
+       0.494118,
+       0.607843,
+       0.521569,
+       0.309804,
+       0.431373
+      ],
+      [
+       0.415686,
+       0.576471,
+       0.533333,
+       0.458824,
+       0.572549,
+       0.486275,
+       0.27451,
+       0.396078
+      ],
+      [
+       0.396078,
+       0.556863,
+       0.513725,
+       0.439216,
+       0.552941,
+       0.466667,
+       0.254902,
+       0.376471
+      ],
+      [
+       0.403922,
+       0.564706,
+       0.521569,
+       0.447059,
+       0.560784,
+       0.47451,
+       0.262745,
+       0.384314
+      ],
+      [
+       0.431373,
+       0.592157,
+       0.54902,
+       0.47451,
+       0.588235,
+       0.501961,
+       0.290196,
+       0.411765
+      ],
+      [
+       0.470588,
+       0.631373,
+       0.588235,
+       0.513725,
+       0.627451,
+       0.541176,
+       0.329412,
+       0.45098
+      ],
+      [
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549
+      ],
+      [
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412
+      ],
+      [
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431
+      ],
+      [
+       0.360784,
+       0.360784,
+       0.360784,
+       0.360784,
+       0.360784,
+       0.360784,
+       0.360784,
+       0.360784
+      ],
+      [
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686
+      ],
+      [
+       0.266667,
+       0.266667,
+       0.266667,
+       0.266667,
+       0.266667,
+       0.266667,
+       0.266667,
+       0.266667
+      ],
+      [
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941
+      ],
+      [
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529
+      ]
+     ],
+     [
+      [
+       0.447059,
+       0.607843,
+       0.564706,
+       0.490196,
+       0.603922,
+       0.517647,
+       0.305882,
+       0.427451
+      ],
+      [
+       0.411765,
+       0.572549,
+       0.529412,
+       0.454902,
+       0.568627,
+       0.482353,
+       0.270588,
+       0.392157
+      ],
+      [
+       0.376471,
+       0.537255,
+       0.494118,
+       0.419608,
+       0.533333,
+       0.447059,
+       0.235294,
+       0.356863
+      ],
+      [
+       0.356863,
+       0.517647,
+       0.47451,
+       0.4,
+       0.513725,
+       0.427451,
+       0.215686,
+       0.337255
+      ],
+      [
+       0.364706,
+       0.52549,
+       0.482353,
+       0.407843,
+       0.521569,
+       0.435294,
+       0.223529,
+       0.345098
+      ],
+      [
+       0.392157,
+       0.552941,
+       0.509804,
+       0.435294,
+       0.54902,
+       0.462745,
+       0.25098,
+       0.372549
+      ],
+      [
+       0.431373,
+       0.592157,
+       0.54902,
+       0.47451,
+       0.588235,
+       0.501961,
+       0.290196,
+       0.411765
+      ],
+      [
+       0.286275,
+       0.286275,
+       0.286275,
+       0.286275,
+       0.286275,
+       0.286275,
+       0.286275,
+       0.286275
+      ],
+      [
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196
+      ],
+      [
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216
+      ],
+      [
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569
+      ],
+      [
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471
+      ],
+      [
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451
+      ],
+      [
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725,
+       0.313725
+      ],
+      [
+       0.384314,
+       0.384314,
+       0.384314,
+       0.384314,
+       0.384314,
+       0.384314,
+       0.384314,
+       0.384314
+      ]
+     ],
+     [
+      [
+       0.388235,
+       0.54902,
+       0.505882,
+       0.431373,
+       0.545098,
+       0.458824,
+       0.247059,
+       0.368627
+      ],
+      [
+       0.352941,
+       0.513725,
+       0.470588,
+       0.396078,
+       0.509804,
+       0.423529,
+       0.211765,
+       0.333333
+      ],
+      [
+       0.317647,
+       0.478431,
+       0.435294,
+       0.360784,
+       0.47451,
+       0.388235,
+       0.176471,
+       0.298039
+      ],
+      [
+       0.298039,
+       0.458824,
+       0.415686,
+       0.341176,
+       0.454902,
+       0.368627,
+       0.156863,
+       0.278431
+      ],
+      [
+       0.305882,
+       0.466667,
+       0.423529,
+       0.34902,
+       0.462745,
+       0.376471,
+       0.164706,
+       0.286275
+      ],
+      [
+       0.333333,
+       0.494118,
+       0.45098,
+       0.376471,
+       0.490196,
+       0.403922,
+       0.192157,
+       0.313725
+      ],
+      [
+       0.372549,
+       0.533333,
+       0.490196,
+       0.415686,
+       0.529412,
+       0.443137,
+       0.231373,
+       0.352941
+      ],
+      [
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451
+      ],
+      [
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373
+      ],
+      [
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392
+      ],
+      [
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745
+      ],
+      [
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647
+      ],
+      [
+       0.168627,
+       0.168627,
+       0.168627,
+       0.168627,
+       0.168627,
+       0.168627,
+       0.168627,
+       0.168627
+      ],
+      [
+       0.254902,
+       0.254902,
+       0.254902,
+       0.254902,
+       0.254902,
+       0.254902,
+       0.254902,
+       0.254902
+      ],
+      [
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549,
+       0.32549
+      ]
+     ]
+    ],
+    "slot_id": 86
+   },
+   {
+    "core": [
+     [
+      [
+       0.478431,
+       0.317647,
+       0.239216,
+       0.494118,
+       0.592157,
+       0.478431,
+       0.545098,
+       0.568627
+      ],
+      [
+       0.462745,
+       0.301961,
+       0.223529,
+       0.478431,
+       0.576471,
+       0.462745,
+       0.529412,
+       0.552941
+      ],
+      [
+       0.470588,
+       0.309804,
+       0.231373,
+       0.486275,
+       0.584314,
+       0.470588,
+       0.537255,
+       0.560784
+      ],
+      [
+       0.501961,
+       0.341176,
+       0.262745,
+       0.517647,
+       0.615686,
+       0.501961,
+       0.568627,
+       0.592157
+      ],
+      [
+       0.541176,
+       0.380392,
+       0.301961,
+       0.556863,
+       0.654902,
+       0.541176,
+       0.607843,
+       0.631373
+      ],
+      [
+       0.568627,
+       0.407843,
+       0.329412,
+       0.584314,
+       0.682353,
+       0.568627,
+       0.635294,
+       0.658824
+      ],
+      [
+       0.572549,
+       0.411765,
+       0.333333,
+       0.588235,
+       0.686275,
+       0.572549,
+       0.639216,
+       0.662745
+      ],
+      [
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294
+      ],
+      [
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902
+      ],
+      [
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745,
+       0.462745
+      ],
+      [
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529
+      ],
+      [
+       0.392157,
+       0.392157,
+       0.392157,
+       0.392157,
+       0.392157,
+       0.392157,
+       0.392157,
+       0.392157
+      ],
+      [
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882
+      ],
+      [
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412
+      ],
+      [
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882,
+       0.505882
+      ]
+     ],
+     [
+      [
+       0.439216,
+       0.278431,
+       0.2,
+       0.454902,
+       0.552941,
+       0.439216,
+       0.505882,
+       0.529412
+      ],
+      [
+       0.423529,
+       0.262745,
+       0.184314,
+       0.439216,
+       0.537255,
+       0.423529,
+       0.490196,
+       0.513725
+      ],
+      [
+       0.431373,
+       0.270588,
+       0.192157,
+       0.447059,
+       0.545098,
+       0.431373,
+       0.498039,
+       0.521569
+      ],
+      [
+       0.462745,
+       0.301961,
+       0.223529,
+       0.478431,
+       0.576471,
+       0.462745,
+       0.529412,
+       0.552941
+      ],
+      [
+       0.501961,
+       0.341176,
+       0.262745,
+       0.517647,
+       0.615686,
+       0.501961,
+       0.568627,
+       0.592157
+      ],
+      [
+       0.529412,
+       0.368627,
+       0.290196,
+       0.545098,
+       0.643137,
+       0.529412,
+       0.596078,
+       0.619608
+      ],
+      [
+       0.533333,
+       0.372549,
+       0.294118,
+       0.54902,
+       0.647059,
+       0.533333,
+       0.6,
+       0.623529
+      ],
+      [
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078
+      ],
+      [
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804
+      ],
+      [
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529,
+       0.423529
+      ],
+      [
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314
+      ],
+      [
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941,
+       0.352941
+      ],
+      [
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667
+      ],
+      [
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196
+      ],
+      [
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667,
+       0.466667
+      ]
+     ],
+     [
+      [
+       0.380392,
+       0.219608,
+       0.141176,
+       0.396078,
+       0.494118,
+       0.380392,
+       0.447059,
+       0.470588
+      ],
+      [
+       0.364706,
+       0.203922,
+       0.12549,
+       0.380392,
+       0.478431,
+       0.364706,
+       0.431373,
+       0.454902
+      ],
+      [
+       0.372549,
+       0.211765,
+       0.133333,
+       0.388235,
+       0.486275,
+       0.372549,
+       0.439216,
+       0.462745
+      ],
+      [
+       0.403922,
+       0.243137,
+       0.164706,
+       0.419608,
+       0.517647,
+       0.403922,
+       0.470588,
+       0.494118
+      ],
+      [
+       0.443137,
+       0.282353,
+       0.203922,
+       0.458824,
+       0.556863,
+       0.443137,
+       0.509804,
+       0.533333
+      ],
+      [
+       0.470588,
+       0.309804,
+       0.231373,
+       0.486275,
+       0.584314,
+       0.470588,
+       0.537255,
+       0.560784
+      ],
+      [
+       0.47451,
+       0.313725,
+       0.235294,
+       0.490196,
+       0.588235,
+       0.47451,
+       0.541176,
+       0.564706
+      ],
+      [
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255
+      ],
+      [
+       0.25098,
+       0.25098,
+       0.25098,
+       0.25098,
+       0.25098,
+       0.25098,
+       0.25098,
+       0.25098
+      ],
+      [
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706,
+       0.364706
+      ],
+      [
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549
+      ],
+      [
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118
+      ],
+      [
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843
+      ],
+      [
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373
+      ],
+      [
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843
+      ]
+     ]
+    ],
+    "slot_id": 129
+   }
+  ],
+  "stride": 16
+ },
+ "schema": "drivedit.dc2-golden/1",
+ "segments": [
+  {
+   "episode_id": 0,
+   "first_decision_step": 126,
+   "last_decision_step": 414,
+   "n_steps": 49
+  },
+  {
+   "episode_id": 1,
+   "first_decision_step": 456,
+   "last_decision_step": 744,
+   "n_steps": 49
+  }
+ ],
+ "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00"
+}

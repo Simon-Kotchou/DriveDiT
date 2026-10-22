@@ -10,6 +10,8 @@ classes.
 | `addon.gproj` | Project file (same GameProject syntax as DataTest; new ID and GUID) |
 | `worlds/DataCapture/DC_Arland.ent` | Arland capture world: a SubScene of vanilla `worlds/Arland/Arland.ent` |
 | `worlds/DataCapture/DC_Arland_Layers/default.layer` | Its layer (game mode, AI world, cars, spawn points, drive targets) |
+| `worlds/DataCapture/DC_Probes_Arland.ent` | T0-ENG probe world (DD-4-probe): a SubScene of vanilla Arland, see below |
+| `worlds/DataCapture/DC_Probes_Arland_Layers/default.layer` | Its layer (probe game mode with the runner and the probe components, AI world, `DC_Ego`) |
 | `deploy_manifest.txt` | The only files `tools/deploy_addon.py` may copy into the deployed addon |
 
 Not versioned, because Workbench generates and owns them: `*.meta`, `resourceDatabase.rdb`, `UserMaps.desc`.
@@ -157,3 +159,97 @@ nothing is overwritten.
 - No session means no `DrivingData` folder at all.
 - Without `-profile` inside `E:\DriveDiT` (for example Workbench started from Steam), the collector refuses to write
   and logs `ERROR: capture output refused`. Relaunch with `wb_R1.bat`.
+
+## Probe world DC_Probes_Arland (DD-4-probe)
+
+`worlds/DataCapture/DC_Probes_Arland.ent` is a second world in the same addon, for the T0-ENG core engine probes
+(capture program r2 4.4). Like DC_Arland it is a SubScene of vanilla Arland. One deploy carries both worlds;
+DC_Arland and its capture producers are unchanged. In Workbench open
+`$DataCapture:worlds/DataCapture/DC_Probes_Arland.ent` and press Play.
+
+Its layer `DC_Probes_Arland_Layers/default.layer` holds:
+- `GameMode_DCProbes` (the GameMode_Plain set of DC_Arland, no auto-spawn) with `DC_ProbeRunner` and the probe
+  components `DC_ProbeEngine`, `DC_ProbeSequences`, `DC_ProbeImages`, `DC_ProbeMarkers` and `DC_RoadDump`;
+- DC_Arland's `SCR_AIWorld`: its road network is what the road dump (e08a) reads;
+- DC_Arland's chat, faction, radio and loadout managers and its two spawn points (inert without auto-spawn);
+- the `ManualCamera`, behind the south end of the main runway, which is the test area of the driving probes;
+- one S105 named `DC_Ego` at AI_Car_1's spot. The driving probes teleport it to the runway.
+
+It has no `SCR_MLDataCollector`, no `SCR_MLScreenshotCapture`, no director and no AI groups, so a Play in this
+world writes no `DrivingData` session.
+
+Before the first probe Play:
+- `E:\DriveDiT\tools\launch\wb_R1.bat` must be the patched launcher (DD-0 follow-up). It copies the launch record
+  to `E:\DriveDiT\wb_profile\profile\dc_launch\` and passes `-dcLaunchId`. Without it every probe Play refuses and
+  writes nothing.
+- New script classes and a new world need a Workbench restart from `wb_R1.bat` after the deploy.
+
+### Launch guard
+
+`DC_LaunchGuard` decides at the start of every Play whether anything may be written. It writes nothing, not even
+a folder, unless one of these holds:
+- `-dcLaunchId <id>` is on the command line, `-profile` lies inside `E:/DriveDiT`, and
+  `$profile:dc_launch/launch_<id>.json` is a valid launch record of this exe (`wb` in Workbench);
+- the Workbench escape (`m_bAllowWorkbenchWithoutLaunchId 1` in this layer): the game cannot see the command line
+  at all, `$profile` lies inside `E:/DriveDiT`, and the newest `-wb-` record in `$profile:dc_launch` is valid and
+  newer than the deploy. Every run header of such a Play says `launch.mode=wb_escape`.
+
+A visible command line without `-dcLaunchId` always refuses: Workbench was then not started by the patched launcher.
+
+### Expected probe lines in console.log
+
+1. `[DC_Probe] E-11: -profile visible=<0|1> -dcLaunchId visible=<0|1> $profile=<path or n/a> exe=wb`. This line
+   answers E-11. It shows the profile path, which holds the Windows user name when Workbench was started from
+   Steam: never paste it into a PR, a commit or a report.
+2. Then either `[DC_Probe] launch guard: mode=cli id=<launch id> pin=<pin id>` (a WARNING with `mode=wb_escape`), or
+   `[DC_Probe] ERROR: launch guard refused: <reason> - no probe runs, nothing written`. The usual reasons:
+   - `started without -dcLaunchId: start Workbench with E:\DriveDiT\tools\launch\wb_R1.bat`;
+   - `-profile '...' is not inside E:/DriveDiT` or `$profile '...' is not inside E:/DriveDiT` (Workbench started
+     from Steam);
+   - `no launch record $profile:dc_launch/launch_<id>.json ...` or `no launch record under $profile:dc_launch` (the
+     unpatched launcher, or the record was removed);
+   - `newest launch record <id> predates the deploy <utc>: restart Workbench with wb_R1.bat`.
+3. `[DC_Probe] plan from m_sPlan: '...' -> N probe(s) with a component: ...`, with a WARNING for every plan id that
+   has no probe component in this deploy.
+4. `[DC_Probe] run started (OnGameModeStart): plan=..., warm-up 3.0 s, gap 1.0 s`.
+5. After the warm-up `[DC_Probe] step source: simulate (...)`. A WARNING `step source: fixedframe` or an ERROR
+   `step source: none` means that the game mode entity gets no EOnSimulate.
+6. For each probe: `[DC_Probe <id>] START play_dir=$profile:DC_Probes/<id>/<launch id>/play_NN`, the probe's own
+   `[DC_Probe <id>]` lines, then `[DC_Probe <id>] END reason=done status=complete`. Other ends:
+   - `reason=timeout`;
+   - `reason=write_fail`, with the requested and the returned byte counts of the failed write;
+   - `reason=start_failed`, for example without `DC_Ego`.
+7. `[DC_Probe] plan complete: ...`. Stop the Play after this line. A Stop before it ends the running probes with
+   `reason=play_end`.
+
+### Where the probe files are
+
+Every probe writes to `$profile:DC_Probes/<probe>/<launch id>/play_NN/`. NN = 01..99 is the first free number:
+every Play of one Workbench start shares the launch id.
+- With `wb_R1.bat` this is **`E:\DriveDiT\wb_profile\profile\DC_Probes\`**, which is
+  `/mnt/e/DriveDiT/wb_profile/profile/DC_Probes/` in WSL.
+- Each play folder holds:
+  - `run_header.txt`: build stamp (git sha, dirty flag), launch id and pin, build version, fixed time slice,
+    world, clocks, and every probe parameter as `params.*`;
+  - the probe's CSV files, each with one header row;
+  - `run_footer.txt`, written when the probe ends: status, reason, rows and bytes per file. A play folder without
+    it was ended by a crash, a kill or a Stop that tore the world down.
+- A refused Play creates no `DC_Probes` folder at all.
+
+### Choosing the probes
+
+The plan is `m_sPlan` on `GameMode_DCProbes` > `DC_ProbeRunner` (default `e10,e04,e20,e19,e08a,e01,e02a,e05,e06a`).
+e10 runs alongside the others for the whole plan; the others run one after another, 1 s apart.
+`-dcProbePlan <ids>` on the Workbench command line overrides `m_sPlan`, when the game can see the command line.
+The probe parameters are attributes of the probe components, set in this layer, and every run header repeats them.
+
+`e19kill` is never in the default plan. Run it on its own, last in a session: it waits for a
+`taskkill /F /IM ArmaReforgerWorkbenchSteamDiag.exe`, after which Workbench must be restarted. For E-19's read-only
+case, run `attrib +R E:\DriveDiT\wb_profile\profile\DC_Probes\e19\ro_target.txt` (cmd) between two Plays with e19.
+
+Each analysis prints one `[PASS]`, `[FAIL]`, `[INCOMPLETE]` or `[INFO]` line per item and ends with
+`RESULT <probe>: PASS|FAIL|INCOMPLETE` (exit code 0, 1 or 3; 2 = usage or input error). Run them from the repo
+with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
+
+| id | measures | Play time | analysis |
+|---|---|---|---|

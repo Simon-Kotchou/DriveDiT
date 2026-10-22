@@ -39,6 +39,7 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_sTerrain "Arland"
    m_sRequiredProfileRoot "E:/DriveDiT"
    m_bAllowWorkbenchWithoutLaunchId 1
+   m_bEscapeBindToProcessStart 1
    m_fWarmupS 3
    m_fGapS 1
   }

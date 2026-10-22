@@ -15,19 +15,22 @@
 //     poll, timeouts, the due request: one System.MakeScreenshot in flight, extension-less path
 //     frames/f_<slot:08d>); one e05_frames.csv row (the hf prototype: camera and vehicle transforms, fps);
 //   - with m_bDrive, a shuttle along the test area on the physics steps: reset (DC_ProbeActuator.Teleport to the
-//     area start), settle (brake and handbrake for m_fSettleS), drive (speed hold m_fDriveKmh, steering 0) until the
-//     far end or the area edge, stop (brake to < 1 km/h), and again. Without m_bDrive the car is not commanded and
-//     the segment is "static". The teleport itself runs in OnProbeFrame, never inside a physics step (the rule of
-//     DC_ProbeSequences): the reset segment waits for it;
-//   - the probe is done after m_fDurationS of world time; OnProbeStop resolves the requests still in flight, parks
-//     the car, removes the bands and gives the camera back.
+//     start point 2 x m_fAreaMarginM along the centre line, as DC_ProbeSequences, so the start lies inside the
+//     margin-inset area), settle (brake and handbrake for m_fSettleS), drive (speed hold m_fDriveKmh, steering 0)
+//     until the far end or the area edge, stop (brake to < 1 km/h), and again. Without m_bDrive the car is not
+//     commanded and the segment is "static". The teleport itself runs in OnProbeFrame, never inside a physics step
+//     (the rule of DC_ProbeSequences): the reset segment waits for it;
+//   - after m_fDurationS of world time no new slot is issued; the requests still in flight are drained with the
+//     camera and the bands kept (DC_ImageSlotScheduler.StopIssuing), then the probe is done. OnProbeStop resolves
+//     what is left (only on a timeout or a Stop), parks the car, removes the bands and gives the camera back.
 //
 // The E-05 criteria (missing <= 1%, "Screenshot saved" count = files, FPS p5 >= 30, latency, MB/frame, engine-written
 // name) and E-06 (decode >= 99.5% over >= 600 frames, offset) are evaluated offline from these files.
 //
 // Failure handling: OnProbeStart returns false (footer status failed) when DC_Ego has no CarControllerComponent while
-// m_bDrive is set, when the rig cannot attach, the bands cannot be created, frames/ cannot be created or a CSV cannot
-// be opened; it undoes what it did. A failed CSV write stops the probe through the runner (reason write_fail).
+// m_bDrive is set, when the shuttle start point is not inside the margin-inset area, when the rig cannot attach, the
+// bands cannot be created, frames/ cannot be created or a CSV cannot be opened; it undoes what it did. A failed CSV
+// write stops the probe through the runner (reason write_fail).
 // Reason "delete" (world teardown) touches no camera, widget, setting or entity: it only drops references.
 // ============================================================================
 
@@ -87,6 +90,7 @@ class DC_ImageSlotScheduler
 	protected bool m_bReanchor;					//!< leaving backlog: realign the grid at the next frame
 	protected bool m_bInitialized;
 	protected bool m_bFinished;
+	protected bool m_bDraining;					//!< StopIssuing was called: no new slot, in-flight requests still resolve
 	protected DC_ProbeCsv m_Requests;			//!< owned by the probe context
 	protected ref DC_ProbeRow m_Row = new DC_ProbeRow();
 	protected ref array<ref DC_ImageSlotRequest> m_aInFlight = {};	//!< oldest first
@@ -120,6 +124,28 @@ class DC_ImageSlotScheduler
 		m_iNextSlot = 0;
 		m_bInitialized = true;
 		m_bFinished = false;
+		m_bDraining = false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! No new slot from now on (no skipped rows either). OnFrame keeps polling and expiring the requests in flight
+	//! until IsDrained; the probe keeps the camera and the bands until then, so the last files are still written by
+	//! the rig camera before the probe ends. Idempotent.
+	//! \return true on the first call
+	bool StopIssuing()
+	{
+		if (m_bDraining)
+			return false;
+
+		m_bDraining = true;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once StopIssuing was called and no request is in flight any more (each resolved as done or timeout)
+	bool IsDrained()
+	{
+		return m_bDraining && m_aInFlight.IsEmpty();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -158,6 +184,9 @@ class DC_ImageSlotScheduler
 
 		Poll(POLL_PER_FRAME, renderFrame, worldMs, tickMs);
 		Expire(renderFrame, worldMs, tickMs);
+
+		if (m_bDraining)
+			return;
 
 		if (m_bBacklog)
 		{
@@ -594,6 +623,7 @@ class DC_ProbeImages : DC_ProbeComponent
 	protected int m_iShuttles;
 	protected int m_iFrames;
 	protected bool m_bTeleportPending;		//!< the reset segment waits for the teleport of the next OnProbeFrame
+	protected float m_fStartAlongM;			//!< every reset puts the car this far along the centre line (2 x margin)
 
 	//------------------------------------------------------------------------------------------------
 	override void GetProbeIds(notnull array<string> outIds)
@@ -674,6 +704,15 @@ class DC_ProbeImages : DC_ProbeComponent
 		m_Area = new DC_ProbeArea();
 		m_Area.Set(m_vAreaStart, m_fAreaHeadingDeg, m_fAreaLengthM, m_fAreaHalfWidthM);
 
+		// The shuttle starts where its own drive check (Contains with the margin) holds, as DC_ProbeSequences does
+		m_fStartAlongM = 2 * m_fAreaMarginM;
+		if (m_bDrive && !m_Area.Contains(m_Area.PointAt(m_fStartAlongM, 0), m_fAreaMarginM))
+		{
+			ctx.Error("shuttle start " + m_fStartAlongM.ToString(-1, 1) + " m along the area is not inside it with the margin " + m_fAreaMarginM.ToString(-1, 1) + " m (length " + m_fAreaLengthM.ToString(-1, 1) + " m) - not started");
+			ReleaseAll();
+			return false;
+		}
+
 		// The actuator also gives the speed column; it is required only when the probe drives.
 		m_Actuator = new DC_ProbeActuator();
 		if (!m_Actuator.Init(m_Ego))
@@ -743,6 +782,7 @@ class DC_ProbeImages : DC_ProbeComponent
 			header.Insert("fiducial.created=0");
 
 		AppendAreaLines(header, m_Area);
+		header.Insert("area.start_along_m=" + m_fStartAlongM.ToString(-1, 3));
 		header.Insert("capture.frames_dir=" + frameDir);
 		header.Insert("capture.request_name=f_<slot_id:08d> (no extension)");
 		header.Insert("capture.start_world_ms=" + m_fStartWorldMs.ToString(-1, 3));
@@ -797,6 +837,16 @@ class DC_ProbeImages : DC_ProbeComponent
 		bool camCurrent = m_Rig.IsCurrent();
 		bool camAttached = m_Rig.IsAttached();
 		float worldMs = m_Runner.GetWorldTimeMs();
+
+		// No slot at or after the deadline; what is in flight resolves with the camera and the bands still in place
+		if (worldMs - m_fStartWorldMs >= m_fDurationS * 1000)
+		{
+			bool firstStop = m_Scheduler.StopIssuing();
+			int inFlight = m_Scheduler.GetInFlight();
+			if (firstStop && m_Ctx)
+				m_Ctx.Log("capture time over: no new request, draining " + inFlight.ToString() + " in flight");
+		}
+
 		m_Scheduler.OnFrame(worldMs, renderFrame, m_Runner.GetPhysicsStep(), m_Runner.GetTickMs(), camCurrent, camAttached);
 
 		VehicleWheeledSimulation simulation;
@@ -812,7 +862,7 @@ class DC_ProbeImages : DC_ProbeComponent
 		if (m_bTeleportPending)
 			TeleportToStart();
 
-		if (worldMs - m_fStartWorldMs >= m_fDurationS * 1000)
+		if (m_Scheduler.IsDrained())
 			m_bDone = true;
 	}
 
@@ -924,12 +974,12 @@ class DC_ProbeImages : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Called from OnProbeFrame: teleports the car to the area start (DC_ProbeActuator.Teleport also commands brake 1
-	//! and the handbrake) and lets the reset segment end
+	//! Called from OnProbeFrame: teleports the car to the start point m_fStartAlongM along the centre line
+	//! (DC_ProbeActuator.Teleport also commands brake 1 and the handbrake) and lets the reset segment end
 	protected void TeleportToStart()
 	{
 		m_bTeleportPending = false;
-		vector start = m_Area.PointAt(0, 0);
+		vector start = m_Area.PointAt(m_fStartAlongM, 0);
 		if (!m_Actuator.Teleport(start, m_fAreaHeadingDeg, m_fSpawnLiftM) && m_Ctx)
 			m_Ctx.Warn("teleport to the area start failed");
 	}

@@ -5,17 +5,21 @@
 // Decides whether this Play may write anything at all. DC_ProbeRunner calls DC_LaunchGuard.Evaluate() once per Play,
 // logs the result and, when it is refused, writes nothing (not even a directory).
 //
-// THE RULE (PROBE_DESIGN.md 4.6, checks G1-G14 in this order; the first failure refuses with its reason)
+// THE RULE (PROBE_DESIGN.md 4.6, checks G1-G15 in this order; the first failure refuses with its reason)
 //   CLI mode: -dcLaunchId <id> is on the command line (System.GetCLIParam). The id must be a launch id, -profile must
-//     be visible and lie inside the required profile root (E:/DriveDiT), in Workbench the resolved $profile too, and
-//     $profile:dc_launch/launch_<id>.json must exist and be a valid launch record (status ok, same id, exe wb in
-//     Workbench and client outside). tools/launch/wb_R1.bat copies the preflight record there and passes the id
-//     (DD-0 follow-up).
+//     be visible and lie inside the required profile root (E:/DriveDiT); in Workbench the resolved $profile must lie
+//     there too, and a $profile Workbench cannot resolve refuses (as in the escape). $profile:dc_launch/
+//     launch_<id>.json must exist and be a valid launch record (status ok, same id, exe wb in Workbench and client
+//     outside). tools/launch/wb_R1.bat copies the preflight record there and passes the id (DD-0 follow-up).
 //   Workbench escape: only when the command line is not visible at all (E-11: whether Workbench Play passes its own
 //     command line to GetCLIParam is unknown until the first Play), only with m_bAllowWorkbenchWithoutLaunchId, only
 //     in Workbench, only with a $profile inside the root, and only with the newest -wb- launch record in
-//     $profile:dc_launch, which must be valid and younger than the deploy (DC_BuildInfo.DEPLOY_UTC). Escape runs are
-//     marked launch.mode=wb_escape in every run header.
+//     $profile:dc_launch, which must be valid, younger than the deploy (DC_BuildInfo.DEPLOY_UTC) and, with
+//     escapeBindToProcessStart (the default), written by the launch that started this Workbench: at most
+//     LAUNCH_LEAD_MAX_S before the process start (System.GetUnixTime() - System.GetTickCount() / 1000) and not after
+//     it. The newest record is the only candidate: when it is not this start's record (the current record was
+//     removed, or a second Workbench was started later) the guard refuses and never falls back to an older one.
+//     Escape runs are marked launch.mode=wb_escape and launch.escape_binding in every run header.
 //   A visible command line without -dcLaunchId always refuses, escape or not: Workbench was then started by hand.
 //
 // WHAT IT READS from a launch record (dd-launch/1, tools/pin/preflight.py make_record; dd-launch/2 adds the optional
@@ -54,6 +58,11 @@ class DC_LaunchInfo
 	string m_sUseClass = "dev";	//!< top-level use_class, "dev" when absent
 	int m_iGameBuildId = -1;	//!< observed.game.buildid
 	int m_iToolsBuildId = -1;	//!< observed.tools.buildid
+	string m_sEscapeBinding;	//!< escape only: "process_start" (G15 applied) or "newest_after_deploy" (G15 off)
+	int m_iNowUnix;				//!< System.GetUnixTime() at the evaluation
+	int m_iUptimeS;				//!< System.GetTickCount() / 1000 at the evaluation (E-11: process or Play relative?)
+	int m_iProcessStartUnix;	//!< m_iNowUnix - m_iUptimeS: estimated start of this process
+	int m_iRecordUnix = -1;		//!< the record's utc as Unix seconds, -1 when not parsed
 
 	//------------------------------------------------------------------------------------------------
 	//! Appends the launch.* key=value lines of PROBE_DESIGN.md 4.5 to lines
@@ -76,6 +85,11 @@ class DC_LaunchInfo
 		lines.Insert("launch.use_class=" + m_sUseClass);
 		lines.Insert("launch.game_buildid=" + m_iGameBuildId.ToString());
 		lines.Insert("launch.tools_buildid=" + m_iToolsBuildId.ToString());
+		lines.Insert("launch.escape_binding=" + m_sEscapeBinding);
+		lines.Insert("launch.now_unix=" + m_iNowUnix.ToString());
+		lines.Insert("launch.uptime_s=" + m_iUptimeS.ToString());
+		lines.Insert("launch.process_start_unix_est=" + m_iProcessStartUnix.ToString());
+		lines.Insert("launch.record_unix=" + m_iRecordUnix.ToString());
 	}
 }
 
@@ -89,6 +103,15 @@ class DC_LaunchGuard
 	static const string MODE_CLI = "cli";
 	static const string MODE_ESCAPE = "wb_escape";
 	static const string MODE_REFUSED = "refused";
+	static const string BINDING_PROCESS_START = "process_start";
+	static const string BINDING_NEWEST = "newest_after_deploy";
+
+	//! G15: a record written more than this before the estimated process start belongs to an earlier Workbench
+	//! start. The preflight stamps the record seconds before the exe starts; the estimate is later than the exe start
+	//! by the engine start-up time [s]
+	static const int LAUNCH_LEAD_MAX_S = 300;
+	//! G15: allowed clock and rounding slack for a record stamped after the estimated process start [s]
+	static const int LAUNCH_CLOCK_SLACK_S = 5;
 
 	//! Launch ids are YYYYMMDDTHHMMSSZ-<exe>-<hex>: 24 characters today, 20..64 accepted
 	static const int LAUNCH_ID_MIN_LENGTH = 20;
@@ -97,13 +120,20 @@ class DC_LaunchGuard
 	static const int UTC_LENGTH = 20;
 
 	//------------------------------------------------------------------------------------------------
-	//! Evaluates the guard (PROBE_DESIGN.md 4.6, G1-G14). Never writes and never prints; the caller logs the result.
+	//! Evaluates the guard (PROBE_DESIGN.md 4.6, G1-G15). Never writes and never prints; the caller logs the result.
 	//! \param[in] requiredProfileRoot folder -profile and $profile must lie in (DC_ProbeRunner.m_sRequiredProfileRoot)
 	//! \param[in] allowWorkbenchWithoutLaunchId enables the Workbench escape for an invisible command line
-	static DC_LaunchInfo Evaluate(string requiredProfileRoot, bool allowWorkbenchWithoutLaunchId)
+	//! \param[in] escapeBindToProcessStart escape only: G15, the record must be this Workbench start's record
+	static DC_LaunchInfo Evaluate(string requiredProfileRoot, bool allowWorkbenchWithoutLaunchId, bool escapeBindToProcessStart)
 	{
 		DC_LaunchInfo info = new DC_LaunchInfo();
 		info.m_sMode = MODE_REFUSED;
+
+		// Clock facts, logged in every run header (E-11 also answers whether GetTickCount counts from the process
+		// start or from the Play start). GetUnixTime: System.c:53, GetTickCount: System.c:134 (both unchanged in 1.9)
+		info.m_iNowUnix = System.GetUnixTime();
+		info.m_iUptimeS = System.GetTickCount() / 1000;
+		info.m_iProcessStartUnix = info.m_iNowUnix - info.m_iUptimeS;
 
 		// G1: the E-11 facts. GetCLIParam: Core/generated/System/System.c:33, IsCLIParam :45 (both unchanged in 1.9)
 		string launchId;
@@ -133,7 +163,7 @@ class DC_LaunchGuard
 		if (!allowWorkbenchWithoutLaunchId)
 			return Refuse(info, "no -dcLaunchId and the Workbench escape is off");
 
-		return EvaluateEscape(info, requiredProfileRoot);
+		return EvaluateEscape(info, requiredProfileRoot, escapeBindToProcessStart);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -153,7 +183,13 @@ class DC_LaunchGuard
 		if (!IsPathInside(info.m_sProfileCli, requiredProfileRoot))
 			return Refuse(info, "-profile '" + info.m_sProfileCli + "' is not inside " + requiredProfileRoot);
 
-		// G5: in Workbench the resolved $profile as well, when it could be resolved
+		// G5: in Workbench the resolved $profile as well. A $profile Workbench cannot resolve refuses, as in the escape
+		// (G11): the -profile string alone does not prove where $profile is
+#ifdef WORKBENCH
+		if (info.m_sProfileAbs.IsEmpty())
+			return Refuse(info, "$profile could not be resolved (Workbench.GetAbsolutePath)");
+#endif
+
 		if (!info.m_sProfileAbs.IsEmpty() && !IsPathInside(info.m_sProfileAbs, requiredProfileRoot))
 			return Refuse(info, "$profile '" + info.m_sProfileAbs + "' is not inside " + requiredProfileRoot);
 
@@ -173,8 +209,8 @@ class DC_LaunchGuard
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! G10-G14: no command line visible, escape enabled
-	protected static DC_LaunchInfo EvaluateEscape(notnull DC_LaunchInfo info, string requiredProfileRoot)
+	//! G10-G15: no command line visible, escape enabled
+	protected static DC_LaunchInfo EvaluateEscape(notnull DC_LaunchInfo info, string requiredProfileRoot, bool bindToProcessStart)
 	{
 #ifndef WORKBENCH
 		// G10
@@ -187,10 +223,10 @@ class DC_LaunchGuard
 		if (!IsPathInside(info.m_sProfileAbs, requiredProfileRoot))
 			return Refuse(info, "$profile '" + info.m_sProfileAbs + "' is not inside " + requiredProfileRoot);
 
-		// G12
+		// G12: the newest -wb- record is the only candidate; an older one is never used
 		string recordPath = FindNewestLaunchRecord(GetExpectedExe());
 		if (recordPath.IsEmpty())
-			return Refuse(info, "no launch record under " + LAUNCH_DIR);
+			return Refuse(info, "no launch record under " + LAUNCH_DIR + " (the unpatched wb_R1.bat, or the record was removed)");
 
 		// G13: the id comes from the file name and must match the record's own launch_id
 		string fileName = FilePath.StripPath(recordPath);
@@ -206,10 +242,78 @@ class DC_LaunchGuard
 		if (deployUtc.IsEmpty() || info.m_sRecordUtc.Compare(deployUtc) < 0)
 			return Refuse(info, "newest launch record " + launchId + " predates the deploy " + deployUtc + ": restart Workbench with wb_R1.bat");
 
+		// G15: the record must belong to this Workbench start (no fall-back to the record of an earlier start)
+		info.m_iRecordUnix = UtcTextToUnix(info.m_sRecordUtc);
+		info.m_sEscapeBinding = BINDING_NEWEST;
+		if (bindToProcessStart)
+		{
+			info.m_sEscapeBinding = BINDING_PROCESS_START;
+			if (info.m_iRecordUnix < 0)
+				return Refuse(info, "launch record " + launchId + " has utc '" + info.m_sRecordUtc + "', which cannot be read as a time");
+
+			int leadS = info.m_iProcessStartUnix - info.m_iRecordUnix;
+			if (leadS > LAUNCH_LEAD_MAX_S)
+				return Refuse(info, string.Format("no launch record of this Workbench start: the newest, %1, was written %2 s before this Workbench started (limit %3 s; uptime %4 s). Its own record was removed, or Workbench was not started by wb_R1.bat", launchId, leadS, LAUNCH_LEAD_MAX_S, info.m_iUptimeS));
+
+			if (leadS < -LAUNCH_CLOCK_SLACK_S)
+				return Refuse(info, string.Format("no launch record of this Workbench start: the newest, %1, was written %2 s after this Workbench started (another Workbench started later?)", launchId, -leadS));
+		}
+
 		info.m_bAllowed = true;
 		info.m_sMode = MODE_ESCAPE;
 		return info;
 #endif
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! "YYYY-MM-DDTHH:MM:SSZ" (a launch record's utc) as Unix seconds; -1 when the text is not of that form.
+	//! Days from the civil date by integer arithmetic (valid for years 2000..2037 in a 32-bit int)
+	static int UtcTextToUnix(string utc)
+	{
+		if (utc.Length() != UTC_LENGTH || !utc.EndsWith("Z"))
+			return -1;
+
+		if (utc.Get(4) != "-" || utc.Get(7) != "-" || utc.Get(10) != "T" || utc.Get(13) != ":" || utc.Get(16) != ":")
+			return -1;
+
+		int year = ReadDigits(utc, 0, 4);
+		int month = ReadDigits(utc, 5, 2);
+		int day = ReadDigits(utc, 8, 2);
+		int hour = ReadDigits(utc, 11, 2);
+		int minute = ReadDigits(utc, 14, 2);
+		int second = ReadDigits(utc, 17, 2);
+		if (year < 2000 || year > 2037 || month < 1 || month > 12 || day < 1 || day > 31)
+			return -1;
+
+		if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60)
+			return -1;
+
+		// days_from_civil (proleptic Gregorian): March-based year, so the leap day is the last day of the year
+		int y = year;
+		if (month <= 2)
+			y = y - 1;
+
+		int era = y / 400;
+		int yearOfEra = y - era * 400;
+		int monthFromMarch = (month + 9) % 12;
+		int dayOfYear = (153 * monthFromMarch + 2) / 5 + day - 1;
+		int dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+		int days = era * 146097 + dayOfEra - 719468;
+		return days * 86400 + hour * 3600 + minute * 60 + second;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return the decimal number of text[start .. start + length), or -1 when one of those characters is no digit
+	protected static int ReadDigits(string text, int start, int length)
+	{
+		for (int i = start; i < start + length; i++)
+		{
+			if (!text.IsDigitAt(i))
+				return -1;
+		}
+
+		string digits = text.Substring(start, length);
+		return digits.ToInt(-1);
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -185,6 +185,7 @@ class DC_ProbeContext
 	protected DC_ProbeRunner m_Runner;
 	protected ref array<ref DC_ProbeCsv> m_aCsvs = {};	//!< every CSV opened through OpenCsv, for the footer
 	protected ref array<string> m_aCsvNames = {};
+	protected string m_sReportedFailure;				//!< first failure of a file not opened through OpenCsv
 
 	//------------------------------------------------------------------------------------------------
 	void DC_ProbeContext(string probeId, string playDir, DC_ProbeRunner runner)
@@ -298,9 +299,25 @@ class DC_ProbeContext
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! true once any CSV opened through this context failed a write
+	//! A probe reports a failed write of a file it writes itself (not through OpenCsv, e.g. the e19kill chunks); the
+	//! runner then stops the probe with reason write_fail like any failed CSV. The first report is kept.
+	void ReportWriteFailure(string failure)
+	{
+		if (!m_sReportedFailure.IsEmpty())
+			return;
+
+		m_sReportedFailure = failure;
+		if (m_sReportedFailure.IsEmpty())
+			m_sReportedFailure = "write failure reported by the probe";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once any CSV opened through this context failed a write, or the probe reported a failed write
 	bool HasWriteFailure()
 	{
+		if (!m_sReportedFailure.IsEmpty())
+			return true;
+
 		foreach (DC_ProbeCsv csv : m_aCsvs)
 		{
 			if (csv && csv.HasFailed())
@@ -311,7 +328,7 @@ class DC_ProbeContext
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The first failure message of the first failed CSV, empty when none failed
+	//! The first failure message of the first failed CSV (else the reported failure), empty when none failed
 	string GetWriteFailure()
 	{
 		foreach (DC_ProbeCsv csv : m_aCsvs)
@@ -320,7 +337,7 @@ class DC_ProbeContext
 				return csv.GetFailure();
 		}
 
-		return string.Empty;
+		return m_sReportedFailure;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -415,6 +432,9 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 
 	[Attribute("0", UIWidgets.CheckBox, "Launch guard: Workbench-only escape for a Play that cannot see the command line (E-11). It still needs the newest -wb- launch record in $profile:dc_launch, copied after the deploy by wb_R1.bat, and a $profile inside the root; escape runs are marked launch.mode=wb_escape", category: "Probes")]
 	protected bool m_bAllowWorkbenchWithoutLaunchId;
+
+	[Attribute("1", UIWidgets.CheckBox, "Launch guard escape only: the newest -wb- record must be this Workbench start's own record (written at most 300 s before the process start, estimated as GetUnixTime - GetTickCount / 1000); there is no fall-back to an older record. Off = the newest record younger than the deploy (launch.escape_binding=newest_after_deploy): only if E-11 shows that GetTickCount does not count from the process start", category: "Probes")]
+	protected bool m_bEscapeBindToProcessStart;
 
 	[Attribute("3", UIWidgets.Slider, "Warm-up before the first exclusive probe [world s]; the physics-step source is decided at its end", "0 60 0.5", category: "Probes")]
 	protected float m_fWarmupS;
@@ -551,12 +571,13 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		}
 
 		// The guard never prints, so the E-11 line comes first. It shows $profile: never paste it into a PR or report.
-		m_LaunchInfo = DC_LaunchGuard.Evaluate(m_sRequiredProfileRoot, m_bAllowWorkbenchWithoutLaunchId);
+		m_LaunchInfo = DC_LaunchGuard.Evaluate(m_sRequiredProfileRoot, m_bAllowWorkbenchWithoutLaunchId, m_bEscapeBindToProcessStart);
 		string profileAbs = m_LaunchInfo.m_sProfileAbs;
 		if (profileAbs.IsEmpty())
 			profileAbs = "n/a";
 
-		Print(string.Format("[DC_Probe] E-11: -profile visible=%1 -dcLaunchId visible=%2 $profile=%3 exe=%4", DC_LaunchGuard.BoolText(m_LaunchInfo.m_bCliProfile), DC_LaunchGuard.BoolText(m_LaunchInfo.m_bCliLaunchId), profileAbs, GetEngineExe()), LogLevel.NORMAL);
+		// uptime_s = GetTickCount / 1000: shows whether the tick count runs from the process start or the Play start
+		Print(string.Format("[DC_Probe] E-11: -profile visible=%1 -dcLaunchId visible=%2 $profile=%3 exe=%4 uptime_s=%5", DC_LaunchGuard.BoolText(m_LaunchInfo.m_bCliProfile), DC_LaunchGuard.BoolText(m_LaunchInfo.m_bCliLaunchId), profileAbs, GetEngineExe(), m_LaunchInfo.m_iUptimeS), LogLevel.NORMAL);
 
 		if (!m_LaunchInfo.m_bAllowed)
 		{
@@ -566,7 +587,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 
 		string guardLine = string.Format("[DC_Probe] launch guard: mode=%1 id=%2 pin=%3", m_LaunchInfo.m_sMode, m_LaunchInfo.m_sLaunchId, m_LaunchInfo.m_sPinId);
 		if (m_LaunchInfo.m_sMode == DC_LaunchGuard.MODE_ESCAPE)
-			Print(guardLine + " (Workbench escape: the command line is not visible; joined the newest launch record copied after the deploy)", LogLevel.WARNING);
+			Print(guardLine + " (Workbench escape: the command line is not visible; joined the newest launch record, binding " + m_LaunchInfo.m_sEscapeBinding + ")", LogLevel.WARNING);
 		else
 			Print(guardLine, LogLevel.NORMAL);
 
@@ -1013,13 +1034,22 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 			state.m_Component.MarkProbeActive(state.m_sProbeId, false);
 		}
 
+		// A write that failed inside OnProbeStop (the last rows) fails the probe as well: the footer must not say
+		// complete next to file.<name>.failed=1
+		string stopNote;
+		if (reason != REASON_WRITE_FAIL && state.m_Context.HasWriteFailure())
+		{
+			stopNote = "write failed while stopping (reason " + reason + "): ";
+			reason = REASON_WRITE_FAIL;
+		}
+
 		string status = STATUS_STOPPED;
 		if (reason == REASON_DONE)
 			status = STATUS_COMPLETE;
 		else if (reason == REASON_WRITE_FAIL || reason == REASON_ERROR)
 			status = STATUS_FAILED;
 
-		string note = state.m_Context.GetWriteFailure();
+		string note = stopNote + state.m_Context.GetWriteFailure();
 		if (reason == REASON_TIMEOUT)
 			note = string.Format("timeout after %1 world s %2", state.m_fTimeoutS.ToString(-1, 1), note);
 

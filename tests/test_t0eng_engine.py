@@ -55,7 +55,7 @@ class EngineAnalysisTest(unittest.TestCase):
     # --------------------------------------------------------------------------------------------
     # E-10
     # --------------------------------------------------------------------------------------------
-    def e10_play(self, seconds=10, k=3, drop_step=None, drop_telemetry=None, n=1):
+    def e10_play(self, seconds=10, k=3, drop_step=None, drop_telemetry=None, n=1, step_rows=True):
         t0 = 5000.5
         n_steps = int(round(seconds / DT))
         steps, frames, telemetry = [], [], []
@@ -67,20 +67,23 @@ class EngineAnalysisTest(unittest.TestCase):
             totals[0] += 1
             totals[1] += 1 if posted else 0
             if posted:
-                steps.append([i, "%.3f" % t, "%.6f" % DT, frame, "%.3f" % t, "%.6f" % DT, frame])
+                steps.append([i, "%.3f" % t, "%.6f" % DT, frame, "%.3f" % t, "%.6f" % DT, frame,
+                              "%.3f" % (t - t0)])
             frames.append([frame, "%.3f" % t, 1000 + i * 17, "%.6f" % DT, 1, 1, 1 if posted else 0, 0, 0,
                            totals[0], totals[1], 0, 0, "60.000", 0, "simulate"])
             if posted and i % k == 0 and i != drop_telemetry:
-                telemetry.append([i, "%.3f" % t, k, "-1.000"])
+                telemetry.append([i, "%.3f" % t, k, "-1.000", "%.3f" % (t - t0)])
         csvs = {
             "e10_frames": (["render_frame", "world_time_ms", "tick_ms", "frame_timeslice_s", "fixed_steps",
                             "n_simulate", "n_postsimulate", "n_fixedframe", "n_postfixedframe", "simulate_total",
                             "postsimulate_total", "fixedframe_total", "postfixedframe_total", "fps_avg", "paused",
                             "step_source"], frames),
             "e10_steps": (["physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre",
-                           "world_time_ms_post", "timeslice_post_s", "render_frame_post"], steps),
-            "e10_telemetry": (["physics_step", "world_time_ms", "k", "speed_kmh"], telemetry),
+                           "world_time_ms_post", "timeslice_post_s", "render_frame_post", "world_ts_ms_post"], steps),
+            "e10_telemetry": (["physics_step", "world_time_ms", "k", "speed_kmh", "world_ts_ms"], telemetry),
         }
+        if not step_rows:
+            del csvs["e10_steps"]
         h = header("e10", **{"params.k": str(k), "params.dt_s": "%.6f" % DT, "params.m_fE10TelemetryPeriodS": "0.05"})
         return pc.write_synthetic_play(self.play("e10", n), h, csvs, footer=COMPLETE)
 
@@ -90,7 +93,14 @@ class EngineAnalysisTest(unittest.TestCase):
         self.assertIn("[PASS] steps_per_world_second: 60.00 +-1 in 9/9 full seconds", out)
         self.assertIn("[PASS] telemetry_every_k: k=3, 0 missed of 200", out)
         self.assertIn("[INFO] world_time_resolution: undetermined", out)
+        self.assertIn("[INFO] world_timestamp: WorldTimestamp", out)
         self.assertTrue(out.rstrip().endswith("RESULT E-10: PASS"), out)
+
+    def test_e10_without_step_rows_is_incomplete(self):
+        code, out = run(e10_ticks, [self.e10_play(step_rows=False)])
+        self.assertEqual(code, 3, out)
+        self.assertIn("[INCOMPLETE] post_simulate_every_step: e10_steps.csv missing", out)
+        self.assertIn("[INCOMPLETE] telemetry_every_k: e10_steps.csv missing", out)
 
     def test_e10_one_missing_step_fails(self):
         code, out = run(e10_ticks, [self.e10_play(drop_step=301)])
@@ -119,7 +129,7 @@ class EngineAnalysisTest(unittest.TestCase):
     # --------------------------------------------------------------------------------------------
     # E-19
     # --------------------------------------------------------------------------------------------
-    def e19_play(self, c05_returned="0"):
+    def e19_play(self, c05_returned="0", c09="ok", c11_length=68):
         d = self.play("e19")
         rows = [
             ["c01_ascii_row", "new_file_write_17_bytes", "p", "WRITE", 1, 17, 17, 17, 17, "ret:17/len:17", 0, "ok"],
@@ -141,9 +151,17 @@ class EngineAnalysisTest(unittest.TestCase):
              "observed"],
             ["c08_second_writer_h2", "second_of_two_write_handles", "p", "WRITE", 1, 1, 1, 1, 1, "observed", 0,
              "observed"],
-            ["c09_readonly_target", "target_created_set_it_read_only", "p", "WRITE", 1, 2, 2, "", "",
-             "ret:0_or_open_null", 0, "prepared"],
         ]
+        if c09 == "prepared":
+            rows.append(["c09_readonly_target", "target_created_set_it_read_only", "p", "WRITE", 1, 2, 2, "", "",
+                         "ret:0_or_open_null", 0, "prepared"])
+        else:
+            rows.append(["c09_readonly_target", "append_to_read_only_target", "p", "APPEND", 0, 2, "", "", "",
+                         "ret:0_or_open_null", 1, "ok"])
+        rows.append(["c10_overwrite_shorter", "rewrite_17_byte_file_with_5_bytes", "p", "WRITE", 1, 5, 5, 5, 5,
+                     "len:5_truncates_or_17_keeps_tail", 0, "truncates"])
+        rows.append(["c11_append_reopen", "append_reopen_close_per_line", "p", "APPEND", 1, 68, c11_length, "",
+                     c11_length, "len:68", int(c11_length != 68), "ok" if c11_length == 68 else "unexpected"])
         detected = "1" if c05_returned != "1" else "0"
         verdict = "ok" if c05_returned != "1" else "unexpected"
         rows.append(["c05_read_handle", "write_through_read_handle", "p", "READ", 1, 1, c05_returned, 0, 17, "ret:0",
@@ -152,12 +170,27 @@ class EngineAnalysisTest(unittest.TestCase):
                    "pos_after", "length_after", "expected", "detected", "verdict"]
         return pc.write_synthetic_play(d, header("e19"), {"e19_cases": (columns, rows)}, footer=COMPLETE)
 
-    def test_e19_all_detected_pass(self):
+    def test_e19_alone_is_incomplete_until_the_kill_run(self):
         code, out = run(e19_write, [self.e19_play()])
-        self.assertEqual(code, 0, out)
+        self.assertEqual(code, 3, out)
         self.assertIn("[PASS] short_or_failed_writes_detected", out)
+        self.assertIn("[PASS] readonly_target_detected", out)
+        self.assertIn("[PASS] overwrite_semantics_recorded: WRITE over a 17-byte file with 5 bytes: truncates", out)
+        self.assertIn("[PASS] append_reopen_recorded", out)
         self.assertIn("[INFO] c04_writeline: position after WriteLine(\"abc\") = 5 (CR LF)", out)
+        self.assertIn("[INCOMPLETE] kill_run", out)
+        self.assertIn("RESULT E-19: INCOMPLETE", out)
+
+    def test_e19_first_play_with_a_prepared_target_is_incomplete(self):
+        code, out = run(e19_write, [self.e19_play(c09="prepared"), "--kill", self.kill_play()])
+        self.assertEqual(code, 3, out)
+        self.assertIn("[INCOMPLETE] readonly_target_detected", out)
         self.assertIn("prepared", out)
+
+    def test_e19_append_reopen_short_fails(self):
+        code, out = run(e19_write, [self.e19_play(c11_length=51), "--kill", self.kill_play()])
+        self.assertEqual(code, 1, out)
+        self.assertIn("[FAIL] append_reopen_recorded", out)
 
     def test_e19_read_handle_returning_one_fails(self):
         code, out = run(e19_write, [self.e19_play(c05_returned="1")])
@@ -165,7 +198,7 @@ class EngineAnalysisTest(unittest.TestCase):
         self.assertIn("[FAIL] read_handle_detected", out)
         self.assertIn("[FAIL] short_or_failed_writes_detected", out)
 
-    def kill_play(self, chunks=5, torn=True, uncommitted=True, short_chunk=None):
+    def kill_play(self, chunks=5, torn=True, uncommitted=True, short_chunk=None, append_log=True):
         d = self.play("e19kill")
         files = {}
         commit = ["chunk_id,first_key,last_key,n_rows,n_bytes"]
@@ -188,20 +221,29 @@ class EngineAnalysisTest(unittest.TestCase):
         if torn:
             text += "%d,%d,%d" % (chunks + 1, key - 5, key)          # torn commit line, no LF
         files["e19_commit.csv"] = text.encode("ascii")
+        if append_log:
+            files["e19_commit_append.csv"] = text.encode("ascii")
         return pc.write_synthetic_play(d, header("e19kill"), {}, footer=None, files=files)
 
     def test_e19_kill_torn_line_and_uncommitted_chunk_pass(self):
         code, out = run(e19_write, ["--kill", self.kill_play()])
-        self.assertEqual(code, 0, out)
+        self.assertEqual(code, 3, out)
+        self.assertIn("[INCOMPLETE] writer_cases", out)
         self.assertIn("[PASS] commit_log_consistent: 5 of 5 committed chunks verified", out)
+        self.assertIn("[PASS] commit_log_append_consistent: 5 of 5 committed chunks verified", out)
         self.assertIn("[INFO] torn_commit_line:", out)
-        self.assertIn("[INFO] uncommitted_chunks: 1 trailing chunk file(s)", out)
+        self.assertIn("[INFO] uncommitted_chunks: e19_commit.csv: 1 trailing chunk file(s)", out)
         self.assertIn("[PASS] kill_happened", out)
 
     def test_e19_kill_committed_chunk_one_byte_short_fails(self):
         code, out = run(e19_write, ["--kill", self.kill_play(short_chunk=3)])
         self.assertEqual(code, 1, out)
         self.assertIn("[FAIL] commit_log_consistent: 4 of 5 committed chunks verified", out)
+
+    def test_e19_kill_without_the_append_log_is_incomplete(self):
+        code, out = run(e19_write, [self.e19_play(), "--kill", self.kill_play(append_log=False)])
+        self.assertEqual(code, 3, out)
+        self.assertIn("[INCOMPLETE] commit_log_append_consistent: e19_commit_append.csv missing", out)
 
     def test_e19_and_kill_together(self):
         code, out = run(e19_write, [self.e19_play(), "--kill", self.kill_play()])

@@ -8,7 +8,9 @@ Synthetic world: magenta markers on two lines beside the path, a camera moving f
 oscillation. Images are rendered in memory: discs at the pinhole projections of one frame's camera, plus fiducial v2
 of the frame the image claims to show. Rendering frame F and claiming F must PASS (RMS ~0 at k = 0); rendering
 F - 1 and claiming F (a known one-frame lag) must give argmin k = -1 and FAIL; a static camera is INCOMPLETE. The
-end-to-end cases write 12 PNGs into a probe_common.make_temp_dir play (never /tmp) and run the CLI.
+end-to-end cases write 24 PNGs (slalom, backlog and brake at 60 and 30 FPS) into a probe_common.make_temp_dir play
+(never /tmp) and run the CLI or analyse(): a play without slalom, backlog or brake data, or with an aborted or
+low-speed segment, is INCOMPLETE however well the rest aligns.
 """
 
 import math
@@ -178,33 +180,51 @@ def cam_values(cam):
     return [round(v, 6) for v in list(cam[3]) + list(cam[0]) + list(cam[1]) + list(cam[2])]
 
 
-def build_e06a_play(base, lag=0, measured_fps_30=30.0):
-    """6 images at fps_setting 60 (frames 3000+) and 6 at 30 (frames 7000+), one slalom/backlog each."""
+PHASE_COLUMNS = ["phase_idx", "fps_setting", "segment", "start_world_ms", "end_world_ms", "start_render_frame",
+                 "end_render_frame", "result"]
+SEGMENTS = ("slalom", "backlog", "brake")
+
+
+def build_e06a_play(base, lag=0, measured_fps_30=30.0, segments=SEGMENTS, lag_segments=None, phase_results=None,
+                    phases_file=True, not_current=0, images_per_segment=4):
+    """A play with images_per_segment images per segment and FPS setting (60, then 30), as DC_ProbeMarkers writes it.
+
+    lag: frames between the rendered and the claimed frame, for the segments in lag_segments (default: all);
+    phase_results: {(fps, segment): result} overrides the "ok" of e06a_phases.csv; not_current: that many issued
+    requests (the first ones) say cam_current 0.
+    """
     play_dir = os.path.join(base, "DC_Probes", "e06a", LAUNCH_ID, "play_01")
-    frames, requests, proj, files = [], [], [], {}
+    frames, requests, proj, phases, files = [], [], [], [], {}
     slot = 0
-    for setting, first, fps, segment in ((60, 3000, 60.0, "slalom"), (30, 7000, 30.0, "backlog")):
-        cams = cameras(first, 80, fps)
+    for setting, base_frame, fps in ((60, 3000, 60.0), (30, 7000, 30.0)):
         measured = fps
         if setting == 30:
             measured = measured_fps_30
-        for frame, cam in sorted(cams.items()):
-            frames.append([frame, (frame - first) * 1000.0 / fps, 1000 + frame, 1.0 / fps, measured, measured,
-                           frame * 2, 0, 1, 1, fiducial.code_for(frame)] + cam_values(cam) + cam_values(cam)
-                          + [40.0, 0, segment, setting])
-        for frame in range(first + 10, first + 70, 10):
-            rel = "frames/f_%08d" % slot
-            files[rel + ".png"] = cv2.imencode(".png", cv2.cvtColor(render(cams[frame - lag], frame, slot),
-                                                                    cv2.COLOR_RGB2BGR))[1].tobytes()
-            requests.append([slot, 100.0 * slot, "issued", 100.0 * slot, frame - 1, frame * 2, 5000 + slot, rel,
-                             1, 1, 1, 0, int(segment == "backlog"), "done", frame + 2, 100.0 * slot + 30,
-                             5030 + slot, ".png", setting, segment])
-            uv, depth = rp.project(MARKERS, cams[frame], VFOV, WIDTH, HEIGHT)
-            for marker_id in range(len(MARKERS)):
-                if 0.1 < depth[marker_id] <= 150 and numpy.isfinite(uv[marker_id, 0]):
-                    proj.append([frame, marker_id, round(uv[marker_id, 0], 3), round(uv[marker_id, 1], 3),
-                                 round(depth[marker_id], 3)])
-            slot += 1
+        for index, segment in enumerate(segments):
+            first = base_frame + 200 * index
+            cams = cameras(first, 80, fps)
+            for frame, cam in sorted(cams.items()):
+                frames.append([frame, (frame - first) * 1000.0 / fps, 1000 + frame, 1.0 / fps, measured, measured,
+                               frame * 2, 0, 1, 1, fiducial.code_for(frame)] + cam_values(cam) + cam_values(cam)
+                              + [40.0, 0, segment, setting])
+            result = (phase_results or {}).get((setting, segment), "ok")
+            phases.append([len(phases), setting, segment, first * 10.0, (first + 80) * 10.0, first, first + 80,
+                           result])
+            segment_lag = lag if lag_segments is None or segment in lag_segments else 0
+            for frame in range(first + 10, first + 10 + 15 * images_per_segment, 15):
+                rel = "frames/f_%08d" % slot
+                image = render(cams[frame - segment_lag], frame, slot)
+                files[rel + ".png"] = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))[1].tobytes()
+                current = 0 if slot < not_current else 1
+                requests.append([slot, 100.0 * slot, "issued", 100.0 * slot, frame - 1, frame * 2, 5000 + slot, rel,
+                                 1, current, 1, 0, int(segment == "backlog"), "done", frame + 2, 100.0 * slot + 30,
+                                 5030 + slot, ".png", setting, segment])
+                uv, depth = rp.project(MARKERS, cams[frame], VFOV, WIDTH, HEIGHT)
+                for marker_id in range(len(MARKERS)):
+                    if 0.1 < depth[marker_id] <= 150 and numpy.isfinite(uv[marker_id, 0]):
+                        proj.append([frame, marker_id, round(uv[marker_id, 0], 3), round(uv[marker_id, 1], 3),
+                                     round(depth[marker_id], 3)])
+                slot += 1
     markers = [[i, "straight", x, y, z, MARKER_RADIUS_M, "FF00FF", "shape"] for i, (x, y, z) in enumerate(MARKERS)]
     markers_end = [[i, 3, 0, 0.0] for i in range(len(MARKERS))]
     geometry = fiducial.layout(WIDTH, HEIGHT)
@@ -215,15 +235,24 @@ def build_e06a_play(base, lag=0, measured_fps_30=30.0):
         "fiducial.physical_h": str(HEIGHT), "fiducial.left_x": str(geometry["left"][0][0]),
         "fiducial.right_x": str(geometry["right"][0][0]),
     }
+    for i, (_, y) in enumerate(geometry["left"]):
+        header["fiducial.y%d" % i] = str(y)
     footer = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
-    probe_common.write_synthetic_play(play_dir, header, {
+    csvs = {
         "e06a_frames": (FRAME_COLUMNS, frames),
         "e06a_requests": (REQUEST_COLUMNS, requests),
         "e06a_markers": (["marker_id", "set", "x", "y", "z", "radius_m", "color_hex", "kind"], markers),
         "e06a_markers_end": (["marker_id", "phase_idx", "moved", "moved_m"], markers_end),
         "e06a_proj": (["render_frame", "marker_id", "screen_x", "screen_y", "depth"], proj),
-    }, footer=footer, files=files)
+    }
+    if phases_file:
+        csvs["e06a_phases"] = (PHASE_COLUMNS, phases)
+    probe_common.write_synthetic_play(play_dir, header, csvs, footer=footer, files=files)
     return play_dir
+
+
+def tags(verdict):
+    return {name: tag for tag, name, _ in verdict.items}
 
 
 class EndToEndTests(unittest.TestCase):
@@ -231,34 +260,79 @@ class EndToEndTests(unittest.TestCase):
         self.base = probe_common.make_temp_dir("e06a_")
         self.addCleanup(shutil.rmtree, self.base, True)
 
-    def run_cli(self, play_dir):
+    def run_cli(self, play_dir, *extra):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-        return subprocess.run([sys.executable, "-I", "-B", os.path.join(VALIDATOR, "e06a_reproject.py"), play_dir],
-                              capture_output=True, text=True, env=env)
+        return subprocess.run([sys.executable, "-I", "-B", os.path.join(VALIDATOR, "e06a_reproject.py"), play_dir]
+                              + list(extra), capture_output=True, text=True, env=env)
 
-    def test_12_pngs_pass(self):
+    def test_24_pngs_pass(self):
         play_dir = build_e06a_play(self.base)
-        self.assertEqual(len(os.listdir(os.path.join(play_dir, "frames"))), 12)
+        self.assertEqual(len(os.listdir(os.path.join(play_dir, "frames"))), 24)
         done = self.run_cli(play_dir)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("[PASS] alignment_60fps", done.stdout)
-        self.assertIn("[PASS] alignment_30fps", done.stdout)
-        self.assertIn("[PASS] camera_model", done.stdout)
+        for name in ("alignment_60fps", "alignment_60fps_backlog", "coverage_60fps", "alignment_30fps",
+                     "alignment_30fps_backlog", "coverage_30fps", "camera_model", "rig_camera_current"):
+            self.assertIn("[PASS] %s:" % name, done.stdout)
         self.assertIn("RESULT E-06A: PASS", done.stdout)
 
-    def test_12_pngs_with_a_one_frame_lag_fail(self):
+    def test_header_geometry_option(self):
+        done = self.run_cli(build_e06a_play(self.base), "--header-geometry")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("geometry run header fiducial.*", done.stdout)
+        self.assertIn("RESULT E-06A: PASS", done.stdout)
+
+    def test_a_one_frame_lag_fails(self):
         done = self.run_cli(build_e06a_play(self.base, lag=1))
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertIn("[FAIL] alignment_60fps", done.stdout)
+        self.assertIn("[FAIL] alignment_60fps:", done.stdout)
         self.assertIn("argmin k=-1", done.stdout)
         self.assertIn("RESULT E-06A: FAIL", done.stdout)
 
+    def test_backlog_is_judged_on_its_own(self):
+        verdict = rp.analyse(build_e06a_play(self.base, lag=1, lag_segments=("backlog",)))
+        found = tags(verdict)
+        self.assertEqual(found["alignment_60fps"], "PASS")
+        self.assertEqual(found["alignment_60fps_backlog"], "FAIL")
+        self.assertEqual(found["alignment_30fps_backlog"], "FAIL")
+        self.assertEqual(verdict.result(), "FAIL")
+
+    def test_curve_only_is_incomplete(self):
+        verdict = rp.analyse(build_e06a_play(self.base, segments=("curve",)))
+        found = tags(verdict)
+        self.assertEqual(found["alignment_60fps"], "PASS")
+        self.assertEqual(found["alignment_60fps_backlog"], "INCOMPLETE")
+        self.assertEqual(found["coverage_60fps"], "INCOMPLETE")
+        self.assertEqual(found["coverage_30fps"], "INCOMPLETE")
+        self.assertEqual(verdict.result(), "INCOMPLETE")
+
+    def test_aborted_slalom_or_low_speed_brake_is_incomplete(self):
+        verdict = rp.analyse(build_e06a_play(self.base, phase_results={(60, "slalom"): "aborted_area",
+                                                                       (30, "brake"): "low_speed"}))
+        found = tags(verdict)
+        self.assertEqual(found["coverage_60fps"], "INCOMPLETE")
+        self.assertEqual(found["coverage_30fps"], "INCOMPLETE")
+        details = {name: detail for _, name, detail in verdict.items}
+        self.assertIn("slalom aborted_area", details["coverage_60fps"])
+        self.assertIn("brake low_speed", details["coverage_30fps"])
+        self.assertEqual(verdict.result(), "INCOMPLETE")
+
+    def test_missing_phases_file_is_incomplete(self):
+        verdict = rp.analyse(build_e06a_play(self.base, phases_file=False))
+        self.assertEqual(tags(verdict)["coverage_60fps"], "INCOMPLETE")
+        self.assertEqual(verdict.result(), "INCOMPLETE")
+
     def test_fps_setting_not_taken_is_incomplete(self):
         verdict = rp.analyse(build_e06a_play(self.base, measured_fps_30=58.0))
-        found = {name: tag for tag, name, _ in verdict.items}
+        found = tags(verdict)
         self.assertEqual(found["alignment_60fps"], "PASS")
         self.assertEqual(found["alignment_30fps"], "INCOMPLETE")
+        self.assertEqual(found["alignment_30fps_backlog"], "INCOMPLETE")
         self.assertEqual(verdict.result(), "INCOMPLETE")
+
+    def test_rig_camera_not_current_fails(self):
+        verdict = rp.analyse(build_e06a_play(self.base, not_current=1))
+        self.assertEqual(tags(verdict)["rig_camera_current"], "FAIL")
+        self.assertEqual(verdict.result(), "FAIL")
 
 
 if __name__ == "__main__":

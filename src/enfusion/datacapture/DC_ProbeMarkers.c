@@ -15,7 +15,8 @@
 //     rig.*, fiducial.*, area.*, markers.* and fps.* lines to the run header;
 //   - for each value of m_sFpsPhases (one "FPS phase"): sets MaxFps (BaseContainer.Set + UserSettingsChanged, never
 //     SaveUserSettings), then the segments
-//       reset   teleport to the area start, heading along the area
+//       reset   teleport to 2 x m_fAreaMarginM along the centre line (inside the margin-inset area, as
+//               DC_ProbeSequences), heading along the area
 //       settle  brake and handbrake for m_fSettleS
 //       slalom  speed hold m_fSlalomKmh, steer m_fSlalomAmplitude * sin(2 pi t / m_fSlalomPeriodS), m_fSlalomS long,
 //               images on the m_fImageHz grid with one request in flight
@@ -28,6 +29,8 @@
 //     and restores MaxFps. A slalom, backlog or curve that leaves the area (minus m_fAreaMarginM) goes on with the
 //     next segment; its row says aborted_area. The teleports run in OnProbeFrame, never inside a physics step (the
 //     rule of DC_ProbeSequences): a reset segment waits for its teleport;
+//   - after the last FPS phase no new slot is issued and the requests in flight are drained with the camera and
+//     the bands kept (DC_ImageSlotScheduler.StopIssuing); then the probe is done;
 //   - every render frame: DC_Fiducial.Show, the scheduler, one e06a_frames.csv row and, on frames that issued a
 //     request, e06a_proj.csv rows: WorkspaceWidget.ProjWorldToScreenNative of up to m_iProjMarkersPerFrame markers
 //     within m_fProjMaxDistM in front of the camera (the engine's own projection, to validate the Python camera
@@ -38,9 +41,10 @@
 // shapes do not show in screenshots) do: the straight set sits beside the slalom line, and a marker that moved is
 // logged and excluded by the analysis. A prefab marker's logged position is the centre of its local bounds.
 //
-// Failure handling: OnProbeStart returns false and undoes what it did when the actuator, the markers, the rig, the
-// bands, frames/ or a CSV fail. Reason "delete" (world teardown) touches no camera, widget, setting or entity: it
-// only drops references (MaxFps then stays at the phase value: the engine settings are not saved by this probe).
+// Failure handling: OnProbeStart returns false and undoes what it did when the straight or the ring start point is
+// not inside the margin-inset area, or when the actuator, the markers, the rig, the bands, frames/ or a CSV fail.
+// Reason "delete" (world teardown) touches no camera, widget, setting or entity: it only drops references (MaxFps
+// then stays at the phase value: the engine settings are not saved by this probe).
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -280,6 +284,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 	protected int m_iFrames;
 	protected bool m_bTeleportPending;			//!< a reset segment waits for the teleport of the next OnProbeFrame
 	protected float m_fTeleportAlongM;
+	protected float m_fStartAlongM;				//!< start of the straight segments: 2 x m_fAreaMarginM along
 
 	//------------------------------------------------------------------------------------------------
 	override void GetProbeIds(notnull array<string> outIds)
@@ -387,6 +392,16 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		m_Area = new DC_ProbeArea();
 		m_Area.Set(m_vAreaStart, m_fAreaHeadingDeg, m_fAreaLengthM, m_fAreaHalfWidthM);
 
+		// Both teleport targets must pass the segments' own area check (Contains with the margin)
+		m_fStartAlongM = 2 * m_fAreaMarginM;
+		string startFailure = CheckStartPoints();
+		if (!startFailure.IsEmpty())
+		{
+			ctx.Error(startFailure + " - not started");
+			ReleaseAll();
+			return false;
+		}
+
 		m_Actuator = new DC_ProbeActuator();
 		if (!m_Actuator.Init(m_Ego))
 		{
@@ -444,6 +459,9 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		m_Rig.AppendHeaderLines(header);
 		m_Fiducial.AppendHeaderLines(header);
 		DC_ProbeImages.AppendAreaLines(header, m_Area);
+		float ringStartAlongM = GetRingStartAlongM();
+		header.Insert("area.start_along_m=" + m_fStartAlongM.ToString(-1, 3));
+		header.Insert("area.ring_start_along_m=" + ringStartAlongM.ToString(-1, 3));
 		AppendMarkerLines(header);
 		header.Insert("capture.frames_dir=" + frameDir);
 		header.Insert("capture.request_name=f_<slot_id:08d> (no extension)");
@@ -497,6 +515,14 @@ class DC_ProbeMarkers : DC_ProbeComponent
 
 		m_Fiducial.Show(renderFrame);
 
+		// After the last FPS phase: no new slot; what is in flight resolves with the camera and the bands in place
+		if (m_iStage == STAGE_DONE)
+		{
+			bool firstStop = m_Scheduler.StopIssuing();
+			if (firstStop && m_Ctx)
+				m_Ctx.Log("all FPS phases done: no new request, draining the requests in flight");
+		}
+
 		bool camCurrent = m_Rig.IsCurrent();
 		bool camAttached = m_Rig.IsAttached();
 		int issuedBefore = m_Scheduler.GetIssued();
@@ -515,7 +541,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		if (m_bTeleportPending)
 			RunPendingTeleport();
 
-		if (m_iStage == STAGE_DONE)
+		if (m_iStage == STAGE_DONE && m_Scheduler.IsDrained())
 			m_bDone = true;
 	}
 
@@ -633,7 +659,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 			if (!stopped)
 				m_sSegmentResult = "timeout";
 
-			TeleportTo(m_fRingAlongM - m_fRingRadiusM - RING_APPROACH_M);
+			TeleportTo(GetRingStartAlongM());
 			EnterStage(STAGE_RESET_RING, SEGMENT_RESET, "ok");
 			return;
 		}
@@ -685,7 +711,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 	protected void StartFpsPhase()
 	{
 		ApplyMaxFps(CurrentFpsSetting());
-		TeleportTo(0);
+		TeleportTo(m_fStartAlongM);
 		m_sSegment = string.Empty;
 		EnterStage(STAGE_RESET_STRAIGHT, SEGMENT_RESET, "ok");
 	}
@@ -785,6 +811,28 @@ class DC_ProbeMarkers : DC_ProbeComponent
 			index = m_aFpsPhases.Count() - 1;
 
 		return m_aFpsPhases[index];
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return along position of the curve start: m_fRingRadiusM + RING_APPROACH_M before the ring centre
+	protected float GetRingStartAlongM()
+	{
+		return m_fRingAlongM - m_fRingRadiusM - RING_APPROACH_M;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return empty when the straight start (m_fStartAlongM) and the ring start lie inside the area shrunk by the
+	//! margin (the check every driving segment makes), else the failure
+	protected string CheckStartPoints()
+	{
+		float ringStart = GetRingStartAlongM();
+		if (!m_Area.Contains(m_Area.PointAt(m_fStartAlongM, 0), m_fAreaMarginM))
+			return "straight start " + m_fStartAlongM.ToString(-1, 1) + " m along the area is not inside it with the margin " + m_fAreaMarginM.ToString(-1, 1) + " m";
+
+		if (!m_Area.Contains(m_Area.PointAt(ringStart, 0), m_fAreaMarginM))
+			return "ring start " + ringStart.ToString(-1, 1) + " m along the area (m_fRingAlongM - m_fRingRadiusM - 15) is not inside it with the margin " + m_fAreaMarginM.ToString(-1, 1) + " m";
+
+		return string.Empty;
 	}
 
 	//------------------------------------------------------------------------------------------------

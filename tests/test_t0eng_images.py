@@ -67,7 +67,7 @@ def frame_image(code, seed, undecodable=False):
 
 
 def build_e05_play(base, slots=20, missing=(), undecodable=(), offsets=None, footer=True, saved=None,
-                   probe="e05", fps=60.0):
+                   probe="e05", fps=60.0, not_current=(), vfov_read="50.000000"):
     """Writes a synthetic e05 play and its console log. Returns (play_dir, log_path).
 
     missing: slots without a file; undecodable: slots whose left band is grey; offsets: {slot: frames from the
@@ -93,8 +93,9 @@ def build_e05_play(base, slots=20, missing=(), undecodable=(), offsets=None, foo
             done = ["done", issue_frame + 3, issue_ms + 50, tick + 50, ".png"]
         else:
             done = ["timeout", None, None, None, None]
-        requests.append([slot, issue_ms, "issued", issue_ms, issue_frame, 3 * issue_frame, tick, rel, 1, 1, 1, 0, 0]
-                        + done)
+        current = 0 if slot in not_current else 1
+        requests.append([slot, issue_ms, "issued", issue_ms, issue_frame, 3 * issue_frame, tick, rel, 1, current, 1,
+                         0, 0] + done)
     frames = []
     for frame in range(first_frame - 5, first_frame + 6 * slots + 5):
         frames.append([frame, (frame - first_frame) * 1000.0 / fps, 20000 + (frame - first_frame) * 17,
@@ -103,7 +104,7 @@ def build_e05_play(base, slots=20, missing=(), undecodable=(), offsets=None, foo
     header = {
         "schema": "dc-probe-run/1", "probe": probe, "play_dir": PLAY_VALUE.replace("e05", probe, 1),
         "launch.id": LAUNCH_ID, "params.image_hz": "10.000", "fiducial.patch_px": "32", "fiducial.margin_px": "16",
-        "fiducial.gap_px": "8",
+        "fiducial.gap_px": "8", "params.vertical_fov_deg": "50.000", "rig.vfov_read": vfov_read,
     }
     geometry = fiducial.layout(WIDTH, HEIGHT)
     header["fiducial.left_x"] = str(geometry["left"][0][0])
@@ -150,6 +151,8 @@ class E05Tests(TempCase):
         verdict = e05_images.evaluate(play_dir, log_path)
         found = items(verdict)
         self.assertEqual(verdict.result(), "PASS", verdict.items)
+        self.assertEqual(found["rig_camera_current"][0], "PASS")
+        self.assertEqual(found["rig_vfov"][0], "PASS")
         self.assertEqual(found["png_dims"][0], "PASS")
         self.assertIn("%dx%d" % (WIDTH, HEIGHT), found["png_dims"][1])
         self.assertEqual(found["saved_count_eq_files"][0], "PASS")
@@ -175,6 +178,23 @@ class E05Tests(TempCase):
         self.assertEqual(verdict.result(), "FAIL")
         self.assertEqual(found["saved_count_eq_files"][0], "FAIL")
         self.assertEqual(found["missing_le_1pct"][0], "PASS")
+
+    def test_rig_camera_not_current_fails(self):
+        play_dir, log_path = build_e05_play(self.base, not_current=(4,))
+        verdict = e05_images.evaluate(play_dir, log_path)
+        found = items(verdict)
+        self.assertEqual(found["rig_camera_current"][0], "FAIL")
+        self.assertIn("1 of 20", found["rig_camera_current"][1])
+        self.assertEqual(verdict.result(), "FAIL")
+
+    def test_rig_vfov_off_fails_and_missing_is_incomplete(self):
+        play_dir, log_path = build_e05_play(self.base, vfov_read="52.000000")
+        found = items(e05_images.evaluate(play_dir, log_path))
+        self.assertEqual(found["rig_vfov"][0], "FAIL")
+        other = os.path.join(self.base, "second")
+        play_dir, log_path = build_e05_play(other, vfov_read="")
+        found = items(e05_images.evaluate(play_dir, log_path))
+        self.assertEqual(found["rig_vfov"][0], "INCOMPLETE")
 
     def test_low_fps_fails(self):
         play_dir, log_path = build_e05_play(self.base, fps=25.0)

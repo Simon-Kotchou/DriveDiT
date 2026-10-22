@@ -3,10 +3,14 @@
 
     python3 -I -B tools/validator/e06a_reproject.py <e06a play_dir> [--kmax 3] [--rms-px 2.0] [--margin 0.5]
         [--gate-px 20] [--color FF00FF] [--color-tol 60] [--min-motion-px 2] [--min-area 3] [--fps-tol 0.15]
+        [--header-geometry]
 
 Input: one play directory of probe e06a (DC_ProbeMarkers): run_header.txt (rig.vfov_read, fiducial.*),
 e06a_markers.csv, e06a_markers_end.csv, e06a_frames.csv (camera transform per render frame), e06a_requests.csv
-(fps_setting, segment), e06a_proj.csv and frames/.
+(fps_setting, segment), e06a_phases.csv (one row per segment and FPS phase with its result), e06a_proj.csv and
+frames/. --header-geometry decodes the fiducial at the fiducial.left_x / right_x / y0..y5 keys of the run header
+(as e06_fiducial.py does) instead of the layout of each image's size: for screenshots whose size differs from the
+canvas the bands were laid out on.
 
 Method:
   * camera model: pinhole, fy = fx = (H / 2) / tan(vfov / 2) with rig.vfov_read, cx = W / 2, cy = H / 2, in
@@ -23,11 +27,18 @@ Method:
     at every k (residuals capped at 5 x gate), so every k is scored on the same blobs. Only images whose markers
     move >= --min-motion-px between F - 1 and F + 1 count (a static camera cannot discriminate k). Segments
     slalom, backlog, brake and curve are used; reset and settle are not;
-  * per condition (each fps_setting, backlog included): RMS(k).
+  * per condition: RMS(k). Each fps_setting gives two conditions, judged separately: the images on the slot grid
+    (slalom, brake and curve; alignment_<fps>fps) and the backlog images, one request every frame with no in-flight
+    limit (alignment_<fps>fps_backlog).
 
-r2 PASS per condition: RMS(0) <= 2 px, k = 0 is the unique minimum, and RMS(0) <= 0.5 x min(RMS(-1), RMS(+1)),
-at 60 and at 30 FPS (every value of params.fps_phases). A condition whose measured FPS p50 is not within --fps-tol of
-its setting is INCOMPLETE (the setting did not take); no counted blob is INCOMPLETE (switch m_eMarkerKind to PREFAB).
+r2 3.5 / 4.4 require slalom and hard braking at 60 and 30 FPS with induced screenshot backlog. PASS per condition:
+RMS(0) <= 2 px, k = 0 is the unique minimum, and RMS(0) <= 0.5 x min(RMS(-1), RMS(+1)), for both conditions of every
+value of params.fps_phases. coverage_<fps>fps is INCOMPLETE when slalom, backlog or brake has no counted blob at that
+setting, or when its e06a_phases.csv row is missing or not "ok" (aborted_area, low_speed, timeout, stopped_*): a run
+without that data cannot pass, whatever the curve shows. A condition whose measured FPS p50 is not within --fps-tol
+of its setting is INCOMPLETE (the setting did not take); no counted blob is INCOMPLETE (switch m_eMarkerKind to
+PREFAB). rig_camera_current FAILs when an issued request of a used segment had cam_current or cam_attached 0 (the
+screenshot then shows another camera than rig R1).
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error. The script only reads.
 
 Library use (tests): project(markers, cam_rows, vfov_deg, width, height) and evaluate(observations, cam_by_frame,
@@ -48,11 +59,15 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "tools", "probes", "t0eng"))
 import probe_common  # noqa: E402  (shared reader and verdict printer)
 import e05_images  # noqa: E402  (FrameFiles: request path -> engine-written file)
+import e06_fiducial  # noqa: E402  (geometry_from_header: the --header-geometry patch origins)
 
 FIDUCIAL_PATH = os.path.join(REPO, "data", "dc2", "fiducial.py")
 LABEL = "E-06A marker reprojection"
 PROBE = "e06a"
 USED_SEGMENTS = ("slalom", "backlog", "brake", "curve")
+REQUIRED_SEGMENTS = ("slalom", "backlog", "brake")      # r2 3.5: slalom and hard braking with induced backlog
+BACKLOG_SEGMENT = "backlog"
+PHASE_OK = "ok"
 RESIDUAL_CAP_GATES = 5.0
 MODEL_P95_MAX_PX = 1.0
 CAM_PREFIX = "cam"
@@ -291,8 +306,43 @@ def model_check(play, ids, markers, cam_by_frame, vfov_deg, width, height):
     return errors
 
 
+def condition_key(fps_setting, segment):
+    """The alignment condition of a request: (fps, "backlog") for backlog images, else (fps, "grid")."""
+    return (int(fps_setting), BACKLOG_SEGMENT if segment == BACKLOG_SEGMENT else "grid")
+
+
+def load_phases(play):
+    """e06a_phases.csv rows, or None when the file is absent (an older or truncated play)."""
+    if not play.has("e06a_phases.csv"):
+        return None
+    return play.csv("e06a_phases", required=("fps_setting", "segment", "result"))
+
+
+def coverage(fps, phases, by_segment):
+    """(ok, detail) of coverage_<fps>fps: slalom, backlog and brake each ran "ok" and gave counted blobs."""
+    problems, notes = [], []
+    for segment in REQUIRED_SEGMENTS:
+        result = by_segment.get("%d/%s" % (fps, segment))
+        blobs = result["blobs"] if result else 0
+        if phases is None:
+            outcome = "no e06a_phases.csv"
+        else:
+            rows = [row for row in phases if row["segment"] == segment and row["fps_setting"] == str(fps)]
+            outcomes = sorted({row["result"] for row in rows})
+            outcome = ",".join(outcomes) if outcomes else "no row"
+        if outcome != PHASE_OK:
+            problems.append("%s %s" % (segment, outcome))
+        if not blobs:
+            problems.append("%s without a counted blob" % segment)
+        notes.append("%s %s, %d blobs" % (segment, outcome, blobs))
+    detail = "; ".join(notes)
+    if problems:
+        return None, "missing data: %s (%s)" % (", ".join(problems), detail)
+    return True, detail
+
+
 def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00FF", color_tol=60,
-            min_motion_px=2.0, min_area=3, fps_tol=0.15):
+            min_motion_px=2.0, min_area=3, fps_tol=0.15, header_geometry=False):
     """Builds the E-06A verdict of one e06a play directory."""
     fiducial = load_fiducial()
     play = probe_common.Play(play_dir)
@@ -308,10 +358,12 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
 
     frames = play.csv("e06a_frames", required=("render_frame", "fps", "fps_setting", "segment", "cam_pos_x"))
     requests = play.csv("e06a_requests", required=("issue_status", "issue_render_frame", "path", "found_suffix",
-                                                    "fps_setting", "segment"))
+                                                    "cam_current", "cam_attached", "fps_setting", "segment"))
+    phases = load_phases(play)
     ids, markers, moved = load_markers(play)
     cam_by_frame = {int(row["render_frame"]): cam_from_row(row) for row in frames}
     files = e05_images.FrameFiles(play.dir)
+    geometry = e06_fiducial.geometry_from_header(header, fiducial) if header_geometry else None
 
     verdict = probe_common.Verdict(LABEL, play.dir)
     verdict.info("markers", "%d used, %d excluded as moved" % (len(ids), len(moved)))
@@ -323,9 +375,14 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
     by_segment = []
     size = None
     undecodable = 0
+    issued_used = 0
+    not_current = 0
     for row in requests:
         if row["issue_status"] != "issued" or row["segment"] not in USED_SEGMENTS:
             continue
+        issued_used += 1
+        if row["cam_current"] != "1" or row["cam_attached"] != "1":
+            not_current += 1
         path, _ = files.resolve(row["path"], row.get("found_suffix", ""))
         if not path:
             continue
@@ -336,22 +393,34 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
             continue
         height, width = image.shape[:2]
         size = size or (width, height)
-        decoded = fiducial.decode(image, patch=patch, margin=fid_margin, gap=gap)
+        if geometry is not None:
+            left, right, geometry_patch = geometry
+            decoded = fiducial.decode_origins(image, left, right, patch=geometry_patch)
+        else:
+            decoded = fiducial.decode(image, patch=patch, margin=fid_margin, gap=gap)
         if decoded.status != fiducial.STATUS_OK:
             undecodable += 1
             continue
         frame = fiducial.unwrap(decoded.code, int(row["issue_render_frame"]))
         blobs = detect_blobs(image, target, color_tol, band_exclusion(width, header, fiducial), min_area)
-        observations.append({"condition": int(row["fps_setting"]), "frame": frame, "blobs": blobs})
+        observations.append({"condition": condition_key(row["fps_setting"], row["segment"]), "frame": frame,
+                             "blobs": blobs})
         by_segment.append({"condition": "%s/%s" % (row["fps_setting"], row["segment"]), "frame": frame,
                            "blobs": blobs})
+
+    if issued_used:
+        verdict.check("rig_camera_current", not_current == 0, "%d of %d issued requests of the used segments had "
+                      "cam_current or cam_attached 0" % (not_current, issued_used))
+    else:
+        verdict.check("rig_camera_current", None, "no issued request in a used segment")
     if size is None:
         verdict.check("images", None, "no screenshot of a used segment could be read")
         verdict.check_footer(play)
         return verdict
     width, height = size
-    verdict.info("images", "%d decoded, %d undecodable or unreadable, %dx%d px, vfov %.3f deg" % (
-        len(observations), undecodable, width, height, vfov))
+    verdict.info("images", "%d decoded, %d undecodable or unreadable, %dx%d px, vfov %.3f deg, geometry %s" % (
+        len(observations), undecodable, width, height, vfov,
+        "run header fiducial.*" if header_geometry else "layout() of each image's size"))
 
     model_w = int(float(header.get("fiducial.physical_w", width) or width))
     model_h = int(float(header.get("fiducial.physical_h", height) or height))
@@ -367,27 +436,35 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
         verdict.info("size", "screenshots %dx%d differ from the workspace %dx%d" % (width, height, model_w, model_h))
 
     results = evaluate(observations, cam_by_frame, markers, vfov, width, height, kmax, gate_px, min_motion_px)
+    segment_results = evaluate(by_segment, cam_by_frame, markers, vfov, width, height, kmax, gate_px, min_motion_px)
+    if phases is None:
+        verdict.info("phases", "e06a_phases.csv missing: segment results unknown")
     for condition in fps_phases(header, requests):
         fps = [value for row, value in zip(frames, probe_common.floats(frames, "fps"))
                if value is not None and row["fps_setting"] == str(condition) and row["segment"] in USED_SEGMENTS]
-        name = "alignment_%dfps" % condition
+        p50 = probe_common.percentile(fps, 50) if fps else None
+        fps_problem = None
         if not fps:
-            verdict.check(name, None, "no frame at fps_setting %d" % condition)
-            continue
-        p50 = probe_common.percentile(fps, 50)
-        if abs(p50 - condition) > fps_tol * condition:
-            verdict.check(name, None, "measured FPS p50 %.1f is not within %.0f%% of the setting %d (MaxFps did not "
-                                      "take)" % (p50, 100 * fps_tol, condition))
-            continue
-        result = results.get(condition)
-        if result is None:
-            verdict.check(name, None, "no decoded image at fps_setting %d" % condition)
-            continue
-        ok, detail = judge(result, rms_px, margin)
-        verdict.check(name, ok, "FPS p50 %.1f; %s" % (p50, detail))
+            fps_problem = "no frame at fps_setting %d" % condition
+        elif abs(p50 - condition) > fps_tol * condition:
+            fps_problem = "measured FPS p50 %.1f is not within %.0f%% of the setting %d (MaxFps did not take)" % (
+                p50, 100 * fps_tol, condition)
+        for kind, name in (("grid", "alignment_%dfps" % condition),
+                           (BACKLOG_SEGMENT, "alignment_%dfps_backlog" % condition)):
+            if fps_problem:
+                verdict.check(name, None, fps_problem)
+                continue
+            result = results.get((condition, kind))
+            if result is None:
+                verdict.check(name, None, "no decoded %s image at fps_setting %d" % (
+                    "backlog" if kind == BACKLOG_SEGMENT else "slalom, brake or curve", condition))
+                continue
+            ok, detail = judge(result, rms_px, margin)
+            verdict.check(name, ok, "FPS p50 %.1f; %s" % (p50, detail))
+        ok, detail = coverage(condition, phases, segment_results)
+        verdict.check("coverage_%dfps" % condition, ok, detail)
 
-    for condition, result in sorted(evaluate(by_segment, cam_by_frame, markers, vfov, width, height, kmax, gate_px,
-                                             min_motion_px).items()):
+    for condition, result in sorted(segment_results.items()):
         rms = result["rms"]
         verdict.info("segment_%s" % condition, "RMS(-1/0/+1) %s px, %d blobs in %d images" % (
             "/".join("-" if rms.get(k) is None else "%.2f" % rms[k] for k in (-1, 0, 1)), result["blobs"],
@@ -409,13 +486,16 @@ def parse_args(argv):
                         help="median marker motion between F-1 and F+1 needed to count an image (default 2)")
     parser.add_argument("--min-area", type=int, default=3, help="smallest blob in px (default 3)")
     parser.add_argument("--fps-tol", type=float, default=0.15, help="measured FPS p50 tolerance (default 0.15)")
+    parser.add_argument("--header-geometry", action="store_true",
+                        help="decode the fiducial at the run header's fiducial.* origins (screenshot size differs "
+                             "from the layout canvas)")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     return analyse(args.play_dir, args.kmax, args.rms_px, args.margin, args.gate_px, args.color, args.color_tol,
-                   args.min_motion_px, args.min_area, args.fps_tol).report()
+                   args.min_motion_px, args.min_area, args.fps_tol, args.header_geometry).report()
 
 
 if __name__ == "__main__":

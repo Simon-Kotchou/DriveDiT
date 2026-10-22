@@ -9,14 +9,18 @@
 //   - 6 patches x 3 bits in a left band, mirrored (same values, same order) in a right band; patch 0 is the top
 //     patch and carries the 3 least significant bits: value_i = (code >> (3 * i)) & 7;
 //   - a patch value is a corner of the RGB cube: bit 0 red, bit 1 green, bit 2 blue, each channel 0 or 255;
-//   - each patch is P x P physical pixels. Layout on the physical canvas W x H (the workspace in physical pixels),
-//     integer arithmetic: left x0 = M, right x0 = W - M - P, y_i = (H - (6 P + 5 G)) / 2 + i (P + G), i = 0..5 from
-//     the top. P = 32, M = 16, G = 8 by default; for the 1408x720 client class the patches sit inside the 64 px
-//     bands (left x0 16, right x0 1360, y0 244). The Python decoder (data/dc2/fiducial.py) uses the same rule.
+//   - each patch is P x P physical pixels. Layout on the physical canvas W x H (the workspace render target in
+//     physical pixels), integer arithmetic: left x0 = M, right x0 = W - M - P,
+//     y_i = (H - (6 P + 5 G)) / 2 + i (P + G), i = 0..5 from the top. P = 32, M = 16, G = 8 by default; for the
+//     1408x720 client class the patches sit inside the 64 px bands (left x0 16, right x0 1360, y0 244). The Python
+//     decoder (data/dc2/fiducial.py) uses the same rule.
 //
 // HOW (vanilla 1.8.0.13 APIs, PROBE_APIS.md 4.4)
 //   - the user DPI scale is saved and forced to 1.0 (WorkspaceWidget.SetUserDPIScale) so one reference unit maps to
-//     a fixed number of physical pixels; the physical canvas is DPIScale(GetWidth()) x DPIScale(GetHeight());
+//     a fixed number of physical pixels. The physical canvas is GetWidth() x GetHeight(): both already return the
+//     render-target size in physical pixels (WorkspaceWidget.c:37-40; vanilla converts them to reference units with
+//     DPIUnscale, SCR_ActionMenuInteractionDisplay.c:507-508), so no DPI factor is applied to them. Only the widget
+//     positions and sizes are converted (DPIUnscale); DPIScale(1) is logged as fiducial.dpi_scale;
 //   - 12 textureless ImageWidgets (WorkspaceWidget.CreateWidgetInWorkspace, ImageWidgetTypeID, as vanilla
 //     SCR_SlotLabelsComponent2.c:22 uses a coloured ImageWidget) are placed with FrameSlot.SetPos/SetSize in
 //     reference units = DPIUnscale(physical px). Widgets are pixel-perfect by default, so they snap to whole pixels;
@@ -51,10 +55,13 @@ class DC_Fiducial
 	protected int m_iPatchPx;
 	protected int m_iMarginPx;
 	protected int m_iGapPx;
-	protected int m_iWorkspaceW;					//!< WorkspaceWidget.GetWidth() at the last layout (reference units)
+	protected int m_iWorkspaceW;					//!< WorkspaceWidget.GetWidth() at the last layout (render target, physical px)
 	protected int m_iWorkspaceH;
-	protected int m_iPhysicalW;						//!< DPIScale(GetWidth()) rounded, physical px
+	protected int m_iPhysicalW;						//!< the layout canvas = m_iWorkspaceW (physical px)
 	protected int m_iPhysicalH;
+	protected float m_fDpiScale = 1;				//!< DPIScale(1): physical px per reference unit at the last layout
+	protected float m_fReferenceW;					//!< DPIUnscale(GetWidth()): the canvas in reference units
+	protected float m_fReferenceH;
 	protected float m_fPatchRefUnits;
 	protected int m_iLeftX;
 	protected int m_iRightX;
@@ -177,10 +184,14 @@ class DC_Fiducial
 	//! \return false (GetFailure) when the canvas is too small for both bands
 	protected bool ComputeLayout(notnull WorkspaceWidget workspace)
 	{
+		// GetWidth/GetHeight are the render-target size in physical pixels already: no DPIScale here
 		m_iWorkspaceW = workspace.GetWidth();
 		m_iWorkspaceH = workspace.GetHeight();
-		m_iPhysicalW = Math.Round(workspace.DPIScale(m_iWorkspaceW));
-		m_iPhysicalH = Math.Round(workspace.DPIScale(m_iWorkspaceH));
+		m_iPhysicalW = m_iWorkspaceW;
+		m_iPhysicalH = m_iWorkspaceH;
+		m_fDpiScale = workspace.DPIScale(1);
+		m_fReferenceW = workspace.DPIUnscale(m_iWorkspaceW);
+		m_fReferenceH = workspace.DPIUnscale(m_iWorkspaceH);
 		m_fPatchRefUnits = workspace.DPIUnscale(m_iPatchPx);
 
 		int columnPx = PATCH_COUNT * m_iPatchPx + (PATCH_COUNT - 1) * m_iGapPx;
@@ -316,6 +327,10 @@ class DC_Fiducial
 		lines.Insert("fiducial.workspace_h=" + m_iWorkspaceH.ToString());
 		lines.Insert("fiducial.physical_w=" + m_iPhysicalW.ToString());
 		lines.Insert("fiducial.physical_h=" + m_iPhysicalH.ToString());
+		lines.Insert("fiducial.canvas_source=GetWidth_GetHeight_physical");
+		lines.Insert("fiducial.dpi_scale=" + m_fDpiScale.ToString(-1, 6));
+		lines.Insert("fiducial.reference_w=" + m_fReferenceW.ToString(-1, 3));
+		lines.Insert("fiducial.reference_h=" + m_fReferenceH.ToString(-1, 3));
 		lines.Insert("fiducial.dpi_user_before=" + m_fDpiUserBefore.ToString(-1, 4));
 		lines.Insert("fiducial.dpi_user_now=" + m_fDpiUserNow.ToString(-1, 4));
 		lines.Insert("fiducial.patch_ref_units=" + m_fPatchRefUnits.ToString(-1, 6));

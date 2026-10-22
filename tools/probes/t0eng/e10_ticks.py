@@ -13,11 +13,14 @@ every k steps, 0 missed. Checked here:
   post_simulate_every_step  every dispatched step number between the first and the last has its e10_steps.csv row
                             (written in the post call): a single lost post call is invisible to the +-1 above
   telemetry_every_k        e10_telemetry.csv holds exactly the steps that are multiples of k (params.k) within the
-                            dispatched step range, each once: 0 missed, 0 duplicated, 0 off-grid
+                            dispatched step range, each once: 0 missed, 0 duplicated, 0 off-grid. The dispatched
+                            range comes from e10_steps.csv; without it (m_bE10StepRows 0) both checks are
+                            INCOMPLETE, because the telemetry cannot vouch for its own leading or trailing gaps
   run_footer                the probe ended normally (status complete) - at best INCOMPLETE otherwise
 INFO: k and dt (TBD-1), the step source, the EOnSimulate / EOnFixedFrame totals, the sum of GetFixedSteps() against
-the simulate count, the steps-per-frame histogram, whether world time advances per step or per frame (TBD-1), and
-post calls without a pre call.
+the simulate count, the steps-per-frame histogram, whether world time advances per step or per frame (TBD-1), post
+calls without a pre call, and world_timestamp: the dc-2.0 clock (BaseWorld.GetTimestamp().DiffMilliseconds, the
+world_ts_ms columns) against GetWorldTime over the run and whether it advances per step (TBD-1).
 
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
 """
@@ -121,6 +124,9 @@ def analyse(play):
                % (min(values), pc.percentile(values, 50), max(values), len(values), len(paused_seconds)))
 
     # Every dispatched step got its post call: the +-1 above cannot see a single lost step, this can
+    if steps is None:
+        v.check("post_simulate_every_step", None, "e10_steps.csv missing (m_bE10StepRows 0): lost post calls cannot be "
+                                                  "seen")
     if steps:
         numbers = [s for s in pc.ints(steps, "physics_step") if s is not None]
         if numbers:
@@ -142,11 +148,11 @@ def analyse(play):
         v.check("telemetry_every_k", None, "params.k missing in the run header")
     else:
         tele_steps = [s for s in pc.ints(telemetry, "physics_step") if s is not None]
-        if steps:
-            dispatched = [s for s in pc.ints(steps, "physics_step") if s is not None]
-        else:
-            dispatched = list(tele_steps)
-        if not dispatched:
+        dispatched = [s for s in pc.ints(steps, "physics_step") if s is not None] if steps else []
+        if steps is None:
+            v.check("telemetry_every_k", None, "e10_steps.csv missing (m_bE10StepRows 0): the dispatched step range "
+                                               "is unknown, so leading or trailing telemetry gaps cannot be seen")
+        elif not dispatched:
             v.check("telemetry_every_k", None, "k=%d, no dispatched steps recorded" % k)
         else:
             first = min(dispatched)
@@ -191,8 +197,24 @@ def analyse(play):
         v.info("world_time_resolution", resolution)
         no_pre = sum(1 for r in steps if not r["world_time_ms_pre"])
         v.info("post_without_pre", "%d of %d step rows" % (no_pre, len(steps)))
+        v.info("world_timestamp", world_timestamp_text(steps))
     v.check_footer(play)
     return v
+
+
+def world_timestamp_text(steps):
+    """WorldTimestamp (world_ts_ms_post) against GetWorldTime (world_time_ms_post) over the step rows (TBD-1)."""
+    pairs = [(t, w) for t, w in zip(pc.floats(steps, "world_ts_ms_post"), pc.floats(steps, "world_time_ms_post"))
+             if t is not None and t >= 0 and w is not None]
+    if len(pairs) < 2:
+        return "no world_ts_ms_post values (a play written before the column existed)"
+    span_ts = pairs[-1][0] - pairs[0][0]
+    span_wt = pairs[-1][1] - pairs[0][1]
+    increments = [b[0] - a[0] for a, b in zip(pairs, pairs[1:])]
+    advancing = sum(1 for d in increments if d > 0)
+    return "WorldTimestamp span %.3f ms vs GetWorldTime span %.3f ms (difference %.3f ms); advances on %d of %d " \
+           "steps, increment p50 %.3f ms" % (span_ts, span_wt, span_ts - span_wt, advancing, len(increments),
+                                           pc.percentile(increments, 50))
 
 
 def world_time_resolution(steps):

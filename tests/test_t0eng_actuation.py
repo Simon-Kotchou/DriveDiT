@@ -12,7 +12,10 @@ removes it afterwards. The fixtures are generated here from a small vehicle mode
     an automatic gearbox that shifts up -> every identification has a value, PASS, and the identified values match;
   - E-01 with a car that never moves -> FAIL (moves), and ForceEnableSimulation "does not help";
   - E-02a with kappa = G(v) * s -> R2 ~ 1, PASS; one speed with only 2 valid cells -> FAIL;
-  - the PRBS generator mirrors DC_ProbePrbs: maximum length for every supported order.
+  - the PRBS generator mirrors DC_ProbePrbs: maximum length for every supported order;
+  - the step-CSV header of the fixtures is built from the Enforce source (DC_ProbeSequences.c: the stepColumns list,
+    DC_ProbeActuator.AddStepColumns and DC_ProbeCsv.AddVectorColumns' _x/_y/_z), and every column the reader
+    requires is in it, so a reader/producer name mismatch fails here instead of on the first real play.
 """
 
 import contextlib
@@ -21,6 +24,7 @@ import io
 import math
 import os
 import random
+import re
 import shutil
 import sys
 import unittest
@@ -41,13 +45,32 @@ def load_tool(name, path):
 e01 = load_tool("e01_actuation", os.path.join(T0ENG, "e01_actuation.py"))
 
 DT = 1.0 / 60.0
-STEP_COLUMNS = (
-    "physics_step,world_time_ms,timeslice_s,phase,segment,phase_step,force_sim,cmd_steer,cmd_throttle,cmd_brake,"
-    "cmd_clutch,cmd_gear,cmd_handbrake,speed_hold_kmh,input_pre_steer,input_pre_throttle,input_pre_brake,"
-    "input_pre_clutch,input_pre_gear,input_pre_handbrake,input_post_steer,input_post_throttle,input_post_brake,"
-    "input_post_clutch,input_post_gear,input_post_handbrake,cur_gear,fut_gear,rpm,engine_on,speed_kmh,vel_lx,vel_ly,"
-    "vel_lz,angvel_lx,angvel_ly,angvel_lz,acc_lx,acc_ly,acc_lz,pos_x,pos_y,pos_z,fwd_x,fwd_y,fwd_z,heading_deg,"
-    "ground_contact,wheels_contact,in_area").split(",")
+ENFORCE_SEQUENCES = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_ProbeSequences.c")
+
+
+def enforce_step_columns(path=ENFORCE_SEQUENCES):
+    """The <probe>_steps.csv header exactly as DC_ProbeSequences.OnProbeStart builds it: the literal stepColumns list,
+    DC_ProbeActuator.AddStepColumns (columns.Insert and DC_ProbeCsv.AddVectorColumns -> _x, _y, _z), then the
+    stepColumns.Insert calls after it."""
+    with open(path, "r", encoding="ascii") as handle:
+        source = handle.read()
+    start = re.search(r"array<string> stepColumns = \{([^}]*)\};", source)
+    body = re.search(r"static void AddStepColumns\(notnull array<string> columns\)\s*\{(.*?)\n\t\}", source, re.S)
+    if not start or not body:
+        raise AssertionError("stepColumns or AddStepColumns not found in %s" % path)
+    columns = re.findall(r'"([^"]+)"', start.group(1))
+    for match in re.finditer(r'columns\.Insert\("([^"]+)"\)|AddVectorColumns\(columns, "([^"]+)"\)', body.group(1)):
+        if match.group(1):
+            columns.append(match.group(1))
+        else:
+            columns.extend(match.group(2) + suffix for suffix in ("_x", "_y", "_z"))
+    tail = source[start.end():]
+    after = tail[tail.index("AddStepColumns(stepColumns);"):tail.index("OpenCsv(probeId + \"_steps\"")]
+    columns.extend(re.findall(r'stepColumns\.Insert\("([^"]+)"\)', after))
+    return columns
+
+
+STEP_COLUMNS = enforce_step_columns()
 PHASE_COLUMNS = ["phase_idx", "phase", "start_step", "end_step", "start_world_ms", "end_world_ms", "target_kmh",
                  "amplitude", "force_sim", "result", "note"]
 CELL_COLUMNS = ["cell_idx", "target_kmh", "steer", "start_step", "excite_start_step", "end_step", "result", "note"]
@@ -127,9 +150,10 @@ class Car:
             "input_post_brake": "%.4f" % brake, "input_post_clutch": "1.0000", "input_post_gear": cur_gear,
             "input_post_handbrake": int(handbrake), "cur_gear": cur_gear, "fut_gear": cur_gear,
             "rpm": "%.1f" % (900 + 40 * kmh), "engine_on": 1, "speed_kmh": "%.3f" % kmh,
-            "vel_lx": "0.000", "vel_ly": "0.000", "vel_lz": "%.3f" % self.speed,
-            "angvel_lx": "0.000000", "angvel_ly": "%.6f" % math.radians(self.yaw_rate), "angvel_lz": "0.000000",
-            "acc_lx": "0.0000", "acc_ly": "0.0000", "acc_lz": "%.4f" % self.acc,
+            "vel_l_x": "0.000", "vel_l_y": "0.000", "vel_l_z": "%.3f" % self.speed,
+            "angvel_l_x": "0.000000", "angvel_l_y": "%.6f" % math.radians(self.yaw_rate), "angvel_l_z": "0.000000",
+            "acc_l_x": "%.4f" % (self.speed * math.radians(self.yaw_rate)), "acc_l_y": "0.0000",
+            "acc_l_z": "%.4f" % self.acc,
             "pos_x": "%.3f" % self.x, "pos_y": "40.000", "pos_z": "%.3f" % self.z,
             "fwd_x": "%.6f" % math.sin(rad), "fwd_y": "0.000000", "fwd_z": "%.6f" % math.cos(rad),
             "heading_deg": "%.5f" % self.heading, "ground_contact": 1, "wheels_contact": 4, "in_area": 1})
@@ -330,6 +354,42 @@ class ActuationTests(unittest.TestCase):
         self.assertIn("not needed", text)
         self.assertIn("steer pre echo", text)
         self.assertIn("2:honoured", text)
+        self.assertIn("[PASS] local_axes: z_forward 1", text)
+        self.assertIn("x_right 1", text)
+        self.assertIn("x right, z forward: yes", text)
+        self.assertIn("[INFO] gear_indices:", text)
+
+    def test_reader_columns_come_from_the_enforce_producer(self):
+        columns = enforce_step_columns()
+        self.assertEqual(len(columns), len(set(columns)), "duplicate step column")
+        self.assertEqual(columns[:6], ["physics_step", "world_time_ms", "timeslice_s", "phase", "segment",
+                                       "phase_step"])
+        self.assertEqual(columns[-1], "in_area")
+        for name in ("angvel_l_y", "acc_l_z", "acc_l_x", "vel_l_z", "fwd_x", "fwd_z"):
+            self.assertIn(name, columns)
+        missing = [name for name in e01.STEP_COLUMNS if name not in columns]
+        self.assertEqual(missing, [], "e01_actuation.STEP_COLUMNS names the producer does not write")
+
+    def test_a_flipped_local_x_axis_is_reported(self):
+        play = os.path.join(self.base, "e01_flipped")
+        build_e01(play)
+        path = os.path.join(play, "e01_steps.csv")
+        with open(path, "r", encoding="ascii", newline="") as handle:
+            lines = handle.read().split("\n")
+        index = lines[0].split(",").index("acc_l_x")
+        flipped = [lines[0]]
+        for line in lines[1:]:
+            if line:
+                parts = line.split(",")
+                value = float(parts[index])
+                parts[index] = "%.4f" % (-value) if value else parts[index]
+                line = ",".join(parts)
+            flipped.append(line)
+        with open(path, "w", encoding="ascii", newline="") as handle:
+            handle.write("\n".join(flipped))
+        code, text = run_tool(["e01", play])
+        self.assertIn("x_right -1", text)
+        self.assertIn("x right, z forward: no", text)
 
     def test_e01_no_motion_fails(self):
         play = os.path.join(self.base, "e01_still")

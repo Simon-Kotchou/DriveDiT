@@ -7,6 +7,10 @@ Input: one play directory of probe e05 (DC_ProbeImages): run_header.txt, run_foo
 e05_frames.csv and frames/. With --log, the engine console log of the same Workbench session (read only).
 
 r2 4.4 criterion of E-05, printed as checks:
+  * rig_camera_current  r2 4.4 "R1 camera ...: attached, current, vFOV": cam_current and cam_attached are 1 on every
+                        request MakeScreenshot was called for (issued and make_failed); otherwise the files may show
+                        another camera (the ManualCamera)
+  * rig_vfov            rig.vfov_read is within 0.1 deg of params.vertical_fov_deg
   * png_dims            the image dimensions are logged and equal for every file
   * missing_le_1pct     slots without a file <= 1% (skipped, make_failed and timed-out slots without a file count)
   * saved_count_eq_files the "Screenshot saved" lines between the START and END markers of this play equal the files
@@ -33,8 +37,10 @@ LABEL = "E-05 R1 camera and 10 Hz screenshots"
 PROBE = "e05"
 REQUEST_COLUMNS = (
     "slot_id", "requested_world_ms", "issue_status", "issue_render_frame", "issue_tick_ms", "path", "make_ok",
-    "done_status", "done_tick_ms", "found_suffix",
+    "cam_current", "cam_attached", "done_status", "done_tick_ms", "found_suffix",
 )
+ATTEMPTED = ("issued", "make_failed")       # issue_status of a request MakeScreenshot was called for
+VFOV_TOL_DEG = 0.1
 FRAME_COLUMNS = ("render_frame", "fps", "segment")
 MISSING_MAX_PCT = 1.0
 FPS_P5_MIN = 30.0
@@ -153,6 +159,25 @@ def evaluate(play_dir, log_path=None):
             suffixes[suffix] = suffixes.get(suffix, 0) + 1
         if row["done_status"] == "done" and row["done_tick_ms"] and row["issue_tick_ms"]:
             latencies.append(float(row["done_tick_ms"]) - float(row["issue_tick_ms"]))
+
+    attempted = [row for row in requests if row["issue_status"] in ATTEMPTED]
+    if not attempted:
+        verdict.check("rig_camera_current", None, "no request was issued")
+    else:
+        off = [row["slot_id"] for row in attempted if row["cam_current"] != "1" or row["cam_attached"] != "1"]
+        detail = "%d of %d issued requests with cam_current or cam_attached 0" % (len(off), len(attempted))
+        if off:
+            detail += " (first slots: %s)" % ", ".join(off[:5])
+        verdict.check("rig_camera_current", not off, detail)
+
+    vfov_read = probe_common.to_float(play.header.get("rig.vfov_read"))
+    vfov_set = probe_common.to_float(play.header.get("params.vertical_fov_deg"))
+    if vfov_read is None or vfov_set is None:
+        verdict.check("rig_vfov", None, "rig.vfov_read=%s, params.vertical_fov_deg=%s" % (
+            play.header.get("rig.vfov_read", "(absent)"), play.header.get("params.vertical_fov_deg", "(absent)")))
+    else:
+        verdict.check("rig_vfov", abs(vfov_read - vfov_set) <= VFOV_TOL_DEG, "read %.4f deg, set %.4f deg (limit "
+                      "%.1f deg)" % (vfov_read, vfov_set, VFOV_TOL_DEG))
 
     slots = len(requests)
     verdict.info("slots", "%d slots: %s; %d files present, %d files in frames/" % (

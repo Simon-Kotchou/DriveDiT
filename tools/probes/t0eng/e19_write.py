@@ -5,7 +5,9 @@
     python3 -I -B tools/probes/t0eng/e19_write.py --kill <e19kill play_dir>
 
 r2 4.4 criterion (E-19): FileHandle.Write return on a read-only target; taskkill during commit -> "short or failed
-writes detected; the commit log stays consistent". Checked here (e19_cases.csv):
+writes detected; the commit log stays consistent". Both named experiments are required: without the read-only case
+(c09 verdict ok, which needs a second e19 Play after attrib +R) and without an analysed --kill play the result is at
+best INCOMPLETE, so TBD-3 cannot be frozen on a first-Play e19 alone. Checked here (e19_cases.csv):
   exact_returns          c01 (17 bytes), c02 (Write(s, 5)) and every c03 size return exactly what was asked, and
                          the c03 file length is the sum
   read_handle_detected   c05: a write through a READ handle does not return the requested count (or the open fails)
@@ -13,14 +15,23 @@ writes detected; the commit log stays consistent". Checked here (e19_cases.csv):
                          directory instead, that is INFO
   dir_as_file_detected   c07: opening a directory as a file fails or the write comes back short
   short_or_failed_writes_detected   all of the above together
-INFO (TBD-3): c04 WriteLine (position after "abc", 5 = CR LF), c08 two WRITE handles on one file, c09 the read-only
-target (prepared / observed / detected).
-With --kill (e19kill play, Workbench killed by "taskkill /F" in the kill window):
-  commit_log_consistent  every committed chunk exists with n_rows data rows and n_bytes bytes, consecutive keys and
+  readonly_target_detected  c09: the write to the read-only target was refused or came back short (verdict ok);
+                         "prepared" (the target was just created) or "observed" (it was not read-only) is INCOMPLETE
+  overwrite_semantics_recorded  c10: whether WRITE over a longer file truncates it (dc-2.0 heartbeat, TBD-3); PASS
+                         when the length after the rewrite was read back (truncates or keeps_tail), the value is the
+                         result
+  append_reopen_recorded c11: open-APPEND-write-close per line (the dc-2.0 commit-log pattern) adds exactly one line
+                         per cycle: PASS when ok, FAIL when a return or the final length differs
+INFO (TBD-3): c04 WriteLine (position after "abc", 5 = CR LF), c08 two WRITE handles on one file.
+With --kill (e19kill play, Workbench killed by "taskkill /F" in the kill window), for both commit logs
+(e19_commit.csv kept open, e19_commit_append.csv reopened per line):
+  commit_log_consistent, commit_log_append_consistent
+                         every committed chunk exists with n_rows data rows and n_bytes bytes, consecutive keys and
                          64-character payloads; a torn last commit line and uncommitted trailing chunks are detected
                          and discarded (INFO); a torn line before the end, a gap or a mismatch is a FAIL
   kill_happened          no run_footer.txt (the kill ended the play); a footer means the window closed without a
                          kill: INCOMPLETE
+Without --kill: kill_run INCOMPLETE. Without an e19 play: writer_cases INCOMPLETE.
 
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
 """
@@ -111,11 +122,31 @@ def analyse_cases(v, play):
         if cid in cases:
             v.info(cid, case_text(cases[cid]))
     c09 = cases.get("c09_readonly_target")
-    if c09:
-        meaning = {"prepared": "target created: attrib +R it and run e19 again",
-                   "observed": "the target accepted the write (not read-only)",
+    if c09 is None:
+        v.check("readonly_target_detected", None, "c09 not run")
+    else:
+        meaning = {"prepared": "target created: attrib +R it and run e19 again in a later Play",
+                   "observed": "the target accepted the write (it is not read-only): attrib +R it and run e19 again",
                    "ok": "write to the read-only target detected"}.get(c09["verdict"], c09["verdict"])
-        v.info("c09_readonly_target", "%s - %s" % (case_text(c09), meaning))
+        ok = None
+        if c09["verdict"] == "ok":
+            ok = c09["detected"] == "1"
+        v.check("readonly_target_detected", ok, "%s - %s" % (case_text(c09), meaning))
+
+    c10 = cases.get("c10_overwrite_shorter")
+    if c10 is None:
+        v.check("overwrite_semantics_recorded", None, "c10 not run (heartbeat rewrite pattern unmeasured)")
+    elif c10["verdict"] in ("truncates", "keeps_tail"):
+        v.check("overwrite_semantics_recorded", True, "WRITE over a 17-byte file with 5 bytes: %s (%s)" % (
+            c10["verdict"], case_text(c10)))
+    else:
+        v.check("overwrite_semantics_recorded", None, "length after the rewrite not read back: " + case_text(c10))
+
+    c11 = cases.get("c11_append_reopen")
+    if c11 is None:
+        v.check("append_reopen_recorded", None, "c11 not run (commit-log pattern unmeasured)")
+    else:
+        v.check("append_reopen_recorded", c11["verdict"] == "ok", "open-APPEND-write-close per line: " + case_text(c11))
 
 
 def read_commit_log(path):
@@ -176,10 +207,22 @@ def check_chunk(chunk_dir, row):
 
 
 def analyse_kill(v, play):
-    if not play.has("e19_commit.csv"):
-        v.check("commit_log_consistent", None, "e19_commit.csv missing")
+    for name, check in (("e19_commit.csv", "commit_log_consistent"),
+                        ("e19_commit_append.csv", "commit_log_append_consistent")):
+        analyse_commit_log(v, play, name, check)
+    if play.footer is None:
+        v.check("kill_happened", True, "no run_footer.txt: the play was killed during the kill window")
     else:
-        rows, torn, problems = read_commit_log(play.path("e19_commit.csv"))
+        v.check("kill_happened", None, "run_footer.txt present (status=%s reason=%s): no kill in the window" % (
+            play.footer.get("status"), play.footer.get("reason")))
+
+
+def analyse_commit_log(v, play, log_name, check):
+    """One commit log of an e19kill play against the chunk files."""
+    if not play.has(log_name):
+        v.check(check, None, "%s missing" % log_name)
+    else:
+        rows, torn, problems = read_commit_log(play.path(log_name))
         chunk_dir = play.path("chunks")
         files = {}
         if os.path.isdir(chunk_dir):
@@ -208,18 +251,13 @@ def analyse_kill(v, play):
             problems.append("uncommitted chunk(s) before the last commit: %s" % inner)
         detail = "%d of %d committed chunks verified" % (len(rows) - bad_chunks, len(rows))
         if torn is not None:
-            v.info("torn_commit_line", "last commit line torn and discarded: %r" % torn)
+            v.info("torn_commit_line", "%s: last commit line torn and discarded: %r" % (log_name, torn))
         if uncommitted:
-            v.info("uncommitted_chunks", "%d trailing chunk file(s) without a commit line discarded: %s" % (
-                len(uncommitted), ", ".join(files[i] for i in uncommitted)))
+            v.info("uncommitted_chunks", "%s: %d trailing chunk file(s) without a commit line discarded: %s" % (
+                log_name, len(uncommitted), ", ".join(files[i] for i in uncommitted)))
         if problems:
             detail += "; problems: " + "; ".join(problems[:5])
-        v.check("commit_log_consistent", not problems and bool(rows), detail if rows else "no committed chunk")
-    if play.footer is None:
-        v.check("kill_happened", True, "no run_footer.txt: the play was killed during the kill window")
-    else:
-        v.check("kill_happened", None, "run_footer.txt present (status=%s reason=%s): no kill in the window" % (
-            play.footer.get("status"), play.footer.get("reason")))
+        v.check(check, not problems and bool(rows), detail if rows else "no committed chunk")
 
 
 def main(argv=None):
@@ -235,8 +273,12 @@ def main(argv=None):
         play = pc.Play(args.play_dir)
         analyse_cases(v, play)
         v.check_footer(play)
+    else:
+        v.check("writer_cases", None, "no e19 play given: the writer cases c01-c11 are not analysed")
     if args.kill:
         analyse_kill(v, pc.Play(args.kill))
+    else:
+        v.check("kill_run", None, "no --kill play given: r2 4.4 needs the taskkill-during-commit run (e19kill)")
     return v.report()
 
 

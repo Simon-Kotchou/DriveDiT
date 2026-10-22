@@ -188,27 +188,47 @@ Before the first probe Play:
 
 `DC_LaunchGuard` decides at the start of every Play whether anything may be written. It writes nothing, not even
 a folder, unless one of these holds:
-- `-dcLaunchId <id>` is on the command line, `-profile` lies inside `E:/DriveDiT`, and
-  `$profile:dc_launch/launch_<id>.json` is a valid launch record of this exe (`wb` in Workbench);
+- `-dcLaunchId <id>` is on the command line, `-profile` lies inside `E:/DriveDiT`, in Workbench the resolved
+  `$profile` lies there too (a `$profile` Workbench cannot resolve refuses), and `$profile:dc_launch/launch_<id>.json`
+  is a valid launch record of this exe (`wb` in Workbench);
 - the Workbench escape (`m_bAllowWorkbenchWithoutLaunchId 1` in this layer): the game cannot see the command line
-  at all, `$profile` lies inside `E:/DriveDiT`, and the newest `-wb-` record in `$profile:dc_launch` is valid and
-  newer than the deploy. Every run header of such a Play says `launch.mode=wb_escape`.
+  at all, `$profile` lies inside `E:/DriveDiT`, and the newest `-wb-` record in `$profile:dc_launch` is valid, newer
+  than the deploy and this Workbench start's own record: written at most 300 s before the process start, which the
+  guard estimates as `GetUnixTime - GetTickCount / 1000` (`m_bEscapeBindToProcessStart 1`). Only the newest record
+  is considered: when it belongs to another Workbench start the Play is refused, never joined to an older record.
+  Every run header of such a Play says `launch.mode=wb_escape` and `launch.escape_binding=process_start`.
+  - If the first Play shows that `GetTickCount` does not count from the Workbench start (the E-11 line's
+    `uptime_s` is only the seconds since Play, and the refusal says the record was written long before "this
+    Workbench started"), set `m_bEscapeBindToProcessStart` to 0 in the Object Properties for that Play (do not save
+    the layer). The escape then takes the newest record younger than the deploy and marks
+    `launch.escape_binding=newest_after_deploy`.
 
 A visible command line without `-dcLaunchId` always refuses: Workbench was then not started by the patched launcher.
 
 ### Expected probe lines in console.log
 
-1. `[DC_Probe] E-11: -profile visible=<0|1> -dcLaunchId visible=<0|1> $profile=<path or n/a> exe=wb`. This line
-   answers E-11. It shows the profile path, which holds the Windows user name when Workbench was started from
+1. `[DC_Probe] E-11: -profile visible=<0|1> -dcLaunchId visible=<0|1> $profile=<path or n/a> exe=wb uptime_s=<n>`.
+   This line answers E-11; `uptime_s` (GetTickCount / 1000) shows whether the tick count runs from the Workbench
+   start. It shows the profile path, which holds the Windows user name when Workbench was started from
    Steam: never paste it into a PR, a commit or a report.
 2. Then either `[DC_Probe] launch guard: mode=cli id=<launch id> pin=<pin id>` (a WARNING with `mode=wb_escape`), or
    `[DC_Probe] ERROR: launch guard refused: <reason> - no probe runs, nothing written`. The usual reasons:
    - `started without -dcLaunchId: start Workbench with E:\DriveDiT\tools\launch\wb_R1.bat`;
    - `-profile '...' is not inside E:/DriveDiT` or `$profile '...' is not inside E:/DriveDiT` (Workbench started
      from Steam);
-   - `no launch record $profile:dc_launch/launch_<id>.json ...` or `no launch record under $profile:dc_launch` (the
-     unpatched launcher, or the record was removed);
+   - `$profile could not be resolved ...`;
+   - CLI mode: `no launch record $profile:dc_launch/launch_<id>.json ...` (the unpatched launcher, or the record was
+     removed);
+   - escape: `no launch record under $profile:dc_launch ...` (no `-wb-` record at all), `no launch record of this
+     Workbench start: the newest, <id>, was written <n> s before this Workbench started ...` (this start's record was
+     removed, or Workbench was not started by `wb_R1.bat`), or `... written <n> s after this Workbench started
+     (another Workbench started later?)`;
    - `newest launch record <id> predates the deploy <utc>: restart Workbench with wb_R1.bat`.
+   - Guard test (optional, no restart): rename this start's record
+     `E:\DriveDiT\wb_profile\profile\dc_launch\launch_<id>.json`, press Play, then Stop. In CLI mode the expected
+     refusal is `no launch record $profile:dc_launch/launch_<id>.json ...`; in escape mode it is `no launch record
+     under $profile:dc_launch ...` when no other `-wb-` record exists, else `no launch record of this Workbench
+     start: ...` or `... predates the deploy ...`. No `DC_Probes` folder may appear. Rename the record back.
 3. `[DC_Probe] plan from m_sPlan: '...' -> N probe(s) with a component: ...`, with a WARNING for every plan id that
    has no probe component in this deploy.
 4. `[DC_Probe] run started (OnGameModeStart): plan=..., warm-up 3.0 s, gap 1.0 s`.
@@ -246,6 +266,11 @@ The probe parameters are attributes of the probe components, set in this layer, 
 `e19kill` is never in the default plan. Run it on its own, last in a session: it waits for a
 `taskkill /F /IM ArmaReforgerWorkbenchSteamDiag.exe`, after which Workbench must be restarted. For E-19's read-only
 case, run `attrib +R E:\DriveDiT\wb_profile\profile\DC_Probes\e19\ro_target.txt` (cmd) between two Plays with e19.
+E-19 stays INCOMPLETE until both exist: an e19 Play whose c09 refused the write to the read-only target, and an
+analysed e19kill Play (`e19_write.py <e19 play_dir> --kill <e19kill play_dir>`). e19 also measures whether WRITE
+truncates a longer file (c10, the dc-2.0 heartbeat) and the open-APPEND-write-close cycle per line (c11); e19kill
+writes its commit lines both through one open handle (`e19_commit.csv`) and with that cycle
+(`e19_commit_append.csv`).
 
 Each analysis prints one `[PASS]`, `[FAIL]`, `[INCOMPLETE]` or `[INFO]` line per item and ends with
 `RESULT <probe>: PASS|FAIL|INCOMPLETE` (exit code 0, 1 or 3; 2 = usage or input error). Run them from the repo
@@ -262,4 +287,16 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e01 | Mode A actuation identification | ~6 min | `e01_actuation.py e01 <play_dir>` |
 | e02a | first-pass steer -> kappa | ~10-15 min | `e01_actuation.py e02a <play_dir>` |
 | e05 | R1 camera, 10 Hz screenshots (E-05, E-06) | 10 min | `e05_images.py <play_dir> --log <console.log>`, `e06_fiducial.py <play_dir>` |
-| e06a | marker reprojection alignment (60 and 30 FPS, backlog) | ~3-5 min | `tools/validator/e06a_reproject.py <play_dir>` |
+| e06a | marker reprojection alignment (60 and 30 FPS, backlog) | ~3-5 min | `tools/validator/e06a_reproject.py <play_dir> [--header-geometry]` |
+
+Notes on the image probes:
+- e05 and e06a drive from 2 x `m_fAreaMarginM` along the test area (6 m with the layer's margin), inside the area
+  their drive check uses; a start point outside it refuses the probe at its start.
+- At the end of the capture time (e05) or after the last FPS phase (e06a) no new screenshot is requested, and the
+  requests in flight are drained with the rig camera and the bands still in place before the probe ends, so every
+  `Screenshot saved` line of the play comes before its END line.
+- E-05 also checks that the rig camera was current and attached on every request, and the vFOV read back.
+- E-06A judges the grid images (slalom, brake, curve) and the backlog images separately at each FPS setting, and
+  is INCOMPLETE when slalom, backlog or brake has no counted marker or its `e06a_phases.csv` row is not `ok`.
+- The fiducial is laid out on `WorkspaceWidget.GetWidth() x GetHeight()`, which is the window's render target in
+  physical pixels; the run header logs `fiducial.dpi_scale`.

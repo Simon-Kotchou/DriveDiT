@@ -7,14 +7,21 @@
 //            (e10_frames.csv) and per physics step (e10_steps.csv), and writes a telemetry row every k-th step
 //            (e10_telemetry.csv), k = max(1, round(m_fE10TelemetryPeriodS / GetFixedTimeSlice())). r2 4.4: the
 //            EOnPostSimulate count per world-second is 1/dt +-1 and the telemetry comes every k steps, 0 missed.
+//            Step and telemetry rows also carry world_ts_ms = BaseWorld.GetTimestamp().DiffMilliseconds(start): the
+//            dc-2.0 clock, next to GetWorldTime (TBD-1).
 //   e04      one shot, needs DC_Ego. Reads the S105's prefab, component classes, gearbox, assistance mode and engine
 //            facts (e04_vehicle.txt, e04_components.csv). Read only: nothing on the vehicle is changed.
 //   e20      one shot. Dumps every variable of the engine and game user-settings modules generically
 //            (e20_settings.csv) and the display facts (e20_display.txt). Read only: no setting is changed or saved.
-//   e19      file-writer cases c01..c09, one per frame, c05 (a write through a READ handle) last. Each case is also
-//            logged on the console, so the result survives even if the CSV writer itself cannot be trusted.
-//   e19kill  opt-in, never in the default plan. Writes chunk files and an acknowledged commit log for a manual
-//            "taskkill /F" during the kill window; e19_write.py --kill checks the commit log afterwards.
+//   e19      file-writer cases c01..c11, one per frame, c05 (a write through a READ handle) last. Each case is also
+//            logged on the console, so the result survives even if the CSV writer itself cannot be trusted. c10
+//            rewrites a 17-byte file with 5 bytes through a new WRITE handle (does WRITE truncate? the dc-2.0
+//            heartbeat), c11 appends one line per open-APPEND-write-close cycle (the dc-2.0 commit-log pattern).
+//   e19kill  opt-in, never in the default plan. Writes chunk files and two acknowledged commit logs for a manual
+//            "taskkill /F" during the kill window: e19_commit.csv through one handle kept open, and
+//            e19_commit_append.csv opened with APPEND, written and closed for every line (the dc-2.0 pattern);
+//            e19_write.py --kill checks both afterwards. A chunk or commit line that fails is reported to the
+//            context, so the runner ends the probe with write_fail.
 //
 // Every number that could depend on the build is an attribute (echoed as params.* into each run header); no clock
 // is a CallLater: e19kill paces itself on world time in OnProbeFrame.
@@ -39,7 +46,9 @@ class DC_ProbeEngine : DC_ProbeComponent
 	static const string ID_E20 = "e20";
 
 	//! E-19 case order: c05 runs last, only it could take the process down
-	static const int E19_CASE_COUNT = 9;
+	static const int E19_CASE_COUNT = 11;
+	//! c11: open-APPEND-write-close cycles after the first line
+	static const int E19_APPEND_CYCLES = 3;
 	static const string E19_ROW = "0123456789abcdef\n";
 	static const string E19_RO_DIR = "$profile:DC_Probes/e19";
 	static const string E19_RO_TARGET = "$profile:DC_Probes/e19/ro_target.txt";
@@ -91,6 +100,8 @@ class DC_ProbeEngine : DC_ProbeComponent
 	protected float m_fE10PreTimeSliceS;
 	protected int m_iE10PreRenderFrame;
 	protected int m_iE10LastTelemetryStep = -1;
+	protected WorldTimestamp m_E10StartTimestamp;	//!< BaseWorld.GetTimestamp() at the start of e10
+	protected bool m_bE10HasTimestamp;
 
 	// E-04, E-20
 	protected bool m_bE04Done;
@@ -105,6 +116,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 	// e19kill
 	protected ref DC_ProbeContext m_KillContext;
 	protected ref DC_ProbeCsv m_KillCommit;
+	protected string m_sKillAppendPath;		//!< e19_commit_append.csv: one open-APPEND-write-close cycle per line
 	protected string m_sKillChunkDir;
 	protected int m_iKillChunkId;
 	protected int m_iKillKey;
@@ -242,6 +254,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 			m_Row.AddFloat(worldMs, 3);
 			m_Row.AddFloat(timeSlice, 6);
 			m_Row.AddInt(runner.GetRenderFrame());
+			m_Row.AddFloat(GetE10TimestampMs(), 3);
 			m_E10Steps.WriteRow(m_Row);
 			m_iE10PreStep = -1;
 		}
@@ -259,7 +272,21 @@ class DC_ProbeEngine : DC_ProbeComponent
 		m_Row.AddFloat(worldMs, 3);
 		m_Row.AddInt(m_iE10K);
 		m_Row.AddFloat(speedKmh, 3);
+		m_Row.AddFloat(GetE10TimestampMs(), 3);
 		m_E10Telemetry.WriteRow(m_Row);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! BaseWorld.GetTimestamp().DiffMilliseconds(start of e10) [ms] (BaseWorld.c:247, WorldTimestamp.c:30; both in
+	//! 1.9): the clock dc-2.0 takes world_time_ms from. -1 without a world or a start timestamp
+	protected float GetE10TimestampMs()
+	{
+		BaseWorld world = GetGame().GetWorld();
+		if (!world || !m_bE10HasTimestamp)
+			return -1;
+
+		WorldTimestamp now = world.GetTimestamp();
+		return now.DiffMilliseconds(m_E10StartTimestamp);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -357,6 +384,13 @@ class DC_ProbeEngine : DC_ProbeComponent
 		m_iE10K = ComputeTelemetryK();
 		m_iE10PreStep = -1;
 		m_iE10LastTelemetryStep = -1;
+		m_bE10HasTimestamp = false;
+		BaseWorld world = GetGame().GetWorld();
+		if (world)
+		{
+			m_E10StartTimestamp = world.GetTimestamp();
+			m_bE10HasTimestamp = true;
+		}
 
 		array<string> frameColumns = {"render_frame", "world_time_ms", "tick_ms", "frame_timeslice_s", "fixed_steps", "n_simulate", "n_postsimulate", "n_fixedframe", "n_postfixedframe", "simulate_total", "postsimulate_total", "fixedframe_total", "postfixedframe_total", "fps_avg", "paused", "step_source"};
 		m_E10Frames = ctx.OpenCsv("e10_frames", frameColumns);
@@ -365,13 +399,13 @@ class DC_ProbeEngine : DC_ProbeComponent
 
 		if (m_bE10StepRows)
 		{
-			array<string> stepColumns = {"physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre", "world_time_ms_post", "timeslice_post_s", "render_frame_post"};
+			array<string> stepColumns = {"physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre", "world_time_ms_post", "timeslice_post_s", "render_frame_post", "world_ts_ms_post"};
 			m_E10Steps = ctx.OpenCsv("e10_steps", stepColumns);
 			if (!m_E10Steps)
 				return false;
 		}
 
-		array<string> telemetryColumns = {"physics_step", "world_time_ms", "k", "speed_kmh"};
+		array<string> telemetryColumns = {"physics_step", "world_time_ms", "k", "speed_kmh", "world_ts_ms"};
 		m_E10Telemetry = ctx.OpenCsv("e10_telemetry", telemetryColumns);
 		if (!m_E10Telemetry)
 			return false;
@@ -600,10 +634,13 @@ class DC_ProbeEngine : DC_ProbeComponent
 		{
 			int width = workspace.GetWidth();
 			int height = workspace.GetHeight();
+			// GetWidth/GetHeight are the render-target size in physical pixels (WorkspaceWidget.c:37-40); the
+			// reference-unit size is DPIUnscale of it, as vanilla computes it (SCR_ActionMenuInteractionDisplay.c:507)
 			display.Insert("workspace_w=" + IntText(width));
 			display.Insert("workspace_h=" + IntText(height));
-			display.Insert("workspace_phys_w=" + FloatText(workspace.DPIScale(width), 2));
-			display.Insert("workspace_phys_h=" + FloatText(workspace.DPIScale(height), 2));
+			display.Insert("workspace_ref_w=" + FloatText(workspace.DPIUnscale(width), 2));
+			display.Insert("workspace_ref_h=" + FloatText(workspace.DPIUnscale(height), 2));
+			display.Insert("dpi_scale=" + FloatText(workspace.DPIScale(1), 6));
 			display.Insert("dpi_user=" + FloatText(workspace.GetUserDPIScale(), 4));
 		}
 		else
@@ -746,12 +783,12 @@ class DC_ProbeEngine : DC_ProbeComponent
 		if (!m_E19Cases)
 			return false;
 
-		ctx.Log("E-19: 9 writer cases, one per frame; c05 (write through a READ handle) runs last");
+		ctx.Log("E-19: 11 writer cases, one per frame; c05 (write through a READ handle) runs last");
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Runs the next case: c01 c02 c03 c04 c06 c07 c08 c09, then c05
+	//! Runs the next case: c01 c02 c03 c04 c06 c07 c08 c09 c10 c11, then c05
 	protected void RunNextE19Case()
 	{
 		if (!m_E19Context || m_iE19NextCase >= E19_CASE_COUNT)
@@ -776,6 +813,10 @@ class DC_ProbeEngine : DC_ProbeComponent
 			RunE19SecondWriter();
 		else if (index == 7)
 			RunE19ReadOnlyTarget();
+		else if (index == 8)
+			RunE19OverwriteShorter(dir);
+		else if (index == 9)
+			RunE19AppendReopen(dir);
 		else
 			RunE19ReadHandle();
 	}
@@ -1014,6 +1055,104 @@ class DC_ProbeEngine : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! c10_overwrite_shorter: a 17-byte file opened again with WRITE and given 5 bytes. The length read back through
+	//! a READ handle after the close says whether WRITE truncates (5) or keeps the old tail (17): the dc-2.0
+	//! heartbeat rewrites one file every 5 s (TBD-3). Observed, not judged; detected = the 5-byte write came back short
+	protected void RunE19OverwriteShorter(string dir)
+	{
+		string path = dir + "/c10_overwrite_shorter.txt";
+		FileHandle first = FileIO.OpenFile(path, FileMode.WRITE);
+		if (!first)
+		{
+			WriteE19Case("c10_overwrite_shorter", "rewrite_17_byte_file_with_5_bytes", path, "WRITE", false, 5, "", "", "", "len:5_truncates_or_17_keeps_tail", true, "unexpected");
+			return;
+		}
+
+		first.Write(E19_ROW);
+		first.Close();
+
+		FileHandle second = FileIO.OpenFile(path, FileMode.WRITE);
+		if (!second)
+		{
+			WriteE19Case("c10_overwrite_shorter", "rewrite_17_byte_file_with_5_bytes", path, "WRITE", false, 5, "", "", "", "len:5_truncates_or_17_keeps_tail", true, "unexpected");
+			return;
+		}
+
+		int written = second.Write("short");
+		int pos = second.GetPos();
+		second.Close();
+
+		int lengthClosed = -1;
+		FileHandle check = FileIO.OpenFile(path, FileMode.READ);
+		if (check)
+		{
+			lengthClosed = check.GetLength();
+			check.Close();
+		}
+
+		string verdict = "observed";
+		if (lengthClosed == 5)
+			verdict = "truncates";
+		else if (lengthClosed == E19_ROW.Length())
+			verdict = "keeps_tail";
+
+		WriteE19Case("c10_overwrite_shorter", "rewrite_17_byte_file_with_5_bytes", path, "WRITE", true, 5, IntText(written), IntText(pos), IntText(lengthClosed), "len:5_truncates_or_17_keeps_tail", written != 5, verdict);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! c11_append_reopen: one 17-byte line written with WRITE, then E19_APPEND_CYCLES cycles of OpenFile(APPEND),
+	//! Write(line), Close (the dc-2.0 commit-log pattern). Every return is 17 and the length read back is
+	//! (1 + cycles) x 17: verdict ok; anything else is detected
+	protected void RunE19AppendReopen(string dir)
+	{
+		string path = dir + "/c11_append_reopen.txt";
+		int lineBytes = E19_ROW.Length();
+		int expectedLength = (1 + E19_APPEND_CYCLES) * lineBytes;
+		FileHandle create = FileIO.OpenFile(path, FileMode.WRITE);
+		if (!create)
+		{
+			WriteE19Case("c11_append_reopen", "append_reopen_close_per_line", path, "APPEND", false, expectedLength, "", "", "", "len:" + IntText(expectedLength), true, "unexpected");
+			return;
+		}
+
+		int returnedTotal = create.Write(E19_ROW);
+		create.Close();
+
+		bool allExact = returnedTotal == lineBytes;
+		bool allOpened = true;
+		for (int cycle = 0; cycle < E19_APPEND_CYCLES; cycle++)
+		{
+			FileHandle append = FileIO.OpenFile(path, FileMode.APPEND);
+			if (!append)
+			{
+				allOpened = false;
+				allExact = false;
+				continue;
+			}
+
+			int written = append.Write(E19_ROW);
+			append.Close();
+			returnedTotal += written;
+			if (written != lineBytes)
+				allExact = false;
+		}
+
+		int lengthClosed = -1;
+		FileHandle check = FileIO.OpenFile(path, FileMode.READ);
+		if (check)
+		{
+			lengthClosed = check.GetLength();
+			check.Close();
+		}
+
+		string verdict = "unexpected";
+		if (allExact && lengthClosed == expectedLength)
+			verdict = "ok";
+
+		WriteE19Case("c11_append_reopen", "append_reopen_close_per_line", path, "APPEND", allOpened, expectedLength, IntText(returnedTotal), "", IntText(lengthClosed), "len:" + IntText(expectedLength), !allExact, verdict);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! c05_read_handle: Write("x") through a READ handle of the c01 file returns 0 (detected). Runs last.
 	protected void RunE19ReadHandle()
 	{
@@ -1102,6 +1241,16 @@ class DC_ProbeEngine : DC_ProbeComponent
 		if (!m_KillCommit)
 			return false;
 
+		// The second commit log: header now, then one open-APPEND-write-close cycle per commit line
+		m_sKillAppendPath = ctx.GetPlayDir() + "/e19_commit_append.csv";
+		array<string> appendHeader = {"chunk_id,first_key,last_key,n_rows,n_bytes"};
+		string failure;
+		if (!DC_ProbeCsv.WriteLines(m_sKillAppendPath, appendHeader, false, failure))
+		{
+			ctx.Error("e19_commit_append.csv: " + failure);
+			return false;
+		}
+
 		DC_ProbeRunner runner = ctx.GetRunner();
 		if (!runner)
 			return false;
@@ -1109,7 +1258,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 		m_fKillStartMs = runner.GetWorldTimeMs();
 		m_fKillNextChunkMs = m_fKillStartMs;
 		m_fKillNextBannerMs = m_fKillStartMs;
-		ctx.Log(string.Format("e19kill: a chunk of %1 rows every %2 s, each closed before its commit line; kill window %3 s", m_iE19KillRowsPerChunk, m_fE19KillChunkS.ToString(-1, 3), m_fE19KillWindowS.ToString(-1, 0)));
+		ctx.Log(string.Format("e19kill: a chunk of %1 rows every %2 s, each closed before its commit lines (e19_commit.csv kept open, e19_commit_append.csv reopened per line); kill window %3 s", m_iE19KillRowsPerChunk, m_fE19KillChunkS.ToString(-1, 3), m_fE19KillWindowS.ToString(-1, 0)));
 		return true;
 	}
 
@@ -1174,18 +1323,33 @@ class DC_ProbeEngine : DC_ProbeComponent
 		chunk.Close();
 		if (!ok)
 		{
-			m_KillContext.Error("chunk " + IntText(m_iKillChunkId) + " not committed: " + chunk.GetFailure());
+			// Not opened through the context: report it, so the runner stops the probe with write_fail
+			string chunkFailure = "chunk " + IntText(m_iKillChunkId) + " not committed: " + chunk.GetFailure();
+			m_KillContext.Error(chunkFailure);
+			m_KillContext.ReportWriteFailure(chunkFailure);
 			m_bKillDone = true;
 			return;
 		}
 
+		int rowCount = chunk.GetRowCount();
+		int byteCount = chunk.GetByteCount();
 		m_Row.Clear();
 		m_Row.AddInt(m_iKillChunkId);
 		m_Row.AddInt(firstKey);
 		m_Row.AddInt(m_iKillKey);
-		m_Row.AddInt(chunk.GetRowCount());
-		m_Row.AddInt(chunk.GetByteCount());
+		m_Row.AddInt(rowCount);
+		m_Row.AddInt(byteCount);
 		m_KillCommit.WriteRow(m_Row);
+
+		string commitText = string.Format("%1,%2,%3,%4,%5", m_iKillChunkId, firstKey, m_iKillKey, rowCount, byteCount);
+		array<string> commitLine = {commitText};
+		string failure;
+		if (!DC_ProbeCsv.WriteLines(m_sKillAppendPath, commitLine, true, failure))
+		{
+			m_KillContext.Error("e19_commit_append.csv: " + failure);
+			m_KillContext.ReportWriteFailure("e19_commit_append.csv: " + failure);
+			m_bKillDone = true;
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------

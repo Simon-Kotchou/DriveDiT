@@ -19,16 +19,23 @@ measured. Auto-gear works or a scripted gearbox is needed. Recorded whether it w
                            yaw rate from heading_deg differences; differences make the peak sit at the dead time
                            even with a first-order lag), cross-checked by the first step after each steering change
                            of steer_reversal whose yaw rate leaves the pre-change mean by 3 sigma (median)
-  throttle_delay_steps     first step after the throttle step where acc_lz leaves the settle baseline +-3 sigma
+  throttle_delay_steps     first step after the throttle step where acc_l_z leaves the settle baseline +-3 sigma
   brake_delay_steps        the same for the brake steps (baseline: end of the accel segment); median over phases
   steer_sign               sign of corr(cmd_steer, heading rate) at the level-correlation peak (contract: right turn
                            positive; r2 expects -1, CarSteering +1 = left); INFO yaw_axis_sign = sign of
-                           corr(angvel_ly, heading rate)
+                           corr(angvel_l_y, heading rate)
+  local_axes               the vehicle-local axes of GetVelocityLocal / GetAccelerationLocal (TBD-5; dc-2.0 assumes
+                           x right, y up, z forward): z_forward = sign of vel_l_z on driving steps whose position
+                           advances along the fwd vector (>= 90% agreement), x_right = sign of corr(acc_l_x,
+                           v x heading rate) on the steering excite steps (centripetal acceleration points into a
+                           right turn); PASS when both are measured, the detail says whether they match
   gearbox                  "automatic works" when cur_gear rises in gear_observe (cmd_gear -1) while speed rises,
                            else "scripted gearbox needed"; INFO gear_scripted honoured or overridden, shift loops
   force_enable_simulation  "not needed" (move_check ok), "needed" (only move_check_forced moved), "does not help"
   INFO                     engine_on 0 steps while driving (stall watch, expected 0 on 1.8), persistent-handbrake
-                           re-releases, the level-correlation peak (dead time plus lag), the rerun19.* checklist
+                           re-releases, the level-correlation peak (dead time plus lag), the rerun19.* checklist,
+                           gear_indices (cur_gear at standstill and while moving forward; TBD-7: no phase drives in
+                           reverse, so the reverse and neutral indices stay unmeasured)
   RESULT PASS when the car moved and every identification has a value.
 
 E-02a (r2 4.4: "fit usable by llc_v1"): per cell the steady window is the last half of excite, steps within
@@ -68,9 +75,15 @@ CHANNELS = (
     ("gear", "cmd_gear", "input_pre_gear", "input_post_gear"),
     ("handbrake", "cmd_handbrake", "input_pre_handbrake", "input_post_handbrake"),
 )
+# Names as DC_ProbeActuator.AddStepColumns writes them: DC_ProbeCsv.AddVectorColumns appends _x/_y/_z to the
+# prefixes vel_l, angvel_l, acc_l, pos and fwd (tests/test_t0eng_actuation.py builds the header from the Enforce
+# source and checks this list against it)
 STEP_COLUMNS = ("physics_step", "timeslice_s", "phase", "segment", "phase_step", "speed_kmh", "heading_deg",
-                "angvel_ly", "acc_lz", "pos_x", "pos_z", "cur_gear", "engine_on") + tuple(
-    name for channel in CHANNELS for name in channel[1:])
+                "angvel_l_y", "acc_l_z", "acc_l_x", "vel_l_z", "pos_x", "pos_z", "fwd_x", "fwd_z", "cur_gear",
+                "engine_on") + tuple(name for channel in CHANNELS for name in channel[1:])
+AXIS_SHARE = 0.9
+AXIS_MIN_STEPS = 30
+AXIS_MIN_KMH = 5.0
 DRIVING = ("accel", "excite")
 
 
@@ -293,7 +306,7 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
         cmd_prbs.update(steps.series(phase, "cmd_steer", ("excite",)))
         yaw_prbs.update(steps.yaw_series(phase, ("excite",)))
         yaw_prbs_all.update(steps.yaw_series(phase))
-        angvel_prbs_all.update(steps.series(phase, "angvel_ly"))
+        angvel_prbs_all.update(steps.series(phase, "angvel_l_y"))
     if len(cmd_prbs) < 3:
         verdict.check("steer_delay_steps", None, "no steer_prbs excite steps")
     else:
@@ -312,7 +325,7 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
                         cross.append(delay)
         identified = lag is not None and c is not None and abs(c) >= MIN_CORR and lag < max_lag
         verdict.check("steer_delay_steps", identified,
-                      "%s steps (|corr| %s of d cmd_steer vs d yaw rate over %d PRBS steps; angvel_ly: lag %s "
+                      "%s steps (|corr| %s of d cmd_steer vs d yaw rate over %d PRBS steps; angvel_l_y: lag %s "
                       "corr %s); reversal onsets median %s steps over %d changes; level-correlation peak (dead time "
                       "+ lag) %s steps" % (fmt(lag), fmt(abs(c) if c is not None else None), len(cmd_prbs),
                                            fmt(lag_w), fmt(c_w), fmt(median(cross)), len(cross), fmt(level_lag)))
@@ -332,14 +345,16 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
                       "used by e02a of the same Play" % (fmt(sign), fmt(c), fmt(lag)))
         angvel = {}
         for phase in prbs_phases + rev_phases:
-            angvel.update(steps.series(phase, "angvel_ly", DRIVING))
+            angvel.update(steps.series(phase, "angvel_l_y", DRIVING))
         c_axis = corr_at_lag(angvel, yaw_all, 0)
-        verdict.info("yaw_axis_sign", "%s (corr(angvel_ly, heading rate) %s)" % (
+        verdict.info("yaw_axis_sign", "%s (corr(angvel_l_y, heading rate) %s)" % (
             fmt(None if c_axis is None else (1 if c_axis > 0 else -1)), fmt(c_axis)))
         header_sign = header_value(play, "m_iAssumedSteerSign")
         verdict.info("steer_sign_attribute", "m_iAssumedSteerSign %s" % fmt(header_sign))
 
-    # throttle / brake dead time on acc_lz
+    local_axes(verdict, steps, prbs_phases + rev_phases)
+
+    # throttle / brake dead time on acc_l_z
     for kind, base_segment in (("throttle", "settle"), ("brake", "accel")):
         delays, ran = [], 0
         for phase in steps.phases(kind):
@@ -347,7 +362,7 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
             if excite_start is None:
                 continue
             ran += 1
-            acc = steps.series(phase, "acc_lz")
+            acc = steps.series(phase, "acc_l_z")
             delay = onset_delay(acc, excite_start, BASELINE_STEPS, max_long_lag)
             if delay is not None:
                 delays.append(delay)
@@ -355,7 +370,7 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
         if ran == 0:
             verdict.check(name, None, "no %s phase with an excite segment" % kind)
         else:
-            verdict.check(name, bool(delays), "median %s steps (%s) over %d of %d %s steps; acc_lz leaves the %s "
+            verdict.check(name, bool(delays), "median %s steps (%s) over %d of %d %s steps; acc_l_z leaves the %s "
                           "baseline +-3 sigma" % (fmt(median(delays)), ",".join(str(d) for d in delays) or "-",
                                                   len(delays), ran, kind, base_segment))
 
@@ -427,6 +442,7 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
             checks["move_check_forced"]["result"] if "move_check_forced" in checks else "-"))
 
     # INFO
+    verdict.info("gear_indices", gear_indices(steps))
     stalled = sum(1 for r in steps.rows if r["segment"] in DRIVING and num(r["engine_on"]) == 0)
     verdict.info("engine_off_steps", "%d driving steps with engine_on 0 (stall watch; expected 0 on 1.8)" % stalled)
     resets = 0
@@ -439,6 +455,80 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
     for key in sorted(k for k in play.header if k.split("params.", 1)[-1].startswith("rerun19.")):
         verdict.info(key.split("params.", 1)[-1], play.header[key])
     return verdict
+
+
+def local_axes(verdict, steps, steer_phases):
+    """local_axes check (TBD-5): the sign of vel_l_z when the car advances along its forward vector, and the sign of
+    corr(acc_l_x, v x heading rate) while steering (x right when positive)."""
+    agree = disagree = 0
+    for rows in steps.by_phase.values():
+        previous = None
+        for row in rows:
+            point = (num(row["pos_x"]), num(row["pos_z"]))
+            step = int(row["physics_step"])
+            fwd = (num(row["fwd_x"]), num(row["fwd_z"]))
+            vel_z = num(row["vel_l_z"])
+            speed = num(row["speed_kmh"]) or 0.0
+            if previous is not None and previous[0] == step - 1 and row["segment"] in DRIVING \
+                    and speed >= AXIS_MIN_KMH and None not in point and None not in fwd and vel_z is not None:
+                advance = (point[0] - previous[1][0]) * fwd[0] + (point[1] - previous[1][1]) * fwd[1]
+                if advance != 0 and vel_z != 0:
+                    if (advance > 0) == (vel_z > 0):
+                        agree += 1
+                    else:
+                        disagree += 1
+            previous = (step, point)
+    total = agree + disagree
+    z_sign = None
+    if total >= AXIS_MIN_STEPS and agree >= AXIS_SHARE * total:
+        z_sign = 1
+    elif total >= AXIS_MIN_STEPS and disagree >= AXIS_SHARE * total:
+        z_sign = -1
+
+    lateral, centripetal = {}, {}
+    for phase in steer_phases:
+        acc_x = steps.series(phase, "acc_l_x", ("excite",))
+        speed = steps.series(phase, "speed_kmh", ("excite",))
+        yaw = steps.yaw_series(phase, ("excite",))
+        for step, value in acc_x.items():
+            kmh = speed.get(step)
+            if value is None or kmh is None or kmh < AXIS_MIN_KMH or step not in yaw:
+                continue
+            lateral[step] = value
+            centripetal[step] = kmh / 3.6 * math.radians(yaw[step])
+    c_x = corr_at_lag(lateral, centripetal, 0) if len(lateral) >= AXIS_MIN_STEPS else None
+    x_sign = None
+    if c_x is not None and abs(c_x) >= MIN_CORR:
+        x_sign = 1 if c_x > 0 else -1
+
+    measured = z_sign is not None and x_sign is not None
+    matches = "yes" if z_sign == 1 and x_sign == 1 else "no"
+    verdict.check("local_axes", True if measured else None,
+                  "z_forward %s (vel_l_z sign agrees with the advance along fwd on %d of %d steps), x_right %s "
+                  "(corr(acc_l_x, v x heading rate) %s over %d steering steps); dc-2.0 convention x right, z forward: "
+                  "%s" % (fmt(z_sign), agree, total, fmt(x_sign), fmt(c_x), len(lateral),
+                          matches if measured else "undecided"))
+
+
+def gear_indices(steps):
+    """cur_gear values at standstill (settle, < 0.5 km/h) and while moving forward (driving, >= 5 km/h, vel_l_z > 0).
+    Reverse and neutral cannot be told from these: no E-01 phase drives in reverse (TBD-7)."""
+    standstill, forward = {}, {}
+    for row in steps.rows:
+        gear = num(row["cur_gear"])
+        speed = num(row["speed_kmh"])
+        if gear is None or speed is None:
+            continue
+        if row["segment"] == "settle" and speed < 0.5:
+            standstill[int(gear)] = standstill.get(int(gear), 0) + 1
+        elif row["segment"] in DRIVING and speed >= AXIS_MIN_KMH and (num(row["vel_l_z"]) or 0.0) > 0:
+            forward[int(gear)] = forward.get(int(gear), 0) + 1
+
+    def text(counts):
+        return ", ".join("%d (%d steps)" % item for item in sorted(counts.items())) or "none"
+
+    return "standstill cur_gear %s; moving forward cur_gear %s; reverse and neutral not measured (TBD-7)" % (
+        text(standstill), text(forward))
 
 
 def count_shift_loops(steps):

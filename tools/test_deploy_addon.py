@@ -61,6 +61,10 @@ def manifest_entries(path=MANIFEST):
 def expected_dst(kind, src):
     if kind == "addon":
         return src[len("addons/DataCapture/"):]
+    if kind == "config":
+        for src_root, dst_root in deploy_addon.CONFIG_ROOTS:
+            if src.startswith(src_root):
+                return dst_root + src[len(src_root):]
     return SCRIPT_DST + "/" + src.rsplit("/", 1)[1]
 
 
@@ -190,6 +194,27 @@ class DeployAddonTest(unittest.TestCase):
             self.assertEqual(rc, 2, "%s: %s" % (line, out))
             self.assertIn("REFUSED", out)
             self.assertFalse(os.path.exists(self.target), "%s: refusal still wrote the target" % line)
+
+    def test_config_entries(self):
+        # DD-7-min: routes under the addon's Configs/ and vehicle cards from tools/ident/cards/ deploy byte for byte
+        configs = [(k, s) for k, s in manifest_entries() if k == "config"]
+        self.assertIn(("config", "addons/DataCapture/Configs/routes/arland_t0_loop.json"), configs)
+        self.assertEqual(deploy_addon.manifest_entry("config", "tools/ident/cards/1.8.0.13/S105.json"),
+                         ("config", "Configs/ident/cards/1.8.0.13/S105.json"))
+        self.assertEqual(deploy_addon.manifest_entry("config", "addons/DataCapture/Configs/routes/arland_t0_loop.json"),
+                         ("config", "Configs/routes/arland_t0_loop.json"))
+        for kind, src in (("config", "tools/ident/fit_steer_kappa.py"), ("config", "tools/deploy_state.json"),
+                          ("config", "addons/DataCapture/worlds/DataCapture/DC_Arland.ent"),
+                          ("config", "addons/DataCapture/Configs/routes/bad name.json"),
+                          ("addon", "addons/DataCapture/Configs/routes/arland_t0_loop.json")):
+            with self.assertRaises(deploy_addon.Refusal, msg=src):
+                deploy_addon.manifest_entry(kind, src)
+        rc, out = self.run_tool("addons/DataCapture/Configs/routes/arland_t0_loop.json")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(listing(self.target), {"Configs/routes/arland_t0_loop.json", SCRIPT_DST + "/DC_BuildInfo.c",
+                                                ".deploy_state.json"})
+        self.assertEqual(sha(os.path.join(REPO, "addons/DataCapture/Configs/routes/arland_t0_loop.json")),
+                         sha(os.path.join(self.target, "Configs/routes/arland_t0_loop.json")))
 
     def test_refuses_c_drive_and_wsl_disk_targets(self):
         # Checked in-process on the pure target_reason(): no C: or WSL-disk path is ever passed to the tool's argv.

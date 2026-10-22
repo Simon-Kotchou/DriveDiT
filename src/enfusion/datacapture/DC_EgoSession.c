@@ -90,6 +90,7 @@ class DC_EgoSession : DC_SessionModule
 	protected int m_iEpisodeStartStep;
 	protected int m_iEpisodeStartWorldMs;
 	protected int m_iLastWorldMs;
+	protected string m_sStopTermination;		//!< latched when the planned end begins during an episode
 	protected string m_sEpisodeWeather;
 	protected float m_fEpisodeTodH;
 	protected float m_fEpisodeRain;
@@ -298,13 +299,26 @@ class DC_EgoSession : DC_SessionModule
 		if (m_iEpisodeId < 0 || physicsStep % m_Session.GetStepsPerDecision() != 0)
 			return;
 
-		// The first terminal event wins: a termination the driver already reported is kept over the planned end
-		string reason = m_Recorder.GetTermination();
-		if (reason.IsEmpty() && m_Session.IsStopping())
-			reason = TERMINATION_SESSION_STOP;
+		// The first terminal event wins: the reason latched when the planned end began, else the driver's
+		string reason = m_sStopTermination;
+		if (reason.IsEmpty())
+			reason = m_Recorder.GetTermination();
 
 		if (!reason.IsEmpty())
 			EndEpisode(physicsStep, reason);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The planned end begins: the episode's terminal reason is latched now (a termination the driver already
+	//! reported, else session_stop), so a later driver report cannot replace the earlier event
+	override void OnSessionStopping(string endReason)
+	{
+		if (m_iEpisodeId < 0 || !m_sStopTermination.IsEmpty())
+			return;
+
+		m_sStopTermination = m_Recorder.GetTermination();
+		if (m_sStopTermination.IsEmpty())
+			m_sStopTermination = TERMINATION_SESSION_STOP;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -320,8 +334,12 @@ class DC_EgoSession : DC_SessionModule
 		if (m_iEpisodeId < 0)
 			return;
 
-		// The first terminal event wins: a termination the driver already reported is kept
-		string reason = m_Recorder.GetTermination();
+		// The first terminal event wins: the reason latched at the planned end, else a termination the driver already
+		// reported, else the session's
+		string reason = m_sStopTermination;
+		if (reason.IsEmpty())
+			reason = m_Recorder.GetTermination();
+
 		if (reason.IsEmpty())
 		{
 			reason = TERMINATION_SESSION_STOP;
@@ -459,6 +477,7 @@ class DC_EgoSession : DC_SessionModule
 
 		m_iEpisodeId = -1;
 		m_EpisodeInfo = null;
+		m_sStopTermination = string.Empty;
 		m_Session.SetEpisodeId(-1);
 		m_Recorder.ClearEpisode();
 		string failure;

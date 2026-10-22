@@ -248,6 +248,12 @@ class DC_SessionStream
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Drops what is buffered without writing it (never acknowledged); the stream stays open
+	void DiscardBuffered()
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
 	bool HasFailed()
 	{
 		return false;
@@ -1915,8 +1921,14 @@ class DC_Session : SCR_BaseGameModeComponent
 			return;
 		}
 
+		// After a failure the buffered ordinary events are never acknowledged: only the script_error row is written,
+		// keyed right after the last committed event so event_seq stays contiguous
 		if (m_bWriteFailed)
+		{
+			events.DiscardBuffered();
+			m_iEventSeq = events.GetLastCommittedKey() + 1;
 			LogEvent("script_error", "reason=write_fail");
+		}
 
 		if (!events.Close())
 			NoteCloseFailure(events);

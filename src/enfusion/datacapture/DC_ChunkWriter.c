@@ -266,6 +266,13 @@ class DC_ChunkWriter : DC_SessionStream
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Drops the buffered rows unwritten (never acknowledged); the writer stays open
+	override void DiscardBuffered()
+	{
+		m_aLines.Clear();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Drops the buffered rows unwritten (never acknowledged) and closes. Idempotent
 	override void Abandon()
 	{

@@ -1,0 +1,346 @@
+{
+  "schema": "drivedit.features/1",
+  "features_version": "features_v1",
+  "contract_version": "dc-2.0",
+  "status": "DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22",
+  "spec": "docs/capture_contract/dc-2.0.md",
+  "streams": "docs/capture_contract/dc-2.0.streams.json",
+  "classes": {
+    "student_input": "may reach a deployed model (world model or policy) as an input, within its role's offsets; available at test time on every map through the bridge; never absolute",
+    "teacher_input": "privileged; may reach a teacher model only, never a deployed student",
+    "aux_target": "loss side only (targets, auxiliary targets, masks); never an input to any role",
+    "eval_only": "evaluation, stratification and bookkeeping; never an input and never a target"
+  },
+  "roles": {
+    "world_model": "the DriveDiT world model: a transition is (obs_t, action_cmd applied over physics steps (P_t, P_t + N], obs_t+1)",
+    "policy": "the driving policy: predicts action_label at t from inputs at <= t, with action history <= t-1",
+    "teacher": "a privileged or bidirectional teacher used only for training (never deployed)"
+  },
+  "offsets": {
+    "unit": "decision step",
+    "decision_hz": 10,
+    "physics_steps_per_decision": 6,
+    "tbd": "TBD-1",
+    "decision_step_rule": "decision step t is the physics step P_t with P_t mod physics_steps_per_decision == 0; the HL decides in EOnPostSimulate of P_t from the state after step P_t, and the command applies in steps P_t + 1 .. P_t + N (N = physics_steps_per_decision; streams JSON timing)",
+    "zero": "offset 0 = the value at t: for state, nav and image the state after step P_t; for action_cmd and action_exec the command applied over steps (P_t, P_t + N]",
+    "max_offset": "an input may use offsets <= max_offset; null with input true = unbounded within the clip (teacher only)",
+    "fallback_5hz": {
+      "rule": "at image_hz 5 (TBD-2 fallback) the HL decision rate drops to 5 Hz, because the decision interval is the training interval (r2 3.5); tensor names stay, action_cmd stays [T,3]",
+      "decision_hz": 5,
+      "physics_steps_per_decision": 12,
+      "shapes": {"action_exec": ["T", 12, 4]}
+    }
+  },
+  "rules": [
+    "Only student_input channels reach a deployed model (L3); the builder (DD-11) enforces the offsets and C24 checks them (DD-5).",
+    "The world model conditions on action_cmd at offset 0 and on state history; it is never conditioned on realised future state.",
+    "The policy sees action_cmd and action_exec only as history (offset <= -1); state, nav and style at offset <= 0.",
+    "aux_target channels are never inputs; eval_only channels are never inputs or targets.",
+    "No student_input channel is absolute (world-frame pose, heading, velocity, altitude, map or build identity).",
+    "build_scoped channels are raw engine inputs and are never pooled across build_keys (MIGRATION_1_9 3.2).",
+    "pin_id and build_key are eval_only: no model-visible build token (MIGRATION_1_9 2.2)."
+  ],
+  "c24_forbidden_inputs": {
+    "names": [
+      "map_id",
+      "terrain",
+      "pos_x",
+      "pos_y",
+      "pos_z",
+      "heading_world_rad",
+      "vel_world_x",
+      "vel_world_y",
+      "vel_world_z",
+      "distance_total_m",
+      "route_progress_m",
+      "region",
+      "split",
+      "session_id",
+      "pin_id",
+      "build_key",
+      "anchor_2s_x",
+      "anchor_2s_y",
+      "anchor_4s_x",
+      "anchor_4s_y",
+      "anchor_6s_x",
+      "anchor_6s_y",
+      "fut_dx",
+      "fut_dy",
+      "fut_dpsi"
+    ],
+    "patterns": ["anchor_*", "fut_*", "*_world_*", "goal_*"],
+    "meaning": "map_id, absolute pose, altitude, distance_total, world-frame heading/velocity, hindsight goals and anchors (including planned-time goals at +2/+4/+6 s), anything derived from future telemetry, and build or session identity (r2 2.3 L3, 3.3; MIGRATION_1_9 2.2)"
+  },
+  "tensors": [
+    {
+      "name": "image",
+      "shape": ["T", 3, 288, 512],
+      "channel_axis": 1,
+      "class": "student_input",
+      "kind": "observation",
+      "access": {
+        "world_model": {"input": true, "max_offset": 0, "target": true},
+        "policy": {"input": true, "max_offset": 0, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose captured frame has last_physics_step <= P_t; t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period. The builder records the realised age per decision step (derived decision_index).",
+      "channels": [
+        {"name": "image_r", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Red."},
+        {"name": "image_g", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Green."},
+        {"name": "image_b", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Blue."}
+      ]
+    },
+    {
+      "name": "state",
+      "shape": ["T", 4],
+      "class": "student_input",
+      "kind": "observation",
+      "access": {
+        "world_model": {"input": true, "max_offset": 0, "target": false},
+        "policy": {"input": true, "max_offset": 0, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "Values at <= t only: telemetry_export at P_t, the state after step P_t, which holds no step of action_cmd_t. The world model is never conditioned on realised future state.",
+      "channels": [
+        {"name": "speed_mps", "unit": "m/s", "source": "telemetry_export.speed_fwd_mps", "absolute": false, "build_scoped": false, "desc": "Signed forward speed."},
+        {"name": "yaw_rate_rps", "unit": "rad/s", "source": "telemetry_export.yaw_rate_rps", "absolute": false, "build_scoped": false, "sign": "right+", "tbd": "TBD-5", "desc": "Yaw rate, right-positive."},
+        {"name": "acc_long_achieved_mps2", "unit": "m/s2", "source": "telemetry_export.acc_long_mps2", "absolute": false, "build_scoped": false, "desc": "Achieved longitudinal acceleration (separate from the desired a_target)."},
+        {"name": "dir_state", "unit": "-", "source": "telemetry_export.dir_state", "absolute": false, "build_scoped": false, "tbd": "TBD-7", "desc": "Drive direction -1/0/+1."}
+      ]
+    },
+    {
+      "name": "action_cmd",
+      "shape": ["T", 3],
+      "class": "student_input",
+      "kind": "action",
+      "access": {
+        "world_model": {"input": true, "max_offset": 0, "target": false},
+        "policy": {"input": true, "max_offset": -1, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "What was executed through llc_v1 over steps (P_t, P_t + N]: ctl.hl_* at P_t + 1, the command decided in EOnPostSimulate of P_t. World model: conditioning at offset 0. Policy: history only (offset <= -1).",
+      "channels": [
+        {"name": "kappa_target", "unit": "1/m", "source": "ctl.hl_kappa", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Curvature target, right-positive."},
+        {"name": "a_target", "unit": "m/s2", "source": "ctl.hl_accel", "absolute": false, "build_scoped": false, "desc": "Desired acceleration."},
+        {"name": "dir_cmd", "unit": "-", "source": "ctl.hl_dir", "absolute": false, "build_scoped": false, "desc": "Direction command -1/0/+1."}
+      ]
+    },
+    {
+      "name": "action_label",
+      "shape": ["T", 3],
+      "class": "aux_target",
+      "kind": "target",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": false},
+        "policy": {"input": false, "max_offset": null, "target": true},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "The expert's HL command at t: ctl.exp_*_now at P_t, evaluated on the state after step P_t (the state the policy sees). Equals action_cmd in mode E; differs in N/D. The policy's prediction target; never an input.",
+      "channels": [
+        {"name": "label_kappa_target", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Expert curvature target."},
+        {"name": "label_a_target", "unit": "m/s2", "source": "ctl.exp_accel_now", "absolute": false, "build_scoped": false, "desc": "Expert acceleration target."},
+        {"name": "label_dir_cmd", "unit": "-", "source": "ctl.exp_dir_now", "absolute": false, "build_scoped": false, "desc": "Expert direction."}
+      ]
+    },
+    {
+      "name": "action_exec",
+      "shape": ["T", 6, 4],
+      "class": "student_input",
+      "kind": "action",
+      "optional": true,
+      "access": {
+        "world_model": {"input": true, "max_offset": 0, "target": false},
+        "policy": {"input": true, "max_offset": -1, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "Optional diagnostic / world-model ablation: the 60 Hz llc output and input_post of the ctl rows P_t + 1 .. P_t + N (physics_steps_per_decision rows, TBD-1; 12 at the 5 Hz fallback). Raw engine inputs: build-scoped, never pooled across builds. Policy: history only.",
+      "channels": [
+        {"name": "exec_steer_cmd", "unit": "1", "source": "ctl_export.steer_cmd", "absolute": false, "build_scoped": true, "sign": "right+", "tbd": "TBD-5", "desc": "Commanded steering, contract sign."},
+        {"name": "exec_throttle", "unit": "1", "source": "ctl.llc_throttle", "absolute": false, "build_scoped": true, "desc": "Throttle."},
+        {"name": "exec_brake", "unit": "1", "source": "ctl.llc_brake", "absolute": false, "build_scoped": true, "desc": "Brake."},
+        {"name": "exec_steer_input", "unit": "1", "source": "ctl_export.steer_input", "absolute": false, "build_scoped": true, "sign": "right+", "tbd": "TBD-5", "desc": "Steering input readback, contract sign."}
+      ]
+    },
+    {
+      "name": "nav",
+      "shape": ["T", 10],
+      "class": "student_input",
+      "kind": "observation",
+      "access": {
+        "world_model": {"input": true, "max_offset": 0, "target": false},
+        "policy": {"input": true, "max_offset": 0, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "drivedit_nav.nav_v1(route, pose) at the pose of P_t (one function for the harvester, the builder and the bridge; C22). Distance-based route points, never time-based or hindsight goals (RT-C03). nav_valid 0 (more than 30 m off the route) sets policy_valid and wm_valid to 0.",
+      "channels": [
+        {"name": "p20_x", "unit": "m", "source": "nav.p20_x", "absolute": false, "build_scoped": false, "desc": "Route point 20 m ahead, ego forward."},
+        {"name": "p20_y", "unit": "m", "source": "nav.p20_y", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route point 20 m ahead, ego right."},
+        {"name": "p40_x", "unit": "m", "source": "nav.p40_x", "absolute": false, "build_scoped": false, "desc": "Route point 40 m ahead, ego forward."},
+        {"name": "p40_y", "unit": "m", "source": "nav.p40_y", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route point 40 m ahead, ego right."},
+        {"name": "man_left", "unit": "-", "source": "nav.man_left", "absolute": false, "build_scoped": false, "desc": "Next maneuver: left."},
+        {"name": "man_straight", "unit": "-", "source": "nav.man_straight", "absolute": false, "build_scoped": false, "desc": "Next maneuver: straight."},
+        {"name": "man_right", "unit": "-", "source": "nav.man_right", "absolute": false, "build_scoped": false, "desc": "Next maneuver: right."},
+        {"name": "man_follow", "unit": "-", "source": "nav.man_follow", "absolute": false, "build_scoped": false, "desc": "No maneuver within 200 m."},
+        {"name": "d_man", "unit": "m", "source": "nav.d_man", "absolute": false, "build_scoped": false, "desc": "Distance to the next maneuver, 0-200."},
+        {"name": "d_stop", "unit": "m", "source": "nav.d_stop", "absolute": false, "build_scoped": false, "desc": "Distance to the next commanded stop, 0-200; 200 = none."}
+      ]
+    },
+    {
+      "name": "style",
+      "shape": ["T", 3],
+      "class": "student_input",
+      "kind": "observation",
+      "access": {
+        "world_model": {"input": true, "max_offset": 0, "target": false},
+        "policy": {"input": true, "max_offset": 0, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "style_v1 per episode; nominal (1.0, 0.0 m, 2.75 m/s2) at evaluation.",
+      "channels": [
+        {"name": "style_speed_factor", "unit": "1", "source": "episodes.style_speed_factor", "absolute": false, "build_scoped": false, "desc": "Speed factor."},
+        {"name": "style_lane_offset_m", "unit": "m", "source": "episodes.style_lane_offset_m", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Lane offset, right-positive."},
+        {"name": "style_alat_max_mps2", "unit": "m/s2", "source": "episodes.style_alat_max_mps2", "absolute": false, "build_scoped": false, "desc": "a_lat,max."}
+      ]
+    },
+    {
+      "name": "masks",
+      "shape": ["T", 5],
+      "class": "aux_target",
+      "kind": "mask",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": false},
+        "policy": {"input": false, "max_offset": null, "target": false},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "Loss and sampling masks; never a model input and never a prediction target.",
+      "channels": [
+        {"name": "policy_valid", "unit": "-", "source": "ctl.react_visible", "absolute": false, "build_scoped": false, "desc": "Built by the builder: 0 for X/A rows, while a reaction to an actor with ctl.react_visible 0 lasts (the in-engine visibility test of r2 3.1; reserved until DD-4/DD-7), for nav_valid 0 and for decision steps without a valid image (decision_index.obs_valid 0, C29)."},
+        {"name": "wm_valid", "unit": "-", "source": "builder", "absolute": false, "build_scoped": false, "desc": "0 across gaps, fiducial failures, teleports, nav_valid 0 and decision_index.obs_valid 0."},
+        {"name": "warmup", "unit": "-", "source": "events.kind=warmup_end", "absolute": false, "build_scoped": false, "desc": "1 during the session warm-up."},
+        {"name": "env_transition", "unit": "-", "source": "events.kind=env_change", "absolute": false, "build_scoped": false, "desc": "1 for 15 s after an environment change."},
+        {"name": "teleport", "unit": "-", "source": "events.kind=teleport", "absolute": false, "build_scoped": false, "desc": "1 at a teleport or respawn."}
+      ]
+    },
+    {
+      "name": "hindsight_anchors",
+      "shape": ["T", 6],
+      "class": "aux_target",
+      "kind": "target",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": true},
+        "policy": {"input": false, "max_offset": null, "target": true},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "Ego-frame positions of the logged trajectory at +2/+4/+6 s: future information, aux target only, on C24's forbidden-input list (RT-C03).",
+      "channels": [
+        {"name": "anchor_2s_x", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "desc": "Ego x at +2 s."},
+        {"name": "anchor_2s_y", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Ego y at +2 s."},
+        {"name": "anchor_4s_x", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "desc": "Ego x at +4 s."},
+        {"name": "anchor_4s_y", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Ego y at +4 s."},
+        {"name": "anchor_6s_x", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "desc": "Ego x at +6 s."},
+        {"name": "anchor_6s_y", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Ego y at +6 s."}
+      ]
+    },
+    {
+      "name": "future_pose",
+      "shape": ["T", "H", 3],
+      "class": "aux_target",
+      "kind": "target",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": true},
+        "policy": {"input": false, "max_offset": null, "target": true},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "Ego-frame pose deltas at +1..+H decision steps (H set by the builder); aux target only.",
+      "channels": [
+        {"name": "fut_dx", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "desc": "Forward displacement."},
+        {"name": "fut_dy", "unit": "m", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Right displacement."},
+        {"name": "fut_dpsi", "unit": "rad", "source": "telemetry future pose", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Heading change, right-positive."}
+      ]
+    },
+    {
+      "name": "road_context",
+      "shape": ["T", 4],
+      "class": "aux_target",
+      "kind": "target",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": true},
+        "policy": {"input": false, "max_offset": null, "target": true},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "Road context from the matched graph and the route; aux target only (r2 3.3).",
+      "channels": [
+        {"name": "road_class", "unit": "-", "source": "road.road_class", "absolute": false, "build_scoped": false, "desc": "Matched road class (categorical)."},
+        {"name": "road_width_m", "unit": "m", "source": "telemetry.road_width_m", "absolute": false, "build_scoped": false, "desc": "Closest road width."},
+        {"name": "lane_lat_err_m", "unit": "m", "source": "telemetry.lane_lat_err_m", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Lane-relative lateral error."},
+        {"name": "lane_head_err_rad", "unit": "rad", "source": "telemetry.lane_head_err_rad", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Lane-relative heading error."}
+      ]
+    },
+    {
+      "name": "contact_events",
+      "shape": ["T", 2],
+      "class": "aux_target",
+      "kind": "target",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": true},
+        "policy": {"input": false, "max_offset": null, "target": true},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "Contact events in [t, t+dt); aux target only. Depth targets are disabled (r2 8 R31).",
+      "channels": [
+        {"name": "contact_event", "unit": "-", "source": "events.kind=collision", "absolute": false, "build_scoped": false, "desc": "1 when a contact event falls in the interval."},
+        {"name": "contact_class", "unit": "-", "source": "events.kind=collision", "absolute": false, "build_scoped": false, "desc": "vehicle/static/character/terrain (categorical)."}
+      ]
+    },
+    {
+      "name": "privileged_route",
+      "shape": ["T", 5],
+      "class": "teacher_input",
+      "kind": "observation",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": false},
+        "policy": {"input": false, "max_offset": null, "target": false},
+        "teacher": {"input": true, "max_offset": null, "target": false}
+      },
+      "rule": "Privileged geometry for a teacher only (capture-protocol 4.2 'privileged' layer); never a student input.",
+      "channels": [
+        {"name": "path_kappa_0m", "unit": "1/m", "source": "route geometry", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route curvature at the ego."},
+        {"name": "path_kappa_10m", "unit": "1/m", "source": "route geometry", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route curvature 10 m ahead."},
+        {"name": "path_kappa_20m", "unit": "1/m", "source": "route geometry", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route curvature 20 m ahead."},
+        {"name": "path_kappa_40m", "unit": "1/m", "source": "route geometry", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route curvature 40 m ahead."},
+        {"name": "lead_gap_m", "unit": "m", "source": "traffic (reserved, T2)", "absolute": false, "build_scoped": false, "desc": "Gap to the lead vehicle in the lane corridor."}
+      ]
+    },
+    {
+      "name": "eval_only",
+      "shape": ["T", "-"],
+      "class": "eval_only",
+      "kind": "meta",
+      "access": {
+        "world_model": {"input": false, "max_offset": null, "target": false},
+        "policy": {"input": false, "max_offset": null, "target": false},
+        "teacher": {"input": false, "max_offset": null, "target": false}
+      },
+      "rule": "Evaluation, stratification and bookkeeping only; never an input and never a target.",
+      "channels": [
+        {"name": "pos_x", "unit": "m", "source": "telemetry.pos_x", "absolute": true, "build_scoped": false, "desc": "Absolute position x."},
+        {"name": "pos_y", "unit": "m", "source": "telemetry.pos_y", "absolute": true, "build_scoped": false, "desc": "Altitude."},
+        {"name": "pos_z", "unit": "m", "source": "telemetry.pos_z", "absolute": true, "build_scoped": false, "desc": "Absolute position z."},
+        {"name": "heading_world_rad", "unit": "rad", "source": "telemetry_export.heading_rad", "absolute": true, "build_scoped": false, "desc": "World-frame heading."},
+        {"name": "vel_world_x", "unit": "m/s", "source": "telemetry (world rotation of vel_local)", "absolute": true, "build_scoped": false, "desc": "World-frame velocity x."},
+        {"name": "vel_world_y", "unit": "m/s", "source": "telemetry (world rotation of vel_local)", "absolute": true, "build_scoped": false, "desc": "World-frame velocity y."},
+        {"name": "vel_world_z", "unit": "m/s", "source": "telemetry (world rotation of vel_local)", "absolute": true, "build_scoped": false, "desc": "World-frame velocity z."},
+        {"name": "distance_total_m", "unit": "m", "source": "telemetry (integrated)", "absolute": true, "build_scoped": false, "desc": "Distance driven since the start."},
+        {"name": "route_progress_m", "unit": "m", "source": "nav.progress_m", "absolute": true, "build_scoped": false, "desc": "Ordered route progress."},
+        {"name": "map_id", "unit": "-", "source": "session.json map.map_id", "absolute": true, "build_scoped": false, "desc": "Canonical map id."},
+        {"name": "terrain", "unit": "-", "source": "session.json map.terrain", "absolute": true, "build_scoped": false, "desc": "Engine terrain name."},
+        {"name": "region", "unit": "-", "source": "road.region", "absolute": true, "build_scoped": false, "desc": "splits_v2 region per frame."},
+        {"name": "split", "unit": "-", "source": "route split tag", "absolute": true, "build_scoped": false, "desc": "Split of the episode."},
+        {"name": "session_id", "unit": "-", "source": "session.json session_id", "absolute": true, "build_scoped": false, "desc": "Session id."},
+        {"name": "pin_id", "unit": "-", "source": "session.json pin.pin_id", "absolute": true, "build_scoped": false, "desc": "Pin id; never a model-visible build token."},
+        {"name": "build_key", "unit": "-", "source": "session.json pin.build_key, else the harvester's harvest.json", "absolute": true, "build_scoped": false, "desc": "Build identity; never a model-visible build token."},
+        {"name": "exp_now_60hz", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "60 Hz expert re-evaluation, diagnostics only."}
+      ]
+    }
+  ]
+}

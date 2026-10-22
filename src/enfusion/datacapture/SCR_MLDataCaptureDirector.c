@@ -19,22 +19,32 @@
 //   - keeps every capture group simulated wherever the camera is (1.8 deactivates AI at max LOD, about 1 km or more
 //     from every observer): pins its agents to full AI LOD (AIAgent.SetPermanentLOD(0), group PreventMaxLOD, CRITICAL
 //     spawn importance; m_bPinDriverLOD) and puts a temporary local observer on its vehicle
-//     (ObserversSystem.InsertObserverSP; m_bVehicleObservers). Both are undone when the director stops. The seated,
+//     (ObserversSystem.InsertObserverSP; m_bVehicleObservers). Both are undone when the director stops. The ready,
 //     statistics and boarding-window lines log the agent count, dormancy, observer range and per-agent LOD;
 //   - after each completed waypoint assigns a different one, never the current one and never one within 2x the
 //     completion radius of the vehicle or of the current target; when no target qualifies the group gets none and
 //     the choice is retried (no fallback to an excluded target);
 //   - once every group has been attempted ("Spawned N/M groups"), opens a boarding window of m_iBoardingWindowMs and
-//     polls the pilot seats. It starts the SCR_MLDataCollector session as soon as every configured group has a living
-//     seated driver, otherwise when the window ends, with the groups seated by then if there are at least
+//     polls the pilot seats. A group is READY when a living driver sits in its pilot seat AND that driver's AI agent
+//     is activated and below max LOD (direct seating teleports the body in whatever the AI state, so a seated driver
+//     alone does not prove that the car can drive). It starts the SCR_MLDataCollector session as soon as every
+//     configured group is ready; or, when some groups failed to start or to get a driver, as soon as every group that
+//     still can is ready; otherwise when the window ends, with the groups ready by then if there are at least
 //     m_iMinSeatedGroups of them (default 1; m_iMinSeatedGroups = m_iMaxAIGroups is the old all-or-nothing gate).
-//     Right before StartSession it registers the seated vehicles in group-id order, so vehicle_id is the registration
-//     index (k - 1 when every group is seated; session_info.txt maps vehicle_<id> to AI_Car_k). Missing groups are
-//     listed one per line. With no seated driver, fewer than the minimum, or a minimum that can no longer be reached
-//     it logs an ERROR and starts no session. A driver seated after the session started is not added to it (the
-//     collector's vehicle list and session_info.txt are fixed at StartSession): that is logged, the car keeps driving;
-//   - teleports a vehicle back to its own group's spawn point when it has not moved for m_fStuckTimeS while a living
-//     driver sat in its pilot seat (occupancy is re-read on every monitor tick, independent of the readiness poll);
+//     A session with fewer than m_iMaxAIGroups vehicles does not meet the TKT-01 acceptance criteria: it is logged
+//     at ERROR level ("TKT-01 acceptance NOT met") and still started, as smoke data.
+//     Right before StartSession it registers the ready vehicles in group-id order, so vehicle_id is the registration
+//     index (k - 1 when every group is ready; session_info.txt maps vehicle_<id> to AI_Car_k). Missing groups are
+//     listed one per line. With no ready driver, fewer than the minimum, or a minimum that can no longer be reached
+//     it logs an ERROR and starts no session. A driver that becomes ready after the session started is not added to
+//     it (the collector's vehicle list and session_info.txt are fixed at StartSession): that is logged once, the car
+//     keeps driving;
+//   - m_iDrivingCheckMs after the session start, checks once that every registered vehicle moved at least
+//     m_fDrivingCheckMinDistanceM since it was registered, and logs an ERROR for each one that did not (a parked car
+//     in the session);
+//   - teleports a vehicle back to its own group's spawn point when it has not moved for m_fStuckTimeS while a ready
+//     driver sat in its pilot seat (occupancy is re-read on every monitor tick, independent of the readiness poll; a
+//     driver whose AI is deactivated cannot drive, so resetting its car would not help);
 //   - stops the collector session (SCR_MLDataCollector.StopSession) when the game mode or the game ends.
 //
 // LIFECYCLE (vanilla 1.8.0.13 Game/GameMode/SCR_BaseGameMode.c:428-458 and :499-521): the authority's first
@@ -45,9 +55,9 @@
 // OnGameModeStart; both paths go through the same idempotent StartDirector(), so at most one of them starts it.
 //
 // Call queue: at most one entry per director function is ever pending (one repeating spawn tick, one repeating
-// monitor tick that also runs the per-group seating retries and waypoint assignments, one readiness poll, one
-// fallback timer), so a single ScriptCallQueue.Remove per function in StopDirector() clears everything the director
-// queued.
+// monitor tick that also runs the per-group seating retries, the waypoint assignments and the driving check, one
+// readiness poll, one fallback timer), so a single ScriptCallQueue.Remove per function in StopDirector() clears
+// everything the director queued.
 //
 // Failure handling: a group whose spawn point, vehicle, vehicle simulation, pilot seat, group prefab, driver prefab
 // or waypoint prefab is missing or invalid is skipped with an ERROR before anything is spawned for it (no shared-car
@@ -117,9 +127,13 @@ class SCR_MLDataCaptureGroupState
 	bool m_bObserverAdded;			//!< a temporary local observer follows the vehicle (ObserversSystem.InsertObserverSP)
 
 	bool m_bDriverSeated;			//!< a living character sits in the pilot seat (latest monitor or readiness tick)
+	bool m_bDriverReady;			//!< ... and its AI agent is activated and below max LOD (latest monitor or readiness tick)
 	float m_fFirstSeatedS = -1;		//!< director time [s] when a seated driver was first seen, -1 = never
-	bool m_bSeatedLogged;			//!< the "driver seated" line was logged
+	float m_fFirstReadyS = -1;		//!< director time [s] when a ready driver was first seen, -1 = never
+	bool m_bReadyLogged;			//!< the "driver ready" line was logged (during the boarding window)
+	bool m_bLateWarned;				//!< the "ready after the boarding window, not in the session" warning was logged
 	bool m_bRegistered;				//!< registered with SCR_MLDataCollector
+	float m_fDistanceAtRegistration;	//!< m_fDistance when the vehicle was registered (for the driving check)
 	float m_fNextAssignAtMs = -1;	//!< world time at which the next waypoint is due, -1 = none pending
 	bool m_bNoTargetWarned;			//!< the "no drive target qualifies" warning was logged since the last assignment
 
@@ -176,7 +190,7 @@ class SCR_MLDataCaptureGroupState
 }
 
 //------------------------------------------------------------------------------------------------
-[ComponentEditorProps(category: "GameScripted/DataCapture", description: "Seats one AI driver directly in each placed capture vehicle, drives them between drive-target markers and starts the SCR_MLDataCollector session once the drivers are seated")]
+[ComponentEditorProps(category: "GameScripted/DataCapture", description: "Seats one AI driver directly in each placed capture vehicle, drives them between drive-target markers and starts the SCR_MLDataCollector session once the drivers are ready (seated, AI active)")]
 class SCR_MLDataCaptureDirectorClass : SCR_BaseGameModeComponentClass
 {
 }
@@ -235,7 +249,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	[Attribute("3000", UIWidgets.Slider, "Delay before the next waypoint is assigned after one is completed [ms]", "0 20000 100", category: "Driving")]
 	protected int m_iWaypointDelay;
 
-	[Attribute("1", UIWidgets.CheckBox, "Teleport a vehicle with a seated driver back to its group's spawn point when it is stuck", category: "Driving")]
+	[Attribute("1", UIWidgets.CheckBox, "Teleport a vehicle with a ready driver (seated, AI active) back to its group's spawn point when it is stuck", category: "Driving")]
 	protected bool m_bResetStuckVehicles;
 
 	[Attribute("30", UIWidgets.Slider, "A vehicle is stuck after this long within the stuck distance [s]", "5 300 1", category: "Driving")]
@@ -264,11 +278,17 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	[Attribute("500", UIWidgets.Slider, "Driver readiness check interval [ms]", "100 5000 100", category: "Start")]
 	protected int m_iReadinessPollMs;
 
-	[Attribute("60000", UIWidgets.Slider, "Boarding window [ms], counted from 'Spawned N/M groups': the collector session starts as soon as every group has a seated driver, otherwise when the window ends with the groups seated by then", "5000 600000 1000", category: "Start")]
+	[Attribute("60000", UIWidgets.Slider, "Boarding window [ms], counted from 'Spawned N/M groups': the collector session starts as soon as every group has a ready driver (seated, AI active below max LOD), otherwise when the window ends with the groups ready by then", "5000 600000 1000", category: "Start")]
 	protected int m_iBoardingWindowMs;
 
-	[Attribute("1", UIWidgets.Slider, "Minimum number of groups with a seated driver for the session to start when the boarding window ends; set it to the number of AI groups for the old all-or-nothing gate", "1 10 1", category: "Start")]
+	[Attribute("1", UIWidgets.Slider, "Minimum number of groups with a ready driver for the session to start when the boarding window ends; set it to the number of AI groups for the old all-or-nothing gate. A session with fewer than all groups logs 'TKT-01 acceptance NOT met' at ERROR level", "1 10 1", category: "Start")]
 	protected int m_iMinSeatedGroups;
+
+	[Attribute("60000", UIWidgets.Slider, "This long after the session start, check once that every registered vehicle has moved at least the driving-check distance; ERROR for each one that has not [ms], 0 = off", "0 600000 1000", category: "Start")]
+	protected int m_iDrivingCheckMs;
+
+	[Attribute("20", UIWidgets.Slider, "Driving check: minimum distance a registered vehicle must have moved since its registration [m]", "1 500 1", category: "Start")]
+	protected float m_fDrivingCheckMinDistanceM;
 
 	// === STATE ===
 	protected bool m_bStarted;			//!< StartDirector ran (any machine), never cleared
@@ -277,6 +297,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	protected bool m_bReadinessArmed;	//!< the readiness poll was queued (after every group was attempted)
 	protected float m_fBoardingWindowStartMs;	//!< world time when the boarding window opened ("Spawned N/M groups")
 	protected bool m_bSessionStarted;	//!< this director started a collector session
+	protected float m_fDrivingCheckAtMs = -1;	//!< world time of the post-start driving check, -1 = none pending
 	protected float m_fStartTimeMs;
 	protected float m_fFallbackArmedMs;	//!< world time when FallbackStart was queued in OnPostInit
 	protected int m_iNextGroupId;		//!< next group id the spawn tick attempts
@@ -381,6 +402,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		CollectDriveTargets();
 		Print(string.Format("[DataCapture] AI LOD: max LOD %1 (agents are deactivated there); driver LOD pin %2, vehicle observers %3", AIAgent.GetMaxLOD(), m_bPinDriverLOD, m_bVehicleObservers), LogLevel.NORMAL);
 
+		// GetMinSeatedGroups() limits the minimum to 1..m_iMaxAIGroups; say so when the layer asks for more (or less).
+		if (m_iMinSeatedGroups != GetMinSeatedGroups())
+			Print(string.Format("[DataCapture] WARNING: m_iMinSeatedGroups %1 is outside 1..%2 (m_iMaxAIGroups) - using %3", m_iMinSeatedGroups, m_iMaxAIGroups, GetMinSeatedGroups()), LogLevel.WARNING);
+
 		if (m_aDriveTargets.IsEmpty())
 		{
 			Print(string.Format("[DataCapture] ERROR: no drive-target markers %1<1..%2> found - no groups spawned, no collector session", m_sDriveTargetPrefix, m_iMaxDriveTargets), LogLevel.ERROR);
@@ -434,6 +459,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	protected void StopDirector(bool stopCollector)
 	{
 		m_bActive = false;
+		m_fDrivingCheckAtMs = -1;
 
 		ArmaReforgerScripted game = GetGame();
 		if (game)
@@ -664,7 +690,17 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		// Before the driver exists, so it is pinned as it joins (GetOnAgentAdded).
 		PinGroupLOD(state);
 		AddVehicleObserver(state);
-		Print(string.Format("[DataCapture] Group %1: lod_pin=%2 (permanent LOD 0, max LOD prevented, importance CRITICAL), observer=%3 on %4 (key %5)", groupId, state.m_bLODPinned, state.m_bObserverAdded, vehicleName, OBSERVER_KEY_BASE + groupId), LogLevel.NORMAL);
+
+		// Describe only what was actually applied (the switches can be off, the observer system can be missing).
+		string pinText = "lod_pin=0";
+		if (state.m_bLODPinned)
+			pinText = "lod_pin=1 (permanent LOD 0, max LOD prevented, importance CRITICAL)";
+
+		string observerText = "observer=0";
+		if (state.m_bObserverAdded)
+			observerText = string.Format("observer=1 on %1 (key %2)", vehicleName, OBSERVER_KEY_BASE + groupId);
+
+		Print(string.Format("[DataCapture] Group %1: %2, %3", groupId, pinText, observerText), LogLevel.NORMAL);
 
 		TrySeatDriver(state);
 		ReportSpawnProgress();
@@ -790,8 +826,31 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! \return "none", "alive", "incapacitated" or "dead" for the driver character this director spawned
+	protected string DescribeDriver(IEntity driver)
+	{
+		ChimeraCharacter character = ChimeraCharacter.Cast(driver);
+		if (!character)
+			return "none";
+
+		CharacterControllerComponent controller = character.GetCharacterController();
+		if (!controller)
+			return "unknown";
+
+		ECharacterLifeState lifeState = controller.GetLifeState();
+		if (lifeState == ECharacterLifeState.ALIVE)
+			return "alive";
+
+		if (lifeState == ECharacterLifeState.INCAPACITATED)
+			return "incapacitated";
+
+		return "dead";
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! One-line diagnostics of a group: how its driver boarded, agent count, dormancy, whether an observer is within
-	//! 1 km, the group's LOD, per-agent LOD / max / permanent LOD / activation, and whether the pilot seat is taken.
+	//! 1 km, the group's LOD, per-agent LOD / max / permanent LOD / activation, the spawned driver's life state and
+	//! whether the pilot seat is taken.
 	protected string DescribeGroup(SCR_MLDataCaptureGroupState state)
 	{
 		string text = "boarding=" + typename.EnumToString(SCR_EMLDataCaptureBoarding, state.m_eBoarding);
@@ -817,7 +876,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (state.m_Vehicle)
 			pilot = state.m_Vehicle.GetPilot() != null;
 
-		return text + string.Format(" pilot=%1 lod_pin=%2 observer=%3", pilot, state.m_bLODPinned, state.m_bObserverAdded);
+		return text + string.Format(" driver=%1 pilot=%2 lod_pin=%3 observer=%4", DescribeDriver(state.m_Driver), pilot, state.m_bLODPinned, state.m_bObserverAdded);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -828,6 +887,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//! deletes the character when the seat cannot be taken. Walking is not needed, so the distance to the camera does
 	//! not matter. On failure the next attempt is due m_iSeatRetryMs later (run by MonitorVehicles); after
 	//! m_iSeatAttempts failures the group falls back to walk-in boarding.
+	//! Vanilla spawns the character at the vehicle's origin: its "spawn above the vehicle" line
+	//! (BaseCompartmentSlot.c:340, 'params.Transform[3] + SPAWN_IN_VEHICLE_OFFSET;') discards its result, identical in
+	//! 1.9. The same call teleports it into the seat, so this normally does not matter. If it does, vanilla prints
+	//! "'BaseCompartmentSlot' Trying to spawn character in compartment but it could not be moved" and returns null
+	//! (retried here), or the driver dies after seating: DescribeGroup then shows driver=dead and the group never
+	//! becomes ready.
+	//! Seating alone does not make a group ready: CheckReadiness also requires the driver's AI to be active.
 	protected void TrySeatDriver(SCR_MLDataCaptureGroupState state)
 	{
 		state.m_fNextSeatAttemptAtMs = -1;
@@ -970,7 +1036,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! After the last group was attempted: logs "Spawned N/M groups" once, opens the boarding window and queues the
-	//! readiness poll, so the log reads director start -> spawned N/M groups -> driver seated lines -> session start.
+	//! readiness poll, so the log reads director start -> spawned N/M groups -> driver ready lines -> session start.
 	protected void ReportSpawnProgress()
 	{
 		if (m_iGroupsAttempted < m_iMaxAIGroups || m_bReadinessArmed)
@@ -979,7 +1045,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		m_bReadinessArmed = true;
 		m_fBoardingWindowStartMs = GetGame().GetWorld().GetWorldTime();
 		float windowS = m_iBoardingWindowMs / 1000.0;
-		Print(string.Format("[DataCapture] Spawned %1/%2 groups - boarding window %3 s: the session starts once all %2 drivers are seated, or when the window ends with at least %4 seated", m_aGroups.Count(), m_iMaxAIGroups, windowS.ToString(-1, 0), GetMinSeatedGroups()), LogLevel.NORMAL);
+		Print(string.Format("[DataCapture] Spawned %1/%2 groups - boarding window %3 s: the session starts once the drivers of all %1 started groups are ready (seated, AI active below max LOD), or when the window ends with at least %4 ready", m_aGroups.Count(), m_iMaxAIGroups, windowS.ToString(-1, 0), GetMinSeatedGroups()), LogLevel.NORMAL);
 
 		if (m_bActive && !m_bReadinessDone)
 			GetGame().GetCallqueue().CallLater(CheckReadiness, m_iReadinessPollMs, true);
@@ -1099,35 +1165,64 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! \return true when a living character sits in the vehicle's pilot seat
-	protected bool HasLivingDriver(Vehicle vehicle)
+	//! \return the living character in the vehicle's pilot seat, or null
+	protected ChimeraCharacter GetLivingDriver(Vehicle vehicle)
 	{
 		if (!vehicle)
-			return false;
+			return null;
 
 		// GameCode/Vehicle/Vehicle.c:114; alive check as in Game/AI/ScriptedNodes/Vehicles/SCR_AIDecoTestIsDriverAliveInsideVehicle.c
 		ChimeraCharacter driver = ChimeraCharacter.Cast(vehicle.GetPilot());
 		if (!driver)
-			return false;
+			return null;
 
 		CharacterControllerComponent controller = driver.GetCharacterController();
-		return controller && controller.GetLifeState() == ECharacterLifeState.ALIVE;
+		if (!controller || controller.GetLifeState() != ECharacterLifeState.ALIVE)
+			return null;
+
+		return driver;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Re-reads whether a living driver sits in the group's pilot seat and remembers when one was first seen.
+	//! \return true when the character's AI agent is activated and below max LOD, i.e. it can actually drive.
+	//! Direct seating teleports the body into the seat whatever the AI state, so a seated driver alone proves nothing:
+	//! 1.8 deactivates an agent at max LOD (AIAgent.GetMaxLOD, about 1 km or more from every observer).
+	protected bool IsDriverAIActive(IEntity driver)
+	{
+		if (!driver)
+			return false;
+
+		AIAgent agent = SCR_AIUtils.GetAIAgent(driver); // AIControlComponent.GetControlAIAgent, unchanged in 1.9
+		return agent && agent.IsAIActivated() && agent.GetLOD() < AIAgent.GetMaxLOD();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Re-reads whether a living driver sits in the group's pilot seat and whether its AI is active (ready), and
+	//! remembers when each was first seen.
 	protected void UpdateOccupancy(SCR_MLDataCaptureGroupState state, float elapsedS)
 	{
-		state.m_bDriverSeated = HasLivingDriver(state.m_Vehicle);
+		ChimeraCharacter driver = GetLivingDriver(state.m_Vehicle);
+		state.m_bDriverSeated = driver != null;
+		state.m_bDriverReady = state.m_bDriverSeated && IsDriverAIActive(driver);
+
 		if (state.m_bDriverSeated && state.m_fFirstSeatedS < 0)
 			state.m_fFirstSeatedS = elapsedS;
+
+		if (state.m_bDriverReady && state.m_fFirstReadyS < 0)
+			state.m_fFirstReadyS = elapsedS;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! Repeating until done, queued once every group was attempted ("Spawned N/M groups" opens the boarding window).
-	//! Logs each seated driver once and starts the collector session (StartCaptureSession) as soon as every configured
-	//! group has a seated driver, or when the window ends with at least GetMinSeatedGroups() seated. Otherwise, or as
-	//! soon as the minimum can no longer be reached, it logs an ERROR with the missing groups and starts no session.
+	//! Logs each ready driver once (seated and AI active below max LOD) and starts the collector session
+	//! (StartCaptureSession):
+	//! - at once when every configured group is ready;
+	//! - at once when every group that can still get a driver is ready and that is at least GetMinSeatedGroups()
+	//!   (the others failed to start or to get a driver, so waiting longer cannot add a car);
+	//! - otherwise when the window ends with at least GetMinSeatedGroups() ready.
+	//! A start with fewer than m_iMaxAIGroups vehicles logs "TKT-01 acceptance NOT met" at ERROR level. With fewer than
+	//! the minimum when the window ends, or as soon as the minimum can no longer be reached, it logs an ERROR with the
+	//! missing groups and starts no session.
 	protected void CheckReadiness()
 	{
 		if (!m_bActive || m_bReadinessDone)
@@ -1138,40 +1233,54 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		float nowMs = GetGame().GetWorld().GetWorldTime();
 		float elapsedS = (nowMs - m_fStartTimeMs) / 1000.0;
-		int seated;
-		int canSeat;	// seated, or a driver still pending / walking in (boarding not FAILED)
+		int ready;
+		int canSeat;	// ready, or still able to become ready: seated, or a driver pending / walking in (boarding not FAILED)
+		int boardingFailed;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
 			UpdateOccupancy(state, elapsedS);
-			if (!state.m_bDriverSeated)
+			if (!state.m_bDriverReady)
 			{
-				if (state.m_eBoarding != SCR_EMLDataCaptureBoarding.FAILED)
+				if (state.m_bDriverSeated || state.m_eBoarding != SCR_EMLDataCaptureBoarding.FAILED)
 					canSeat++;
+				else
+					boardingFailed++;
 
 				continue;
 			}
 
-			seated++;
+			ready++;
 			canSeat++;
-			if (!state.m_bSeatedLogged)
+			if (!state.m_bReadyLogged)
 			{
-				state.m_bSeatedLogged = true;
-				Print(string.Format("[DataCapture] Group %1: driver seated in %2 (first seen %3 s after the director start) %4", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1), DescribeGroup(state)), LogLevel.NORMAL);
+				state.m_bReadyLogged = true;
+				Print(string.Format("[DataCapture] Group %1: driver ready in %2 (seated %3 s, AI active below max LOD %4 s after the director start) %5", state.m_iGroupId, state.m_Vehicle.GetName(), state.m_fFirstSeatedS.ToString(-1, 1), state.m_fFirstReadyS.ToString(-1, 1), DescribeGroup(state)), LogLevel.NORMAL);
 			}
 		}
 
-		if (seated >= m_iMaxAIGroups)
+		if (ready >= m_iMaxAIGroups)
 		{
-			StartCaptureSession(string.Format("All %1 drivers seated after %2 s", seated, elapsedS.ToString(-1, 1)));
+			StartCaptureSession(string.Format("All %1 drivers ready after %2 s", ready, elapsedS.ToString(-1, 1)));
 			return;
 		}
 
-		// Groups that failed to start or to get a driver never seat: stop waiting once the minimum is out of reach.
-		int minSeated = GetMinSeatedGroups();
-		if (canSeat < minSeated)
+		// Groups that failed to start or to get a driver never become ready: stop waiting once the minimum is out of reach.
+		int minReady = GetMinSeatedGroups();
+		if (canSeat < minReady)
 		{
-			FinishReadiness(string.Format("[DataCapture] ERROR: only %1 of %2 groups can still get a seated driver (%3 failed to start), fewer than the minimum of %4 - collector session NOT started", canSeat, m_iMaxAIGroups, m_iGroupsFailed, minSeated));
+			FinishReadiness(string.Format("[DataCapture] ERROR: only %1 of %2 groups can still get a ready driver (%3 failed to start, %4 got no driver), fewer than the minimum of %5 - collector session NOT started", canSeat, m_iMaxAIGroups, m_iGroupsFailed, boardingFailed, minReady));
 			LogMissingGroups(LogLevel.ERROR);
+			return;
+		}
+
+		string missing;
+		// Every group that still can is ready, but some failed to start or to get a driver: waiting cannot add a car.
+		if (ready == canSeat)
+		{
+			missing = MissingGroupIds();
+			Print(string.Format("[DataCapture] ERROR: TKT-01 acceptance NOT met: %1/%2 drivers ready after %3 s and no other group can get one (%4 failed to start, %5 got no driver) - starting a partial session without groups:%6", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1), m_iGroupsFailed, boardingFailed, missing), LogLevel.ERROR);
+			LogMissingGroups(LogLevel.WARNING);
+			StartCaptureSession(string.Format("%1/%2 drivers ready after %3 s", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1)));
 			return;
 		}
 
@@ -1179,27 +1288,28 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 
 		float windowS = m_iBoardingWindowMs / 1000.0;
-		string missing = MissingGroupIds();
-		if (seated < minSeated)
+		missing = MissingGroupIds();
+		if (ready < minReady)
 		{
-			string outcome = string.Format("%1/%2 drivers seated, fewer than the minimum of %3", seated, m_iMaxAIGroups, minSeated);
-			if (seated == 0)
-				outcome = string.Format("no seated driver (0/%1)", m_iMaxAIGroups);
+			string outcome = string.Format("%1/%2 drivers ready, fewer than the minimum of %3", ready, m_iMaxAIGroups, minReady);
+			if (ready == 0)
+				outcome = string.Format("no ready driver (0/%1)", m_iMaxAIGroups);
 
-			FinishReadiness(string.Format("[DataCapture] ERROR: boarding window of %1 s ended with %2 (groups without a seated driver:%3) - collector session NOT started", windowS.ToString(-1, 0), outcome, missing));
+			FinishReadiness(string.Format("[DataCapture] ERROR: boarding window of %1 s ended with %2 (groups without a ready driver:%3) - collector session NOT started", windowS.ToString(-1, 0), outcome, missing));
 			LogMissingGroups(LogLevel.ERROR);
 			return;
 		}
 
-		Print(string.Format("[DataCapture] WARNING: boarding window of %1 s ended with %2/%3 drivers seated (minimum %4) - starting the session without groups:%5", windowS.ToString(-1, 0), seated, m_iMaxAIGroups, minSeated, missing), LogLevel.WARNING);
+		Print(string.Format("[DataCapture] ERROR: TKT-01 acceptance NOT met: boarding window of %1 s ended with %2/%3 drivers ready (minimum %4) - starting a partial session without groups:%5", windowS.ToString(-1, 0), ready, m_iMaxAIGroups, minReady, missing), LogLevel.ERROR);
 		LogMissingGroups(LogLevel.WARNING);
-		StartCaptureSession(string.Format("%1/%2 drivers seated after %3 s", seated, m_iMaxAIGroups, elapsedS.ToString(-1, 1)));
+		StartCaptureSession(string.Format("%1/%2 drivers ready after %3 s", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1)));
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Ends the boarding window: registers every vehicle with a seated driver with the collector, in group-id order
-	//! (vehicle_id = registration index, k - 1 when every group is seated), then starts the session. Groups without a
-	//! seated driver now stay out of this session; MonitorVehicles logs it if one seats later.
+	//! Ends the boarding window: registers every vehicle with a ready driver with the collector, in group-id order
+	//! (vehicle_id = registration index, k - 1 when every group is ready), then starts the session and schedules the
+	//! driving check. Groups without a ready driver now stay out of this session; MonitorVehicles logs it once if one
+	//! becomes ready later.
 	protected void StartCaptureSession(string summary)
 	{
 		m_bReadinessDone = true;
@@ -1211,46 +1321,90 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 		}
 
-		array<SCR_MLDataCaptureGroupState> seatedGroups = {};
+		array<SCR_MLDataCaptureGroupState> readyGroups = {};
 		string vehicles;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			if (!state.m_bDriverSeated || state.m_bRegistered)
+			if (!state.m_bDriverReady || state.m_bRegistered)
 				continue;
 
-			vehicles += string.Format(" V%1=%2", seatedGroups.Count(), state.m_Vehicle.GetName());
-			seatedGroups.Insert(state);
+			vehicles += string.Format(" V%1=%2", readyGroups.Count(), state.m_Vehicle.GetName());
+			readyGroups.Insert(state);
 		}
 
-		Print(string.Format("[DataCapture] %1 - starting the collector session with %2 vehicles:%3", summary, seatedGroups.Count(), vehicles), LogLevel.NORMAL);
-		foreach (SCR_MLDataCaptureGroupState seatedState : seatedGroups)
+		Print(string.Format("[DataCapture] %1 - starting the collector session with %2 vehicles:%3", summary, readyGroups.Count(), vehicles), LogLevel.NORMAL);
+		foreach (SCR_MLDataCaptureGroupState readyState : readyGroups)
 		{
-			m_Collector.RegisterVehicle(seatedState.m_Vehicle);
-			seatedState.m_bRegistered = true;
+			m_Collector.RegisterVehicle(readyState.m_Vehicle);
+			readyState.m_bRegistered = true;
+			readyState.m_fDistanceAtRegistration = readyState.m_fDistance;
 
-			int targetId = seatedState.GetCurrentTargetId();
+			int targetId = readyState.GetCurrentTargetId();
 			if (targetId > 0)
-				m_Collector.SetVehicleWaypoint(seatedState.m_Vehicle, targetId, seatedState.m_aWaypoints[seatedState.m_iCurrentWaypoint].m_vPosition);
+				m_Collector.SetVehicleWaypoint(readyState.m_Vehicle, targetId, readyState.m_aWaypoints[readyState.m_iCurrentWaypoint].m_vPosition);
 		}
 
 		if (!m_Collector.StartSession(string.Empty, m_sInitialWeather, m_iInitialHour))
 		{
-			Print("[DataCapture] ERROR: SCR_MLDataCollector.StartSession() failed - no session", LogLevel.ERROR);
+			Print("[DataCapture] ERROR: SCR_MLDataCollector.StartSession() failed - no session (the [MLDataCollector] lines above say why)", LogLevel.ERROR);
 			return;
 		}
 
 		m_bSessionStarted = true;
+		if (m_iDrivingCheckMs > 0)
+			m_fDrivingCheckAtMs = GetGame().GetWorld().GetWorldTime() + m_iDrivingCheckMs;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! \return " 3 4 5": the configured group ids without a seated driver (including groups that failed to start)
+	//! Run once by MonitorVehicles m_iDrivingCheckMs after the session start: every registered vehicle must have moved
+	//! at least m_fDrivingCheckMinDistanceM since its registration. A seated driver whose AI never drives (for example
+	//! a lost LOD pin) would otherwise put a parked car into the session with no sign but stuck resets.
+	protected void CheckRegisteredVehiclesDriving()
+	{
+		m_fDrivingCheckAtMs = -1;
+		float checkS = m_iDrivingCheckMs / 1000.0;
+		int registered;
+		int driving;
+		string moved;
+		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
+		{
+			if (!state.m_bRegistered)
+				continue;
+
+			registered++;
+			float distance = state.m_fDistance - state.m_fDistanceAtRegistration;
+			string vehicleName = "deleted vehicle";
+			if (state.m_Vehicle)
+				vehicleName = state.m_Vehicle.GetName();
+
+			moved += string.Format(" %1=%2m", vehicleName, distance.ToString(-1, 0));
+			if (distance >= m_fDrivingCheckMinDistanceM)
+			{
+				driving++;
+				continue;
+			}
+
+			Print(string.Format("[DataCapture] ERROR: group %1: %2 is in the collector session but not driving: it moved %3 m in the first %4 s of the session (minimum %5 m, stuck resets %6) %7", state.m_iGroupId, vehicleName, distance.ToString(-1, 1), checkS.ToString(-1, 0), m_fDrivingCheckMinDistanceM, state.m_iStuckResets, DescribeGroup(state)), LogLevel.ERROR);
+		}
+
+		if (driving == registered)
+		{
+			Print(string.Format("[DataCapture] Driving check %1 s after the session start: all %2 registered vehicles moved at least %3 m:%4", checkS.ToString(-1, 0), registered, m_fDrivingCheckMinDistanceM, moved), LogLevel.NORMAL);
+			return;
+		}
+
+		Print(string.Format("[DataCapture] ERROR: driving check %1 s after the session start: only %2 of %3 registered vehicles moved at least %4 m:%5 - the session contains parked cars", checkS.ToString(-1, 0), driving, registered, m_fDrivingCheckMinDistanceM, moved), LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return " 3 4 5": the configured group ids without a ready driver (including groups that failed to start)
 	protected string MissingGroupIds()
 	{
 		string missing;
 		for (int groupId = 1; groupId <= m_iMaxAIGroups; groupId++)
 		{
 			SCR_MLDataCaptureGroupState state = FindGroup(groupId);
-			if (!state || !state.m_bDriverSeated)
+			if (!state || !state.m_bDriverReady)
 				missing += " " + groupId.ToString();
 		}
 
@@ -1258,7 +1412,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One line per configured group without a seated driver: why it failed to start, or its DescribeGroup state.
+	//! One line per configured group without a ready driver: why it failed to start, or whether a driver is seated
+	//! (but its AI is not active below max LOD) plus its DescribeGroup state.
 	protected void LogMissingGroups(LogLevel level)
 	{
 		for (int groupId = 1; groupId <= m_iMaxAIGroups; groupId++)
@@ -1270,14 +1425,18 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 				continue;
 			}
 
-			if (state.m_bDriverSeated)
+			if (state.m_bDriverReady)
 				continue;
 
 			string vehicleName = "deleted vehicle";
 			if (state.m_Vehicle)
 				vehicleName = state.m_Vehicle.GetName();
 
-			Print(string.Format("[DataCapture]   group %1 (%2): no seated driver, %3", groupId, vehicleName, DescribeGroup(state)), level);
+			string why = "no seated driver";
+			if (state.m_bDriverSeated)
+				why = "driver seated but its AI is not active below max LOD";
+
+			Print(string.Format("[DataCapture]   group %1 (%2): %3, %4", groupId, vehicleName, why, DescribeGroup(state)), level);
 		}
 	}
 
@@ -1290,7 +1449,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Repeating: distance and speed statistics, and stuck detection for vehicles with a seated driver.
+	//! Repeating: distance and speed statistics, stuck detection for vehicles with a ready driver, the seating retries,
+	//! the waypoint assignments and the one-off driving check after the session start.
 	protected void MonitorVehicles()
 	{
 		if (!m_bActive)
@@ -1304,16 +1464,18 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			// or still running, and it drops when the driver leaves or dies.
 			UpdateOccupancy(state, elapsedS);
 
-			// A driver seated after the boarding window is not added to a running session: the collector's vehicle
-			// ids and session_info.txt are fixed at StartSession. Log it once; the car keeps driving.
-			if (m_bReadinessDone && state.m_bDriverSeated && !state.m_bSeatedLogged)
+			// A driver that is ready only after the boarding window ended (late, or seated earlier and then lost before
+			// the start) is not added to a running session: the collector's vehicle ids and session_info.txt are fixed
+			// at StartSession. Log it once per group; the car keeps driving. Without a collector there is no session to
+			// miss (StartDirector already warned).
+			if (m_Collector && m_bReadinessDone && state.m_bDriverReady && !state.m_bRegistered && !state.m_bLateWarned)
 			{
-				state.m_bSeatedLogged = true;
+				state.m_bLateWarned = true;
 				string session = "no collector session is running";
 				if (m_bSessionStarted)
 					session = "not added to the running collector session (its vehicle ids and session_info.txt are fixed at its start)";
 
-				Print(string.Format("[DataCapture] WARNING: group %1: driver seated in %2 %3 s after the director start, after the boarding window - %4; the car keeps driving", state.m_iGroupId, state.m_Vehicle.GetName(), elapsedS.ToString(-1, 1), session), LogLevel.WARNING);
+				Print(string.Format("[DataCapture] WARNING: group %1: driver in %2 ready %3 s after the director start, after the boarding window ended - %4; the car keeps driving, not captured", state.m_iGroupId, state.m_Vehicle.GetName(), elapsedS.ToString(-1, 1), session), LogLevel.WARNING);
 			}
 
 			if (state.m_fNextSeatAttemptAtMs >= 0 && nowMs >= state.m_fNextSeatAttemptAtMs)
@@ -1348,13 +1510,18 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 			CheckStuck(state, position, dtS);
 		}
+
+		// After the per-group loop, so the distances are current.
+		if (m_fDrivingCheckAtMs >= 0 && nowMs >= m_fDrivingCheckAtMs)
+			CheckRegisteredVehiclesDriving();
 	}
 
 	//------------------------------------------------------------------------------------------------
 	protected void CheckStuck(SCR_MLDataCaptureGroupState state, vector position, float dtS)
 	{
-		// Only while a living driver sits in the pilot seat: a car waiting for its crew is parked, not stuck.
-		if (!m_bResetStuckVehicles || !state.m_bDriverSeated)
+		// Only while a ready driver (alive, AI active below max LOD) sits in the pilot seat: a car waiting for its crew,
+		// or whose driver AI is deactivated, is parked, not stuck, and teleporting it would not make it drive.
+		if (!m_bResetStuckVehicles || !state.m_bDriverReady)
 		{
 			state.m_fStuckTimeS = 0;
 			state.m_vStuckCheckPosition = position;
@@ -1407,9 +1574,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		Print(string.Format("Director time: %1 min, groups: %2/%3, waypoints completed: %4", minutes.ToString(-1, 1), m_aGroups.Count(), m_iMaxAIGroups, m_iTotalWaypointsCompleted), LogLevel.NORMAL);
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			Print(string.Format("Group %1: distance=%2 m max_speed=%3 km/h waypoints=%4 stuck_resets=%5 target=%6 driver_seated=%7 %8",
+			Print(string.Format("Group %1: distance=%2 m max_speed=%3 km/h waypoints=%4 stuck_resets=%5 target=%6 driver_seated=%7 driver_ready=%8 %9",
 				state.m_iGroupId, state.m_fDistance.ToString(-1, 1), state.m_fMaxSpeed.ToString(-1, 1), state.m_iWaypointsCompleted,
-				state.m_iStuckResets, state.GetCurrentTargetId(), state.m_bDriverSeated, DescribeGroup(state)), LogLevel.NORMAL);
+				state.m_iStuckResets, state.GetCurrentTargetId(), state.m_bDriverSeated, state.m_bDriverReady, DescribeGroup(state)), LogLevel.NORMAL);
 		}
 		Print("==========================================", LogLevel.NORMAL);
 	}
@@ -1441,7 +1608,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 				if (sim.EngineIsOn())
 					engine = "ON";
 
-				DbgUI.Text(string.Format("--- GROUP %1 (%2) target %3 seated %4 ---", state.m_iGroupId, state.m_Vehicle.GetName(), state.GetCurrentTargetId(), state.m_bDriverSeated));
+				DbgUI.Text(string.Format("--- GROUP %1 (%2) target %3 seated %4 ready %5 ---", state.m_iGroupId, state.m_Vehicle.GetName(), state.GetCurrentTargetId(), state.m_bDriverSeated, state.m_bDriverReady));
 				DbgUI.Text(string.Format("Speed: %1 km/h  Accel: %2 km/h/s  Engine: %3 (%4 RPM)  Gear: %5", speed.ToString(-1, 1), state.m_fAcceleration.ToString(-1, 1), engine, rpm.ToString(-1, 0), sim.GetGear()));
 				if (state.m_fStuckTimeS > 5.0)
 					DbgUI.Text(string.Format("STUCK WARNING: %1 s", state.m_fStuckTimeS.ToString(-1, 1)));

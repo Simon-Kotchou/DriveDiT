@@ -5,11 +5,17 @@
 // Captures synchronized telemetry data for world model training.
 // Outputs CSV format compatible with comma.ai/Open-Oasis training pipelines.
 //
-// OUTPUT:
+// OUTPUT (session_XXXX = world time in ms at the session start; if that folder already exists, an earlier Play's,
+// session_XXXX_<unix time> is used instead, so nothing is overwritten):
 //   $profile:DrivingData/session_XXXX/telemetry.csv
 //   $profile:DrivingData/session_XXXX/session_info.txt
 //   $profile:DrivingData/session_XXXX/anchors.csv (when anchor selection enabled)
 //   $profile:DrivingData/session_XXXX/frames/frame_XXXXXX.bmp (when screenshot capture enabled)
+//
+// OUTPUT LOCATION GUARD: a session is only written when the -profile command-line folder lies inside
+//   m_sRequiredProfileRoot (default E:/DriveDiT; in Workbench $profile is <-profile>/profile). Without -profile,
+//   $profile is the default profile under Documents on the C: drive, which is refused with an ERROR: frames are
+//   0.5-1.6 MB at 5 Hz. OnPostInit logs the decision once per Play.
 //
 // INTEGRATIONS:
 //   - SCR_AnchorFrameSelector: Anchor frame selection for Self-Forcing++ training
@@ -18,8 +24,9 @@
 //
 // SESSION START:
 //   Nothing is captured on a timer or by entity name any more. The driving director on the same game mode calls
-//   StartSession() exactly once: when every configured driver is seated, or when its boarding window ends with at
-//   least its minimum of seated drivers. Right before that it registers the vehicles with a seated driver by entity
+//   StartSession() exactly once: when every configured driver is ready (seated, AI active), or when no other group
+//   can still get one, or when its boarding window ends with at least its minimum of ready drivers. Right before
+//   that it registers the vehicles with a ready driver by entity
 //   (RegisterVehicle, in group-id order; vehicle_id = registration index), and afterwards it keeps their current
 //   drive target up to date (SetVehicleWaypoint). It registers nothing after StartSession, because session_info.txt
 //   lists the tracked vehicles once, at the start. When the game mode or the game ends it calls StopSession(), which
@@ -60,6 +67,9 @@ class SCR_MLDataCollector: ScriptComponent
 
     [Attribute("smoke_bootstrap", UIWidgets.EditBox, "Data class written to session_info.txt and summary.txt. smoke_* sessions are bootstrap smoke data (harvest=never) and are never copied into training captures")]
     protected string m_sDataClass;
+
+    [Attribute("E:/DriveDiT", UIWidgets.EditBox, "Sessions are written only when the -profile command-line folder lies inside this folder (case-insensitive, either slash), so captures never fill the C: drive; without -profile the default profile under Documents is used, which is refused. Empty = no check (deliberate exceptions only)")]
+    protected string m_sRequiredProfileRoot;
 
     // === ANCHOR FRAME CONFIGURATION ===
     [Attribute("1", UIWidgets.CheckBox, "Enable anchor frame selection for Self-Forcing++ training")]
@@ -153,14 +163,68 @@ class SCR_MLDataCollector: ScriptComponent
 
         // No timer and no name-based discovery: SCR_MLDataCaptureDirector registers the vehicles and calls StartSession()
         Print("[MLDataCollector] Component initialized, waiting for StartSession()", LogLevel.NORMAL);
+
+        // Say up front where sessions would go and whether the profile guard allows them (InitializeSession re-checks).
+        string profile;
+        bool allowed = IsProfileAllowed(profile);
+        if (m_sRequiredProfileRoot.Trim().IsEmpty())
+            Print("[MLDataCollector] WARNING: capture output guard off (m_sRequiredProfileRoot is empty): sessions go to $profile:DrivingData wherever -profile '" + profile + "' points", LogLevel.WARNING);
+        else if (allowed)
+            Print("[MLDataCollector] Capture output allowed: -profile '" + profile + "' is inside " + m_sRequiredProfileRoot + "; sessions go to $profile:DrivingData/session_<n> (in Workbench: " + profile + "\\profile\\DrivingData)", LogLevel.NORMAL);
+        else
+            Print("[MLDataCollector] ERROR: capture output refused: -profile '" + profile + "' is not inside " + m_sRequiredProfileRoot + " (no -profile means the default profile under Documents on C:) - no session will be written. Relaunch Workbench with E:\\DriveDiT\\tools\\launch\\wb_R1.bat", LogLevel.ERROR);
+    }
+
+    //------------------------------------------------------------------------
+    //! \return true when sessions may be written: m_sRequiredProfileRoot is empty, or the -profile command-line folder
+    //! lies inside it. $profile is <-profile>/profile in Workbench; without -profile it is the default profile under
+    //! Documents on C:, which is refused (captures are 0.5-1.6 MB frames at 5 Hz, tens of GB per hour).
+    //! \param[out] profile the -profile value, empty when the parameter is absent
+    bool IsProfileAllowed(out string profile)
+    {
+        profile = string.Empty;
+        bool hasProfile = System.GetCLIParam("profile", profile); // Core/generated/System/System.c:33, unchanged in 1.9
+
+        string root = NormalizePathForCompare(m_sRequiredProfileRoot);
+        if (root.IsEmpty())
+            return true;
+
+        if (!hasProfile)
+            return false;
+
+        string normalized = NormalizePathForCompare(profile);
+        return normalized == root || normalized.StartsWith(root + "/");
+    }
+
+    //------------------------------------------------------------------------
+    //! Trimmed, unquoted, lower-case, forward slashes, no trailing slash: "E:\DriveDiT\" -> "e:/drivedit"
+    protected static string NormalizePathForCompare(string path)
+    {
+        string normalized = path.Trim();
+        normalized.Replace("\"", "");
+        normalized.Replace("\\", "/");
+        normalized.ToLower();
+        while (normalized.EndsWith("/"))
+        {
+            normalized = normalized.Substring(0, normalized.Length() - 1);
+        }
+
+        return normalized;
+    }
+
+    //------------------------------------------------------------------------
+    //! \return true when a session folder already exists at path (the folder itself, or the files every session writes)
+    protected bool SessionPathTaken(string path)
+    {
+        return FileIO.FileExists(path) || FileIO.FileExists(path + "/session_info.txt") || FileIO.FileExists(path + "/telemetry.csv");
     }
 
     //------------------------------------------------------------------------
     // Start the capture session for the vehicles registered so far. Called once by SCR_MLDataCaptureDirector
-    // when its drivers are seated (all of them, or its minimum when the boarding window ends). Returns false
-    // (and starts nothing) if a session is already running, no vehicle is registered or the session files
-    // cannot be created. mapName defaults to the loaded world file; weather and timeOfDay (hours, -1 = unknown)
-    // only go into session_info.txt.
+    // when its drivers are ready (all of them, all that still can be, or its minimum when the boarding window
+    // ends). Returns false (and starts nothing) if a session is already running, no vehicle is registered, the
+    // -profile folder is outside m_sRequiredProfileRoot or the session files cannot be created. mapName defaults
+    // to the loaded world file; weather and timeOfDay (hours, -1 = unknown) only go into session_info.txt.
     bool StartSession(string mapName = "", string weather = "", float timeOfDay = -1)
     {
         if (m_bSessionInitialized)
@@ -241,15 +305,48 @@ class SCR_MLDataCollector: ScriptComponent
             return true;
         }
 
+        // Never write captures outside the allowed profile root (the C: drive is nearly full; see IsProfileAllowed)
+        string profile;
+        if (!IsProfileAllowed(profile))
+        {
+            Print("[MLDataCollector] ERROR: session refused: -profile '" + profile + "' is not inside " + m_sRequiredProfileRoot + " (no -profile means the default profile under Documents on C:) - nothing written. Relaunch Workbench with E:\\DriveDiT\\tools\\launch\\wb_R1.bat", LogLevel.ERROR);
+            return false;
+        }
+
         // Create base directory
         string basePath = "$profile:DrivingData";
         FileIO.MakeDirectory(basePath);
 
-        // Generate session ID from world time
+        // Generate session ID from world time. Plays start the session at nearly the same world time, so a folder
+        // that already exists gets the unix time (and if needed a counter) appended: no earlier session is truncated
+        // or overwritten.
         float worldTime = GetGame().GetWorld().GetWorldTime();
         int sessionID = worldTime;
 
-        m_sSessionPath = basePath + "/session_" + sessionID.ToString();
+        string sessionPath = basePath + "/session_" + sessionID.ToString();
+        if (SessionPathTaken(sessionPath))
+        {
+            int unixTime = System.GetUnixTime(); // Core/generated/System/System.c:53, unchanged in 1.9
+            string uniquePath = sessionPath + "_" + unixTime.ToString();
+            string candidate = uniquePath;
+            int attempt = 1;
+            while (SessionPathTaken(candidate))
+            {
+                attempt++;
+                if (attempt > 100)
+                {
+                    Print("[MLDataCollector] ERROR: no free session folder name after " + uniquePath + "_100 - no session", LogLevel.ERROR);
+                    return false;
+                }
+
+                candidate = uniquePath + "_" + attempt.ToString();
+            }
+
+            Print("[MLDataCollector] WARNING: " + sessionPath + " already exists (an earlier Play) - this session uses " + candidate, LogLevel.WARNING);
+            sessionPath = candidate;
+        }
+
+        m_sSessionPath = sessionPath;
         FileIO.MakeDirectory(m_sSessionPath);
 
         // Create frames subdirectory for screenshots

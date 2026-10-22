@@ -66,13 +66,28 @@ for each group k = 1..5:
    - Both are undone when the director stops.
 4. It sends the car between the `AI_Drive_Target_N` markers, starting once the driver exists.
 
-The collector session starts as soon as all 5 drivers are seated. Otherwise it starts when the boarding window
-ends, with the cars that have a driver by then. With no driver, or fewer than the minimum, it logs an ERROR and starts
-no session.
+A car counts as **ready** when a living driver sits in its driver seat **and** that driver's AI is active below max
+LOD. A seated driver alone is not enough: direct seating puts the body in the seat even when its AI is switched off.
+
+The collector session starts:
+- as soon as all 5 drivers are ready (the normal case, about 10-11 s after the director start);
+- or, if some groups failed to start or got no driver at all, as soon as every group that still can is ready;
+- or when the 60 s boarding window ends, with the cars that are ready by then (at least `m_iMinSeatedGroups`).
+
+A session with fewer than 5 cars does not meet the TKT-01 acceptance criteria. It still starts, as smoke data, but
+logs `ERROR: TKT-01 acceptance NOT met` and one line per missing car. With no ready driver, or fewer than the
+minimum, it logs an ERROR and starts no session.
+
+60 s after the session start, the director checks that every car in the session has moved at least 20 m. Each car
+that has not is logged as `ERROR: group k: AI_Car_k is in the collector session but not driving`.
 
 Vehicles are registered in group order right before the session starts, so `vehicle_id` is k-1 when all 5 are
-seated. Otherwise the ids are listed in the `starting the collector session with N vehicles: V0=AI_Car_1 ...` line and
-in `session_info.txt`. A car that gets its driver later keeps driving but is not captured in that session.
+ready. Otherwise the ids are listed in the `starting the collector session with N vehicles: V0=AI_Car_1 ...` line and
+in `session_info.txt`. A car whose driver becomes ready later keeps driving but is not captured in that session.
+
+The collector writes a session only when Workbench was started with `-profile` inside `E:\DriveDiT` (the
+`wb_R1.bat` launcher does this). Otherwise it logs `ERROR: capture output refused` at Play start and writes nothing,
+so captures never land on C:.
 
 Director attributes in the layer (the defaults need no layer change):
 
@@ -83,46 +98,62 @@ Director attributes in the layer (the defaults need no layer change):
 | `m_iSeatAttempts` / `m_iSeatRetryMs` | 3 / 1000 | Direct seating attempts before walk-in boarding |
 | `m_bPinDriverLOD` | 1 | Full AI LOD pin |
 | `m_bVehicleObservers` | 1 | One temporary observer per car (SP keys 4400 + k) |
-| `m_iBoardingWindowMs` | 60000 | Window after `Spawned N/M groups`. The session starts when all are seated, or when the window ends |
-| `m_iMinSeatedGroups` | 1 | Seated cars needed when the window ends. Set it to `m_iMaxAIGroups` for the old all-or-nothing gate |
+| `m_iBoardingWindowMs` | 60000 | Window after `Spawned N/M groups`. The session starts when all are ready, or when the window ends |
+| `m_iMinSeatedGroups` | 1 | Ready cars needed when the window ends (limited to 1..`m_iMaxAIGroups`, with a WARNING). Set it to `m_iMaxAIGroups` for the old all-or-nothing gate |
+| `m_iDrivingCheckMs` / `m_fDrivingCheckMinDistanceM` | 60000 / 20 | When the "is every car driving" check runs after the session start, and the distance each car must have moved. 0 turns the check off |
 
-### Expected `[DataCapture]` lines in console.log
+Collector attribute: `m_sRequiredProfileRoot` (default `E:/DriveDiT`). Sessions are written only when `-profile` lies
+inside it. Empty turns the guard off; use that only deliberately.
+
+### Expected lines in console.log
 
 Booleans may print as `1`/`0` or as `true`/`false`.
 
-1. `Director started (OnGameModeStart)`, then `AI LOD: max LOD <n> ...; driver LOD pin 1, vehicle observers 1`.
-2. For each group, about 2 s apart:
+1. `[MLDataCollector] Capture output allowed: -profile 'E:\DriveDiT\wb_profile' is inside E:/DriveDiT; sessions go to ...`.
+   An `ERROR: capture output refused` line here means no capture will be written: relaunch with `wb_R1.bat`.
+2. `[DataCapture] Director started (OnGameModeStart)`, then `AI LOD: max LOD <n> ...; driver LOD pin 1, vehicle observers 1`.
+3. For each group, about 2 s apart:
    - `Group k spawned at AI_Spawn_k for vehicle AI_Car_k with 20 waypoints`;
-   - `Group k: lod_pin=1 ..., observer=1 on AI_Car_k (key 440k)`;
-   - `Group k: driver spawned in the pilot seat of AI_Car_k (direct seating, attempt 1/3) boarding=DIRECT agents=1 ... [lod=<l>/<max> perm=0 active=1] pilot=1 ...`;
+   - `Group k: lod_pin=1 (permanent LOD 0, max LOD prevented, importance CRITICAL), observer=1 on AI_Car_k (key 440k)`;
+   - `Group k: driver spawned in the pilot seat of AI_Car_k (direct seating, attempt 1/3) boarding=DIRECT agents=1 ... driver=alive pilot=1 ...`;
    - `Group k waypoint none -> N`.
-3. `Spawned 5/5 groups - boarding window 60 s: ...`.
-4. Five `Group k: driver seated in AI_Car_k (first seen X s after the director start) ...` lines, each with `pilot=1`
-   and `[lod=0/<max> perm=0 active=1]`. The statistics block every 60 s repeats this per group, and groups 3-5 must
-   show `distance` > 0.
-5. `All 5 drivers seated after X s - starting the collector session with 5 vehicles: V0=AI_Car_1 ... V4=AI_Car_5`. Then:
+4. `Spawned 5/5 groups - boarding window 60 s: the session starts once the drivers of all 5 started groups are ready ...`.
+5. Five `Group k: driver ready in AI_Car_k (seated X s, AI active below max LOD Y s after the director start) ...`
+   lines, each with `[lod=0/<max> perm=0 active=1]` and `driver=alive pilot=1`.
+6. `All 5 drivers ready after X s - starting the collector session with 5 vehicles: V0=AI_Car_1 ... V4=AI_Car_5`. Then:
    - five `[MLDataCollector] Registered vehicle: AI_Car_k (index k-1)` lines;
    - `[MLDataCollector] Session initialized: $profile:DrivingData/session_<n>`;
    - `Session started. Tracking 5 vehicles`.
 
-   With fewer than 5 cars seated, this line is instead:
-   - `WARNING: boarding window of 60 s ended with S/5 drivers seated (minimum 1) - starting the session without groups: ...`,
-     followed by one line per missing group;
-   - then `S/5 drivers seated after X s - starting the collector session with S vehicles: ...`.
-6. Signs of trouble:
+   With fewer than 5 cars ready, this line is instead:
+   - `ERROR: TKT-01 acceptance NOT met: boarding window of 60 s ended with S/5 drivers ready (minimum 1) - starting a partial session without groups: ...`
+     (or `... S/5 drivers ready after X s and no other group can get one ...` when groups failed outright);
+   - one line per missing group: `group k (AI_Car_k): no seated driver, ...` or
+     `group k (AI_Car_k): driver seated but its AI is not active below max LOD, ...`;
+   - then `S/5 drivers ready after X s - starting the collector session with S vehicles: ...`.
+7. About 60 s after the session start: `Driving check 60 s after the session start: all 5 registered vehicles moved at least 20 m: AI_Car_1=...m ...`.
+8. Signs of trouble:
    - `direct seating attempt i/3 ... failed (pilot seat occupant=... accessible=...)`;
    - `falling back to walk-in boarding`;
-   - `ERROR: boarding window of 60 s ended with no seated driver ... - collector session NOT started`.
+   - `driver=dead` in a group line;
+   - `ERROR: group k: AI_Car_k is in the collector session but not driving`;
+   - `ERROR: boarding window of 60 s ended with no ready driver ... - collector session NOT started`.
 
 ### Where the captures are
 
 The collector writes to `$profile:DrivingData/session_<n>/`, where `<n>` is the world time in ms at the session
-start.
+start. If that folder already exists from an earlier Play, the session uses `session_<n>_<unix time>` instead, so
+nothing is overwritten.
 - With the E: profile (`wb_R1.bat`, `-profile E:\DriveDiT\wb_profile`) this is
   **`E:\DriveDiT\wb_profile\profile\DrivingData\session_<n>\`**, which is
   `/mnt/e/DriveDiT/wb_profile/profile/DrivingData/` in WSL.
-- Each session holds `session_info.txt` (written at the start: `data_class=smoke_bootstrap`, `harvest=never`, the
-  build stamp and `vehicle_<id>=AI_Car_k`), `telemetry.csv` (one row per car per 200 ms) and, after Stop,
-  `summary.txt`.
+- Each session holds:
+  - `session_info.txt`, written at the start: `data_class=smoke_bootstrap`, `harvest=never`, the build stamp and
+    `vehicle_<id>=AI_Car_k`;
+  - `telemetry.csv`, one row per car per 200 ms;
+  - `frames/frame_NNNNNN.bmp.png`, one screenshot per 200 ms from the first car in the session (V0, normally
+    `AI_Car_1`). The layer enables screenshots; each is about 0.5-1.6 MB, so roughly 10-30 GB per hour;
+  - after Stop, `summary.txt`.
 - No session means no `DrivingData` folder at all.
-- If console.log shows the profile under OneDrive, sessions land on C: instead. Stop and relaunch with `wb_R1.bat`.
+- Without `-profile` inside `E:\DriveDiT` (for example Workbench started from Steam), the collector refuses to write
+  and logs `ERROR: capture output refused`. Relaunch with `wb_R1.bat`.

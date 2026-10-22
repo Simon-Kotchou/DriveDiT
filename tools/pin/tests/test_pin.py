@@ -1038,6 +1038,8 @@ class LaunchPathTests(PinnedCase):
             return pinlib.win_to_wsl(m.group(1))
         self.assertEqual(bat_value("wb_R1.bat", "WB_DIR"), REAL_LAUNCH_PATHS["tools"]["install"] + "/Workbench")
         self.assertEqual(bat_value("client_R1_i01.bat", "GAME_DIR"), REAL_LAUNCH_PATHS["game"]["install"])
+        # A direct exe launch only finds ArmaReforger.gproj through -addonsDir (measured 2026-10-21).
+        self.assertEqual(bat_value("wb_R1.bat", "GAME_ADDONS"), REAL_LAUNCH_PATHS["game"]["install"] + "/addons")
         for app in pinlib.APPS:
             self.assertEqual(REAL_LAUNCH_PATHS[app]["acf"], pinlib.DEFAULT_ACF[app])
             self.assertEqual(pinlib.install_dir_for_acf(REAL_LAUNCH_PATHS[app]["acf"],

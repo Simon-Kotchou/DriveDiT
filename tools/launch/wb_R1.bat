@@ -19,7 +19,11 @@ rem UNVERIFIED (capture program 4.2 item 2): that a direct exe launch never make
 rem or relaunch the app. Steam must be running.
 rem UNVERIFIED (FIX_PLAN step 4, gate P-01): that Workbench honours -profile. After the first
 rem start, check console.log for "Adding relative directory 'E:\DriveDiT\wb_profile\profile'".
-rem Args (Appendix B and FIX_PLAN step 4a): -profile, -gproj, -forceUpdate, -maxFPS 60.
+rem Args (Appendix B and FIX_PLAN step 4a): -profile, -gproj, -addonsDir, -forceUpdate, -maxFPS 60.
+rem -addonsDir: a direct exe launch does not get the game install's addons dir the way a Steam launch
+rem does, so ArmaReforger.gproj (58D0FB3206B6F859) is "not found" and Workbench exits with "Cannot
+rem initialize game project settings" (measured 2026-10-21 18:50, first wb_R1.bat launch). GAME_ADDONS
+rem is the pinned game install (pinlib.LAUNCH_PATHS "game") plus \addons; it holds core\ and data\.
 rem Build: 1.8.0.13 is the INTERIM pin. The plan is to move to 1.9 and its new vehicle physics
 rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1_9.md in
 rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
@@ -35,6 +39,7 @@ set "WB_DIR=C:\Program Files (x86)\Steam\steamapps\common\Arma Reforger Tools\Wo
 set "WB_EXE=%WB_DIR%\ArmaReforgerWorkbenchSteamDiag.exe"
 set "WB_PROFILE=E:\DriveDiT\wb_profile"
 set "WB_GPROJ=E:\DriveDiT\addons\DataCapture\addon.gproj"
+set "GAME_ADDONS=D:\SteamLibrary\steamapps\common\Arma Reforger\addons"
 set "DD_LAUNCHES=E:\DriveDiT\pin\launches"
 set "DD_ERR="
 
@@ -46,6 +51,10 @@ if not errorlevel 1 (
 )
 if not exist "%WB_EXE%" (
   set "DD_ERR=Workbench exe not found: %WB_EXE%"
+  goto :fail
+)
+if not exist "%GAME_ADDONS%\data\ArmaReforger.gproj" (
+  set "DD_ERR=Game addons not found: %GAME_ADDONS%\data\ArmaReforger.gproj"
   goto :fail
 )
 if not exist "%WB_GPROJ%" (
@@ -77,7 +86,7 @@ if not exist "%DD_LAUNCHES%\launch_%LID%.json" (
 )
 
 echo Pin OK. Launch id %LID%
-start "" /D "%WB_DIR%" "%WB_EXE%" -profile "%WB_PROFILE%" -gproj "%WB_GPROJ%" -forceUpdate -maxFPS 60
+start "" /D "%WB_DIR%" "%WB_EXE%" -profile "%WB_PROFILE%" -gproj "%WB_GPROJ%" -addonsDir "%GAME_ADDONS%" -forceUpdate -maxFPS 60
 endlocal
 exit /b 0
 

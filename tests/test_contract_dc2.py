@@ -35,8 +35,8 @@ SPEC_MD = os.path.join(CONTRACT_DIR, "dc-2.0.md")
 STREAMS_JSON = os.path.join(CONTRACT_DIR, "dc-2.0.streams.json")
 FEATURES_JSON = os.path.join(CONTRACT_DIR, "features_v1.json")
 
-STATUS_LINE = ("Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; pending user "
-               "decision D15")
+STATUS_LINE = ("Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision "
+               "D15 adopted 2026-10-22")
 T0ENG = "docs/trials/T0-ENG.md"
 
 FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")

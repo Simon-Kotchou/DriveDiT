@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; pending user decision D15
+Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -986,7 +986,8 @@ Rules (r2 3.3, R35):
 ## 15. Open items before the freeze
 
 - TBD-1 to TBD-5 from `docs/trials/T0-ENG.md` (E-10, E-05, E-19, E-01).
-- User decision D15 (adopt dc-2.0 and the CLAUDE.md tensor-contract change).
+- User decision D15 (adopt dc-2.0 and the CLAUDE.md tensor-contract change): adopted 2026-10-22. The CLAUDE.md
+  update stays with DD-11.
 - Sign-off by the DD-4-min, DD-5-min and DD-7-min authors.
 - Proposed here and to be confirmed at the freeze (none of these is r2 text):
   - trial selection: the `ACTIVE` trial pointer when `-dcTrial` is absent (5.2);

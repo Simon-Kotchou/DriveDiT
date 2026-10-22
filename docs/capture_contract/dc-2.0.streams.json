@@ -1,7 +1,7 @@
 {
   "schema": "drivedit.dc-streams/1",
   "contract_version": "dc-2.0",
-  "status": "DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; pending user decision D15",
+  "status": "DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22",
   "spec": "docs/capture_contract/dc-2.0.md",
   "features": "docs/capture_contract/features_v1.json",
   "route_schema": "drivedit_nav/route_schema.json",

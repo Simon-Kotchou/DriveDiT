@@ -54,6 +54,10 @@ PREFLIGHT="${WB_PREFLIGHT:-/mnt/e/DriveDiT/tools/pin/preflight.py}"
 PIN_DIR="${WB_PIN_DIR:-/mnt/e/DriveDiT/pin}"
 [[ -z "${WB_PIN:-}" ]] || die "WB_PIN is no longer supported: the launch checks the active pin ($PIN_DIR/ACTIVE). Switch pins with pin_activate.py; unset WB_PIN."
 PROFILE_WIN="${WB_PROFILE_WIN:-E:\\DriveDiT\\wb_profile}"
+# A direct exe launch does not get the game install's addons dir the way a Steam launch does, so
+# ArmaReforger.gproj is "not found" and Workbench exits (measured 2026-10-21). Same value as wb_R1.bat
+# GAME_ADDONS: the pinned game install (DD-0 pinlib.LAUNCH_PATHS "game") plus /addons.
+GAME_ADDONS=/mnt/d/SteamLibrary/steamapps/common/Arma\ Reforger/addons
 
 GPROJ=/mnt/e/DriveDiT/addons/DataCapture/addon.gproj
 if [[ $# -gt 0 && "$1" != "--" ]]; then GPROJ="$1"; shift; fi
@@ -63,6 +67,7 @@ EXTRA=("$@")
 [[ -f "$GPROJ" ]] || die "no such gproj: $GPROJ"
 off_c_drive "$GPROJ" || die "refusing gproj $GPROJ: Workbench writes into the opened project; it must be an absolute path off C: (E:)"
 [[ -f "$WB_EXE" ]] || die "Workbench exe not found: $WB_EXE"
+[[ -f "$GAME_ADDONS/data/ArmaReforger.gproj" ]] || die "game addons not found: $GAME_ADDONS/data/ArmaReforger.gproj"
 
 # -profile: ours unless the extra args carry one; either way it must be a Windows path off C:.
 has_arg() { local a; for a in "${EXTRA[@]}"; do [[ "$a" == "$1" ]] && return 0; done; return 1; }
@@ -72,6 +77,7 @@ win_off_c_drive "$PROFILE" || die "refusing -profile '$PROFILE': Workbench write
 ARGS=()
 has_arg -profile || ARGS+=(-profile "$PROFILE_WIN")
 ARGS+=(-gproj "$(wslpath -w "$GPROJ")")
+has_arg -addonsDir || ARGS+=(-addonsDir "$(wslpath -w "$GAME_ADDONS")")
 has_arg -forceUpdate || ARGS+=(-forceUpdate)
 has_arg -maxFPS || ARGS+=(-maxFPS 60)
 ARGS+=("${EXTRA[@]}")

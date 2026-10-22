@@ -81,12 +81,16 @@ minimum, it logs an ERROR and starts no session.
 60 s after the session start, the director checks that every car in the session has moved at least 20 m. Each car
 that has not is logged as `ERROR: group k: AI_Car_k is in the collector session but not driving`.
 
-After the boarding window the director also watches the driver seats. When a group move fails in the car (for
-example `STUCK`), the vanilla AI brakes, sets the handbrake and orders the driver out, then usually walks it back in
-10-45 s later. With an obstructed door the driver never gets back in. The director logs each failed group move, each
-dismount and each return. After `m_fReseatAfterS` (30 s) with no living driver in the seat, it teleports the driver
-back in, or seats a new one if the old driver is gone or dead. While the driver is out, the stuck clock pauses. The
-statistics line counts `dismounts=`, `reseats=` and `move_failures=` per group.
+After the boarding window the director also watches the driver seats. The vanilla AI sometimes brakes mid-route, sets
+the handbrake and orders the driver out, then usually walks it back in 10-45 s later. With an obstructed door the
+driver never gets back in. The most likely trigger, still unconfirmed, is a failed group move in the car (for example
+`UNREACHABLE`); a car that cannot move or is on fire is another. The director logs each failed group move, each
+dismount (with the last move failure and the car's movement damage and fire state) and each return. After
+`m_fReseatAfterS` (30 s) with no living driver in the seat, it teleports the driver back in, or seats a new one if the
+old driver is gone or dead. A dead driver is moved out of the seat first, and the group is kept when it becomes empty.
+It does not reseat into a car that cannot move or is on fire, and it stops after 3 reseats in a row that did not get
+the car moving 5 m. While the driver is out, the stuck clock pauses; it restarts when the vanilla AI gets back in by
+itself. The statistics line counts `dismounts=`, `reseats=` and `move_failures=` per group.
 
 Vehicles are registered in group order right before the session starts, so `vehicle_id` is k-1 when all 5 are
 ready. Otherwise the ids are listed in the `starting the collector session with N vehicles: V0=AI_Car_1 ...` line and
@@ -108,7 +112,7 @@ Director attributes in the layer (the defaults need no layer change):
 | `m_iBoardingWindowMs` | 60000 | Window after `Spawned N/M groups`. The session starts when all are ready, or when the window ends |
 | `m_iMinSeatedGroups` | 1 | Ready cars needed when the window ends (limited to 1..`m_iMaxAIGroups`, with a WARNING). Set it to `m_iMaxAIGroups` for the old all-or-nothing gate |
 | `m_iDrivingCheckMs` / `m_fDrivingCheckMinDistanceM` | 60000 / 20 | When the "is every car driving" check runs after the session start, and the distance each car must have moved. 0 turns the check off |
-| `m_fReseatAfterS` | 30 | Seat watchdog: seconds without a living driver in the driver seat before the director puts one back, repeated while the seat stays empty. 0 turns the reseat off; dismounts are still logged |
+| `m_fReseatAfterS` | 30 | Seat watchdog: seconds without a living driver in the driver seat before the director puts one back, repeated while the seat stays empty. Never into a car that cannot move or is on fire, and at most 3 times in a row without the car moving `m_fStuckDistanceM` (5 m). 0 turns the reseat off; dismounts are still logged |
 
 Collector attribute: `m_sRequiredProfileRoot` (default `E:/DriveDiT`). Sessions are written only when `-profile` lies
 inside it. Empty turns the guard off; use that only deliberately.
@@ -147,8 +151,9 @@ Booleans may print as `1`/`0` or as `true`/`false`.
    - `ERROR: group k: AI_Car_k is in the collector session but not driving`;
    - `ERROR: boarding window of 60 s ended with no ready driver ... - collector session NOT started`;
    - `WARNING: group k: no living driver in the pilot seat of AI_Car_k (dismount n ...)` with no
-     `Group k: driver back in the pilot seat of AI_Car_k after X s` line within about 30 s, or
-     `reseating the driver ... failed` / `cannot reseat the driver`.
+     `Group k: driver back in the pilot seat of AI_Car_k after X s` line within about 30 s;
+   - `reseating the driver ... failed`, `cannot reseat the driver`, `not reseating the driver` or
+     `ERROR: group k: no more reseats into AI_Car_k`.
 
 ### Where the captures are
 

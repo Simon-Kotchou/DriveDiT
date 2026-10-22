@@ -12,16 +12,29 @@ A check is a function check(ctx) -> result dict:
     NOT_EVALUATED is a warning;
   * provisional: the check depends on a TBD-by-probe value of contract dc-2.0 (TBD-1 to TBD-9) and the contract is
     not frozen yet, so its threshold or rule may still change at the T0-ENG freeze.
+
+Severities follow the trial gates (severity()): CAPTURE_PROGRAM 4.4 T0-MIN makes C12, C13b and C21 SOFT and T1 makes
+C21 HARD; C31 is reported (INFO) before T1. C17 (behaviour.py) and C13b's yaw condition (images.py) add their own
+rules. A refusal (Refused: an Everon route outside the sealed path, a lower --trial than the session's) ends the run
+with exit 3.
 """
 
 import importlib.util
-import json
 import math
 import os
 import re
 
 HARD, SOFT, INFO = "HARD", "SOFT", "INFO"
 PASS, FAIL, NA, NOT_EVALUATED = "PASS", "FAIL", "N/A", "NOT_EVALUATED"
+ROUTE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")      # drivedit_nav route ids (route_schema.json)
+
+# Severity by trial tier (CAPTURE_PROGRAM 4.4). T0-MIN and S1 (rank < 2; S1's GO is "all T0-MIN HARD checks"):
+# HARD C01 C02 C05 C06 C07 C08 C10 C11 C13a C15 C28 C34, SOFT C12 C13b C21. T1 on (rank >= 2): the T0-MIN set plus
+# C21, C31 and C35 HARD; C12 and C13b stay SOFT. Every check not named here is HARD at every tier. C20 and C35 are
+# HARD from T0 on, stricter than the T0-MIN list by choice: a script error of the capture code or an ego slot that
+# changes entity never makes usable data. C31 is reported (INFO) before T1. C17 has its own tier rule (behaviour.py).
+SEVERITY_BEFORE_T1 = {"C12": SOFT, "C13b": SOFT, "C21": SOFT, "C31": INFO}
+SEVERITY_FROM_T1 = {"C12": SOFT, "C13b": SOFT, "C21": HARD, "C31": HARD}
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -40,6 +53,17 @@ CHECK_TBDS = {
 }
 
 _READER = []
+
+
+class Refused(Exception):
+    """A refusal: dc_validate prints one line and exits 3 (an Everon route or session outside the sealed evaluation
+    path, a C: path, a report directory outside /mnt/e, a lower --trial than the session's)."""
+
+
+def severity(check_id, rank):
+    """HARD, SOFT or INFO of a check at a tier rank (SEVERITY_BEFORE_T1 / SEVERITY_FROM_T1)."""
+    table = SEVERITY_FROM_T1 if rank >= 2 else SEVERITY_BEFORE_T1
+    return table.get(check_id, HARD)
 
 
 def load_reader():
@@ -64,7 +88,8 @@ class Context:
     """What the checks see: the reader Session (or None with load_error), thresholds, tier, options, collected
     image features and the routes."""
 
-    def __init__(self, session, thresholds, trial_id, options, contract_frozen, load_error=None, images=None):
+    def __init__(self, session, thresholds, trial_id, options, contract_frozen, load_error=None, images=None,
+                 routes=None):
         self.session = session
         self.thresholds = thresholds
         self.trial_id = trial_id
@@ -74,7 +99,10 @@ class Context:
         self.load_error = load_error
         self.images = images
         self.reader = load_reader()
-        self._routes = {}
+        self._routes = dict(routes or {})
+
+    def severity(self, check_id):
+        return severity(check_id, self.rank)
 
     def thr(self, check, key=None, default=None):
         block = self.thresholds.get(check, {})
@@ -83,32 +111,27 @@ class Context:
         return block.get(key, default)
 
     def route(self, route_id):
-        """(Route, path, error) for a route id: --route files (by their route_id) first, then --routes-dir."""
+        """(Route, path, error) for a route id: the --route files (loaded and checked by dc_validate before any
+        session file is read, keyed by their route_id), then <--routes-dir>/<route_id>.json. A route id that is not
+        a drivedit_nav id is an error, never a path. An Everon route (map_id everon, an everon_* split, a path under
+        heldout/ or SEALED) outside the sealed evaluation path raises Refused: it is never skipped."""
         if route_id in self._routes:
             return self._routes[route_id]
         import drivedit_nav
-        found = None
-        for path in getattr(self.options, "route", None) or []:
-            try:
-                with open(path, "rb") as f:
-                    if json.loads(f.read().decode("utf-8")).get("route_id") == route_id:
-                        found = path
-                        break
-            except (OSError, ValueError, AttributeError):
-                continue
         routes_dir = getattr(self.options, "routes_dir", None)
-        if found is None and routes_dir:
-            candidate = os.path.join(routes_dir, route_id + ".json")
-            if os.path.isfile(candidate):
-                found = candidate
-        if found is None:
-            out = (None, None, "no route file for %s (--route / --routes-dir)" % route_id)
-        else:
+        if not (isinstance(route_id, str) and ROUTE_ID_RE.match(route_id)):
+            out = (None, None, "route_id %r is not a route id" % (route_id,))
+        elif routes_dir and os.path.isfile(os.path.join(routes_dir, route_id + ".json")):
+            found = os.path.join(routes_dir, route_id + ".json")
             try:
                 out = (drivedit_nav.load_route(found, sealed_eval=bool(getattr(self.options, "sealed_eval", False))),
                        found, None)
-            except (ValueError, PermissionError) as e:
+            except drivedit_nav.SealedMapError as e:
+                raise Refused(str(e))
+            except (OSError, ValueError) as e:
                 out = (None, found, "route %s: %s" % (found, e))
+        else:
+            out = (None, None, "no route file for %s (--route / --routes-dir)" % route_id)
         self._routes[route_id] = out
         return out
 
@@ -122,8 +145,9 @@ def result(ctx, check_id, severity, status, value=None, threshold=None, detail="
     return out
 
 
-def unreadable(ctx, check_id, severity=HARD):
-    return result(ctx, check_id, severity, NOT_EVALUATED, detail="session not readable: %s" % ctx.load_error)
+def unreadable(ctx, check_id, severity=None):
+    return result(ctx, check_id, severity or ctx.severity(check_id), NOT_EVALUATED,
+                  detail="session not readable: %s" % ctx.load_error)
 
 
 def percentile(values, q):

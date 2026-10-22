@@ -36,6 +36,12 @@ def left_share(turns):
     return float(numpy.abs(turns[turns < 0]).sum()) / total
 
 
+def lr_ratio(turns):
+    """Left / right absolute turning (r2's "L/R ratio"; reported next to the share); None without right turning."""
+    right = float(numpy.abs(turns[turns > 0]).sum())
+    return None if right <= 0 else float(numpy.abs(turns[turns < 0]).sum()) / right
+
+
 def severity_for(ctx):
     """SOFT at T1 (calibration), HARD at T2-T3 for mode E, INFO elsewhere (r2 5.1 C17)."""
     if ctx.tier == "T1":
@@ -59,6 +65,14 @@ def check_c17(ctx):
           lr_ratio_dev_from_route_max (shares of total absolute turning, bounded where a ratio would not be);
           steering mean: |mean contract steer_input - mean(kappa_r / g)| <= steer_mean_dev_from_route_max, g the
           curvature per contract steer fitted on the session's rows above 3 m/s (no vehicle-card map yet).
+      * reported, not judged: r2's L/R ratio (left / right turning) of session and route, and the signed mean
+        curvature in 1/m (realised yaw_rate / v against the route's kappa_r, rows above 3 m/s, no fitted gain).
+    Evidence is never dropped silently: an episode route_sha256 that differs from the route file FAILs (provenance);
+    a mode-E episode with rows after the warm-up that is not compared (no route_id, no route file), rows without
+    road_dist_m / road_width_m (adherence not judged) and, at a HARD tier (T2-T3), the steering mean (a session-fitted
+    gain would hide a steering scale error until the vehicle card's kappa_ss map exists, DD-7-min) leave C17
+    NOT_EVALUATED when nothing failed. The metric definitions (share vs ratio, steering vs 1/m) await a decision
+    (review F-14 / CX-20).
     Mode-E qualification only: SOFT at T1, HARD at T2-T3, INFO elsewhere; N/A without mode-E episodes."""
     if ctx.load_error:
         return unreadable(ctx, "C17", INFO)
@@ -78,6 +92,7 @@ def check_c17(ctx):
     rows = []
     turn_s, turn_r, steer_rows = [], [], []
     notes = []
+    issues = []
     compared = 0
     for e, ei in sorted(episodes.items()):
         idx = [i for i, ee in enumerate(tel.col("episode_id")) if ee == e]
@@ -95,7 +110,8 @@ def check_c17(ctx):
             continue
         want = ep.col("route_sha256")[ei]
         if want and want != route.sha256:
-            notes.append("episode %d: route file %s does not match route_sha256" % (e, rid))
+            issues.append("episode %d: route file %s has sha256 %s, the episode names %s" % (
+                e, rid, route.sha256[:12], want[:12]))
             continue
         poses = [(tel.col("pos_x")[i], tel.col("pos_z")[i], float(texp["heading_rad"][i])) for i in idx]
         progress = {i: nav["progress_m"] for i, nav in zip(idx, drivedit_nav.nav_sequence(route, poses))}
@@ -113,7 +129,6 @@ def check_c17(ctx):
     v_all = numpy.array([texp["speed_fwd_mps"][i] for i in rows])
     value = {"rows": len(rows), "moving_frac": float(numpy.mean(v_all > MOVING_MPS)),
              "speed_p50": percentile(list(v_all), 50), "speed_p95": percentile(list(v_all), 95)}
-    issues = []
     if value["moving_frac"] < thr.get("moving_frac_min", 0.7):
         issues.append("moving fraction %.3f < %s" % (value["moving_frac"], thr.get("moving_frac_min")))
     ev = s.streams["events"]
@@ -124,22 +139,27 @@ def check_c17(ctx):
     if value["stuck_per_30min"] is not None and value["stuck_per_30min"] > thr.get("stuck_per_30min_max", 2):
         issues.append("%d stuck event(s) = %.2f per 30 min > %s" % (stuck, value["stuck_per_30min"],
                                                                     thr.get("stuck_per_30min_max")))
+    skipped = []
+    no_signal = None
     road = [(tel.col("road_dist_m")[i], tel.col("road_width_m")[i]) for i in rows]
+    no_road = sum(1 for d, w in road if d is None or w is None)
     road = [(d, w) for d, w in road if d is not None and w is not None]
+    if no_road:
+        skipped.append("road adherence of %d row(s) without road_dist_m / road_width_m" % no_road)
     if road:
         value["road_adherence"] = sum(1 for d, w in road if d <= w / 2.0 + 1.0) / float(len(road))
         if value["road_adherence"] < thr.get("road_adherence_min", 0.95):
             issues.append("road adherence %.3f < %s" % (value["road_adherence"], thr.get("road_adherence_min")))
-    skipped = []
     if compared == 0:
         skipped.append("route comparison (%s)" % first(notes, 2) if notes else "route comparison")
     else:
         ts, tr = numpy.array(turn_s), numpy.array(turn_r)
         if numpy.abs(ts).sum() < MIN_TURN_RAD and numpy.abs(tr).sum() < MIN_TURN_RAD:
-            skipped.append("L/R and steering mean (route and session turn less than %.1f rad)" % MIN_TURN_RAD)
+            no_signal = "L/R and steering mean (route and session turn less than %.1f rad)" % MIN_TURN_RAD
         else:
             ls, lr = left_share(ts), left_share(tr)
-            value.update({"left_share_session": ls, "left_share_route": lr})
+            value.update({"left_share_session": ls, "left_share_route": lr, "lr_ratio_session": lr_ratio(ts),
+                          "lr_ratio_route": lr_ratio(tr)})
             if ls is None or lr is None:
                 issues.append("no turning in the %s" % ("session" if ls is None else "route"))
             else:
@@ -150,8 +170,14 @@ def check_c17(ctx):
             sr = numpy.array(steer_rows)
             ok = ~numpy.isnan(sr[:, 0])
             fast = ok & (sr[:, 1] > 3.0)
+            if fast.sum():
+                k_s, k_r = float(numpy.mean(sr[fast, 2] / sr[fast, 1])), float(numpy.mean(sr[fast, 3]))
+                value.update({"kappa_mean_session": k_s, "kappa_mean_route": k_r, "kappa_mean_dev": abs(k_s - k_r)})
             g = fit_steer_gain(sr[fast, 2] / sr[fast, 1], sr[fast, 0]) if fast.sum() >= 10 else None
-            if g is None or g <= 0:
+            if severity == HARD:
+                skipped.append("steering mean at a HARD tier (needs the vehicle card's kappa_ss map, DD-7-min; a "
+                               "session-fitted gain hides a steering scale error)")
+            elif g is None or g <= 0:
                 skipped.append("steering mean (no positive curvature-per-steer gain to fit)")
             else:
                 mean_s = float(numpy.mean(sr[ok, 0]))
@@ -162,13 +188,15 @@ def check_c17(ctx):
                     issues.append("steering mean deviation %.4f > %s (session %.4f, route-expected %.4f)" % (
                         value["steer_mean_dev"], thr.get("steer_mean_dev_from_route_max"), mean_s, mean_r))
         if notes:
-            skipped.append("route comparison of some episodes (%s)" % first(notes, 2))
+            skipped.append("route comparison of %d episode(s) (%s)" % (len(notes), first(notes, 2)))
     if issues:
         status = FAIL
-    elif compared == 0:
+    elif compared == 0 or skipped:
         status = NOT_EVALUATED
     else:
         status = PASS
+    if no_signal:           # nothing to compare is not missing evidence: reported, status unchanged
+        skipped.append(no_signal)
     detail = first(issues) if issues else "%d rows of %d mode-E episode(s): moving %.3f%s" % (
         len(rows), len(episodes), value["moving_frac"],
         "; L/R dev %.3f, steering mean dev %.4f" % (value.get("lr_dev", float("nan")),

@@ -60,7 +60,8 @@ def check_c21(ctx):
     """Health (r2 5.1 C21): heartbeat rows every 5 s with no gap above 2 periods (from the session start to the
     first row, between rows, from the last row to the end) and session_end.heartbeats equal to the rows; FPS p5 of
     hf.fps >= C21.fps_p5_min; memory slope of the heartbeat mem_kb (least squares over unix_s) <
-    C21.mem_slope_mb_per_h_max from T1 on (reported in T0)."""
+    C21.mem_slope_mb_per_h_max from T1 on (reported in T0). SOFT before T1 (CAPTURE_PROGRAM 4.4 T0-MIN), HARD from
+    T1."""
     if ctx.load_error:
         return unreadable(ctx, "C21")
     s = ctx.session
@@ -87,7 +88,7 @@ def check_c21(ctx):
     if slope is not None and ctx.rank >= 2 and slope >= thr.get("mem_slope_mb_per_h_max", 100):
         issues.append("memory slope %.1f MB/h >= %s" % (slope, thr.get("mem_slope_mb_per_h_max")))
     value = {"heartbeats": len(hb), "fps_p5": p5, "mem_slope_mb_per_h": slope}
-    return result(ctx, "C21", HARD, FAIL if issues else PASS, value, thr,
+    return result(ctx, "C21", ctx.severity("C21"), FAIL if issues else PASS, value, thr,
                   first(issues) if issues else "%d heartbeats, FPS p5 %s, memory slope %s MB/h%s" % (
                       len(hb), p5, None if slope is None else round(slope, 1),
                       "" if ctx.rank >= 2 else " (judged from T1)"))

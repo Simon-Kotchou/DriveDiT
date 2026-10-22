@@ -1,5 +1,6 @@
 {
   "_source": "CAPTURE_PROGRAM.md section 5.2 Thresholds: the json block at lines 1082-1111 of r2.2 (2026-10-22), identical to lines 1031-1060 of r2.1; copied verbatim. All numbers [target], calibrated once at T0-MIN/T1, frozen before T5. Keys starting with _ are metadata, not thresholds.",
+  "_pin": "Thresholds are keyed by pin (TICKETS_UNIFIED DD-5-min scope note, MIGRATION_1_9 8.3): dc_validate reads thresholds_dc2.<pin_id>.json of the session's pin; this file is pin 1.8.0.13 and its same-build pins (1.8.0.13-<suffix>). A new build gets its own file, re-calibrated on that build.",
   "contract_version": "dc-2.0",
   "image_hz": 10, "telemetry_every_k_physics_steps": 3, "decision_hz": 10,
   "C02": {"pin_id": "1.8.0.13", "game_buildid": 24903726, "tools_buildid": 24870687,

@@ -169,8 +169,9 @@ def check_c11(ctx):
     session); the client class is exactly C11.client_png_wh with core C11.core_wh; capture width = core width +
     2 x band_px with band_px >= C11.band_px_min and both fiducial bands inside the side bands; Workbench sessions
     are tagged exe=wb with source_class wb_viewport (clients cl/cld with client_1408x720); no image without
-    fiducial geometry (out_of_bounds); the files in frames/ equal the issued slots and the engine log's
-    "Screenshot saved to" lines for this session."""
+    fiducial geometry (out_of_bounds); every img.path is exactly frames/f_<slot_id:08d> (reader C11 problems: any
+    other path, absolute or ../, is not read); the files in frames/ equal the issued slots' files (full relative
+    path) and the engine log's "Screenshot saved to" lines for this session."""
     if ctx.load_error:
         return unreadable(ctx, "C11")
     s = ctx.session
@@ -210,10 +211,13 @@ def check_c11(ctx):
     oob = sum(1 for r in s.images if r["fid_status"] == fid.STATUS_OUT_OF_BOUNDS)
     if oob:
         issues.append("%d image(s) without room for the fiducial bands" % oob)
+    path_problems = ["%s: %s" % (p.where, p.message) for p in s.problems_for("C11")]
+    if path_problems:
+        issues.append("%d img path(s) not frames/f_<slot_id:08d> (%s)" % (len(path_problems), first(path_problems, 2)))
     fdir = os.path.join(s.path, s.schema.frames_dir)
-    on_disk = set(n for n in os.listdir(fdir) if os.path.isfile(os.path.join(fdir, n))) if os.path.isdir(fdir) \
-        else set()
-    referenced = set(os.path.basename(r["file"]) for r in s.images if r["file"])
+    on_disk = set("%s/%s" % (s.schema.frames_dir, n) for n in os.listdir(fdir)
+                  if os.path.isfile(os.path.join(fdir, n))) if os.path.isdir(fdir) else set()
+    referenced = set(r["file"] for r in s.images if r["file"])
     extra = sorted(on_disk - referenced)
     if extra:
         issues.append("%d file(s) in frames/ without an img row (%s)" % (len(extra), first(extra, 2)))
@@ -241,8 +245,9 @@ def check_c12(ctx):
     moving frames) of at least C12.overlay_min_region_frac of the image outside the fiducial bands."""
     if ctx.load_error:
         return unreadable(ctx, "C12")
+    severity = ctx.severity("C12")
     if ctx.images is None or not ctx.images.features:
-        return result(ctx, "C12", HARD, NOT_EVALUATED, None, ctx.thr("C12"), "no readable image")
+        return result(ctx, "C12", severity, NOT_EVALUATED, None, ctx.thr("C12"), "no readable image")
     thr = ctx.thr("C12")
     feats = ctx.images.features
     lo, hi = thr.get("luma_mean_day", [8, 247])
@@ -275,13 +280,14 @@ def check_c12(ctx):
     detail = first(issues) if issues else "%d images: luma ok, %d stale of %d moving%s" % (
         len(feats), len(stale), len(moving), "" if regions is not None else "; overlay not judged (%d moving "
         "frames)" % ctx.images.overlay_n)
-    return result(ctx, "C12", HARD, FAIL if issues else PASS, value, thr, detail, not_evaluated=skipped)
+    return result(ctx, "C12", severity, FAIL if issues else PASS, value, thr, detail, not_evaluated=skipped)
 
 
 def check_c13a(ctx):
     """Fiducial pairing (r2 5.1 C13a): of the readable images, >= C13a.min_decode_frac decode in both bands with
     agreeing 18-bit codes (C13a.code_bits); every decoded captured_render_frame (the code unwrapped against
-    issue_render_frame) joins an hf row exactly (0 join failures). The capture offset (captured - issued frame) is
+    issue_render_frame) joins an hf row exactly (0 join failures); no capture offset (captured - issued frame) is
+    negative (a frame captured before its request is a stale or misnamed file). The offset p50 and p99 are
     reported."""
     if ctx.load_error:
         return unreadable(ctx, "C13a")
@@ -304,6 +310,10 @@ def check_c13a(ctx):
     if unjoined:
         issues.append("%d decoded image(s) whose captured frame has no hf row (slots %s)" % (len(unjoined),
                                                                                            first(unjoined, 5)))
+    negative = [r["slot_id"] for r in decoded if r["captured_render_frame"] - r["issue_render_frame"] < 0]
+    if negative:
+        issues.append("%d image(s) captured before their request was issued (slots %s): a stale or misnamed file"
+                      % (len(negative), first(negative, 5)))
     margins = [r["fid_margin"] for r in decoded if r["fid_margin"] is not None]
     value = {"decode_frac": frac, "join_failures": len(unjoined), "offset_p50": percentile(offsets, 50),
              "offset_p99": percentile(offsets, 99), "negative_offsets": sum(1 for o in offsets if o < 0),
@@ -317,8 +327,8 @@ def check_c13b(ctx):
     """Motion lag (r2 5.1 C13b), independent of the fiducial: the horizontal shift of the upper core between
     consecutive slots (1-D normalised cross-correlation of column means) is fitted against the camera heading change
     hf cam_fwd(captured + L) - cam_fwd(previous captured + L) for L in E06A.shift_range; the best lag (smallest
-    residual) must satisfy |L| <= C13b.max_abs_lag_frames. HARD when the session's yaw-rate std >=
-    C13b.min_yaw_rate_std_rps, else INFO."""
+    residual) must satisfy |L| <= C13b.max_abs_lag_frames. SOFT (CAPTURE_PROGRAM 4.4, T0-MIN and T1) when the
+    session's yaw-rate std >= C13b.min_yaw_rate_std_rps, else INFO."""
     if ctx.load_error:
         return unreadable(ctx, "C13b")
     s = ctx.session
@@ -326,7 +336,7 @@ def check_c13b(ctx):
     yaw = s.telemetry_export["yaw_rate_rps"]
     yaw = yaw[~numpy.isnan(yaw)]
     yaw_std = float(yaw.std()) if len(yaw) else 0.0
-    severity = HARD if yaw_std >= thr.get("min_yaw_rate_std_rps", 0.05) else INFO
+    severity = ctx.severity("C13b") if yaw_std >= thr.get("min_yaw_rate_std_rps", 0.05) else INFO
     lo, hi = ctx.thr("E06A", "shift_range", [-3, 3])
     if ctx.images is None:
         return result(ctx, "C13b", severity, NOT_EVALUATED, None, thr, "no image features")
@@ -342,7 +352,7 @@ def check_c13b(ctx):
         if all((a + L) in heading and (b + L) in heading for L in range(lo, hi + 1)):
             pairs.append((a, b, shift))
     if len(pairs) < 10:
-        return result(ctx, "C13b", severity, NOT_EVALUATED if severity == HARD else NA,
+        return result(ctx, "C13b", severity, NOT_EVALUATED if severity != INFO else NA,
                       {"pairs": len(pairs), "yaw_rate_std": yaw_std}, thr,
                       "%d usable consecutive image pairs (< 10)" % len(pairs))
     residuals = {}
@@ -358,7 +368,7 @@ def check_c13b(ctx):
         residuals[L] = float(numpy.sqrt(numpy.mean((shifts - gain * dpsi) ** 2)))
         gains[L] = gain
     if not residuals:
-        return result(ctx, "C13b", severity, NOT_EVALUATED if severity == HARD else NA, None, thr,
+        return result(ctx, "C13b", severity, NOT_EVALUATED if severity != INFO else NA, None, thr,
                       "no heading change between images")
     best = min(residuals, key=lambda L: (residuals[L], abs(L)))
     ok = abs(best) <= thr.get("max_abs_lag_frames", 1)

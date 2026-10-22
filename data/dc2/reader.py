@@ -33,16 +33,28 @@ the ego is read: dc-2.0 has one ego per session and the traffic stream is kept a
 Decision samples (the R-01 decision boundary): decision step t is the physics step P_t with P_t mod N == 0
 (N = clocks.physics_steps_per_decision). state_t = telemetry at P_t; action_label_t = ctl.exp_*_now at P_t;
 action_cmd_t = ctl.hl_* at P_t + 1 (decided after step P_t, applied from P_t + 1); action_exec_t = the ctl rows
-P_t + 1 .. P_t + N; obs_t = the newest decoded image whose captured frame has last_physics_step <= P_t, valid when it
-is at most one image period old. A decision step is wm-valid only with every ctl row of its window, a telemetry row
-at P_t, one episode over the window, a held command, a valid image and no teleport. Segments are the maximal runs of
-wm-valid, non-warm-up decision steps of one episode, so they split at gaps, episode boundaries and masks.
+P_t + 1 .. P_t + N; obs_t = the newest decoded image whose captured frame joins hf, ctl and telemetry and has
+last_physics_step <= P_t, valid when it is at most one image period old. A decision step is wm-valid only with every
+ctl row of its window, every action_exec channel, a telemetry row at P_t, one episode over the window, the command
+held unchanged over the window (same hl_seq and hl_*), a valid image of the same episode and no teleport or respawn
+between the image's last physics step and P_t + N. Segments are the maximal runs of wm-valid, non-warm-up decision
+steps of one episode, so they split at gaps, episode boundaries and masks.
+
+Files: every file the reader opens (stream directories, chunks, session files, images) must resolve inside the
+session directory (symlinks followed), and img.path must be exactly frames/f_<slot_id:08d> (TBD-4); anything else
+is a C01 (outside) or C11 (path) problem and is not read.
+
+The seal (session_end.json, sections 5.3, 8 and 10.2): status ok with a non-error end_reason (C01), contract_version
+dc-2.0 and episodes equal to the committed episodes rows (C01); the committed ctl, telemetry and hf rows reach the
+session end (end.physics_step, end.render_frame: C34), so a lost or truncated tail is seen.
 
 Refusals (ReaderError subclasses): dc-1.0 sessions (LegacySessionError; never mixed with dc-2.0 data, section 14);
-Everon (map_id everon, terrain Eden, an everon_ session id, or a path under heldout/ or a SEALED directory) unless
-sealed_eval=True (SealedMapError, section 3.2); any path on the C: drive. With strict=True (the default, for dataset
-builders) every C01, C05 or C34 problem in session files or committed data and an unsealed session raise as well;
-strict=False (the validator) records them in Session.problems and keeps going.
+Everon (map_id everon, terrain Eden, an Eden-rooted root_world, an everon_ session id, or a path under heldout/ or a
+SEALED directory) unless sealed_eval=True (SealedMapError, section 3.2), checked before any stream is opened; any
+path on the C: drive. With strict=True (the default, for dataset builders) every C01, C05, C07 (duplicated or
+out-of-order key), C34 or C02 (vehicle card hash) problem and an unsealed or failed seal raise as well; salvage=True
+reads an unsealed or failed session's committed data (crash salvage) and still raises on the other problems.
+strict=False (the validator) records every problem in Session.problems and keeps going.
 """
 
 import bisect
@@ -72,6 +84,12 @@ FORBIDDEN_ROOTS = ("/mnt/c/",)
 CHUNK_RE = re.compile(r"^chunk_([0-9]{5})\.csv$")
 INT_RE = re.compile(r"-?[0-9]+")
 FLOAT_RE = re.compile(r"-?[0-9]+(\.[0-9]+)?")     # '.' decimal point, no exponent; nan and inf never match
+EDEN_ROOT_RE = re.compile(r"^(\{[0-9A-Fa-f]+\})?worlds/eden/", re.IGNORECASE)   # every Eden-rooted world is Everon
+# session_end.json end_reason values that end a session in error (section 5.3); duration, stop and dc_stop are
+# the normal endings.
+ERROR_END_REASONS = ("script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost")
+STRICT_FATAL = ("C01", "C02", "C05", "C07", "C34")
+HL_COLUMNS = ("hl_seq", "hl_kappa", "hl_accel", "hl_dir")
 
 # Stream columns the derived views read (docs dc-2.0.md 9.8 ctl_export / telemetry_export and the decision
 # boundary). Schema.check_columns verifies at load time that the streams JSON still defines every one of them.
@@ -177,13 +195,17 @@ def load_schema(path=None):
     return _SCHEMA_CACHE[key]
 
 
-def tbd1_rule(slice_s):
+def tbd1_rule(slice_s, decision_hz=10.0):
     """(physics_steps_per_decision N, telemetry_every_k k) of TBD-1 for a fixed time slice in seconds: N =
-    floor(0.1 / slice + 0.5) first, then k = the largest divisor of N with k * slice <= 50 ms (+1 us), at least 1."""
+    floor(1 / decision_hz / slice + 0.5) first (100 ms at the 10 Hz default, 200 ms at the 5 Hz fallback of TBD-2,
+    where N is 12 at a 60 Hz slice), then k = the largest divisor of N with k * slice <= 50 ms (+1 us), at least 1."""
     slice_s = float(slice_s)
     if not (slice_s > 0.0 and math.isfinite(slice_s)):
         raise ValueError("fixed time slice %r is not a positive number" % slice_s)
-    n = int(math.floor(0.1 / slice_s + 0.5))
+    decision_hz = float(decision_hz)
+    if not (decision_hz > 0.0 and math.isfinite(decision_hz)):
+        raise ValueError("decision rate %r is not a positive number" % decision_hz)
+    n = int(math.floor(1.0 / decision_hz / slice_s + 0.5))
     n = max(n, 1)
     k = 1
     for d in range(1, n + 1):
@@ -204,7 +226,10 @@ def _conv_int(text):
 def _conv_float(text):
     if not FLOAT_RE.fullmatch(text):
         raise ValueError("%r is not a finite decimal number without exponent" % text)
-    return float(text)
+    value = float(text)
+    if not math.isfinite(value):        # a digit string too long for a double overflows to inf (section 8)
+        raise ValueError("%r overflows to a non-finite number" % (text[:24] + "..." if len(text) > 24 else text))
+    return value
 
 
 def _conv_bool(text):
@@ -437,13 +462,22 @@ class Stream:
         return {c: self.data[c][i] for c in self.columns}
 
 
+def inside(root, path):
+    """True when path resolves (symlinks followed) to an entry strictly below the directory root (a realpath)."""
+    return os.path.realpath(path).startswith(root.rstrip("/") + "/")
+
+
 def read_stream(session_dir, name, schema, problems):
     """Committed rows of one stream directory (section 8). Commit/chunk mismatches are C34 problems, header and row
-    problems C05; neither raises here."""
+    problems C05, a directory or file that resolves outside the session directory C01; none raises here.
+    session_dir is a realpath."""
     spec = schema.streams[name]
     sdir = os.path.join(session_dir, spec["dir"])
     stream = Stream(name, spec, os.path.isdir(sdir))
     if not stream.present:
+        return stream
+    if not inside(session_dir, sdir):
+        problems.append(Problem("C01", spec["dir"] + "/", "resolves outside the session directory; not read"))
         return stream
     on_disk = {}
     for entry in sorted(os.listdir(sdir)):
@@ -452,6 +486,10 @@ def read_stream(session_dir, name, schema, problems):
             on_disk[int(m.group(1))] = entry
     commit_path = os.path.join(sdir, schema.commit_name)
     where_commit = "%s/%s" % (spec["dir"], schema.commit_name)
+    if os.path.lexists(commit_path) and not inside(session_dir, commit_path):
+        problems.append(Problem("C01", where_commit, "resolves outside the session directory; not read"))
+        stream.uncommitted = [on_disk[i] for i in sorted(on_disk)]
+        return stream
     if not os.path.isfile(commit_path):
         if on_disk:
             problems.append(Problem("C34", where_commit, "missing: none of the %d chunk files is acknowledged"
@@ -480,7 +518,13 @@ def read_stream(session_dir, name, schema, problems):
         info = {"chunk_id": chunk_id, "file": fname, "exists": False, "size": None, "n_rows": None,
                 "first_key": None, "last_key": None, "refused": False, "commit": commit}
         stream.chunks.append(info)
+        if commit["n_rows"] == 0:
+            problems.append(Problem("C34", where_commit, "chunk %d committed with 0 rows (a chunk is written only "
+                                    "when it holds at least one row, section 8)" % chunk_id))
         path = os.path.join(sdir, fname)
+        if os.path.lexists(path) and not inside(session_dir, path):
+            problems.append(Problem("C01", where, "resolves outside the session directory; not read"))
+            continue
         if not os.path.isfile(path):
             problems.append(Problem("C34", where, "committed chunk file is missing"))
             continue
@@ -517,7 +561,9 @@ def _path_parts(path):
     return os.path.normpath(os.path.abspath(path)).replace("\\", "/").lower().split("/")
 
 
-def _check_paths(path, sealed_eval):
+def check_paths(path, sealed_eval):
+    """realpath of a session path; ReaderError on the C: drive, SealedMapError under heldout/ or a SEALED directory
+    unless sealed_eval (the --legacy self-test calls it too)."""
     real = os.path.realpath(path)
     probe = real if real.endswith("/") else real + "/"
     if any(probe.startswith(root) for root in FORBIDDEN_ROOTS):
@@ -550,12 +596,14 @@ class Session:
     decisions                decision samples (list of dicts; see _build_decisions)
     segments                 list of {episode_id, first_decision_step, last_decision_step, n_steps}
     problems                 list of Problem (check, where, message)
+    salvageable              the problems that salvage=True excuses (an unsealed or failed seal and its tail)
     """
 
     def __init__(self, path, schema):
         self.path = path
         self.schema = schema
         self.problems = []
+        self.salvageable = []
         self.notes = []
         self.meta = None
         self.end = None
@@ -632,23 +680,26 @@ GOLDEN_DECISION_KEYS = ("decision_step", "episode_id", "hl_seq", "state", "actio
 
 
 def open_session(path, sealed_eval=False, strict=True, schema=None, decode_images=True, vehicle_card=None,
-                 allow_unsealed=False, image_visitor=None):
+                 salvage=False, image_visitor=None):
     """Read one dc-2.0 session directory.
 
     sealed_eval     True only on the sealed evaluation path (Everon, heldout/, SEALED).
-    strict          True: raise ReaderError on any C01/C05/C34 problem and on an unsealed session (builders);
-                    False: record problems in Session.problems (validator).
+    strict          True: raise ReaderError on any C01/C02/C05/C07/C34 problem and on an unsealed or failed seal
+                    (builders); False: record problems in Session.problems (validator).
     decode_images   decode every image's fiducial (needs cv2); False leaves img_resolved without codes.
     vehicle_card    dict or path of the vehicle card (gear_indices_forward ...); default
                     tools/ident/cards/<pin_id>/<control.vehicle_card_id>.json when it exists. Without a card
-                    dir_state is None (the gear mapping is read back, never assumed; TBD-7).
-    allow_unsealed  with strict=True, read a session without session_end.json (crash salvage) anyway.
+                    dir_state is None (the gear mapping is read back, never assumed; TBD-7). A card whose sha256
+                    differs from control.vehicle_card_sha (or a dict card when the session names a sha) is a C02
+                    problem and is not used.
+    salvage         with strict=True, read the committed data of an unsealed session or of a seal the writer marked
+                    failed (crash salvage) anyway; every other problem still raises.
     image_visitor   optional callable(session, img_resolved_row, rgb_uint8_hwc), called once per readable image in
                     slot order after the stream joins exist (the validator's image checks use it, so each image is
                     read once).
     """
     schema = schema or load_schema()
-    real = _check_paths(path, sealed_eval)
+    real = check_paths(path, sealed_eval)
     if not os.path.isdir(real):
         raise ReaderError("not a directory: %s" % path)
     if is_legacy_session(real):
@@ -659,7 +710,7 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
         raise SealedMapError("%s is an Everon session; it is read only on the sealed evaluation path "
                              "(sealed_eval=True)" % path)
     s = Session(real, schema)
-    meta = _read_json(os.path.join(real, "session.json"), "session.json", s.problems)
+    meta = _read_session_json(s, "session.json")
     if meta is None:
         raise ReaderError("%s: session.json is missing or unreadable (%s)" % (
             path, "; ".join(p.message for p in s.problems)))
@@ -674,25 +725,27 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
     s.map_id = s.meta_get("map.map_id")
     s.terrain = s.meta_get("map.terrain")
     s.trial_id = s.meta_get("trial.trial_id")
-    if (s.map_id == "everon" or s.terrain == "Eden") and not sealed_eval:
-        raise SealedMapError("%s: map_id %r / terrain %r is the sealed test map; it is read only on the sealed "
-                             "evaluation path (sealed_eval=True)" % (path, s.map_id, s.terrain))
+    root_world = s.meta_get("map.root_world")
+    eden_rooted = isinstance(root_world, str) and bool(EDEN_ROOT_RE.match(root_world))
+    everon_id = isinstance(s.session_id, str) and s.session_id.startswith("everon_")
+    if (s.map_id == "everon" or s.terrain == "Eden" or eden_rooted or everon_id) and not sealed_eval:
+        raise SealedMapError("%s: map_id %r / terrain %r / root_world %r / session_id %r is the sealed test map "
+                             "(every Eden-rooted world counts as Everon); it is read only on the sealed evaluation "
+                             "path (sealed_eval=True)" % (path, s.map_id, s.terrain, root_world, s.session_id))
     if s.map_id not in schema.maps:
         raise ReaderError("%s: session.json map.map_id %r is not a canonical map id (%s)" % (
             path, s.map_id, ", ".join(schema.maps)))
     _check_identity(s, base)
-    end_path = os.path.join(real, "session_end.json")
-    if os.path.isfile(end_path):
-        s.end = _read_json(end_path, "session_end.json", s.problems)
-        if s.end is not None:
-            s.problems += validate_json_file(s.end, schema.file_fields("session_end.json"), "session_end.json")
+    s.end = _read_session_json(s, "session_end.json")
+    if s.end is not None:
+        s.problems += validate_json_file(s.end, schema.file_fields("session_end.json"), "session_end.json")
     s.sealed = s.end is not None
-    harvest_path = os.path.join(real, "harvest.json")
-    if os.path.isfile(harvest_path):
-        s.harvest = _read_json(harvest_path, "harvest.json", s.problems)
+    s.harvest = _read_session_json(s, "harvest.json")
     _read_clocks(s)
     hb_path = os.path.join(real, "heartbeat.csv")
-    if os.path.isfile(hb_path):
+    if os.path.lexists(hb_path) and not inside(real, hb_path):
+        s.problems.append(Problem("C01", "heartbeat.csv", "resolves outside the session directory; not read"))
+    elif os.path.isfile(hb_path):
         with open(hb_path, "rb") as f:
             _, rows = parse_csv_bytes(f.read(), schema.file_fields("heartbeat.csv"), "heartbeat.csv", s.problems)
         s.heartbeat = rows or []
@@ -700,19 +753,84 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
         s.streams[name] = read_stream(real, name, schema, s.problems)
         if not s.streams[name].present and schema.streams[name]["status"] == "required":
             s.problems.append(Problem("C01", schema.streams[name]["dir"] + "/", "required stream directory missing"))
+    _check_key_order(s)
+    _check_seal(s)
+    s.vehicle_card = _load_card(s, vehicle_card)
+    _image_files(s)
     if strict:
-        fatal = [p for p in s.problems if p.check in ("C01", "C05", "C34")]
+        fatal = [p for p in s.problems if p.check in STRICT_FATAL and not (salvage and p in s.salvageable)]
         if fatal:
             raise ReaderError("%s: %d problem(s), first: %s %s: %s" % (
                 path, len(fatal), fatal[0].check, fatal[0].where, fatal[0].message))
-        if not s.sealed and not allow_unsealed:
-            raise ReaderError("%s is not sealed (no session_end.json); pass allow_unsealed=True to salvage it" % path)
-    s.vehicle_card = _load_card(s, vehicle_card)
+        if not s.sealed and not salvage:
+            raise ReaderError("%s is not sealed (no session_end.json); pass salvage=True to salvage it" % path)
     _build_exports(s)
     _build_hf_joins(s)
     _resolve_images(s, decode_images, image_visitor)
     _build_decisions(s)
     return s
+
+
+def _read_session_json(s, name):
+    """One JSON file of the session directory, or None when absent; a file that resolves outside the directory or
+    does not parse is a C01 problem."""
+    path = os.path.join(s.path, name)
+    if not os.path.lexists(path):
+        return None
+    if not inside(s.path, path):
+        s.problems.append(Problem("C01", name, "resolves outside the session directory; not read"))
+        return None
+    if not os.path.isfile(path):
+        s.problems.append(Problem("C01", name, "not a regular file"))
+        return None
+    return _read_json(path, name, s.problems)
+
+
+def _check_key_order(s):
+    """C07 problem per stream whose key (composite for traffic) is not strictly increasing in row order: a
+    duplicated or out-of-order row. Stream.index() keeps the first row of a key, so strict readers must refuse."""
+    for name, st in s.streams.items():
+        keys = list(zip(*[st.data[k] for k in st.spec["key"]]))
+        bad = sum(1 for a, b in zip(keys, keys[1:]) if not b > a)
+        if bad:
+            s.problems.append(Problem("C07", st.spec["dir"] + "/", "key %s not strictly increasing at %d row(s) "
+                                      "(duplicated or out-of-order rows)" % ("+".join(st.spec["key"]), bad)))
+
+
+def _check_seal(s):
+    """The seal against the committed data (sections 5.3, 8, 10.2): C01 for a failed status or an error end_reason
+    (salvageable), the contract version and the episodes count; C34 when the committed ctl, telemetry or hf rows do
+    not reach end.physics_step / end.render_frame (a lost or truncated tail; salvageable, since a failed session
+    stops acknowledging rows)."""
+    if s.end is None or not isinstance(s.end, dict):
+        return
+    status, reason = s.end_get("status"), s.end_get("end_reason")
+    if status != "ok" or reason in ERROR_END_REASONS:
+        p = Problem("C01", "session_end.json", "the writer sealed the session with status %r, end_reason %r: not a "
+                    "complete session (sections 5.3 and 8; salvage only)" % (status, reason))
+        s.problems.append(p)
+        s.salvageable.append(p)
+    if s.end_get("contract_version") != CONTRACT_VERSION:
+        s.problems.append(Problem("C01", "session_end.json", "contract_version %r is not %s"
+                                  % (s.end_get("contract_version"), CONTRACT_VERSION)))
+    episodes = s.end_get("episodes")
+    n_episodes = len(s.streams["episodes"]) if "episodes" in s.streams else 0
+    if episodes != n_episodes:
+        s.problems.append(Problem("C01", "session_end.json", "episodes %r, %d committed episodes row(s)"
+                                  % (episodes, n_episodes)))
+    end_step, end_frame = s.end_get("end.physics_step"), s.end_get("end.render_frame")
+    k = s.clocks["k"]
+    want_tel = end_step - end_step % k if isinstance(end_step, int) and end_step >= 0 else None
+    for stream, key, want, what in (("ctl", "physics_step", end_step, "end.physics_step"),
+                                    ("telemetry", "physics_step", want_tel, "the last k-th step <= end.physics_step"),
+                                    ("hf", "render_frame", end_frame, "end.render_frame")):
+        keys = s.streams[stream].col(key) if stream in s.streams else []
+        last = max(keys) if keys else None
+        if last != want:
+            p = Problem("C34", "%s/" % stream, "committed rows end at %s %r, the session ends at %r (%s): a lost or "
+                        "truncated tail" % (key, last, want, what))
+            s.problems.append(p)
+            s.salvageable.append(p)
 
 
 def _check_identity(s, base):
@@ -764,13 +882,23 @@ def _read_clocks(s):
 
 
 def _load_card(s, card):
+    """The vehicle card (TBD-7), or None. Its sha256 must equal session.json control.vehicle_card_sha when the
+    session names one: a mismatch (or a dict card, whose bytes cannot be hashed) is a C02 problem and the card is not
+    used, so dir_state is never read through another card."""
+    sha = s.meta_get("control.vehicle_card_sha")
     if isinstance(card, dict):
+        if sha:
+            s.problems.append(Problem("C02", "control.vehicle_card_sha", "a vehicle card passed as a dict cannot be "
+                                      "checked against control.vehicle_card_sha %s; not used" % str(sha)[:12]))
+            return None
+        s.notes.append("vehicle card passed as a dict; the session names no vehicle_card_sha")
         return card
     path = card
     if path is None:
         card_id = s.meta_get("control.vehicle_card_id")
         pin_id = s.meta_get("pin.pin_id")
-        if isinstance(card_id, str) and isinstance(pin_id, str) and "/" not in card_id and "/" not in pin_id:
+        if isinstance(card_id, str) and isinstance(pin_id, str) and "/" not in card_id and "/" not in pin_id \
+                and ".." not in card_id and ".." not in pin_id:
             candidate = os.path.join(CARDS_DIR, pin_id, card_id + ".json")
             path = candidate if os.path.isfile(candidate) else None
     if path is None:
@@ -778,10 +906,32 @@ def _load_card(s, card):
         return None
     with open(path, "rb") as f:
         raw = f.read()
-    sha = s.meta_get("control.vehicle_card_sha")
-    if sha and hashlib.sha256(raw).hexdigest() != sha:
-        s.notes.append("vehicle card %s does not match control.vehicle_card_sha" % path)
+    digest = hashlib.sha256(raw).hexdigest()
+    if sha and digest != sha:
+        s.problems.append(Problem("C02", "control.vehicle_card_sha", "vehicle card %s has sha256 %s, session.json "
+                                  "names %s; not used" % (path, digest[:12], str(sha)[:12])))
+        return None
+    if not sha:
+        s.notes.append("vehicle card %s used; the session names no vehicle_card_sha" % path)
     return json.loads(raw.decode("utf-8"))
+
+
+def dir_state_of(card, gear):
+    """dir_state of an engine gear index through the vehicle card (TBD-7, section 7): +1 in a forward gear, -1 in the
+    reverse gear, 0 in the neutral gear. While the card's gear_index_neutral is null (T0-MIN, forward-only) every
+    other gear is 0 (standstill in an unmapped gear); once neutral is measured, a gear the card does not name is
+    None (unknown), never guessed."""
+    if gear is None:
+        return None
+    forward = set(card.get("gear_indices_forward") or [])
+    neutral, reverse = card.get("gear_index_neutral"), card.get("gear_index_reverse")
+    if gear in forward:
+        return 1
+    if reverse is not None and gear == reverse:
+        return -1
+    if neutral is None or gear == neutral:
+        return 0
+    return None
 
 
 # ------------------------------------------------------------------------------------------------
@@ -805,22 +955,47 @@ def fid_margin(image, result):
     return (fiducial.CHANNEL_MARGIN - worst) / 255.0
 
 
+def _image_files(s):
+    """(file, error) per img row, before anything is read: path must be exactly frames/f_<slot_id:08d> (TBD-4; else
+    a C11 problem) and the file must resolve inside the session directory (else C01). Stored in s.image_files."""
+    img = s.streams["img"]
+    s.image_files = []
+    for slot, path in zip(img.data["slot_id"], img.data["path"]):
+        if path is None:
+            s.image_files.append((None, None))
+            continue
+        want = "%s/f_%08d" % (s.schema.frames_dir, slot)
+        if path != want:
+            s.problems.append(Problem("C11", "img slot %d" % slot, "path %r is not %s (TBD-4); not read"
+                                      % (path, want)))
+            s.image_files.append((None, "path %r is not %s" % (path, want)))
+            continue
+        rel = path + IMAGE_SUFFIX
+        full = os.path.join(s.path, rel)
+        if os.path.lexists(full) and not inside(s.path, full):
+            s.problems.append(Problem("C01", rel, "resolves outside the session directory; not read"))
+            s.image_files.append((None, "file resolves outside the session directory"))
+            continue
+        s.image_files.append((rel, None))
+
+
 def _resolve_images(s, decode, visitor):
     img = s.streams["img"]
     hf_index = s.streams["hf"].index()
     s.images = []
     for i in range(len(img)):
         slot = img.data["slot_id"][i]
-        path = img.data["path"][i]
         row = {"slot_id": slot, "issue_status": img.data["issue_status"][i],
                "issue_render_frame": img.data["issue_render_frame"][i], "file": None, "file_exists": 0,
                "png_w": None, "png_h": None, "fid_ok": 0, "fid_status": None, "code": None,
                "captured_render_frame": None, "fid_margin": None, "hf_index": None, "error": None}
         s.images.append(row)
-        if path is None:
+        rel, error = s.image_files[i]
+        if rel is None:
+            row["error"] = error
             continue
-        row["file"] = path + IMAGE_SUFFIX
-        full = os.path.join(s.path, row["file"])
+        row["file"] = rel
+        full = os.path.join(s.path, rel)
         if not os.path.isfile(full):
             row["error"] = "file missing"
             continue
@@ -868,14 +1043,10 @@ def _build_exports(s):
     yaw = s.yaw_axis_sign * tel.array("angvel_local_y")
     with numpy.errstate(invalid="ignore", divide="ignore"):
         kappa = numpy.where(numpy.abs(speed) > 3.0, yaw / speed, numpy.nan)
-    card = s.vehicle_card or {}
-    forward = set(card.get("gear_indices_forward") or [])
-    reverse = set(x for x in [card.get("gear_index_reverse")] if x is not None)
     if s.vehicle_card is None:
         dir_state = [None] * len(tel)
     else:
-        dir_state = [None if g is None else (1 if g in forward else -1 if g in reverse else 0)
-                     for g in tel.data["gear"]]
+        dir_state = [dir_state_of(s.vehicle_card, g) for g in tel.data["gear"]]
     s.telemetry_export = {
         "physics_step": list(tel.data["physics_step"]),
         "heading_rad": heading,
@@ -920,13 +1091,14 @@ def _build_decisions(s):
     texp = s.telemetry_export
     cexp = s.ctl_export
     period = s.clocks["image_period_ms"]
-    # obs candidates: decoded images joined to hf, by captured frame
+    # obs candidates: decoded images joined to hf, and through hf to ctl and telemetry (section 6: a frame whose
+    # joins fail is not joined and its masks are 0), by captured frame; the last field is the frame's episode
     cands = []
     for row in s.images:
-        if row["fid_ok"] and row["hf_index"] is not None:
-            h = row["hf_index"]
+        h = row["hf_index"]
+        if row["fid_ok"] and h is not None and s.hf_ctl[h] is not None and s.hf_tel[h] is not None:
             cands.append((row["captured_render_frame"], hf.data["last_physics_step"][h],
-                          hf.data["world_time_ms"][h], row["slot_id"]))
+                          hf.data["world_time_ms"][h], row["slot_id"], ctl.data["episode_id"][s.hf_ctl[h]]))
     cands.sort()
     cand_lps = [c[1] for c in cands]
     lps_sorted = all(cand_lps[i] <= cand_lps[i + 1] for i in range(len(cand_lps) - 1))
@@ -986,16 +1158,24 @@ def _build_decisions(s):
                           "obs_age_steps": p - obs[1], "obs_age_ms": None if world is None else world - obs[2]}
             if world is not None and obs_fields["obs_age_ms"] <= period:
                 obs_valid = 1
+        same_episode = obs_valid == 1 and obs[4] == episode
         warmup = 1 if world is not None and world < warmup_end_ms else 0
         env_transition = 1 if world is not None and any(0 <= world - w < ENV_TRANSITION_MS for w in env_ms) else 0
-        teleport = 1 if any(p <= q <= p + n for q in tele_steps) else 0
-        react_hidden = any(w is not None and ctl.data["react_visible"][w] == 0 for w in window)
+        # a teleport or respawn between the image's last physics step and the window's end puts the obs and the
+        # state (or the window) on different sides of the jump
+        first_q = obs[1] if obs_valid == 1 else p
+        teleport = 1 if any(first_q <= q <= p + n for q in tele_steps) else 0
+        react_hidden = any(w is not None and ctl.data["react_visible"][w] == 0 for w in [c0] + window)
         has_cmd = cmd is not None and all(v is not None for v in cmd)
+        held = has_cmd and complete and all(
+            [ctl.data[c][w] for c in HL_COLUMNS] == [hl_seq] + cmd for w in window)
+        exec_ok = all(r is not None and all(v is not None for v in r) for r in exec_rows)
         has_label = label is not None and all(v is not None for v in label)
-        wm_valid = int(complete and one_episode and has_cmd and obs_valid == 1 and not teleport)
+        wm_valid = int(complete and one_episode and held and exec_ok and obs_valid == 1 and same_episode
+                       and not teleport)
         policy_valid = int(c0 is not None and t0 is not None and episode is not None and episode >= 0 and has_label
-                           and mode not in ("X", "A", "I", None) and obs_valid == 1 and not react_hidden
-                           and not teleport)
+                           and mode not in ("X", "A", "I", None) and obs_valid == 1 and same_episode
+                           and not react_hidden and not teleport)
         d = {"decision_step": p, "episode_id": episode, "hl_seq": hl_seq, "mode": mode, "world_time_ms": world,
              "state": state, "action_cmd": cmd, "action_label": label, "action_exec": exec_rows,
              "obs_valid": obs_valid,

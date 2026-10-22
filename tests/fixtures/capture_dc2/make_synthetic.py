@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic dc-2.0 sessions for DD-5-min: the golden fixture, the negative fixtures and the C17 loop sessions.
 
-    python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR [--kind golden|t0_loop]
+    python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR [--kind golden|t0_loop|golden_5hz]
         [--variant gap|missing_commit|reused_slot] [--golden-json FILE] [--routes-dir DIR]
 
 writes DIR/<session_id>/ and, with --golden-json, the expected reader output (golden.json). The committed golden
@@ -17,8 +17,9 @@ What a session holds, as DD-4-min's writer will write it (docs/capture_contract/
   * every stream of the streams JSON in its column order, values formatted per unit (fixed point: 4 decimals for
     m, m/s, m/s2 and 6 for rad, rad/s, 1/m and unitless numbers), chunks closed at chunk_max_rows, after 10 s of
     world time or at the end, each committed by one commit.csv line; session.json, session_end.json, heartbeat.csv;
-  * the harvester's sidecars: harvest.json (build_key of a dd-launch/1 session) and _engine_logs/console.log (the
-    sliced engine log: session markers and one "Screenshot saved to" line per image);
+  * the harvester's sidecars: harvest.json (build_key of a dd-launch/1 session), _engine_logs/console.log (the
+    sliced engine log: session markers and one "Screenshot saved to" line per image) and _launch/launch_<id>.json
+    (the session's dd-launch/1 preflight record, copied from the pin's launches directory; C02 joins it);
   * frames/f_<slot:08d>.png (TBD-4 default name): small images whose side bands carry real fiducial v2 patches
     (data/dc2/fiducial.py layout, the DD-4-probe encoder) of the captured render frame, so the reader's img -> hf
     join runs on decoded codes. The core shows an azimuth texture that moves with the heading and stripes that move
@@ -29,8 +30,14 @@ contract steering input, yaw rate = speed x curvature, an llc_v1 stand-in (rate 
 pure-pursuit expert on a drivedit_nav route. Decisions follow R-01: the expert decides in EOnPostSimulate of P_t, the
 command applies from P_t + 1, hl_seq increments at P_t + 1.
 
-golden.json is computed here from the simulation's own values (quantised exactly as written), not by the reader,
-so the reader test compares two independent computations.
+golden.json is computed here from the simulation's own values, not by the reader, so the reader test compares two
+independent computations. The R-01 samples come from the simulation's decision events: action_cmd_t and hl_seq are
+the command the simulated expert decided at P_t and its decision index, action_label_t the expert evaluation after
+step P_t, and a window is "held" when the simulation applied that same command in every step of it; none of them
+is read back from the ctl rows at P_t + 1. The masks and the obs rule repeat the contract's rules (section 6).
+
+Kind golden_5hz is the golden session at the TBD-2 fallback (image_hz = decision_hz = 5, N = 12, k = 3); the tests
+generate it, it is not committed.
 
 Variants (negative fixtures; each breaks one check):
   gap             ctl rows of physics steps 304 and 305 are missing (C06); commit lines and counts stay consistent
@@ -42,6 +49,7 @@ a small zlib PNG writer, so no cv2 is needed here.
 """
 
 import argparse
+import bisect
 import calendar
 import hashlib
 import importlib.util
@@ -66,7 +74,7 @@ CARD_FILE = os.path.join(HERE, "cards", "S105_synthetic.json")
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
 FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
 VARIANTS = ("gap", "missing_commit", "reused_slot")
-KINDS = ("golden", "t0_loop")
+KINDS = ("golden", "t0_loop", "golden_5hz")
 
 SLICE_S = 1.0 / 60.0
 STEER_SIGN = -1                 # TBD-5 default: CarSteering +1 is left, the contract is right-positive
@@ -113,6 +121,15 @@ SPECS = {
     "golden": {
         "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00", "trial_id": "T0b", "seed": 0,
         "start_utc": (2026, 10, 25, 9, 15, 12), "render_frame0": 261900, "lead_frames": 2,
+        "warmup_steps": 120, "route": "golden_s_curve_v1", "v_ref": 8.0,
+        "episodes": [{"max_steps": 300}, {"max_steps": 300}], "between_steps": 30, "teleport_offset": 15,
+        "tail_steps": 30, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
+    },
+    # The golden session at the TBD-2 5 Hz fallback: image_hz = decision_hz = 5, N = 12, k = 3 (generated in the
+    # tests, not committed).
+    "golden_5hz": {
+        "session_id": "arland_T0b_20261025T093000Z_wb_i00_5e05", "trial_id": "T0b", "seed": 0, "decision_hz": 5.0,
+        "start_utc": (2026, 10, 25, 9, 30, 0), "render_frame0": 261900, "lead_frames": 2,
         "warmup_steps": 120, "route": "golden_s_curve_v1", "v_ref": 8.0,
         "episodes": [{"max_steps": 300}, {"max_steps": 300}], "between_steps": 30, "teleport_offset": 15,
         "tail_steps": 30, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
@@ -246,6 +263,7 @@ class Sim:
         self.steps = []         # dicts per step (state after the step, inputs, command, expert, phase)
         self.events = []        # (physics_step, kind, payload)
         self.episodes = []      # dicts
+        self.decisions = []     # (P_t, command) of every expert decision, in order (R-01: applies from P_t + 1)
 
 
 def expert(route, x, z, psi, v, progress, v_ref):
@@ -260,9 +278,14 @@ def expert(route, x, z, psi, v, progress, v_ref):
     return (kappa, accel, 1)
 
 
+def n_per_decision(spec):
+    """Physics steps per decision at the spec's decision rate (6 at 10 Hz, 12 at the 5 Hz fallback)."""
+    return int(round(1.0 / spec.get("decision_hz", 10.0) / SLICE_S))
+
+
 def simulate(spec, route):
     sim = Sim()
-    n_dec = 6
+    n_dec = n_per_decision(spec)
     p0 = route.xz[0]
     p1 = route.point_at(1.0)
     psi0 = math.atan2(p1[0] - p0[0], p1[1] - p0[1])
@@ -337,6 +360,7 @@ def simulate(spec, route):
             else:
                 held = exp
                 pending = True
+                sim.decisions.append((p, exp))
         elif phase == "warmup" and p == phase_end:
             sim.events.append((p, "warmup_end", ""))
             phase = "between"
@@ -425,11 +449,12 @@ def image_slots(spec, sim, frames):
     """Slot grid at 10 Hz phase-locked to physics step 0 (img_lead_ms 0); issue in the first frame at or past the
     due time; the screenshot shows the next frame (capture offset 1) and resolves one frame later."""
     anchor = world_ms(0)
+    period_ms = int(round(1000.0 / spec.get("decision_hz", 10.0)))
     slots = []
     i = 0
     g = 0
     while True:
-        due = anchor + g * 100
+        due = anchor + g * period_ms
         while i < len(frames) and (frames[i]["lps"] < 0 or world_ms(frames[i]["lps"]) < due):
             i += 1
         if i + 2 >= len(frames):
@@ -659,7 +684,8 @@ def session_json(spec, start_unix, card_sha):
                     "yaw_axis_sign": YAW_AXIS_SIGN, "steering_geometry": "unknown_on_1.8"},
         "authority": {"standalone": True, "rpl_ok": True},
         "versions": {"features_version": "features_v1", "nav_version": "nav_v1"},
-        "clocks": {"telemetry_every_k": 3, "physics_steps_per_decision": 6, "decision_hz": 10.0, "image_hz": 10.0,
+        "clocks": {"telemetry_every_k": 3, "physics_steps_per_decision": n_per_decision(spec),
+                   "decision_hz": spec.get("decision_hz", 10.0), "image_hz": spec.get("decision_hz", 10.0),
                    "img_inflight_timeout_ms": 2000, "img_lead_ms": 0, "chunk_max_s": 10.0},
         "rig": {"rig_id": "R1-S105-synthetic-%dx%d" % (w, h), "rig_name": "R1-S105", "ego_prefab": "synthetic/S105.et",
                 "mount": {"fwd_m": 1.8, "up_m": 1.5, "right_m": 0.0, "pitch_deg": -4.0}, "vfov_deg": 50.0,
@@ -676,6 +702,29 @@ def session_json(spec, start_unix, card_sha):
                          "record_launch_id": launch_id, "cli_seen": True, "profile_root_ok": True,
                          "escape_binding": None},
     }
+
+
+PREFLIGHT_CHECKS = ("acf", "appid", "buildid", "target_buildid", "auto_update_behavior", "state_flags", "depots",
+                    "steam_appid_txt", "binaries", "paks", "launch_path")
+
+
+def launch_record(meta):
+    """The session's dd-launch/1 record as DD-0's preflight writes it (tools/pin/preflight.py make_record): status
+    ok, the 22 named checks of both apps, the observed appmanifest buildids. Synthetic values, no host name."""
+    pin = meta["pin"]
+    observed = {"game": {"appid": 1874880, "buildid": pin["game_buildid"], "target_buildid": pin["game_buildid"],
+                         "auto_update_behavior": "1"},
+                "tools": {"appid": 1874910, "buildid": pin["tools_buildid"], "target_buildid": pin["tools_buildid"],
+                          "auto_update_behavior": "1"}}
+    return {"schema": pin["launch_schema"], "launch_id": pin["launch_id"], "status": "ok",
+            "utc": meta["created_utc"], "exe": "wb", "instance": None,
+            "pin": {"path": "synthetic/pin_%s.json" % pin["pin_id"], "pin_id": pin["pin_id"],
+                    "sha256": pin["pin_sha256"], "resolved_by": "active-pointer", "pointer": "synthetic/ACTIVE"},
+            "observed": observed,
+            "checks": [{"name": "%s.%s" % (app, c), "ok": True, "detail": "synthetic"}
+                       for app in ("game", "tools") for c in PREFLIGHT_CHECKS],
+            "host": {"hostname": "synthetic", "wsl_distro": None, "python": "synthetic"},
+            "argv": ["--pin-active", "--exe", "wb"]}
 
 
 def _json_text(obj):
@@ -758,6 +807,9 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
                             "note": "DD-6-min writes harvest.json; this synthetic one carries only build_key"}
                            ).encode("ascii"))
     _write_logs(session_dir, spec, start_unix, slots)
+    os.makedirs(os.path.join(session_dir, "_launch"))
+    with open(os.path.join(session_dir, "_launch", "launch_%s.json" % meta["pin"]["launch_id"]), "wb") as f:
+        f.write(_json_text(launch_record(meta)).encode("ascii"))
     with open(os.path.join(session_dir, "session_end.json"), "wb") as f:
         f.write(_json_text(end).encode("ascii"))
     if routes_dir is not None:
@@ -767,7 +819,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
             f.write((json.dumps(route_obj, indent=1) + "\n").encode("ascii"))
     golden = None
     if golden_json is not None:
-        golden = golden_truth(spec, quantised, slots, frames, card, pixels)
+        golden = golden_truth(spec, sim, quantised, slots, card, pixels)
         with open(check_out(golden_json), "wb") as f:
             f.write((json.dumps(golden, indent=1, sort_keys=True) + "\n").encode("ascii"))
     return {"session_dir": session_dir, "session_id": spec["session_id"], "route": route_obj, "golden": golden}
@@ -798,12 +850,25 @@ def _write_logs(session_dir, spec, start_unix, slots):
 # ------------------------------------------------------------------------------------------------
 # golden.json (expected reader output, from the simulation)
 # ------------------------------------------------------------------------------------------------
-def golden_truth(spec, q, slots, frames, card, pixels):
-    n, k = 6, 3
-    period = 100.0
+def _r6(values):
+    return None if values is None else [None if v is None else (round(v, 6) if isinstance(v, float) else v)
+                                        for v in values]
+
+
+def golden_truth(spec, sim, q, slots, card, pixels):
+    """Expected reader output. The R-01 samples come from the simulation's decision events (sim.decisions: P_t and
+    the command decided after step P_t), not from the ctl rows: action_cmd_t and hl_seq are that command and its
+    index, action_label_t the expert evaluation after step P_t, and the window is held when the simulation applied
+    that command in each of P_t + 1 .. P_t + N. State, exec and obs values are the values as written (q)."""
+    n, k = n_per_decision(spec), 3
+    period = 1000.0 / spec.get("decision_hz", 10.0)
+    steps = sim.steps
+    last = steps[-1]["p"]
     ctl = {r["physics_step"]: r for r in q["ctl"]}
     tel = {r["physics_step"]: r for r in q["telemetry"]}
     forward = set(card["gear_indices_forward"])
+    decided = {p: (i, cmd) for i, (p, cmd) in enumerate(sim.decisions)}
+    decision_steps = [p for p, _ in sim.decisions]
     images = []
     cands = []
     for sl in slots:
@@ -811,38 +876,46 @@ def golden_truth(spec, q, slots, frames, card, pixels):
         images.append({"slot_id": sl["slot_id"], "file": "frames/f_%08d.png" % sl["slot_id"], "file_exists": 1,
                        "png_w": spec["image_w"], "png_h": spec["image_h"], "fid_ok": 1,
                        "captured_render_frame": cf["render_frame"]})
-        cands.append((cf["render_frame"], cf["lps"], world_ms(cf["lps"]) if cf["lps"] >= 0 else 0, sl["slot_id"]))
-    warm = [r for r in q["events"] if r["kind"] == "warmup_end"]
-    warmup_end = warm[0]["world_time_ms"]
-    teleports = [r["physics_step"] for r in q["events"] if r["kind"] in ("teleport", "respawn")]
+        if cf["lps"] >= 0:      # a frame before the first step joins neither ctl nor telemetry
+            cands.append((cf["render_frame"], cf["lps"], world_ms(cf["lps"]), sl["slot_id"],
+                          steps[cf["lps"]]["episode"]))
+    warmup_end = next(world_ms(p) for p, kind, _ in sim.events if kind == "warmup_end")
+    teleports = [p for p, kind, _ in sim.events if kind in ("teleport", "respawn")]
     decisions = []
-    last = max(ctl)
     for p in range(0, last + 1, n):
-        c0, t0, c1 = ctl.get(p), tel.get(p), ctl.get(p + 1)
-        window = [ctl.get(p + j) for j in range(1, n + 1)]
-        world = c0["world_time_ms"]
-        episode = c0["episode_id"]
-        complete = t0 is not None and all(w is not None for w in window)
-        one_ep = complete and episode >= 0 and all(w["episode_id"] == episode for w in window)
+        st, t0 = steps[p], tel[p]
+        world, episode = st["world"], st["episode"]
+        window = list(range(p + 1, p + n + 1))
+        has_next = p + 1 <= last
+        complete = p + n <= last
+        one_ep = complete and episode >= 0 and all(steps[j]["episode"] == episode for j in window)
         state = [t0["vel_local_z"], YAW_AXIS_SIGN * t0["angvel_local_y"], t0["acc_local_z"],
                  1 if t0["gear"] in forward else 0]
-        label = [c0["exp_kappa_now"], c0["exp_accel_now"], c0["exp_dir_now"]]
-        cmd = None if c1 is None else [c1["hl_kappa"], c1["hl_accel"], c1["hl_dir"]]
-        exec_rows = [None if w is None else [None if w["llc_steer_lim"] is None else STEER_SIGN * w["llc_steer_lim"],
-                                             w["llc_throttle"], w["llc_brake"], STEER_SIGN * w["input_post_steer"]]
-                     for w in window]
+        label = _r6(list(st["exp"])) if st["exp"] is not None else [None, None, None]
+        if p in decided:
+            hl_seq, cmd = decided[p][0], _r6(list(decided[p][1]))
+        else:
+            hl_seq = bisect.bisect_right(decision_steps, p) - 1 if has_next else None
+            cmd = [None, None, None] if has_next else None
+        held = p in decided and complete and all(
+            steps[j]["cmd"] == decided[p][1] and steps[j]["hl_seq"] == decided[p][0] for j in window)
+        exec_ok = complete and all(steps[j]["llc_on"] for j in window)
+        exec_rows = [None if ctl.get(j) is None else
+                     [None if ctl[j]["llc_steer_lim"] is None else STEER_SIGN * ctl[j]["llc_steer_lim"],
+                      ctl[j]["llc_throttle"], ctl[j]["llc_brake"], STEER_SIGN * ctl[j]["input_post_steer"]]
+                     for j in window]
         eligible = [c for c in cands if c[1] <= p]
         obs = max(eligible) if eligible else None
         obs_valid = 1 if obs is not None and world - obs[2] <= period else 0
-        teleport = 1 if any(p <= t <= p + n for t in teleports) else 0
-        has_cmd = cmd is not None and None not in cmd
-        has_label = None not in label
-        mode = c1["mode"] if c1 is not None else c0["mode"]
-        wm_valid = int(complete and one_ep and has_cmd and obs_valid == 1 and not teleport)
-        policy_valid = int(episode >= 0 and has_label and mode not in ("X", "A", "I") and obs_valid == 1
-                           and not teleport)
+        same_ep = obs_valid == 1 and obs[4] == episode
+        first_q = obs[1] if obs_valid else p
+        teleport = 1 if any(first_q <= t <= p + n for t in teleports) else 0
+        mode = steps[p + 1]["mode"] if has_next else st["mode"]
+        wm_valid = int(complete and one_ep and held and exec_ok and obs_valid == 1 and same_ep and not teleport)
+        policy_valid = int(episode >= 0 and None not in label and mode not in ("X", "A", "I") and obs_valid == 1
+                           and same_ep and not teleport)
         decisions.append({
-            "decision_step": p, "episode_id": episode, "hl_seq": None if c1 is None else c1["hl_seq"],
+            "decision_step": p, "episode_id": episode, "hl_seq": hl_seq,
             "state": state, "action_cmd": cmd, "action_label": label, "action_exec": exec_rows,
             "obs_slot_id": None if obs is None else obs[3],
             "obs_captured_render_frame": None if obs is None else obs[0],
@@ -875,8 +948,9 @@ def golden_truth(spec, q, slots, frames, card, pixels):
         core = pixels[slot][:, band:spec["image_w"] - band, :].transpose(2, 0, 1)[:, ::stride, ::stride]
         pix.append({"slot_id": slot, "core": numpy.round(core.astype(float) / 255.0, 6).tolist()})
     return {"schema": "drivedit.dc2-golden/1", "session_id": spec["session_id"], "contract_version": "dc-2.0",
-            "clocks": {"telemetry_every_k": k, "physics_steps_per_decision": n, "decision_hz": 10.0,
-                       "image_hz": 10.0, "img_lead_ms": 0},
+            "clocks": {"telemetry_every_k": k, "physics_steps_per_decision": n,
+                       "decision_hz": spec.get("decision_hz", 10.0), "image_hz": spec.get("decision_hz", 10.0),
+                       "img_lead_ms": 0},
             "counts": {name: len(rows) for name, rows in sorted(q.items())},
             "img_resolved": images, "segments": segments, "decision_steps": decisions,
             "pixels": {"stride": stride, "slots": pix}}

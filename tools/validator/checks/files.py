@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from .base import FAIL, HARD, PASS, first, result, unreadable
+from .base import FAIL, HARD, NOT_EVALUATED, PASS, first, result, unreadable
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
@@ -48,30 +48,93 @@ def check_c01(ctx):
                   % len(s.schema.required_streams()))
 
 
+LAUNCH_ID_RE = re.compile(r"^[0-9A-Za-z-]{20,64}$")      # dc-2.0 section 5.1
+LAUNCH_SIDECAR = "_launch"      # the harvester's copy of the session's launch record: _launch/launch_<id>.json
+LAUNCH_SCHEMAS = ("dd-launch/1", "dd-launch/2")
+# DD-0 tools/pin/preflight.py: every launch record names these checks for both apps (22 in all, "22/22").
+PREFLIGHT_APPS = ("game", "tools")
+PREFLIGHT_CHECKS = ("acf", "appid", "buildid", "target_buildid", "auto_update_behavior", "state_flags", "depots",
+                    "steam_appid_txt", "binaries", "paks", "launch_path")
+RECORD_EXE = {"wb": "wb", "cl": "client", "cld": "client"}
+
+
+def launch_record_path(ctx, s):
+    """(path, why missing): --launch-record, else the harvester's sidecar <session>/_launch/launch_<launch_id>.json
+    (pin.launch_id checked against the launch-id rule before it names a file)."""
+    explicit = getattr(ctx.options, "launch_record", None)
+    if explicit:
+        return explicit, None
+    lid = s.meta_get("pin.launch_id")
+    if not (isinstance(lid, str) and LAUNCH_ID_RE.match(lid)):
+        return None, "pin.launch_id %r is not a launch id" % (lid,)
+    candidate = os.path.join(s.path, LAUNCH_SIDECAR, "launch_%s.json" % lid)
+    if os.path.isfile(candidate) and ctx.reader.inside(s.path, candidate):
+        return candidate, None
+    return None, ("no launch record (--launch-record, or the harvester's copy %s/launch_%s.json): the pin join of "
+                  "the session cannot be checked" % (LAUNCH_SIDECAR, lid))
+
+
 def _launch_record_checks(ctx, s, record_path, out):
+    """The dd-launch record against the session (dc-2.0 5.1 item 4, section 11): status ok, the same launch id, the
+    session's exe, pin id and pin sha256, build_key (when the record carries one, dd-launch/2), the observed
+    buildids, and every named preflight check of both apps present and ok."""
     try:
         with open(record_path, "rb") as f:
             rec = json.loads(f.read().decode("utf-8"))
+        if not isinstance(rec, dict):
+            raise ValueError("not a JSON object")
     except (OSError, ValueError) as e:
         out.append(("launch_record", False, "cannot read %s: %s" % (record_path, e)))
         return
+    schema, want_schema = rec.get("schema"), s.meta_get("pin.launch_schema")
+    out.append(("launch_record.schema", schema in LAUNCH_SCHEMAS and schema == want_schema,
+                "record schema %r, session pin.launch_schema %r" % (schema, want_schema)))
     out.append(("launch_record.status", rec.get("status") == "ok", "status %r" % rec.get("status")))
     out.append(("launch_record.launch_id", rec.get("launch_id") == s.meta_get("pin.launch_id"),
                 "record %r, session %r" % (rec.get("launch_id"), s.meta_get("pin.launch_id"))))
-    pin = rec.get("pin") or {}
+    kind = s.meta_get("exe.kind")
+    out.append(("launch_record.exe", rec.get("exe") == RECORD_EXE.get(kind),
+                "record exe %r, session exe.kind %r" % (rec.get("exe"), kind)))
+    pin = rec.get("pin") if isinstance(rec.get("pin"), dict) else {}
     out.append(("launch_record.pin", pin.get("pin_id") == s.meta_get("pin.pin_id")
                 and pin.get("sha256") == s.meta_get("pin.pin_sha256"),
-                "record pin %r sha %s" % (pin.get("pin_id"), str(pin.get("sha256"))[:12])))
-    bad = [c.get("name") for c in rec.get("checks") or [] if not c.get("ok")]
-    out.append(("launch_record.preflight", not bad and bool(rec.get("checks")),
-                "preflight checks failed: %s" % bad if bad else "%d preflight checks ok (buildids, TargetBuildID, "
-                "AutoUpdateBehavior, pak sizes and mtimes)" % len(rec.get("checks") or [])))
+                "record pin %r sha %s, session pin %r sha %s" % (pin.get("pin_id"), str(pin.get("sha256"))[:12],
+                                                                 s.meta_get("pin.pin_id"),
+                                                                 str(s.meta_get("pin.pin_sha256"))[:12])))
+    rec_key = rec.get("build_key") or pin.get("build_key")
+    if rec_key:
+        out.append(("launch_record.build_key", rec_key == s.build_key(),
+                    "record build_key %s, session %s" % (str(rec_key)[:16], str(s.build_key())[:16])))
+    for field in ("channel", "use_class"):
+        if field in rec:
+            want = s.meta_get("pin.channel") if field == "channel" else s.meta_get("use_class")
+            out.append(("launch_record." + field, rec[field] == want, "record %r, session %r" % (rec[field], want)))
+    observed = rec.get("observed") if isinstance(rec.get("observed"), dict) else {}
+    for app in PREFLIGHT_APPS:
+        have = (observed.get(app) or {}).get("buildid") if isinstance(observed.get(app), dict) else None
+        want = s.meta_get("pin.%s_buildid" % app)
+        out.append(("launch_record.%s_buildid" % app, have == want, "observed %r, session %r" % (have, want)))
+    named = {}
+    for c in rec.get("checks") or []:
+        if isinstance(c, dict):
+            named[c.get("name")] = c.get("ok") is True
+    required = ["%s.%s" % (app, c) for app in PREFLIGHT_APPS for c in PREFLIGHT_CHECKS]
+    missing = [n for n in required if n not in named]
+    failed = sorted(n for n, ok in named.items() if not ok)
+    out.append(("launch_record.preflight", not missing and not failed,
+                "preflight checks missing %s, failed %s" % (missing[:4], failed[:4]) if missing or failed
+                else "%d named preflight checks ok (buildids, TargetBuildID, AutoUpdateBehavior, depots, binaries, "
+                "pak sizes and mtimes, launch path)" % len(required)))
 
 
 def check_c02(ctx):
-    """Provenance (r2 5.1 C02): git SHA, dirty=false from T1, pin and buildids against thresholds C02, start/end
-    stamps equal, build_key from session.json or harvest.json, use_class rules, the L8 fingerprint, the launch record
-    (--launch-record), expert/llc SHAs in the allow-list (--allow-list) and the split derived from the route tags."""
+    """Provenance (r2 5.1 C02; TICKETS DD-5-min scope note): git SHA, dirty=false from T1, pin and buildids against
+    the pin's thresholds file (thresholds_dc2.<pin_id>.json), start/end stamps equal, build_key from session.json or
+    harvest.json, channel experimental only for use_class compat-preview, production refused (no G19 record support
+    yet), wb_escape only for dev, probe and appearance, the L8 fingerprint flag, the vehicle card hash (reader C02
+    problems), the launch record (--launch-record or the harvester's _launch/launch_<id>.json: missing leaves C02
+    NOT_EVALUATED, a warning), expert/llc SHAs in the allow-list (--allow-list) and the split derived from the route
+    tags."""
     if ctx.load_error:
         return unreadable(ctx, "C02")
     s = ctx.session
@@ -99,6 +162,10 @@ def check_c02(ctx):
                    "build_key %s" % ("from " + ("session.json" if s.meta_get("pin.build_key") else "harvest.json")
                                      if build_key else "missing from session.json and harvest.json")))
     use_class = s.meta_get("use_class")
+    channel = s.meta_get("pin.channel")
+    if channel == "experimental":
+        checks.append(("channel", use_class == "compat-preview", "pin.channel experimental with use_class %r: an "
+                       "experimental pin is used only for compat-preview" % (use_class,)))
     mode = s.meta_get("launch_guard.launch_mode")
     if use_class == "production":
         checks.append(("use_class", False, "production needs a qualified G19 record for build_key %s; G19 records "
@@ -108,12 +175,14 @@ def check_c02(ctx):
                        "wb_escape session with use_class %r (allowed: dev, probe, appearance)" % use_class))
     checks.append(("fingerprint", s.meta_get("map.fingerprint.ok") in (True, 1), "L8 map.fingerprint.ok %r"
                    % (s.meta_get("map.fingerprint.ok"),)))
-    record = getattr(ctx.options, "launch_record", None)
+    for p in s.problems_for("C02"):
+        checks.append(("vehicle_card", False, "%s: %s" % (p.where, p.message)))
+    record, why = launch_record_path(ctx, s)
+    record_missing = record is None
     if record:
         _launch_record_checks(ctx, s, record, checks)
     else:
-        skipped.append("launch record (pass --launch-record; the launch guard refused to write without an ok "
-                       "record)")
+        skipped.append(why)
     allow = getattr(ctx.options, "allow_list", None)
     if allow:
         with open(allow, "rb") as f:
@@ -144,7 +213,8 @@ def check_c02(ctx):
     elif len(splits) > 1:
         checks.append(("split", False, "episodes use routes of several splits: %s" % sorted(splits)))
     bad = ["%s: %s" % (name, detail) for name, ok, detail in checks if not ok]
-    detail = first(bad) if bad else "%d provenance checks ok; split %s; build_key %s" % (
-        len(checks), split, str(build_key)[:16])
-    return result(ctx, "C02", HARD, FAIL if bad else PASS, {"failed": len(bad), "split": split}, "exact", detail,
+    detail = first(bad) if bad else "%d provenance checks ok; split %s; build_key %s%s" % (
+        len(checks), split, str(build_key)[:16], "; launch record not checked" if record_missing else "")
+    status = FAIL if bad else (NOT_EVALUATED if record_missing else PASS)
+    return result(ctx, "C02", HARD, status, {"failed": len(bad), "split": split}, "exact", detail,
                   not_evaluated=skipped)

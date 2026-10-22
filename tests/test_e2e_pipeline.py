@@ -31,8 +31,9 @@ def test_configuration():
     return config
 
 
-def test_data_loading(config):
-    """Data loading on the dc-2.0 golden fixture through data/dc2/reader.py.
+def test_data_loading(config=None):
+    """Data loading on the dc-2.0 golden fixture through data/dc2/reader.py. A real pytest test (config has a
+    default, so pytest asks for no fixture): it asserts, and run_all_tests turns an exception into a FAIL line.
 
     The invented telemetry.csv this test used to write (to /tmp, on the C: drive here) is gone (CR-109, DD-5-min):
     it followed no writer's schema, and the legacy EnfusionDataset now refuses a CSV without its columns.
@@ -44,21 +45,16 @@ def test_data_loading(config):
     reader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reader)
     fixtures = os.path.join(repo, "tests", "fixtures", "capture_dc2")
-    try:
-        session = reader.open_session(
-            os.path.join(fixtures, "golden", "arland_T0b_20261025T091512Z_wb_i00_5e00"),
-            vehicle_card=os.path.join(fixtures, "cards", "S105_synthetic.json"))
-        valid = [d for d in session.decisions if d["masks"]["wm_valid"]]
-        image = session.load_image(valid[0]["obs_slot_id"])
-        print(f"  dc-2.0 golden: {len(session.decisions)} decision steps, {len(valid)} wm-valid, "
-              f"{len(session.segments)} segments, image {tuple(image.shape)}")
-        print("  ✓ Data loading works")
-        return True
-    except Exception as e:
-        print(f"  ⚠ Data loading issue: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    session = reader.open_session(
+        os.path.join(fixtures, "golden", "arland_T0b_20261025T091512Z_wb_i00_5e00"),
+        vehicle_card=os.path.join(fixtures, "cards", "S105_synthetic.json"))
+    valid = [d for d in session.decisions if d["masks"]["wm_valid"]]
+    image = session.load_image(valid[0]["obs_slot_id"])
+    print(f"  dc-2.0 golden: {len(session.decisions)} decision steps, {len(valid)} wm-valid, "
+          f"{len(session.segments)} segments, image {tuple(image.shape)}")
+    assert len(session.decisions) == 130 and len(valid) == 98 and len(session.segments) == 2
+    assert tuple(image.shape) == (3, 240, 128) and 0.0 <= float(image.min()) <= float(image.max()) <= 1.0
+    print("  PASS: data loading works")
 
 
 def test_model_creation(config):
@@ -275,7 +271,14 @@ def run_all_tests():
         return results
 
     # Test data loading
-    results['data_loading'] = test_data_loading(config)
+    try:
+        test_data_loading(config)
+        results['data_loading'] = True
+    except Exception as e:
+        print(f"  FAIL: data loading: {e}")
+        import traceback
+        traceback.print_exc()
+        results['data_loading'] = False
 
     # Test VAE
     results['vae'] = test_vae()

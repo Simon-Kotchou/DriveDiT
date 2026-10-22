@@ -6,8 +6,10 @@
 
 Checks, without touching any session data:
   * docs/capture_contract/dc-2.0.streams.json is structurally valid (keys, types, units, enums, TBD references);
-  * every stream field that CAPTURE_PROGRAM r2 3.3 lists, and every addition MIGRATION_1_9 8.3 asks of DD-11-min,
-    appears in the JSON files;
+  * every stream field and tensor channel that CAPTURE_PROGRAM r2 3.3 lists, and every addition MIGRATION_1_9 8.3
+    asks of DD-11-min, appears in the JSON files;
+  * the features_v1 registry rules: no student_input channel is absolute, the policy sees action_cmd and action_exec
+    only as history (offset <= -1), aux_target and eval_only channels are never inputs, C24's forbidden list;
   * the field tables in docs/capture_contract/dc-2.0.md equal the JSON, row by row;
   * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md;
   * the session id rule and the canonical map ids;
@@ -508,6 +510,269 @@ class StreamSchemaTest(unittest.TestCase):
             self.assertTrue(all(b < 127 for b in data), path)
             self.assertNotIn(b"\r", data, path)
             self.assertTrue(data.endswith(b"\n"), path)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# features_v1 registry
+
+CLASSES = ("student_input", "teacher_input", "aux_target", "eval_only")
+ROLES = ("world_model", "policy", "teacher")
+DEPLOYED_ROLES = ("world_model", "policy")
+
+# CAPTURE_PROGRAM r2 3.3, tensor table: name -> (shape or None, channel names or None, class).
+R2_TENSORS = {
+    "image": (["T", 3, 288, 512], None, "student_input"),
+    "state": (["T", 4], ["speed_mps", "yaw_rate_rps", "acc_long_achieved_mps2", "dir_state"], "student_input"),
+    "action_cmd": (["T", 3], ["kappa_target", "a_target", "dir_cmd"], "student_input"),
+    "action_label": (["T", 3], None, "aux_target"),
+    "action_exec": (["T", 6, 4], None, "student_input"),
+    "nav": (["T", 10], ["p20_x", "p20_y", "p40_x", "p40_y", "man_left", "man_straight", "man_right", "man_follow",
+                        "d_man", "d_stop"], "student_input"),
+    "style": (["T", 3], None, "student_input"),
+    "masks": (None, ["policy_valid", "wm_valid", "warmup", "env_transition", "teleport"], "aux_target"),
+}
+# r2 3.3 rows 'aux targets' and 'eval-only': item -> channel names and their required class.
+R2_CLASSED_ITEMS = {
+    "hindsight anchors at +2/+4/+6 s": (["anchor_2s_x", "anchor_2s_y", "anchor_4s_x", "anchor_4s_y", "anchor_6s_x",
+                                         "anchor_6s_y"], "aux_target"),
+    "future poses": (["fut_dx", "fut_dy", "fut_dpsi"], "aux_target"),
+    "road context": (["road_class", "road_width_m", "lane_lat_err_m", "lane_head_err_rad"], "aux_target"),
+    "contact events": (["contact_event", "contact_class"], "aux_target"),
+    "absolute pose": (["pos_x", "pos_y", "pos_z"], "eval_only"),
+    "route progress": (["route_progress_m"], "eval_only"),
+    "map_id": (["map_id"], "eval_only"),
+    "region": (["region"], "eval_only"),
+    "pin_id and build_key (MIGRATION_1_9 8.3)": (["pin_id", "build_key"], "eval_only"),
+}
+
+
+def registry_channels(reg):
+    for t in reg["tensors"]:
+        for c in t["channels"]:
+            yield t, c
+
+
+def source_exists(schema, source):
+    """True when a 'group.field' or 'session.json dotted.key' source names a field of the streams schema; None when
+    the source is not a field reference (builder, route geometry, ...)."""
+    m = re.match(r"^(session\.json|session_end\.json) ([a-z0-9_.]+)$", source)
+    if m:
+        return resolve_ref(schema, m.group(1) + "." + m.group(2)) is not None
+    m = re.match(r"^([a-z_]+)\.([a-z0-9_]+)(=[a-z0-9_]+)?$", source)
+    if m and (m.group(1) in schema["streams"] or m.group(1) in schema["derived"]):
+        return resolve_ref(schema, source) is not None
+    return None
+
+
+def registry_violations(reg, schema=None):
+    """Rules of features_v1.json (the DD-11-min acceptance rules plus consistency). Returns violations."""
+    errors = []
+    for k in ("schema", "features_version", "contract_version", "status", "classes", "roles", "offsets", "rules",
+              "c24_forbidden_inputs", "tensors"):
+        if k not in reg:
+            errors.append("top level: missing %r" % k)
+    if errors:
+        return errors
+    if reg["schema"] != "drivedit.features/1" or reg["features_version"] != "features_v1":
+        errors.append("top level: wrong schema id or version")
+    if tuple(reg["classes"]) != CLASSES:
+        errors.append("classes must be exactly %r" % (CLASSES,))
+    if tuple(reg["roles"]) != ROLES:
+        errors.append("roles must be exactly %r" % (ROLES,))
+    tnames = [t["name"] for t in reg["tensors"]]
+    if len(set(tnames)) != len(tnames):
+        errors.append("duplicate tensor names")
+    cnames = [c["name"] for _, c in registry_channels(reg)]
+    dup = sorted({n for n in cnames if cnames.count(n) > 1})
+    if dup:
+        errors.append("channel names used twice: %r" % dup)
+    by_name = {c["name"]: (t, c) for t, c in registry_channels(reg)}
+    for t in reg["tensors"]:
+        where = "tensor " + t["name"]
+        cls = t.get("class")
+        if cls not in CLASSES:
+            errors.append("%s: class %r" % (where, cls))
+        shape = t.get("shape", [])
+        if not shape or shape[0] != "T":
+            errors.append("%s: shape must start with T" % where)
+        else:
+            n_axis = shape[t.get("channel_axis", -1)]
+            if isinstance(n_axis, int) and n_axis != len(t["channels"]):
+                errors.append("%s: channel dimension %d != %d channels" % (where, n_axis, len(t["channels"])))
+        acc = t.get("access", {})
+        if tuple(acc) != ROLES:
+            errors.append("%s: access must list exactly %r" % (where, ROLES))
+            continue
+        for role, a in acc.items():
+            if set(a) != {"input", "max_offset", "target"}:
+                errors.append("%s/%s: access keys %r" % (where, role, sorted(a)))
+                continue
+            if not a["input"] and a["max_offset"] is not None:
+                errors.append("%s/%s: max_offset without input" % (where, role))
+            if a["input"] and a["max_offset"] is None and role in DEPLOYED_ROLES:
+                errors.append("%s/%s: a deployed role needs a bounded max_offset" % (where, role))
+        for c in t["channels"]:
+            for k in ("name", "unit", "source", "absolute", "build_scoped", "desc"):
+                if k not in c:
+                    errors.append("%s.%s: missing %r" % (where, c.get("name"), k))
+            if cls == "student_input" and c.get("absolute"):
+                errors.append("%s.%s: a student_input channel is absolute" % (where, c["name"]))
+            if schema is not None and "source" in c:
+                ok = source_exists(schema, c["source"])
+                if ok is False:
+                    errors.append("%s.%s: source %r is not in the streams schema" % (where, c["name"], c["source"]))
+                if ok:
+                    src = c["source"].replace("session.json ", "session.json.").replace("session_end.json ",
+                                                                                         "session_end.json.")
+                    f = resolve_ref(schema, src)
+                    if f.get("build_scoped") and not c.get("build_scoped") and "=" not in src:
+                        errors.append("%s.%s: built from a build-scoped field but not build_scoped" % (where,
+                                                                                                    c["name"]))
+        if cls == "teacher_input" and any(acc[r]["input"] for r in DEPLOYED_ROLES):
+            errors.append("%s: teacher_input reaches a deployed role" % where)
+        if cls == "aux_target" and any(acc[r]["input"] for r in ROLES):
+            errors.append("%s: aux_target used as an input" % where)
+        if cls == "eval_only" and any(acc[r]["input"] or acc[r]["target"] for r in ROLES):
+            errors.append("%s: eval_only used as an input or target" % where)
+        if t["name"] in ("action_cmd", "action_exec"):
+            pol = acc["policy"]
+            if pol["input"] and (pol["max_offset"] is None or pol["max_offset"] >= 0):
+                errors.append("%s: the policy may see it only as history (offset <= -1)" % where)
+            wm = acc["world_model"]
+            if t["name"] == "action_cmd" and (not wm["input"] or wm["max_offset"] != 0):
+                errors.append("%s: the world model conditions on it at offset 0" % where)
+        if t["name"] in ("image", "state", "nav", "style"):
+            for r in DEPLOYED_ROLES:
+                if acc[r]["input"] and acc[r]["max_offset"] > 0:
+                    errors.append("%s/%s: future values as input" % (where, r))
+        if t["name"] == "action_label" and not acc["policy"]["target"]:
+            errors.append("%s: must be the policy target" % where)
+    forb = reg["c24_forbidden_inputs"]
+    for n in forb.get("names", []):
+        if n not in by_name:
+            errors.append("C24: forbidden channel %r is not in the registry" % n)
+        elif by_name[n][0]["class"] in ("student_input", "teacher_input"):
+            errors.append("C24: forbidden channel %r is an input class" % n)
+    for t, c in registry_channels(reg):
+        if t["class"] in ("student_input", "teacher_input"):
+            for pat in forb.get("patterns", []):
+                if fnmatch.fnmatchcase(c["name"], pat):
+                    errors.append("C24: input channel %r matches forbidden pattern %r" % (c["name"], pat))
+    return errors
+
+
+class FeaturesRegistryTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_json(FEATURES_JSON)
+        cls.schema = load_json(STREAMS_JSON)
+        cls.spec = read_text(SPEC_MD)
+        cls.tensors = {t["name"]: t for t in cls.reg["tensors"]}
+        cls.channels = {c["name"]: (t, c) for t, c in registry_channels(cls.reg)}
+
+    def test_rules(self):
+        self.assertEqual(registry_violations(self.reg, self.schema), [])
+
+    def test_no_student_input_is_absolute(self):
+        for t, c in registry_channels(self.reg):
+            if t["class"] == "student_input":
+                self.assertFalse(c["absolute"], c["name"])
+
+    def test_policy_sees_actions_only_as_history(self):
+        for name in ("action_cmd", "action_exec"):
+            pol = self.tensors[name]["access"]["policy"]
+            self.assertTrue(pol["input"])
+            self.assertIsNotNone(pol["max_offset"])
+            self.assertLessEqual(pol["max_offset"], -1, name)
+        self.assertEqual(self.tensors["action_cmd"]["access"]["world_model"]["max_offset"], 0)
+        for name in ("state", "nav", "style"):
+            for role in DEPLOYED_ROLES:
+                self.assertLessEqual(self.tensors[name]["access"][role]["max_offset"], 0, (name, role))
+
+    def test_broken_registries_are_caught(self):
+        cases = []
+        bad = copy.deepcopy(self.reg)
+        [t for t in bad["tensors"] if t["name"] == "action_cmd"][0]["access"]["policy"]["max_offset"] = 0
+        cases.append(("policy action_cmd at offset 0", bad))
+        bad = copy.deepcopy(self.reg)
+        [t for t in bad["tensors"] if t["name"] == "action_exec"][0]["access"]["policy"]["max_offset"] = 0
+        cases.append(("policy action_exec at offset 0", bad))
+        bad = copy.deepcopy(self.reg)
+        [t for t in bad["tensors"] if t["name"] == "state"][0]["channels"][0]["absolute"] = True
+        cases.append(("absolute student input", bad))
+        bad = copy.deepcopy(self.reg)
+        anchors = [t for t in bad["tensors"] if t["name"] == "hindsight_anchors"][0]
+        anchors["access"]["policy"] = {"input": True, "max_offset": 0, "target": False}
+        cases.append(("aux_target as input", bad))
+        bad = copy.deepcopy(self.reg)
+        ev = [t for t in bad["tensors"] if t["name"] == "eval_only"][0]
+        moved = [c for c in ev["channels"] if c["name"] == "map_id"][0]
+        ev["channels"].remove(moved)
+        moved = dict(moved, absolute=False)
+        [t for t in bad["tensors"] if t["name"] == "style"][0]["channels"].append(moved)
+        cases.append(("map_id as a student input", bad))
+        bad = copy.deepcopy(self.reg)
+        [t for t in bad["tensors"] if t["name"] == "nav"][0]["channels"].append(
+            {"name": "goal_2s_x", "unit": "m", "source": "builder", "absolute": False, "build_scoped": False,
+             "desc": "planned-time goal"})
+        cases.append(("planned-time goal as input", bad))
+        bad = copy.deepcopy(self.reg)
+        [t for t in bad["tensors"] if t["name"] == "nav"][0]["access"]["world_model"]["max_offset"] = 1
+        cases.append(("future nav for the world model", bad))
+        bad = copy.deepcopy(self.reg)
+        [t for t in bad["tensors"] if t["name"] == "action_exec"][0]["channels"][1]["build_scoped"] = False
+        cases.append(("raw input not build_scoped", bad))
+        for label, reg in cases:
+            self.assertTrue(registry_violations(reg, self.schema), label)
+
+    def test_r2_tensors_present(self):
+        for name, (shape, channels, cls) in R2_TENSORS.items():
+            self.assertIn(name, self.tensors)
+            t = self.tensors[name]
+            self.assertEqual(t["class"], cls, name)
+            if shape is not None:
+                self.assertEqual(t["shape"], shape, name)
+            if channels is not None:
+                self.assertEqual([c["name"] for c in t["channels"]], channels, name)
+        self.assertTrue(self.tensors["action_label"]["access"]["policy"]["target"])
+        self.assertTrue(self.tensors["action_exec"].get("optional"))
+
+    def test_r2_classed_items_present(self):
+        for item, (names, cls) in R2_CLASSED_ITEMS.items():
+            for n in names:
+                self.assertIn(n, self.channels, item)
+                self.assertEqual(self.channels[n][0]["class"], cls, (item, n))
+
+    def test_c24_forbidden_list(self):
+        forb = self.reg["c24_forbidden_inputs"]
+        for n in ("map_id", "pos_x", "pos_y", "pos_z", "distance_total_m", "heading_world_rad", "vel_world_x",
+                  "anchor_2s_x", "anchor_6s_y", "fut_dx"):
+            self.assertIn(n, forb["names"])
+        self.assertIn("anchor_*", forb["patterns"])
+        self.assertIn("goal_*", forb["patterns"])
+
+    def test_raw_inputs_build_scoped(self):
+        for c in self.tensors["action_exec"]["channels"]:
+            self.assertTrue(c["build_scoped"], c["name"])
+        for n in ("kappa_target", "speed_mps", "p20_x"):
+            self.assertFalse(self.channels[n][1]["build_scoped"], n)
+
+    def test_offsets_block(self):
+        off = self.reg["offsets"]
+        self.assertEqual(off["decision_hz"], 10)
+        self.assertEqual(off["physics_steps_per_decision"], 6)
+        self.assertEqual(off["tbd"], "TBD-1")
+        self.assertEqual(self.reg["contract_version"], self.schema["contract_version"])
+        self.assertEqual(self.reg["status"], self.schema["status"])
+
+    def test_spec_tensor_table_equals_json(self):
+        rows = md_tables(self.spec).get(("tensors", ""))
+        self.assertIsNotNone(rows)
+        self.assertEqual([r[0].strip("`") for r in rows], [t["name"] for t in self.reg["tensors"]])
+        for r, t in zip(rows, self.reg["tensors"]):
+            self.assertEqual(r[2], t["class"], t["name"])
+            chans = [x.strip().strip("`") for x in r[6].split(",")]
+            self.assertEqual(chans, [c["name"] for c in t["channels"]], t["name"])
 
 
 if __name__ == "__main__":

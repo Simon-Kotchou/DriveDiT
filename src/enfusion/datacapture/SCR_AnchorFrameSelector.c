@@ -302,6 +302,10 @@ class SCR_AnchorFrameSelector: ScriptComponent
 
         m_bSessionInitialized = false;
 
+        // World Editor (edit mode) instances never capture (review CR-012); the containers above stay valid.
+        if (SCR_Global.IsEditMode(owner) || SCR_Global.IsEditMode())
+            return;
+
         // Initialize road network for junction detection
         InitializeRoadNetwork();
 

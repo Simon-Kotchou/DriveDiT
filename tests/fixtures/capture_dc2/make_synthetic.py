@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Synthetic dc-2.0 sessions for DD-5-min: the golden fixture, the negative fixtures and the C17 loop sessions.
 
-    python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR [--kind golden|t0_loop|golden_5hz]
-        [--variant gap|missing_commit|reused_slot] [--golden-json FILE] [--routes-dir DIR]
+    python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR
+        [--kind golden|t0_loop|golden_5hz|client_1408] [--variant gap|missing_commit|reused_slot]
+        [--golden-json FILE] [--routes-dir DIR]
 
 writes DIR/<session_id>/ and, with --golden-json, the expected reader output (golden.json). The committed golden
 fixture was written by
@@ -39,6 +40,10 @@ is read back from the ctl rows at P_t + 1. The masks and the obs rule repeat the
 Kind golden_5hz is the golden session at the TBD-2 fallback (image_hz = decision_hz = 5, N = 12, k = 3); the tests
 generate it, it is not committed.
 
+Kind client_1408 (DD-6-min) is the golden drive captured by a packaged client instead of Workbench: exe cl, instance
+i01, source class client_1408x720, 1408x720 images (a 1280x720 core between two 64 px bands), a dd-launch/1 record
+of exe client. The harvester tests generate it; it is not committed.
+
 Variants (negative fixtures; each breaks one check):
   gap             ctl rows of physics steps 304 and 305 are missing (C06); commit lines and counts stay consistent
   missing_commit  the commit line of the last ctl chunk is missing while session_end still counts it (C34)
@@ -74,7 +79,8 @@ CARD_FILE = os.path.join(HERE, "cards", "S105_synthetic.json")
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
 FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
 VARIANTS = ("gap", "missing_commit", "reused_slot")
-KINDS = ("golden", "t0_loop", "golden_5hz")
+KINDS = ("golden", "t0_loop", "golden_5hz", "client_1408")
+RECORD_EXE = {"wb": "wb", "cl": "client", "cld": "client"}    # dd-launch exe of a session exe.kind
 
 SLICE_S = 1.0 / 60.0
 STEER_SIGN = -1                 # TBD-5 default: CarSteering +1 is left, the contract is right-positive
@@ -141,6 +147,18 @@ SPECS = {
         "warmup_steps": 3600, "route": "t0_loop_synthetic_v1", "v_ref": 8.0,
         "episodes": [{"max_steps": 3000}], "between_steps": 0, "teleport_offset": None,
         "tail_steps": 30, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": False,
+    },
+    # The golden drive in the packaged client (DD-6-min harvester tests): the client source class, 1408x720 images
+    # with a 1280x720 core (generated in the tests, not committed).
+    "client_1408": {
+        "session_id": "arland_T0b_20261025T094500Z_cl_i01_c140", "trial_id": "T0b", "seed": 0,
+        "start_utc": (2026, 10, 25, 9, 45, 0), "render_frame0": 261900, "lead_frames": 2,
+        "warmup_steps": 120, "route": "golden_s_curve_v1", "v_ref": 8.0,
+        "episodes": [{"max_steps": 300}, {"max_steps": 300}], "between_steps": 30, "teleport_offset": 15,
+        "tail_steps": 30, "image_w": 1408, "image_h": 720, "band_px": 64, "fill_route_sha": True,
+        "exe": "cl", "instance": "i01", "source_class": "client_1408x720",
+        # the golden azimuth span over the wider core, so C13b's shift search sees one texture period
+        "rad_per_px": RAD_PER_PX * 128.0 / 1280.0,
     },
 }
 
@@ -397,7 +415,7 @@ def render_image(spec, step, code):
     img = numpy.full((h, w, 3), 70, dtype=numpy.uint8)
     core_w = w - 2 * band
     u = numpy.arange(core_w, dtype=float) - core_w / 2.0 + 0.5
-    az = step["psi"] + u * RAD_PER_PX
+    az = step["psi"] + u * spec.get("rad_per_px", RAD_PER_PX)
     tex = numpy.zeros(core_w)
     for period, amp, phase in TEX:
         tex += amp * numpy.sin(2.0 * math.pi * az / period + phase)
@@ -655,7 +673,8 @@ def _iso(unix_s):
 
 def session_json(spec, start_unix, card_sha):
     sid = spec["session_id"]
-    launch_id = "%s-wb-%s" % (_iso(start_unix - 60).replace("-", "").replace(":", ""), sid[-4:])
+    exe = spec.get("exe", "wb")
+    launch_id = "%s-%s-%s" % (_iso(start_unix - 60).replace("-", "").replace(":", ""), RECORD_EXE[exe], sid[-4:])
     w, h, band = spec["image_w"], spec["image_h"], spec["band_px"]
     render_settings = {"synthetic": True, "VideoUserSettings": {}, "DisplayUserSettings": {}}
     return {
@@ -669,7 +688,8 @@ def session_json(spec, start_unix, card_sha):
                   "conf": {"trial_id": spec["trial_id"], "route": spec["route"], "seed": spec["seed"],
                            "warmup_s": spec["warmup_steps"] / 60.0, "synthetic": True},
                   "seed": spec["seed"], "warmup_s": spec["warmup_steps"] / 60.0, "duration_s": 0.0},
-        "exe": {"kind": "wb", "instance": "i00", "cli": {"dcLaunchId": launch_id, "dcTrial": spec["trial_id"]}},
+        "exe": {"kind": exe, "instance": spec.get("instance", "i00"),
+                "cli": {"dcLaunchId": launch_id, "dcTrial": spec["trial_id"]}},
         "engine": {"build_version": "1.8.0.13", "build_time": "synthetic", "fixed_time_slice_s": SLICE_S},
         "pin": {"pin_id": "1.8.0.13", "pin_sha256": _hex("synthetic pin 1.8.0.13"), "build_key": None,
                 "channel": "stable", "launch_id": launch_id, "launch_schema": "dd-launch/1",
@@ -689,8 +709,8 @@ def session_json(spec, start_unix, card_sha):
                    "img_inflight_timeout_ms": 2000, "img_lead_ms": 0, "chunk_max_s": 10.0},
         "rig": {"rig_id": "R1-S105-synthetic-%dx%d" % (w, h), "rig_name": "R1-S105", "ego_prefab": "synthetic/S105.et",
                 "mount": {"fwd_m": 1.8, "up_m": 1.5, "right_m": 0.0, "pitch_deg": -4.0}, "vfov_deg": 50.0,
-                "writer": "MakeScreenshot", "source_class": "wb_viewport", "capture_wh": [w, h],
-                "core_wh": [w - 2 * band, h], "band_px": band, "derivative_wh": [512, 288],
+                "writer": "MakeScreenshot", "source_class": spec.get("source_class", "wb_viewport"),
+                "capture_wh": [w, h], "core_wh": [w - 2 * band, h], "band_px": band, "derivative_wh": [512, 288],
                 "derivative_codec": "jpeg_q95",
                 "fiducial": {"version": "v2", "bits": 18, "patches": 6, "bits_per_patch": 3, "patch_px": 32,
                              "mirrored": True},
@@ -712,19 +732,21 @@ def launch_record(meta):
     """The session's dd-launch/1 record as DD-0's preflight writes it (tools/pin/preflight.py make_record): status
     ok, the 22 named checks of both apps, the observed appmanifest buildids. Synthetic values, no host name."""
     pin = meta["pin"]
+    exe = RECORD_EXE[meta["exe"]["kind"]]
+    instance = meta["exe"]["instance"] if exe == "client" else None
     observed = {"game": {"appid": 1874880, "buildid": pin["game_buildid"], "target_buildid": pin["game_buildid"],
                          "auto_update_behavior": "1"},
                 "tools": {"appid": 1874910, "buildid": pin["tools_buildid"], "target_buildid": pin["tools_buildid"],
                           "auto_update_behavior": "1"}}
     return {"schema": pin["launch_schema"], "launch_id": pin["launch_id"], "status": "ok",
-            "utc": meta["created_utc"], "exe": "wb", "instance": None,
+            "utc": meta["created_utc"], "exe": exe, "instance": instance,
             "pin": {"path": "synthetic/pin_%s.json" % pin["pin_id"], "pin_id": pin["pin_id"],
                     "sha256": pin["pin_sha256"], "resolved_by": "active-pointer", "pointer": "synthetic/ACTIVE"},
             "observed": observed,
             "checks": [{"name": "%s.%s" % (app, c), "ok": True, "detail": "synthetic"}
                        for app in ("game", "tools") for c in PREFLIGHT_CHECKS],
             "host": {"hostname": "synthetic", "wsl_distro": None, "python": "synthetic"},
-            "argv": ["--pin-active", "--exe", "wb"]}
+            "argv": ["--pin-active", "--exe", exe] + (["--instance", instance] if instance else [])}
 
 
 def _json_text(obj):

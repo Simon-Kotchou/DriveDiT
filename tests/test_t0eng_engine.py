@@ -96,6 +96,31 @@ class EngineAnalysisTest(unittest.TestCase):
         self.assertIn("[INFO] world_timestamp: WorldTimestamp", out)
         self.assertTrue(out.rstrip().endswith("RESULT E-10: PASS"), out)
 
+    def test_e10_runner_step_timing_is_info_only(self):
+        d = self.e10_play()
+        footer = dict(COMPLETE)
+        footer.update({"clock.step_source": "fixedframe", "clock.step_decided_by": "frame",
+                       "clock.step_dt_s": "0.033333", "clock.step_dt_source": "engine",
+                       "clock.measured_fixed_step_s": "0.033357", "clock.engine_fixed_steps": "1069",
+                       "clock.merged_fixed_steps": "3", "clock.fixed_time_slice_min_s": "0.100000",
+                       "clock.fixed_time_slice_max_s": "0.100000", "clock.fixedframe_timeslice_min_s": "0.033333",
+                       "clock.fixedframe_timeslice_max_s": "0.100000",
+                       "clock.fixedframe_timeslice_one_step_s": "0.033333"})
+        with open(os.path.join(d, pc.RUN_FOOTER), "w", encoding="ascii", newline="") as f:
+            f.write("".join("%s=%s\n" % kv for kv in footer.items()))
+        code, out = run(e10_ticks, [d])
+        self.assertEqual(code, 0, out)
+        self.assertIn("[INFO] runner_step_timing: step source fixedframe decided by frame; step dt 0.033333 s "
+                      "(engine, 30.00 steps/s); measured fixed step 0.033357 s over 1069 engine fixed steps, 3 merged",
+                      out)
+        self.assertIn("GetFixedTimeSlice 0.100000..0.100000 s", out)
+        self.assertTrue(out.rstrip().endswith("RESULT E-10: PASS"), out)
+
+    def test_e10_without_runner_step_timing_has_no_info(self):
+        code, out = run(e10_ticks, [self.e10_play()])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("runner_step_timing", out)
+
     def test_e10_without_step_rows_is_incomplete(self):
         code, out = run(e10_ticks, [self.e10_play(step_rows=False)])
         self.assertEqual(code, 3, out)

@@ -20,7 +20,12 @@ every k steps, 0 missed. Checked here:
 INFO: k and dt (TBD-1), the step source, the EOnSimulate / EOnFixedFrame totals, the sum of GetFixedSteps() against
 the simulate count, the steps-per-frame histogram, whether world time advances per step or per frame (TBD-1), post
 calls without a pre call, and world_timestamp: the dc-2.0 clock (BaseWorld.GetTimestamp().DiffMilliseconds, the
-world_ts_ms columns) against GetWorldTime over the run and whether it advances per step (TBD-1).
+world_ts_ms columns) against GetWorldTime over the run and whether it advances per step (TBD-1), and
+runner_step_timing: the run_footer.txt clock.* keys of DC_ProbeRunner (STEP TIMING) - the step length the probes used
+(GetStepDtS) next to the engine's raw values. In the 1.8.0.13 fixedframe fallback EOnFixedFrame comes once per frame
+with at least one 1/30 s fixed step, while GetFixedTimeSlice returned 0.1 s in the first frame: when it stays 0.1 the
+steps_per_world_second check above fails by design (1/dt with dt = engine.fixed_time_slice_s), and this INFO line
+holds the rate the runner measured. The verdict does not use it.
 
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
 """
@@ -198,8 +203,30 @@ def analyse(play):
         no_pre = sum(1 for r in steps if not r["world_time_ms_pre"])
         v.info("post_without_pre", "%d of %d step rows" % (no_pre, len(steps)))
         v.info("world_timestamp", world_timestamp_text(steps))
+    timing = runner_step_timing(play.footer)
+    if timing:
+        v.info("runner_step_timing", timing)
     v.check_footer(play)
     return v
+
+
+def runner_step_timing(footer):
+    """The runner's step timing from run_footer.txt (clock.* keys, DC_ProbeRunner STEP TIMING): the step length the
+    probes used next to the engine's raw values. None for a play written before the keys existed."""
+    if not footer or not footer.get("clock.step_dt_s"):
+        return None
+    dt = pc.to_float(footer.get("clock.step_dt_s"))
+    rate = "%.2f steps/s" % (1.0 / dt) if dt else "no rate"
+    return ("step source %s decided by %s; step dt %s s (%s, %s); measured fixed step %s s over %s engine fixed steps, "
+            "%s merged into one EOnFixedFrame call; GetFixedTimeSlice %s..%s s; EOnFixedFrame time slice %s..%s s "
+            "(one-step frame %s s)" % (
+                footer.get("clock.step_source", "?"), footer.get("clock.step_decided_by", "?"),
+                footer.get("clock.step_dt_s"), footer.get("clock.step_dt_source", "?"), rate,
+                footer.get("clock.measured_fixed_step_s", "?"), footer.get("clock.engine_fixed_steps", "?"),
+                footer.get("clock.merged_fixed_steps", "?"), footer.get("clock.fixed_time_slice_min_s", "?"),
+                footer.get("clock.fixed_time_slice_max_s", "?"), footer.get("clock.fixedframe_timeslice_min_s", "?"),
+                footer.get("clock.fixedframe_timeslice_max_s", "?"),
+                footer.get("clock.fixedframe_timeslice_one_step_s", "?")))
 
 
 def world_timestamp_text(steps):

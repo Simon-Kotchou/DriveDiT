@@ -39,7 +39,8 @@
 //
 // BUILD-AGNOSTIC (PROBE_DESIGN.md 8): every engine call exists with the same signature in 1.8.0.13 and 1.9.0.10
 // (PROBE_APIS.md 4.3); every sequence, amplitude, speed, gear, area and tolerance is an [Attribute]; durations are in
-// seconds and converted with GetFixedTimeSlice. For the 1.9 re-run (MIGRATION_1_9.md 8.3, SURFACE.md A-01..B-08)
+// seconds and converted with the runner's step length (DC_ProbeComponent.GetStepDtS, not GetFixedTimeSlice). For the
+// 1.9 re-run (MIGRATION_1_9.md 8.3, SURFACE.md A-01..B-08)
 // the probe records instead of assuming 1.8 behaviour, and keeps going: self-steer and a steering rate limit or
 // centering show up as input_* != cmd_* or as yaw with zero command; a stall (engine_on 0) ends the phase with
 // engine_off and the next phase restarts the engine; cur_gear / fut_gear every step expose shift loops; a persistent
@@ -869,7 +870,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	[Attribute("20", UIWidgets.Slider, "Speed of the PRBS and reversal phases [km/h]", "1 120 1", category: "E-01")]
 	protected float m_fPrbsSpeedKmh;
 
-	[Attribute("0.2", UIWidgets.Slider, "PRBS bit length [s], converted to physics steps with GetFixedTimeSlice", "0.01 5 0.01", category: "E-01")]
+	[Attribute("0.2", UIWidgets.Slider, "PRBS bit length [s], converted to physics steps with the runner's step length (GetStepDtS)", "0.01 5 0.01", category: "E-01")]
 	protected float m_fPrbsBitS;
 
 	[Attribute("7", UIWidgets.Slider, "PRBS LFSR order (5..10); one period = 2^order - 1 bits", "5 10 1", category: "E-01")]
@@ -968,7 +969,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	protected int m_iSteerSignUsed;				//!< e02a
 	protected string m_sSteerSignSource;		//!< e02a: measured_e01 or attribute
 
-	// Step counts derived from the attributes and GetFixedTimeSlice at the probe start
+	// Step counts derived from the attributes and the runner's step length (GetStepDtS) at the probe start
 	protected float m_fDt;
 	protected int m_iSettleSteps;
 	protected int m_iReachSteps;
@@ -1063,12 +1064,15 @@ class DC_ProbeSequences : DC_ProbeComponent
 		outKeyValues.Insert("m_fE02aMaxTurnDeg=" + m_fE02aMaxTurnDeg.ToString(-1, 3));
 		outKeyValues.Insert("m_iAssumedSteerSign=" + m_iAssumedSteerSign.ToString());
 
+		// dt_s: the runner's step length (DC_ProbeRunner STEP TIMING); engine_fixed_time_slice_s: GetFixedTimeSlice now
 		World world = GetGame().GetWorld();
-		float dt = 0;
+		float dt = GetStepDtS();
+		float engineFixedSlice = 0;
 		if (world)
-			dt = world.GetFixedTimeSlice();
+			engineFixedSlice = world.GetFixedTimeSlice();
 
 		outKeyValues.Insert("dt_s=" + dt.ToString(-1, 6));
+		outKeyValues.Insert("engine_fixed_time_slice_s=" + engineFixedSlice.ToString(-1, 6));
 		if (dt > 0)
 		{
 			int bitSteps = StepsFor(m_fPrbsBitS, dt);
@@ -1173,9 +1177,11 @@ class DC_ProbeSequences : DC_ProbeComponent
 		if (!world)
 			return RefuseStart("no game world - probe not started");
 
-		m_fDt = world.GetFixedTimeSlice();
+		// The runner's step length, not GetFixedTimeSlice: in the 1.8 fixedframe fallback one step is 1/30 s while
+		// GetFixedTimeSlice returned 0.1 (DC_ProbeRunner STEP TIMING)
+		m_fDt = GetStepDtS();
 		if (m_fDt <= 0)
-			return RefuseStart("GetFixedTimeSlice returned " + m_fDt.ToString(-1, 6) + " - probe not started");
+			return RefuseStart("step length (GetStepDtS) is " + m_fDt.ToString(-1, 6) + " s - probe not started");
 
 		if (probeId == PROBE_E02A && m_iForceDecision == 2)
 			return RefuseStart("e01 of this Play found that DC_Ego does not move, even with ForceEnableSimulation - e02a not started");

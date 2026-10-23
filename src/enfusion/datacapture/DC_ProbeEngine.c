@@ -8,7 +8,9 @@
 //            (e10_telemetry.csv), k = max(1, round(m_fE10TelemetryPeriodS / GetFixedTimeSlice())). r2 4.4: the
 //            EOnPostSimulate count per world-second is 1/dt +-1 and the telemetry comes every k steps, 0 missed.
 //            Step and telemetry rows also carry world_ts_ms = BaseWorld.GetTimestamp().DiffMilliseconds(start): the
-//            dc-2.0 clock, next to GetWorldTime (TBD-1).
+//            dc-2.0 clock, next to GetWorldTime (TBD-1). e10 starts before the warm-up, so k uses GetFixedTimeSlice
+//            of the start frame. In the runner's fixedframe fallback the step rows' timeslice_* are the runner's
+//            n x GetStepDtS (DC_ProbeRunner STEP TIMING); the engine's raw values are in run_footer.txt (clock.*).
 //   e04      one shot, needs DC_Ego. Reads the S105's prefab, component classes, gearbox, assistance mode and engine
 //            facts (e04_vehicle.txt, e04_components.csv). Read only: nothing on the vehicle is changed.
 //   e20      one shot. Dumps every variable of the engine and game user-settings modules generically

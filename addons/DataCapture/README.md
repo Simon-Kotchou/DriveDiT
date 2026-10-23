@@ -232,14 +232,23 @@ A visible command line without `-dcLaunchId` always refuses: Workbench was then 
 3. `[DC_Probe] plan from m_sPlan: '...' -> N probe(s) with a component: ...`, with a WARNING for every plan id that
    has no probe component in this deploy.
 4. `[DC_Probe] run started (OnGameModeStart): plan=..., warm-up 3.0 s, gap 1.0 s`.
-5. After the warm-up `[DC_Probe] step source: simulate (...)`. A WARNING `step source: fixedframe` or an ERROR
-   `step source: none` means that the game mode entity gets no EOnSimulate.
-6. For each probe: `[DC_Probe <id>] START play_dir=$profile:DC_Probes/<id>/<launch id>/play_NN`, the probe's own
-   `[DC_Probe <id>]` lines, then `[DC_Probe <id>] END reason=done status=complete`. Other ends:
+5. `[DC_Probe] runner heartbeat #<n> via=frame: world_ms=... step_source=undecided ...` about once per world second
+   until the step source is decided, then every 30 world seconds while the plan runs. `via=fixedframe` or
+   `via=watchdog` means that EOnFrame missed the heartbeat; `plan_calls` greater than `plan_entries` means that EOnFrame
+   calls the sequencer (AdvancePlan) but the call does not reach it.
+6. After the warm-up `[DC_Probe] step source: simulate (...)`, or on the probe world in 1.8 the WARNING
+   `step source: fixedframe - no EOnSimulate on the game mode entity ...`, each with `decided by frame at world <ms> ms;
+   step dt <s> s (<engine|measured>) ...`. An ERROR `step source: none` means that neither EOnSimulate nor
+   EOnFixedFrame arrived. A WARNING `decision path: the frame path (EOnFrame -> AdvancePlan) did not decide the step
+   source; the fixedframe|watchdog path decides it ...` means that the sequencer did not run: send the log folder.
+7. For each exclusive probe: `[DC_Probe] plan: starting exclusive <i>/<n> <id> ...`, then
+   `[DC_Probe <id>] START play_dir=$profile:DC_Probes/<id>/<launch id>/play_NN`, the probe's own `[DC_Probe <id>]`
+   lines, `[DC_Probe <id>] END reason=done status=complete` and `[DC_Probe] plan: <id> ended (done, complete) after
+   <s> world s; next exclusive ...`. Other ends:
    - `reason=timeout`;
    - `reason=write_fail`, with the requested and the returned byte counts of the failed write;
-   - `reason=start_failed`, for example without `DC_Ego`.
-7. `[DC_Probe] plan complete: ...`. Stop the Play after this line. A Stop before it ends the running probes with
+   - `reason=start_failed`, for example without `DC_Ego`, followed by `[DC_Probe] plan: <id> did not start ...`.
+8. `[DC_Probe] plan complete: ...`. Stop the Play after this line. A Stop before it ends the running probes with
    `reason=play_end`.
 
 ### Where the probe files are
@@ -252,8 +261,9 @@ every Play of one Workbench start shares the launch id.
   - `run_header.txt`: build stamp (git sha, dirty flag), launch id and pin, build version, fixed time slice,
     world, clocks, and every probe parameter as `params.*`;
   - the probe's CSV files, each with one header row;
-  - `run_footer.txt`, written when the probe ends: status, reason, rows and bytes per file. A play folder without
-    it was ended by a crash, a kill or a Stop that tore the world down.
+  - `run_footer.txt`, written when the probe ends: status, reason, rows and bytes per file, and the run's step
+    timing (`clock.step_source`, `clock.step_dt_s` and the engine's raw values, see the DC_ProbeRunner header). A play
+    folder without it was ended by a crash, a kill or a Stop that tore the world down.
 - A refused Play creates no `DC_Probes` folder at all.
 
 ### Choosing the probes

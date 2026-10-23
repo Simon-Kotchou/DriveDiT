@@ -820,10 +820,10 @@ class DC_ProbeSequences : DC_ProbeComponent
 	static const float E02A_EDGE_OFFSET_M = 5;
 
 	// === AREA ===
-	[Attribute("1495.4 0 2620", UIWidgets.Coords, "Start of the test area (x, z used, y ignored): south part of the Arland main runway, decoder road 425 RG_Runway_60m [decoder-derived, unverified in the engine]", category: "Area")]
+	[Attribute("659.6 0 2572.4", UIWidgets.Coords, "Start of the test area (x, z used, y ignored): engine road dump E-08a 2026-10-22: Arland main runway (road 83, 60 m x 1217 m, y 38.9-39.2), 58 m in from its west end; the decoder runway (road 425) was misplaced", category: "Area")]
 	protected vector m_vAreaStart;
 
-	[Attribute("0.11", UIWidgets.Slider, "Heading of the area centre line [deg], 0 = +Z (north), clockwise seen from above", "0 360 0.01", category: "Area")]
+	[Attribute("75.11", UIWidgets.Slider, "Heading of the area centre line [deg], 0 = +Z (north), clockwise seen from above", "0 360 0.01", category: "Area")]
 	protected float m_fAreaHeadingDeg;
 
 	[Attribute("1100", UIWidgets.Slider, "Length of the usable area along the centre line [m]", "10 5000 1", category: "Area")]

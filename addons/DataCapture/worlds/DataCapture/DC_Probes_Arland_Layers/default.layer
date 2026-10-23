@@ -54,8 +54,8 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_sE20GameModules "SCR_VideoSettings"
   }
   DC_ProbeSequences "{DC4A50B300000003}" {
-   m_vAreaStart 1495.4 0 2620
-   m_fAreaHeadingDeg 0.11
+   m_vAreaStart 659.6 0 2572.4
+   m_fAreaHeadingDeg 75.11
    m_fAreaLengthM 1100
    m_fAreaHalfWidthM 25
    m_fAreaMarginM 3
@@ -108,8 +108,8 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_iGapPx 8
    m_bDrive 1
    m_fDriveKmh 30
-   m_vAreaStart 1495.4 0 2620
-   m_fAreaHeadingDeg 0.11
+   m_vAreaStart 659.6 0 2572.4
+   m_fAreaHeadingDeg 75.11
    m_fAreaLengthM 1100
    m_fAreaHalfWidthM 25
    m_fAreaMarginM 3
@@ -128,8 +128,8 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_iPatchPx 32
    m_iMarginPx 16
    m_iGapPx 8
-   m_vAreaStart 1495.4 0 2620
-   m_fAreaHeadingDeg 0.11
+   m_vAreaStart 659.6 0 2572.4
+   m_fAreaHeadingDeg 75.11
    m_fAreaLengthM 1100
    m_fAreaHalfWidthM 25
    m_fAreaMarginM 3

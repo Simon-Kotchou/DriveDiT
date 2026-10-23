@@ -47,8 +47,8 @@
 //   (computed from GetFixedTimeSlice, the decision rate and the telemetry period bound m_fTelemetryMaxPeriodS),
 //   TBD-2 image rate, in-flight timeout and lead, TBD-3 writer semantics (keep logs open, re-check file lengths),
 //   TBD-6 Workbench escape (off on DC_Arland; the probe layer alone has it on), TBD-8 render-settings modules. Facts
-//   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance) are
-//   written to the extra "observed" objects of session.json and session_end.json.
+//   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance, the ego's
+//   gearbox) are written to the extra "observed" objects of session.json and session_end.json.
 //
 // FAULT CASES (m_sFaultCase, empty in the layer; for the acceptance runbook only, every one ends in an ERROR or a
 //   failed session): readiness_timeout, session_dir_exists, zero_ego, chunk_dir_blocked.
@@ -322,7 +322,7 @@ class DC_SessionModule : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Writes this module's keys into the session.json object named section ("rig", "control")
+	//! Writes this module's keys into the session.json object named section ("rig", "control", "observed")
 	void WriteSessionJson(string section, notnull DC_JsonWriter json)
 	{
 	}
@@ -1439,6 +1439,11 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.AddString("fault_case", m_sFaultCase);
 		json.AddStringOrNull("trial_conf_raw", m_sTrialConfRaw);
 		json.AddStringOrNull("trial_conf_raw_note", m_sTrialConfRawNote);
+		foreach (DC_SessionModule observedModule : m_aModules)
+		{
+			observedModule.WriteSessionJson("observed", json);
+		}
+
 		json.EndObject();
 
 		json.EndObject();

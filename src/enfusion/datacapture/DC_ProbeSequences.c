@@ -32,14 +32,18 @@
 //
 // Segment transitions are decided in OnProbePostSimulate from the state after the step; the commands of the next
 // step are set in OnProbeSimulate. Teleports run in OnProbeFrame (never inside a physics step). The step row of step
-// N carries the phase and segment whose commands were applied in step N.
+// N carries the phase and segment whose commands were applied in step N. The segment and phase counters advance by
+// the engine steps a dispatched step covers (CoveredSteps: round(timeSlice / dt), n on a frame whose n fixed steps
+// the runner's fixedframe fallback merges into one call, else 1), so every duration holds in world time at any frame
+// rate; phase_step in the step rows counts covered steps, and a PRBS bit is drawn for every bit start reached.
 //
 // SHARED CLASSES (PROBE_DESIGN.md 4.8; DC_ProbeImages and DC_ProbeMarkers use them): DC_ProbeArea (test area
 // geometry), DC_ProbeActuator (Mode A driver of one vehicle), DC_ProbePrbs (maximum-length LFSR).
 //
 // BUILD-AGNOSTIC (PROBE_DESIGN.md 8): every engine call exists with the same signature in 1.8.0.13 and 1.9.0.10
 // (PROBE_APIS.md 4.3); every sequence, amplitude, speed, gear, area and tolerance is an [Attribute]; durations are in
-// seconds and converted with GetFixedTimeSlice. For the 1.9 re-run (MIGRATION_1_9.md 8.3, SURFACE.md A-01..B-08)
+// seconds and converted with the runner's step length (DC_ProbeComponent.GetStepDtS, not GetFixedTimeSlice). For the
+// 1.9 re-run (MIGRATION_1_9.md 8.3, SURFACE.md A-01..B-08)
 // the probe records instead of assuming 1.8 behaviour, and keeps going: self-steer and a steering rate limit or
 // centering show up as input_* != cmd_* or as yaw with zero command; a stall (engine_on 0) ends the phase with
 // engine_off and the next phase restarts the engine; cur_gear / fut_gear every step expose shift loops; a persistent
@@ -869,7 +873,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	[Attribute("20", UIWidgets.Slider, "Speed of the PRBS and reversal phases [km/h]", "1 120 1", category: "E-01")]
 	protected float m_fPrbsSpeedKmh;
 
-	[Attribute("0.2", UIWidgets.Slider, "PRBS bit length [s], converted to physics steps with GetFixedTimeSlice", "0.01 5 0.01", category: "E-01")]
+	[Attribute("0.2", UIWidgets.Slider, "PRBS bit length [s], converted to physics steps with the runner's step length (GetStepDtS)", "0.01 5 0.01", category: "E-01")]
 	protected float m_fPrbsBitS;
 
 	[Attribute("7", UIWidgets.Slider, "PRBS LFSR order (5..10); one period = 2^order - 1 bits", "5 10 1", category: "E-01")]
@@ -957,8 +961,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 	protected int m_iPhasesStarted;
 	protected bool m_bProbeDone;
 	protected DC_EProbeSequenceSegment m_eSegment;
-	protected int m_iSegStep;					//!< steps completed in the current segment
-	protected int m_iPhaseStep;					//!< steps completed in the current phase
+	protected int m_iSegStep;					//!< engine steps covered in the current segment (CoveredSteps)
+	protected int m_iPhaseStep;					//!< engine steps covered in the current phase
+	protected int m_iPrbsBitsDrawn;				//!< PRBS bits drawn in the current segment
 	protected bool m_bTeleportDone;
 	protected bool m_bHasPrevHeading;
 	protected float m_fPrevHeadingDeg;
@@ -968,7 +973,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	protected int m_iSteerSignUsed;				//!< e02a
 	protected string m_sSteerSignSource;		//!< e02a: measured_e01 or attribute
 
-	// Step counts derived from the attributes and GetFixedTimeSlice at the probe start
+	// Step counts derived from the attributes and the runner's step length (GetStepDtS) at the probe start
 	protected float m_fDt;
 	protected int m_iSettleSteps;
 	protected int m_iReachSteps;
@@ -1063,12 +1068,15 @@ class DC_ProbeSequences : DC_ProbeComponent
 		outKeyValues.Insert("m_fE02aMaxTurnDeg=" + m_fE02aMaxTurnDeg.ToString(-1, 3));
 		outKeyValues.Insert("m_iAssumedSteerSign=" + m_iAssumedSteerSign.ToString());
 
+		// dt_s: the runner's step length (DC_ProbeRunner STEP TIMING); engine_fixed_time_slice_s: GetFixedTimeSlice now
 		World world = GetGame().GetWorld();
-		float dt = 0;
+		float dt = GetStepDtS();
+		float engineFixedSlice = 0;
 		if (world)
-			dt = world.GetFixedTimeSlice();
+			engineFixedSlice = world.GetFixedTimeSlice();
 
 		outKeyValues.Insert("dt_s=" + dt.ToString(-1, 6));
+		outKeyValues.Insert("engine_fixed_time_slice_s=" + engineFixedSlice.ToString(-1, 6));
 		if (dt > 0)
 		{
 			int bitSteps = StepsFor(m_fPrbsBitS, dt);
@@ -1173,9 +1181,11 @@ class DC_ProbeSequences : DC_ProbeComponent
 		if (!world)
 			return RefuseStart("no game world - probe not started");
 
-		m_fDt = world.GetFixedTimeSlice();
+		// The runner's step length, not GetFixedTimeSlice: in the 1.8 fixedframe fallback one step is 1/30 s while
+		// GetFixedTimeSlice returned 0.1 (DC_ProbeRunner STEP TIMING)
+		m_fDt = GetStepDtS();
 		if (m_fDt <= 0)
-			return RefuseStart("GetFixedTimeSlice returned " + m_fDt.ToString(-1, 6) + " - probe not started");
+			return RefuseStart("step length (GetStepDtS) is " + m_fDt.ToString(-1, 6) + " s - probe not started");
 
 		if (probeId == PROBE_E02A && m_iForceDecision == 2)
 			return RefuseStart("e01 of this Play found that DC_Ego does not move, even with ForceEnableSimulation - e02a not started");
@@ -1299,9 +1309,10 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_Actuator.ReadPost();
 		bool inArea = m_Area.Contains(m_Actuator.GetPosition(), m_fAreaMarginM);
 		WriteStepRow(physicsStep, timeSlice, phase, inArea);
-		TrackStep(phase);
-		m_iSegStep++;
-		m_iPhaseStep++;
+		TrackStep(phase, timeSlice);
+		int covered = CoveredSteps(timeSlice);
+		m_iSegStep += covered;
+		m_iPhaseStep += covered;
 		Advance(phase, inArea);
 	}
 
@@ -1404,6 +1415,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_eSegment = DC_EProbeSequenceSegment.RESET;
 		m_iSegStep = 0;
 		m_iPhaseStep = 0;
+		m_iPrbsBitsDrawn = 0;
 		m_bTeleportDone = false;
 		m_bHasPrevHeading = false;
 		m_iLastStep = 0;
@@ -1449,6 +1461,19 @@ class DC_ProbeSequences : DC_ProbeComponent
 			return 0;
 
 		int steps = Math.Round(seconds / dt);
+		return steps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine steps one dispatched step covers: round(timeSlice / m_fDt), at least 1. The runner's fixedframe
+	//! fallback passes n x GetStepDtS for a call that covers n fixed steps (DC_ProbeRunner STEP TIMING); counting
+	//! calls instead would stretch every phase by n in world time on such frames
+	protected int CoveredSteps(float timeSlice)
+	{
+		int steps = StepsFor(timeSlice, m_fDt);
+		if (steps < 1)
+			steps = 1;
+
 		return steps;
 	}
 
@@ -1590,6 +1615,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_eSegment = DC_EProbeSequenceSegment.RESET;
 		m_iSegStep = 0;
 		m_iPhaseStep = 0;
+		m_iPrbsBitsDrawn = 0;
 		m_bTeleportDone = false;
 		m_bHasPrevHeading = false;
 		m_fPrbsSteer = 0;
@@ -1647,12 +1673,17 @@ class DC_ProbeSequences : DC_ProbeComponent
 
 			case DC_EProbeSequenceKind.STEER_PRBS:
 			{
-				if (m_iSegStep % m_iPrbsBitSteps == 0)
+				// Bit b starts at covered step b x m_iPrbsBitSteps: draw every bit whose start the segment reached, so
+				// a step that covers several engine steps (CoveredSteps) neither skips a bit nor shifts the sequence
+				int bitIdx = m_iSegStep / m_iPrbsBitSteps;
+				while (m_iPrbsBitsDrawn <= bitIdx)
 				{
 					if (m_Prbs.NextBit() == 1)
 						m_fPrbsSteer = phase.m_fAmplitude;
 					else
 						m_fPrbsSteer = -phase.m_fAmplitude;
+
+					m_iPrbsBitsDrawn++;
 				}
 
 				m_Actuator.SetSpeedHold(phase.m_fTargetKmh, m_fPrbsSteer);
@@ -1713,8 +1744,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Online bookkeeping after each step: max speed, heading change, steer-sign sum, stall watch
-	protected void TrackStep(notnull DC_ProbeSequencePhase phase)
+	//! Online bookkeeping after each step: max speed, heading change, steer-sign sum, stall watch. timeSlice: the world
+	//! time the step covers (n x dt on a merged fallback step), for the heading rate
+	protected void TrackStep(notnull DC_ProbeSequencePhase phase, float timeSlice)
 	{
 		float heading = m_Actuator.GetHeadingDeg();
 		float delta = 0;
@@ -1740,9 +1772,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 
 		phase.m_fTurnDeg += delta;
 		bool steering = phase.m_eKind == DC_EProbeSequenceKind.STEER_PRBS || phase.m_eKind == DC_EProbeSequenceKind.STEER_REVERSAL;
-		if (steering && m_fDt > 0)
+		if (steering && timeSlice > 0)
 		{
-			m_fSteerSignSum += m_Actuator.GetCommandSteer() * delta / m_fDt;
+			m_fSteerSignSum += m_Actuator.GetCommandSteer() * delta / timeSlice;
 			m_iSteerSignSamples++;
 		}
 	}
@@ -1926,6 +1958,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	{
 		m_eSegment = segment;
 		m_iSegStep = 0;
+		m_iPrbsBitsDrawn = 0;
 	}
 
 	//------------------------------------------------------------------------------------------------

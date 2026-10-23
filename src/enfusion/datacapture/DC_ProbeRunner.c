@@ -17,7 +17,11 @@
 //      concurrent probes (IsConcurrent: only e10) at once.
 //   5. After a warm-up of m_fWarmupS world seconds decides the physics-step source: "simulate" if any EOnSimulate
 //      arrived, else "fixedframe" (WARNING) if any EOnFixedFrame arrived, else "none" (ERROR: probes that need steps
-//      refuse to start). Whether SIMULATE fires on an entity without physics is unknown (PROBE_DESIGN.md 11.4).
+//      refuse to start), and the step length GetStepDtS (STEP TIMING). Three paths can decide, the first one wins:
+//        frame       AdvancePlan, called from EOnFrame, as soon as the warm-up is over (the normal path);
+//        fixedframe  EOnFixedFrame, FIXEDFRAME_PATH_LAG_MS after the warm-up, if the frame path has not decided;
+//        watchdog    RunWatchdog on the game call queue (no entity event), WATCHDOG_GRACE_MS after the warm-up.
+//      A decision by the fixedframe path or the watchdog logs a WARNING that names the path that failed.
 //   6. Runs the exclusive probes one after another, m_fGapS world seconds apart. A probe stops when its context saw
 //      a failed write (write_fail), when IsProbeDone says so (done) or after GetProbeTimeoutS (timeout).
 //   7. Plan finished: stops the concurrent probes (done), clears the event mask, logs "plan complete".
@@ -26,8 +30,50 @@
 //   physics step and calls OnProbeSimulate on the running exclusive probe, then on the concurrent ones.
 //   EOnPostSimulate does the same with the same step number (a post without a pre is passed with the last number and
 //   shows up in E-10). In the "fixedframe" fallback EOnFixedFrame / EOnPostFixedFrame do it instead. EOnFrame calls
-//   OnProbeFrame (exclusive first) and then sequences the plan. No CallLater clock is used for any of this: the only
-//   queued call is FallbackStart.
+//   OnProbeFrame (exclusive first) and then AdvancePlan, which sequences the plan. The plan and the dispatch use no
+//   CallLater clock; the queued calls are FallbackStart and RunWatchdog (decision backstop and heartbeat only).
+//   AdvancePlan was called Sequence until the Plays of 2026-10-22: Game/generated/AI/Sequence.c declares a class of
+//   that name, so the bare call "Sequence();" compiled as a construction of that class and the method never ran (the
+//   step source stayed undecided and no exclusive probe started). enf_lint.py now flags a method named like a type.
+//
+// STEP TIMING (measured in the Workbench 1.8.0.13 Plays of 2026-10-22, DC_Probes_Arland, e10 play_01 and play_02):
+//   - EOnSimulate / EOnPostSimulate never arrive on the game mode entity (it has no physics body): 0 calls in 54 world
+//     minutes. The step source is "fixedframe".
+//   - The engine runs fixed steps of 1/30 s: the sum of BaseWorld.GetFixedSteps() over the frames times 1/30 s equals
+//     the world time (35.633 s against 35.659 s). GetFixedSteps() read in EOnFrame is the number of fixed steps of
+//     that frame; they run after its EOnFrame.
+//   - EOnFixedFrame and EOnPostFixedFrame arrive at most once per render frame, in every frame with at least one fixed
+//     step, NOT once per fixed step: each of the 10 frames with 2 or 3 fixed steps got one call (about 30 calls per
+//     world second at 75 FPS; fewer calls than fixed steps whenever a frame takes longer than 1/30 s).
+//   - BaseWorld.GetFixedTimeSlice() returned 0.1 s in the first frame of the run (a 0.1 s frame with 3 fixed steps).
+//     Whether it is a constant or the fixed time of the current frame is not known yet; the runner logs its range.
+//   So in the fallback one dispatched step is one EOnFixedFrame call covering n = GetFixedSteps() engine steps (n = 1
+//   at more than 30 FPS). The runner then numbers one step per call, passes timeSlice = n x GetStepDtS() (the world
+//   time the call covers) to OnProbeSimulate / OnProbePostSimulate, and counts the n - 1 merged steps
+//   (clock.merged_fixed_steps). GetStepDtS() is the engine's own time slice of the step callback (EOnSimulate; in the
+//   fallback the EOnFixedFrame argument of a frame with one fixed step) when it agrees within STEP_DT_TOLERANCE with
+//   the measured fixed step (compensated sum of EOnFrame time slices / sum of GetFixedSteps() since StartRun), else
+//   the measured value. Probes convert seconds into step counts with DC_ProbeComponent.GetStepDtS, never with
+//   GetFixedTimeSlice, and a probe that counts steps counts the n a call covers (round(timeSlice / GetStepDtS)), not
+//   the calls. The engine's raw values are recorded: decision line, heartbeat, run_footer.txt clock.* keys, and per
+//   dispatched step GetDispatchEngineSliceS / GetDispatchCoveredSteps (e10_steps.csv). Each run header carries
+//   clock.start_engine_fixed_steps and clock.start_merged_fixed_steps, so footer minus header is the probe's share.
+//   EOnFixedFrame counts the calls that arrive under another frame number than the last EOnFrame
+//   (clock.fixedframe_frame_mismatches): GetFixedSteps() of that EOnFrame then does not describe the call.
+//
+// DIAGNOSTICS (no per-frame line): "[DC_Probe] runner heartbeat #<n> via=<path>: ..." with world and start time, the
+//   warm-up, the step source and who decided it, the event counts, plan_calls (EOnFrame reached the AdvancePlan call)
+//   and plan_entries (AdvancePlan ran), the current probe and next_exclusive=<index>/<count> (0-based; = count once
+//   every exclusive probe has started); every HEARTBEAT_UNDECIDED_MS while the step source is undecided (for at most
+//   HEARTBEAT_FAST_WINDOW_MS after the warm-up), then every HEARTBEAT_RUN_MS. EOnFrame prints it (via=frame);
+//   EOnFixedFrame (via=fixedframe) or the watchdog (via=watchdog) print it only when the frame path missed it. One
+//   "[DC_Probe] plan: ..." line marks each sequencing transition: probe starting, probe ended, start failed; the
+//   decision and "plan complete" have their own lines. The heartbeat, the decision backstops and the timeouts run on
+//   world time; the watchdog ticks on the game call queue even while world time stands still (pause, a stalled
+//   world), so it prints one WARNING when world time has not advanced for WATCHDOG_FROZEN_TICKS ticks and one line
+//   when it moves again. AdvancePlan runs after the frame dispatch, so a probe frame callback that fails on every
+//   frame keeps it from running: once AdvancePlan has not run for WATCHDOG_GRACE_MS of world time, the watchdog stops
+//   the running exclusive probe itself when its timeout has passed or its context saw a failed write (WARNING).
 //
 // OUTPUT (PROBE_DESIGN.md 4.5): $profile:DC_Probes/<probe>/<launch_id>/play_NN/ with run_header.txt (written before
 //   OnProbeStart), the probe's own files and run_footer.txt (written at the stop; absent after a crash or a kill).
@@ -94,6 +140,35 @@ class DC_ProbeComponent : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! World seconds per dispatched physics step: DC_ProbeRunner.GetStepDtS() once the runner has decided the step
+	//! source, else BaseWorld.GetFixedTimeSlice(); 0 without a world. Durations become step counts with this value,
+	//! not with GetFixedTimeSlice: in the 1.8.0.13 fixedframe fallback the two can differ (DC_ProbeRunner STEP TIMING).
+	float GetStepDtS()
+	{
+		IEntity owner = GetOwner();
+		if (owner)
+		{
+			DC_ProbeRunner runner = DC_ProbeRunner.Cast(owner.FindComponent(DC_ProbeRunner));
+			if (runner)
+			{
+				float stepDt = runner.GetStepDtS();
+				if (stepDt > 0)
+					return stepDt;
+			}
+		}
+
+		ArmaReforgerScripted game = GetGame();
+		if (!game)
+			return 0;
+
+		BaseWorld world = game.GetWorld();
+		if (!world)
+			return 0;
+
+		return world.GetFixedTimeSlice();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! key=value strings, written as params.<key>=<value> into the run header (every attribute of the probe)
 	void GetProbeParams(string probeId, notnull array<string> outKeyValues)
 	{
@@ -107,13 +182,15 @@ class DC_ProbeComponent : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Physics fixed step, before the simulation (EOnSimulate, or EOnFixedFrame in the fallback)
+	//! Physics fixed step, before the simulation (EOnSimulate, or EOnFixedFrame in the fallback). timeSlice: the
+	//! engine's EOnSimulate argument; in the fallback the world time the call covers (n fixed steps x GetStepDtS), so
+	//! a probe that counts steps advances by round(timeSlice / GetStepDtS), not by one per call
 	void OnProbeSimulate(string probeId, float timeSlice, int physicsStep)
 	{
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Same step after the simulation (EOnPostSimulate, or EOnPostFixedFrame)
+	//! Same step after the simulation (EOnPostSimulate, or EOnPostFixedFrame), same timeSlice rule
 	void OnProbePostSimulate(string probeId, float timeSlice, int physicsStep)
 	{
 	}
@@ -399,6 +476,8 @@ class DC_ProbeRunState
 	bool m_bConcurrent;
 	bool m_bActive;				//!< OnProbeStart returned true and the probe has not been stopped
 	bool m_bFinished;			//!< run_footer.txt written (or attempted)
+	string m_sEndStatus;		//!< footer status once finished, for the plan lines
+	string m_sEndReason;		//!< footer reason once finished
 	float m_fTimeoutS;
 	float m_fStartWorldMs;
 	int m_iStartStep;
@@ -457,6 +536,24 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	static const string STEP_FIXEDFRAME = "fixedframe";
 	static const string STEP_NONE = "none";
 
+	// Who decided the step source, and the source of GetStepDtS
+	static const string PATH_FRAME = "frame";				//!< EOnFrame -> AdvancePlan
+	static const string PATH_FIXEDFRAME = "fixedframe";		//!< EOnFixedFrame
+	static const string PATH_WATCHDOG = "watchdog";			//!< RunWatchdog on the game call queue
+	static const string DT_ENGINE = "engine";				//!< the callback's time slice, confirmed by the measurement
+	static const string DT_MEASURED = "measured";			//!< EOnFrame time / GetFixedSteps since StartRun
+	static const string DT_ENGINE_UNCHECKED = "engine_unchecked";	//!< the callback's time slice, nothing to compare
+	static const string DT_NONE = "none";
+
+	static const float FIXEDFRAME_PATH_LAG_MS = 500;		//!< the fixedframe path decides this long after the warm-up
+	static const float WATCHDOG_GRACE_MS = 2000;			//!< the watchdog decides (and stops a probe) this much later
+	static const int WATCHDOG_PERIOD_MS = 1000;
+	static const int WATCHDOG_FROZEN_TICKS = 10;			//!< ticks without world time progress before the WARNING
+	static const float HEARTBEAT_UNDECIDED_MS = 1000;		//!< heartbeat period while the step source is undecided
+	static const float HEARTBEAT_FAST_WINDOW_MS = 10000;	//!< ... for at most this long after the warm-up
+	static const float HEARTBEAT_RUN_MS = 30000;			//!< heartbeat period otherwise
+	static const float STEP_DT_TOLERANCE = 0.05;			//!< relative: engine time slice vs measured fixed step
+
 	static const string REASON_DONE = "done";
 	static const string REASON_TIMEOUT = "timeout";
 	static const string REASON_WRITE_FAIL = "write_fail";
@@ -489,12 +586,49 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	protected float m_fRunStartWorldMs;
 	protected string m_sStepSource;		//!< "" until the warm-up ends, then simulate | fixedframe | none
 
+	protected string m_sDecidedBy;		//!< "" until decided, then frame | fixedframe | watchdog
+	protected float m_fDecidedAtMs;
+
 	protected int m_iPhysicsStep;
 	protected int m_iSimulateCount;
 	protected int m_iPostSimulateCount;
 	protected int m_iFixedFrameCount;
 	protected int m_iPostFixedFrameCount;
 	protected int m_iFrameCount;
+
+	// Step timing (STEP TIMING): GetStepDtS and the engine's raw values, from StartRun on
+	protected float m_fStepDtS;					//!< 0 until decided
+	protected string m_sStepDtSource;
+	protected float m_fMeasuredStepAtDecisionS;	//!< measured fixed step when the source was decided
+	protected int m_iEngineFixedSteps;			//!< sum of GetFixedSteps() over the measured EOnFrame calls
+	protected int m_iFrameFixedSteps;			//!< GetFixedSteps() as EOnFrame read it in frame m_iFrameFixedStepsFrame
+	protected int m_iFrameFixedStepsFrame = -1;
+	protected float m_fFrameTimeS;				//!< sum of the EOnFrame time slices of the same frames
+	protected float m_fFrameTimeCompS;			//!< its Kahan compensation: a plain float sum drifts over a long run
+	protected int m_iMeasuredFrames;
+	protected float m_fFixedSliceMinS;			//!< range of GetFixedTimeSlice() over the measured frames
+	protected float m_fFixedSliceMaxS;
+	protected int m_iFixedFrameSlices;
+	protected float m_fFixedFrameSliceMinS;		//!< range of the EOnFixedFrame time slice argument
+	protected float m_fFixedFrameSliceMaxS;
+	protected float m_fOneStepFixedFrameSliceS;	//!< EOnFixedFrame argument in the last frame with one fixed step
+	protected float m_fLastSimulateSliceS;		//!< EOnSimulate argument, last call
+	protected int m_iMergedSteps;				//!< fallback: fixed steps beyond the first of one EOnFixedFrame call
+	protected int m_iFixedFrameMismatches;		//!< EOnFixedFrame under another frame number than the last EOnFrame
+	protected float m_fDispatchEngineSliceS;	//!< raw engine argument of the step callback being dispatched
+	protected int m_iDispatchCoveredSteps;		//!< engine steps that dispatched step covers (fallback n, else 1)
+
+	// Diagnostics (DIAGNOSTICS)
+	protected int m_iPlanCalls;					//!< EOnFrame reached the AdvancePlan call
+	protected int m_iPlanTicks;					//!< AdvancePlan was entered
+	protected float m_fLastPlanTickMs = -1;
+	protected float m_fLastFixedFrameMs = -1;	//!< last EOnFixedFrame while running
+	protected float m_fNextHeartbeatMs;
+	protected int m_iHeartbeats;
+	protected int m_iWatchdogTicks;
+	protected bool m_bWatchdogQueued;
+	protected float m_fWatchdogWorldMs = -1;	//!< world time the watchdog last saw advance
+	protected int m_iWatchdogFrozenTicks;		//!< watchdog ticks since then
 
 	//------------------------------------------------------------------------------------------------
 	override void OnPostInit(IEntity owner)
@@ -585,11 +719,12 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 			return;
 		}
 
+		// Print(variable) logs "string guardLine = '...'" (EnDebug.c:7); String() passes the text only (Types.c:14)
 		string guardLine = string.Format("[DC_Probe] launch guard: mode=%1 id=%2 pin=%3", m_LaunchInfo.m_sMode, m_LaunchInfo.m_sLaunchId, m_LaunchInfo.m_sPinId);
 		if (m_LaunchInfo.m_sMode == DC_LaunchGuard.MODE_ESCAPE)
 			Print(guardLine + " (Workbench escape: the command line is not visible; joined the newest launch record, binding " + m_LaunchInfo.m_sEscapeBinding + ")", LogLevel.WARNING);
 		else
-			Print(guardLine, LogLevel.NORMAL);
+			Print(String(guardLine), LogLevel.NORMAL);
 
 		BaseWorld world = GetGame().GetWorld();
 		m_Ego = world.FindEntityByName(m_sEgoName);
@@ -600,9 +735,14 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 
 		m_fRunStartWorldMs = world.GetWorldTime();
 		m_fNextStartAtMs = m_fRunStartWorldMs;
+		m_fNextHeartbeatMs = m_fRunStartWorldMs;	// the first EOnFrame prints heartbeat #1
 		m_bRunning = true;
 		SetEventMask(GetOwner(), GetDispatchEventMask());
 		m_bMaskSet = true;
+
+		// Decision backstop and heartbeat of last resort; it needs no entity event (DIAGNOSTICS)
+		GetGame().GetCallqueue().CallLater(RunWatchdog, WATCHDOG_PERIOD_MS, true);
+		m_bWatchdogQueued = true;
 
 		Print(string.Format("[DC_Probe] run started (%1): plan=%2, warm-up %3 s, gap %4 s", reason, JoinIds(m_aPlanIds), m_fWarmupS.ToString(-1, 1), m_fGapS.ToString(-1, 1)), LogLevel.NORMAL);
 
@@ -721,7 +861,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	//! Idempotent. play_end: the running probes get OnProbeStop(play_end). delete: no probe component is called; the
 	//! contexts' files are closed and the footers written (status stopped, reason delete). Both remove FallbackStart
-	//! and clear the event mask.
+	//! and RunWatchdog and clear the event mask.
 	protected void StopRun(string reason)
 	{
 		ArmaReforgerScripted game = GetGame();
@@ -732,6 +872,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 				queue.Remove(FallbackStart);
 		}
 
+		RemoveWatchdog();
 		bool wasRunning = m_bRunning;
 		m_bRunning = false;
 
@@ -759,6 +900,23 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Removes RunWatchdog from the call queue. Idempotent; safe during teardown.
+	protected void RemoveWatchdog()
+	{
+		if (!m_bWatchdogQueued)
+			return;
+
+		m_bWatchdogQueued = false;
+		ArmaReforgerScripted game = GetGame();
+		if (!game)
+			return;
+
+		ScriptCallQueue queue = game.GetCallqueue();
+		if (queue)
+			queue.Remove(RunWatchdog);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	protected void ClearDispatchMask()
 	{
 		if (!m_bMaskSet)
@@ -783,9 +941,12 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		if (!m_bRunning)
 			return;
 
+		m_fLastSimulateSliceS = timeSlice;
 		if (m_sStepSource == STEP_SIMULATE || m_sStepSource.IsEmpty())
 		{
 			m_iPhysicsStep++;
+			m_fDispatchEngineSliceS = timeSlice;
+			m_iDispatchCoveredSteps = 1;
 			DispatchSimulate(timeSlice);
 		}
 	}
@@ -798,21 +959,46 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 			return;
 
 		if (m_sStepSource == STEP_SIMULATE || m_sStepSource.IsEmpty())
+		{
+			m_fDispatchEngineSliceS = timeSlice;
+			m_iDispatchCoveredSteps = 1;
 			DispatchPostSimulate(timeSlice);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! At most once per render frame, after its EOnFrame, covering GetFixedSteps() engine steps (STEP TIMING). Also the
+	//! second decision path and the heartbeat's stand-in when EOnFrame missed one.
 	override void EOnFixedFrame(IEntity owner, float timeSlice)
 	{
 		m_iFixedFrameCount++;
 		if (!m_bRunning)
 			return;
 
-		if (m_sStepSource == STEP_FIXEDFRAME)
-		{
-			m_iPhysicsStep++;
-			DispatchSimulate(timeSlice);
-		}
+		float now = GetWorldTimeMs();
+		m_fLastFixedFrameMs = now;
+		int fixedSteps = GetFrameFixedSteps();
+		RecordFixedFrameSlice(timeSlice, fixedSteps);
+
+		// GetFrameFixedSteps assumes the fixed callbacks run under the frame number of the EOnFrame before them
+		if (m_iFrameFixedStepsFrame >= 0 && GetRenderFrame() != m_iFrameFixedStepsFrame)
+			m_iFixedFrameMismatches++;
+
+		if (m_sStepSource.IsEmpty() && IsWarmupOver(now, FIXEDFRAME_PATH_LAG_MS))
+			DecideStepSource(now, PATH_FIXEDFRAME);
+
+		MaybeHeartbeat(now, PATH_FIXEDFRAME, FIXEDFRAME_PATH_LAG_MS);
+
+		if (m_sStepSource != STEP_FIXEDFRAME)
+			return;
+
+		if (fixedSteps > 1)
+			m_iMergedSteps += fixedSteps - 1;
+
+		m_iPhysicsStep++;
+		m_fDispatchEngineSliceS = timeSlice;
+		m_iDispatchCoveredSteps = GetCoveredSteps(fixedSteps);
+		DispatchSimulate(GetFallbackSliceS(fixedSteps, timeSlice));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -822,8 +1008,13 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		if (!m_bRunning)
 			return;
 
-		if (m_sStepSource == STEP_FIXEDFRAME)
-			DispatchPostSimulate(timeSlice);
+		if (m_sStepSource != STEP_FIXEDFRAME)
+			return;
+
+		int fixedSteps = GetFrameFixedSteps();
+		m_fDispatchEngineSliceS = timeSlice;
+		m_iDispatchCoveredSteps = GetCoveredSteps(fixedSteps);
+		DispatchPostSimulate(GetFallbackSliceS(fixedSteps, timeSlice));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -832,6 +1023,9 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		m_iFrameCount++;
 		if (!m_bRunning)
 			return;
+
+		MeasureFrame(timeSlice);
+		MaybeHeartbeat(GetWorldTimeMs(), PATH_FRAME, 0);
 
 		int renderFrame = GetRenderFrame();
 		if (m_CurrentRun && m_CurrentRun.m_bActive && m_CurrentRun.m_Component)
@@ -843,7 +1037,102 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 				state.m_Component.OnProbeFrame(state.m_sProbeId, timeSlice, renderFrame);
 		}
 
-		Sequence();
+		// Counted here and at the entry of AdvancePlan: calls without entries mean the call does not reach the method
+		m_iPlanCalls++;
+		AdvancePlan();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Step timing of one frame: GetFixedSteps() kept for the fixed callbacks that follow; unpaused frames add their
+	//! time slice and fixed steps to the measurement and GetFixedTimeSlice() to its range
+	protected void MeasureFrame(float timeSlice)
+	{
+		BaseWorld world = GetProbeWorld();
+		if (!world)
+			return;
+
+		m_iFrameFixedSteps = world.GetFixedSteps();
+		m_iFrameFixedStepsFrame = world.GetFrameNumber();
+		if (IsPaused())
+			return;
+
+		float fixedSlice = world.GetFixedTimeSlice();
+		if (m_iMeasuredFrames == 0 || fixedSlice < m_fFixedSliceMinS)
+			m_fFixedSliceMinS = fixedSlice;
+
+		if (m_iMeasuredFrames == 0 || fixedSlice > m_fFixedSliceMaxS)
+			m_fFixedSliceMaxS = fixedSlice;
+
+		m_iEngineFixedSteps += m_iFrameFixedSteps;
+		m_iMeasuredFrames++;
+
+		// Kahan summation: a plain float sum over a 35 min run loses up to half an ulp (about 6e-5 s at 2000 s) per add
+		float addS = timeSlice - m_fFrameTimeCompS;
+		float sumS = m_fFrameTimeS + addS;
+		m_fFrameTimeCompS = (sumS - m_fFrameTimeS) - addS;
+		m_fFrameTimeS = sumS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Range of the raw EOnFixedFrame argument, and its value in a frame with exactly one fixed step
+	protected void RecordFixedFrameSlice(float timeSlice, int fixedSteps)
+	{
+		if (m_iFixedFrameSlices == 0 || timeSlice < m_fFixedFrameSliceMinS)
+			m_fFixedFrameSliceMinS = timeSlice;
+
+		if (m_iFixedFrameSlices == 0 || timeSlice > m_fFixedFrameSliceMaxS)
+			m_fFixedFrameSliceMaxS = timeSlice;
+
+		m_iFixedFrameSlices++;
+		if (fixedSteps == 1)
+			m_fOneStepFixedFrameSliceS = timeSlice;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fixed steps of the current frame: the value EOnFrame read in this frame (it matched the fixed callbacks that
+	//! follow it in every frame of the 2026-10-22 Plays), else BaseWorld.GetFixedSteps() now; -1 without a world
+	protected int GetFrameFixedSteps()
+	{
+		BaseWorld world = GetProbeWorld();
+		if (!world)
+			return -1;
+
+		if (world.GetFrameNumber() == m_iFrameFixedStepsFrame)
+			return m_iFrameFixedSteps;
+
+		return world.GetFixedSteps();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fallback dispatch time slice: the world time one EOnFixedFrame call covers, n x GetStepDtS (n >= 1); the raw
+	//! engine argument only while no step length is known
+	protected float GetFallbackSliceS(int fixedSteps, float engineSlice)
+	{
+		if (m_fStepDtS <= 0)
+			return engineSlice;
+
+		return GetCoveredSteps(fixedSteps) * m_fStepDtS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine steps one fallback call covers: the frame's fixed steps, at least 1
+	protected int GetCoveredSteps(int fixedSteps)
+	{
+		if (fixedSteps < 1)
+			return 1;
+
+		return fixedSteps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Sum of EOnFrame time slices (Kahan-compensated) / sum of GetFixedSteps() since StartRun [s]; 0 before the first
+	//! fixed step. About 1% above the true step over the 3 s warm-up: the frames' time not yet stepped is included
+	float GetMeasuredFixedStepS()
+	{
+		if (m_iEngineFixedSteps <= 0)
+			return 0;
+
+		return m_fFrameTimeS / m_iEngineFixedSteps;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -875,12 +1164,15 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Once per frame after the dispatch: warm-up decision, stop checks, next exclusive probe, end of the plan
-	protected void Sequence()
+	//! Once per frame after the dispatch (the frame path): warm-up decision, stop checks, next exclusive probe, end of
+	//! the plan. Formerly Sequence(), a name the vanilla class Game/generated/AI/Sequence.c hid (header, DISPATCH).
+	protected void AdvancePlan()
 	{
+		m_iPlanTicks++;
 		float now = GetWorldTimeMs();
-		if (m_sStepSource.IsEmpty() && now - m_fRunStartWorldMs >= Math.Max(m_fWarmupS, 0) * 1000)
-			DecideStepSource(now);
+		m_fLastPlanTickMs = now;
+		if (m_sStepSource.IsEmpty() && IsWarmupOver(now, 0))
+			DecideStepSource(now, PATH_FRAME);
 
 		// Concurrent probes run until the plan ends; they only stop early on a failed write or their timeout.
 		foreach (DC_ProbeRunState concurrent : m_aConcurrentRuns)
@@ -892,8 +1184,12 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 				StopProbe(concurrent, REASON_WRITE_FAIL);
 			else if (now - concurrent.m_fStartWorldMs >= concurrent.m_fTimeoutS * 1000)
 				StopProbe(concurrent, REASON_TIMEOUT);
+
+			if (!concurrent.m_bActive)
+				Print("[DC_Probe] plan: concurrent " + concurrent.m_sProbeId + " ended early (" + concurrent.m_sEndReason + ", " + concurrent.m_sEndStatus + ")", LogLevel.WARNING);
 		}
 
+		float gapMs = Math.Max(m_fGapS, 0) * 1000;
 		if (m_CurrentRun)
 		{
 			if (m_CurrentRun.m_bActive)
@@ -909,8 +1205,10 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 			if (m_CurrentRun.m_bActive)
 				return;
 
+			float ranS = (now - m_CurrentRun.m_fStartWorldMs) / 1000;
+			Print(string.Format("[DC_Probe] plan: %1 ended (%2, %3) after %4 world s; %5", m_CurrentRun.m_sProbeId, m_CurrentRun.m_sEndReason, m_CurrentRun.m_sEndStatus, ranS.ToString(-1, 2), DescribeNextExclusive()), LogLevel.NORMAL);
 			m_CurrentRun = null;
-			m_fNextStartAtMs = now + Math.Max(m_fGapS, 0) * 1000;
+			m_fNextStartAtMs = now + gapMs;
 			return;
 		}
 
@@ -923,12 +1221,19 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 			string probeId = m_aExclusiveIds[m_iNextExclusive];
 			DC_ProbeComponent component = m_aExclusiveComponents[m_iNextExclusive];
 			m_iNextExclusive++;
+			float sinceStartS = (now - m_fRunStartWorldMs) / 1000;
+			Print(string.Format("[DC_Probe] plan: starting exclusive %1/%2 %3 at run time %4 s (step source %5)", m_iNextExclusive, m_aExclusiveIds.Count(), probeId, sinceStartS.ToString(-1, 2), m_sStepSource), LogLevel.NORMAL);
 
 			DC_ProbeRunState state = StartProbe(probeId, component, false);
 			if (state && state.m_bActive)
+			{
 				m_CurrentRun = state;
+			}
 			else
-				m_fNextStartAtMs = now + Math.Max(m_fGapS, 0) * 1000;
+			{
+				m_fNextStartAtMs = now + gapMs;
+				Print("[DC_Probe] plan: " + probeId + " did not start (see the line above); " + DescribeNextExclusive(), LogLevel.WARNING);
+			}
 
 			return;
 		}
@@ -937,26 +1242,258 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! End of the warm-up: simulate if any EOnSimulate arrived, else fixedframe if any EOnFixedFrame arrived, else none
-	protected void DecideStepSource(float now)
+	//! "next exclusive <i>/<n> <id> in <gap> s", or the end of the plan when every exclusive probe has started
+	protected string DescribeNextExclusive()
 	{
-		float warmupS = (now - m_fRunStartWorldMs) / 1000;
-		string counts = string.Format("EOnSimulate %1, EOnPostSimulate %2, EOnFixedFrame %3, EOnPostFixedFrame %4, EOnFrame %5 in %6 s", m_iSimulateCount, m_iPostSimulateCount, m_iFixedFrameCount, m_iPostFixedFrameCount, m_iFrameCount, warmupS.ToString(-1, 2));
+		int count = m_aExclusiveIds.Count();
+		if (m_iNextExclusive >= count)
+			return "no exclusive probe left: plan complete next";
+
+		return string.Format("next exclusive %1/%2 %3 in %4 s", m_iNextExclusive + 1, count, m_aExclusiveIds[m_iNextExclusive], m_fGapS.ToString(-1, 1));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once m_fWarmupS + lateMs world ms have passed since StartRun. The difference is taken first, so the
+	//! precedence of '&&' and '-' in a combined condition plays no part.
+	protected bool IsWarmupOver(float now, float lateMs)
+	{
+		float sinceStartMs = now - m_fRunStartWorldMs;
+		float dueMs = GetWarmupMs() + lateMs;
+		return sinceStartMs >= dueMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected float GetWarmupMs()
+	{
+		return Math.Max(m_fWarmupS, 0) * 1000;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! End of the warm-up, by the first path that gets there: simulate if any EOnSimulate arrived, else fixedframe if
+	//! any EOnFixedFrame arrived, else none. Then the step length (ChooseStepDt). Idempotent.
+	protected void DecideStepSource(float now, string path)
+	{
+		if (!m_sStepSource.IsEmpty())
+			return;
+
+		// A path other than the frame path means AdvancePlan did not decide in time: say which path failed
+		if (path != PATH_FRAME)
+		{
+			float lateS = (now - m_fRunStartWorldMs - GetWarmupMs()) / 1000;
+			Print("[DC_Probe] WARNING: decision path: the frame path (EOnFrame -> AdvancePlan) did not decide the step source; the " + path + " path decides it " + lateS.ToString(-1, 2) + " s after the warm-up. " + DescribePaths(), LogLevel.WARNING);
+		}
+
+		float sinceStartS = (now - m_fRunStartWorldMs) / 1000;
+		string counts = string.Format("EOnSimulate %1, EOnPostSimulate %2, EOnFixedFrame %3, EOnPostFixedFrame %4, EOnFrame %5 in %6 s", m_iSimulateCount, m_iPostSimulateCount, m_iFixedFrameCount, m_iPostFixedFrameCount, m_iFrameCount, sinceStartS.ToString(-1, 2));
 		if (m_iSimulateCount > 0)
-		{
 			m_sStepSource = STEP_SIMULATE;
-			Print("[DC_Probe] step source: simulate (" + counts + ")", LogLevel.NORMAL);
-		}
 		else if (m_iFixedFrameCount > 0)
-		{
 			m_sStepSource = STEP_FIXEDFRAME;
-			Print("[DC_Probe] WARNING: step source: fixedframe - no EOnSimulate on the game mode entity, physics steps come from EOnFixedFrame (" + counts + ")", LogLevel.WARNING);
-		}
 		else
-		{
 			m_sStepSource = STEP_NONE;
-			Print("[DC_Probe] ERROR: step source: none - neither EOnSimulate nor EOnFixedFrame arrived, probes that need physics steps will refuse to start (" + counts + ")", LogLevel.ERROR);
+
+		m_sDecidedBy = path;
+		m_fDecidedAtMs = now;
+		ChooseStepDt(now);
+		string decided = "; decided by " + path + " at world " + now.ToString(-1, 1) + " ms; " + DescribeStepDt();
+		if (m_sStepSource == STEP_SIMULATE)
+			Print("[DC_Probe] step source: simulate (" + counts + ")" + decided, LogLevel.NORMAL);
+		else if (m_sStepSource == STEP_FIXEDFRAME)
+			Print("[DC_Probe] WARNING: step source: fixedframe - no EOnSimulate on the game mode entity, physics steps come from EOnFixedFrame (" + counts + ")" + decided, LogLevel.WARNING);
+		else
+			Print("[DC_Probe] ERROR: step source: none - neither EOnSimulate nor EOnFixedFrame arrived, probes that need physics steps will refuse to start (" + counts + ")" + decided, LogLevel.ERROR);
+
+		// A step length that the engine's own time slice does not confirm is a TBD-1 finding, not a failure
+		float tolerance = STEP_DT_TOLERANCE;
+		if (m_sStepDtSource == DT_MEASURED)
+			Print("[DC_Probe] WARNING: step length " + m_fStepDtS.ToString(-1, 6) + " s is the measured fixed step: the callback's time slice does not match it within " + tolerance.ToString(-1, 2) + " (probes use the measured value)", LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GetStepDtS for the decided source (STEP TIMING): the callback's time slice (EOnSimulate; in the fallback the
+	//! EOnFixedFrame argument of a one-step frame) when it agrees with the measurement within STEP_DT_TOLERANCE,
+	//! else the measurement. Measured: simulate = run time / EOnSimulate calls; fixedframe = GetMeasuredFixedStepS.
+	protected void ChooseStepDt(float now)
+	{
+		m_fStepDtS = 0;
+		m_sStepDtSource = DT_NONE;
+		m_fMeasuredStepAtDecisionS = GetMeasuredFixedStepS();
+		if (m_sStepSource == STEP_NONE)
+			return;
+
+		float measured = m_fMeasuredStepAtDecisionS;
+		float engineSlice = m_fOneStepFixedFrameSliceS;
+		if (m_sStepSource == STEP_SIMULATE)
+		{
+			engineSlice = m_fLastSimulateSliceS;
+			measured = 0;
+			if (m_iSimulateCount > 0)
+				measured = (now - m_fRunStartWorldMs) / 1000 / m_iSimulateCount;
 		}
+
+		bool comparable = engineSlice > 0 && measured > 0;
+		if (comparable && Math.AbsFloat(engineSlice - measured) <= STEP_DT_TOLERANCE * measured)
+		{
+			m_fStepDtS = engineSlice;
+			m_sStepDtSource = DT_ENGINE;
+		}
+		else if (measured > 0)
+		{
+			m_fStepDtS = measured;
+			m_sStepDtSource = DT_MEASURED;
+		}
+		else if (engineSlice > 0)
+		{
+			m_fStepDtS = engineSlice;
+			m_sStepDtSource = DT_ENGINE_UNCHECKED;
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The step length and the raw engine values behind it, for the decision line
+	protected string DescribeStepDt()
+	{
+		string dtPart = string.Format("step dt %1 s (%2), measured fixed step %3 s over %4 fixed steps in %5 frames", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fMeasuredStepAtDecisionS.ToString(-1, 6), m_iEngineFixedSteps, m_iMeasuredFrames);
+		string slicePart = string.Format("; EOnFixedFrame time slice %1..%2 s (one-step frame %3 s), GetFixedTimeSlice %4..%5 s, EOnSimulate time slice %6 s", m_fFixedFrameSliceMinS.ToString(-1, 6), m_fFixedFrameSliceMaxS.ToString(-1, 6), m_fOneStepFixedFrameSliceS.ToString(-1, 6), m_fFixedSliceMinS.ToString(-1, 6), m_fFixedSliceMaxS.ToString(-1, 6), m_fLastSimulateSliceS.ToString(-1, 6));
+		return dtPart + slicePart;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! How far each decision path got, for the WARNING of a non-frame decision
+	protected string DescribePaths()
+	{
+		string frameState = "AdvancePlan never entered";
+		if (m_iPlanTicks > 0)
+			frameState = "AdvancePlan last entered at " + m_fLastPlanTickMs.ToString(-1, 1) + " ms";
+
+		if (m_iPlanCalls > 0 && m_iPlanTicks == 0)
+			frameState += " although EOnFrame called it: the call does not reach the method";
+
+		string fixedState = "no EOnFixedFrame while running";
+		if (m_fLastFixedFrameMs >= 0)
+			fixedState = "last EOnFixedFrame at " + m_fLastFixedFrameMs.ToString(-1, 1) + " ms";
+
+		float warmupEndMs = m_fRunStartWorldMs + GetWarmupMs();
+		return string.Format("frame path: EOnFrame %1, AdvancePlan calls %2, entries %3, %4; fixedframe path: EOnFixedFrame %5, %6; warm-up ended at %7 ms", m_iFrameCount, m_iPlanCalls, m_iPlanTicks, frameState, m_iFixedFrameCount, fixedState, warmupEndMs.ToString(-1, 1));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One heartbeat line once one is lateMs overdue (0 for the frame path; the other paths only stand in when the
+	//! frame path missed it). Next one after HEARTBEAT_UNDECIDED_MS while undecided (bounded), else HEARTBEAT_RUN_MS.
+	protected void MaybeHeartbeat(float now, string via, float lateMs)
+	{
+		if (now < m_fNextHeartbeatMs + lateMs)
+			return;
+
+		float periodMs = HEARTBEAT_RUN_MS;
+		if (m_sStepSource.IsEmpty() && !IsWarmupOver(now, HEARTBEAT_FAST_WINDOW_MS))
+			periodMs = HEARTBEAT_UNDECIDED_MS;
+
+		m_fNextHeartbeatMs = now + periodMs;
+		m_iHeartbeats++;
+
+		string stepSource = m_sStepSource;
+		if (stepSource.IsEmpty())
+			stepSource = "undecided";
+
+		string decidedBy = m_sDecidedBy;
+		if (decidedBy.IsEmpty())
+			decidedBy = "-";
+
+		string current = "none";
+		if (m_CurrentRun)
+			current = m_CurrentRun.m_sProbeId;
+
+		float fixedSliceNow = -1;
+		BaseWorld world = GetProbeWorld();
+		if (world)
+			fixedSliceNow = world.GetFixedTimeSlice();
+
+		string timePart = string.Format("[DC_Probe] runner heartbeat #%1 via=%2: world_ms=%3 start_ms=%4 warmup_s=%5 step_source=%6 decided_by=%7 step_dt_s=%8 running=%9", m_iHeartbeats, via, now.ToString(-1, 1), m_fRunStartWorldMs.ToString(-1, 1), m_fWarmupS.ToString(-1, 1), stepSource, decidedBy, m_fStepDtS.ToString(-1, 6), DC_LaunchGuard.BoolText(m_bRunning));
+		string countPart = string.Format(" simulate=%1 postsimulate=%2 fixedframe=%3 postfixedframe=%4 frame=%5 physics_step=%6 engine_fixed_steps=%7 merged_steps=%8", m_iSimulateCount, m_iPostSimulateCount, m_iFixedFrameCount, m_iPostFixedFrameCount, m_iFrameCount, m_iPhysicsStep, m_iEngineFixedSteps, m_iMergedSteps);
+		string planPart = string.Format(" plan_calls=%1 plan_entries=%2 current=%3 next_exclusive=%4/%5 fixed_time_slice_s=%6 frame_fixed_steps=%7 paused=%8 watchdog_ticks=%9", m_iPlanCalls, m_iPlanTicks, current, m_iNextExclusive, m_aExclusiveIds.Count(), fixedSliceNow.ToString(-1, 6), GetFrameFixedSteps(), DC_LaunchGuard.BoolText(IsPaused()), m_iWatchdogTicks);
+		Print(timePart + countPart + planPart, LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Game call queue, every WATCHDOG_PERIOD_MS while the run lasts; needs no entity event. Reports world time that
+	//! stands still, decides the step source when neither the frame nor the fixedframe path did by WATCHDOG_GRACE_MS
+	//! after the warm-up, stops the running exclusive probe when AdvancePlan no longer runs (WatchdogStopChecks), and
+	//! prints the heartbeat when both event paths missed it by WATCHDOG_GRACE_MS.
+	protected void RunWatchdog()
+	{
+		if (!m_bRunning)
+		{
+			RemoveWatchdog();
+			return;
+		}
+
+		m_iWatchdogTicks++;
+		float now = GetWorldTimeMs();
+		WatchWorldTime(now);
+		if (m_sStepSource.IsEmpty() && IsWarmupOver(now, WATCHDOG_GRACE_MS))
+			DecideStepSource(now, PATH_WATCHDOG);
+
+		WatchdogStopChecks(now);
+		MaybeHeartbeat(now, PATH_WATCHDOG, WATCHDOG_GRACE_MS);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The heartbeat, the backstops and the timeouts wait for world time; the call queue does not. One WARNING once
+	//! world time has not advanced for WATCHDOG_FROZEN_TICKS watchdog ticks, one line when it advances again.
+	protected void WatchWorldTime(float now)
+	{
+		if (now > m_fWatchdogWorldMs)
+		{
+			if (m_iWatchdogFrozenTicks >= WATCHDOG_FROZEN_TICKS)
+				Print(string.Format("[DC_Probe] runner: world time advances again (world_ms=%1) after %2 watchdog ticks without progress", now.ToString(-1, 1), m_iWatchdogFrozenTicks), LogLevel.NORMAL);
+
+			m_fWatchdogWorldMs = now;
+			m_iWatchdogFrozenTicks = 0;
+			return;
+		}
+
+		m_iWatchdogFrozenTicks++;
+		if (m_iWatchdogFrozenTicks != WATCHDOG_FROZEN_TICKS)
+			return;
+
+		string stepSource = m_sStepSource;
+		if (stepSource.IsEmpty())
+			stepSource = "undecided";
+
+		string current = "none";
+		if (m_CurrentRun)
+			current = m_CurrentRun.m_sProbeId;
+
+		Print(string.Format("[DC_Probe] WARNING: runner: world time has not advanced for %1 watchdog ticks (%2 ms each): world_ms=%3 paused=%4 frame=%5 fixedframe=%6 step_source=%7 current=%8 - heartbeats, backstops and timeouts wait for world time", m_iWatchdogFrozenTicks, WATCHDOG_PERIOD_MS, now.ToString(-1, 1), DC_LaunchGuard.BoolText(IsPaused()), m_iFrameCount, m_iFixedFrameCount, stepSource, current), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! AdvancePlan runs after the frame dispatch, so a probe frame callback that fails on every frame keeps the stop
+	//! checks from running. Once AdvancePlan has not run for WATCHDOG_GRACE_MS of world time, the watchdog stops the
+	//! running exclusive probe when its context saw a failed write or its timeout has passed. AdvancePlan logs the
+	//! "plan: ... ended" line and starts the next probe as soon as it runs again.
+	protected void WatchdogStopChecks(float now)
+	{
+		if (!m_CurrentRun || !m_CurrentRun.m_bActive)
+			return;
+
+		float sincePlanMs = now - m_fLastPlanTickMs;
+		if (sincePlanMs < WATCHDOG_GRACE_MS)
+			return;
+
+		string reason;
+		if (m_CurrentRun.m_Context.HasWriteFailure())
+			reason = REASON_WRITE_FAIL;
+		else if (now - m_CurrentRun.m_fStartWorldMs >= m_CurrentRun.m_fTimeoutS * 1000)
+			reason = REASON_TIMEOUT;
+
+		if (reason.IsEmpty())
+			return;
+
+		float sincePlanS = sincePlanMs / 1000;
+		Print("[DC_Probe] WARNING: watchdog: AdvancePlan has not run for " + sincePlanS.ToString(-1, 1) + " world s (last at " + m_fLastPlanTickMs.ToString(-1, 1) + " ms; a probe frame callback that fails on every frame blocks it): it stops " + m_CurrentRun.m_sProbeId + " (" + reason + ")", LogLevel.WARNING);
+		StopProbe(m_CurrentRun, reason);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1076,15 +1613,18 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	{
 		state.m_bActive = false;
 		state.m_bFinished = true;
+		state.m_sEndStatus = status;
+		state.m_sEndReason = reason;
 		state.m_Context.CloseAll();
 
 		array<string> footer = {};
 		BuildRunFooter(state, status, reason, note, footer);
 		state.m_Context.WriteTextFile(RUN_FOOTER, footer);
 
+		// String(): Print(line) alone would log "string line = '...'" (EnDebug.c:7)
 		string line = "[DC_Probe " + state.m_sProbeId + "] END reason=" + reason + " status=" + status;
 		if (status == STATUS_COMPLETE)
-			Print(line, LogLevel.NORMAL);
+			Print(String(line), LogLevel.NORMAL);
 		else if (status == STATUS_STOPPED)
 			Print(line + " " + note, LogLevel.WARNING);
 		else
@@ -1102,7 +1642,8 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 
 		m_bRunning = false;
 		ClearDispatchMask();
-		Print(string.Format("[DC_Probe] plan complete: %1 probe(s) started (%2), %3 physics steps, %4 frames, step source %5", m_aRuns.Count(), JoinIds(m_aPlanIds), m_iPhysicsStep, m_iFrameCount, m_sStepSource), LogLevel.NORMAL);
+		RemoveWatchdog();
+		Print(string.Format("[DC_Probe] plan complete: %1 probe(s) started (%2), %3 physics steps, %4 frames, step source %5 (decided by %6), step dt %7 s (%8), merged fixed steps %9", m_aRuns.Count(), JoinIds(m_aPlanIds), m_iPhysicsStep, m_iFrameCount, m_sStepSource, m_sDecidedBy, m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_iMergedSteps), LogLevel.NORMAL);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1182,6 +1723,14 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		lines.Insert("clock.start_render_frame=" + renderFrame.ToString());
 		lines.Insert("clock.start_physics_step=" + state.m_iStartStep.ToString());
 		lines.Insert("clock.step_source=" + m_sStepSource);
+		lines.Insert("clock.step_decided_by=" + m_sDecidedBy);
+		lines.Insert("clock.step_dt_s=" + m_fStepDtS.ToString(-1, 6));
+		lines.Insert("clock.step_dt_source=" + m_sStepDtSource);
+
+		// Run totals at the probe start: the footer's clock.engine_fixed_steps / clock.merged_fixed_steps minus these
+		// are the probe's own (merged steps during e01 / e02a, STEP TIMING)
+		lines.Insert("clock.start_engine_fixed_steps=" + m_iEngineFixedSteps.ToString());
+		lines.Insert("clock.start_merged_fixed_steps=" + m_iMergedSteps.ToString());
 
 		string egoPrefab;
 		if (m_Ego)
@@ -1206,7 +1755,8 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! run_footer.txt keys of PROBE_DESIGN.md 4.5
+	//! run_footer.txt keys of PROBE_DESIGN.md 4.5, plus the run's step timing (clock.*, STEP TIMING; run totals since
+	//! StartRun, not per probe)
 	protected void BuildRunFooter(notnull DC_ProbeRunState state, string status, string reason, string note, notnull array<string> lines)
 	{
 		int unixTime = System.GetUnixTime();
@@ -1215,6 +1765,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		int physicsSteps = m_iPhysicsStep - state.m_iStartStep;
 		int renderFrames = m_iFrameCount - state.m_iStartFrame;
 		float worldMs = GetWorldTimeMs();
+		float measuredStep = GetMeasuredFixedStepS();
 
 		lines.Insert("schema=" + RUN_SCHEMA);
 		lines.Insert("status=" + status);
@@ -1227,6 +1778,22 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		lines.Insert("end.physics_step=" + m_iPhysicsStep.ToString());
 		lines.Insert("physics_steps=" + physicsSteps.ToString());
 		lines.Insert("render_frames=" + renderFrames.ToString());
+		lines.Insert("clock.step_source=" + m_sStepSource);
+		lines.Insert("clock.step_decided_by=" + m_sDecidedBy);
+		lines.Insert("clock.step_decided_world_ms=" + m_fDecidedAtMs.ToString(-1, 3));
+		lines.Insert("clock.step_dt_s=" + m_fStepDtS.ToString(-1, 6));
+		lines.Insert("clock.step_dt_source=" + m_sStepDtSource);
+		lines.Insert("clock.measured_fixed_step_s=" + measuredStep.ToString(-1, 6));
+		lines.Insert("clock.engine_fixed_steps=" + m_iEngineFixedSteps.ToString());
+		lines.Insert("clock.measured_frames=" + m_iMeasuredFrames.ToString());
+		lines.Insert("clock.merged_fixed_steps=" + m_iMergedSteps.ToString());
+		lines.Insert("clock.fixedframe_frame_mismatches=" + m_iFixedFrameMismatches.ToString());
+		lines.Insert("clock.fixed_time_slice_min_s=" + m_fFixedSliceMinS.ToString(-1, 6));
+		lines.Insert("clock.fixed_time_slice_max_s=" + m_fFixedSliceMaxS.ToString(-1, 6));
+		lines.Insert("clock.fixedframe_timeslice_min_s=" + m_fFixedFrameSliceMinS.ToString(-1, 6));
+		lines.Insert("clock.fixedframe_timeslice_max_s=" + m_fFixedFrameSliceMaxS.ToString(-1, 6));
+		lines.Insert("clock.fixedframe_timeslice_one_step_s=" + m_fOneStepFixedFrameSliceS.ToString(-1, 6));
+		lines.Insert("clock.simulate_timeslice_s=" + m_fLastSimulateSliceS.ToString(-1, 6));
 		state.m_Context.AppendFooterLines(lines);
 		lines.Insert("note=" + note.Trim());
 	}
@@ -1338,6 +1905,43 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	string GetStepSource()
 	{
 		return m_sStepSource;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! World seconds per dispatched physics step (STEP TIMING); 0 until the step source is decided and with "none".
+	//! Probes call DC_ProbeComponent.GetStepDtS, which falls back to GetFixedTimeSlice.
+	float GetStepDtS()
+	{
+		return m_fStepDtS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! "engine", "measured", "engine_unchecked" or "none" (ChooseStepDt); "" until decided
+	string GetStepDtSource()
+	{
+		return m_sStepDtSource;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fallback only: engine fixed steps beyond the first of one EOnFixedFrame call, never dispatched on their own
+	int GetMergedSteps()
+	{
+		return m_iMergedSteps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The engine's raw argument of the step callback being dispatched (EOnSimulate / EOnPostSimulate, or in the
+	//! fallback EOnFixedFrame / EOnPostFixedFrame); the probes get n x GetStepDtS as timeSlice instead (STEP TIMING)
+	float GetDispatchEngineSliceS()
+	{
+		return m_fDispatchEngineSliceS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine steps the dispatched step covers: GetFixedSteps() of the frame (at least 1) in the fallback, else 1
+	int GetDispatchCoveredSteps()
+	{
+		return m_iDispatchCoveredSteps;
 	}
 
 	//------------------------------------------------------------------------------------------------

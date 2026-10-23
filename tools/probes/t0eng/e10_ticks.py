@@ -20,7 +20,14 @@ every k steps, 0 missed. Checked here:
 INFO: k and dt (TBD-1), the step source, the EOnSimulate / EOnFixedFrame totals, the sum of GetFixedSteps() against
 the simulate count, the steps-per-frame histogram, whether world time advances per step or per frame (TBD-1), post
 calls without a pre call, and world_timestamp: the dc-2.0 clock (BaseWorld.GetTimestamp().DiffMilliseconds, the
-world_ts_ms columns) against GetWorldTime over the run and whether it advances per step (TBD-1).
+world_ts_ms columns) against GetWorldTime over the run and whether it advances per step (TBD-1), and
+runner_step_timing: the run_footer.txt clock.* keys of DC_ProbeRunner (STEP TIMING) - the step length the probes used
+(GetStepDtS) next to the engine's raw values. In the 1.8.0.13 fixedframe fallback EOnFixedFrame comes once per frame
+with at least one 1/30 s fixed step, while GetFixedTimeSlice returned 0.1 s in the first frame: when it stays 0.1 the
+steps_per_world_second check above fails by design (1/dt with dt = engine.fixed_time_slice_s); its detail then says
+so, and this INFO line holds the rate the runner measured. steps_per_second_vs_step_dt repeats the per-second count
+against 1/clock.step_dt_s, and engine_timeslice gives the engine's raw step-callback argument and the covered_steps of
+the e10_steps.csv rows (merged fallback steps). The verdict uses none of them (TBD-1 is a review decision).
 
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
 """
@@ -104,6 +111,7 @@ def analyse(play):
                   if t is not None]
         basis = "e10_frames.csv %s by frame time" % count_column
     counts = full_second_counts(events, paused_seconds)
+    step_dt = pc.to_float(play.footer.get("clock.step_dt_s")) if play.footer else None
     if dt is None or dt <= 0:
         v.check("steps_per_world_second", None, "no fixed time slice to compare with")
     elif not counts:
@@ -118,10 +126,20 @@ def analyse(play):
             detail += "; outside: " + ", ".join("s%d=%d" % sc for sc in bad[:MAX_LISTED])
             if len(bad) > MAX_LISTED:
                 detail += " ..."
+        if bad and step_source == "fixedframe" and step_dt and abs(1.0 / step_dt - expected) > 1.0:
+            detail += ("; expected in the fixedframe fallback: GetFixedTimeSlice %.6f s is not the runner's step dt "
+                       "%.6f s, see steps_per_second_vs_step_dt (TBD-1: a review decision, not a runner failure)"
+                       % (dt, step_dt))
         v.check("steps_per_world_second", not bad, detail)
         values = list(counts.values())
         v.info("steps_per_second_range", "min %d, p50 %.1f, max %d over %d full seconds, %d paused second(s) skipped"
                % (min(values), pc.percentile(values, 50), max(values), len(values), len(paused_seconds)))
+    if counts and step_dt and step_dt > 0:
+        # The same count against the step length the runner dispatched with (INFO: the verdict keeps r2's 1/dt)
+        expected_dt = 1.0 / step_dt
+        within = sum(1 for c in counts.values() if abs(c - expected_dt) <= 1.0)
+        v.info("steps_per_second_vs_step_dt", "%.2f +-1 (1/clock.step_dt_s %.6f s) in %d/%d full seconds" % (
+            expected_dt, step_dt, within, len(counts)))
 
     # Every dispatched step got its post call: the +-1 above cannot see a single lost step, this can
     if steps is None:
@@ -198,8 +216,45 @@ def analyse(play):
         no_pre = sum(1 for r in steps if not r["world_time_ms_pre"])
         v.info("post_without_pre", "%d of %d step rows" % (no_pre, len(steps)))
         v.info("world_timestamp", world_timestamp_text(steps))
+        v.info("engine_timeslice", engine_timeslice_text(steps))
+    timing = runner_step_timing(play.footer)
+    if timing:
+        v.info("runner_step_timing", timing)
     v.check_footer(play)
     return v
+
+
+def runner_step_timing(footer):
+    """The runner's step timing from run_footer.txt (clock.* keys, DC_ProbeRunner STEP TIMING): the step length the
+    probes used next to the engine's raw values. None for a play written before the keys existed."""
+    if not footer or not footer.get("clock.step_dt_s"):
+        return None
+    dt = pc.to_float(footer.get("clock.step_dt_s"))
+    rate = "%.2f steps/s" % (1.0 / dt) if dt else "no rate"
+    return ("step source %s decided by %s; step dt %s s (%s, %s); measured fixed step %s s over %s engine fixed steps, "
+            "%s merged into one EOnFixedFrame call; GetFixedTimeSlice %s..%s s; EOnFixedFrame time slice %s..%s s "
+            "(one-step frame %s s); EOnFixedFrame calls under another frame number than the last EOnFrame %s" % (
+                footer.get("clock.step_source", "?"), footer.get("clock.step_decided_by", "?"),
+                footer.get("clock.step_dt_s"), footer.get("clock.step_dt_source", "?"), rate,
+                footer.get("clock.measured_fixed_step_s", "?"), footer.get("clock.engine_fixed_steps", "?"),
+                footer.get("clock.merged_fixed_steps", "?"), footer.get("clock.fixed_time_slice_min_s", "?"),
+                footer.get("clock.fixed_time_slice_max_s", "?"), footer.get("clock.fixedframe_timeslice_min_s", "?"),
+                footer.get("clock.fixedframe_timeslice_max_s", "?"),
+                footer.get("clock.fixedframe_timeslice_one_step_s", "?"),
+                footer.get("clock.fixedframe_frame_mismatches", "?")))
+
+
+def engine_timeslice_text(steps):
+    """The engine's raw step-callback argument (engine_timeslice_post_s) and the steps each row covers (covered_steps)
+    next to the dispatched timeslice_post_s (n x the runner's step dt in the fixedframe fallback)."""
+    raw = [t for t in pc.floats(steps, "engine_timeslice_post_s") if t is not None]
+    if not raw:
+        return "no engine_timeslice_post_s values (a play written before the column existed)"
+    covered = [n for n in pc.ints(steps, "covered_steps") if n is not None]
+    multi = [n for n in covered if n > 1]
+    return "raw time slice %.6f..%.6f s (p50 %.6f) over %d step rows; covered_steps > 1 on %d row(s), %d merged " \
+           "engine step(s)" % (min(raw), max(raw), pc.percentile(raw, 50), len(raw), len(multi),
+                               sum(n - 1 for n in multi))
 
 
 def world_timestamp_text(steps):

@@ -35,7 +35,10 @@ measured. Auto-gear works or a scripted gearbox is needed. Recorded whether it w
   INFO                     engine_on 0 steps while driving (stall watch, expected 0 on 1.8), persistent-handbrake
                            re-releases, the level-correlation peak (dead time plus lag), the rerun19.* checklist,
                            gear_indices (cur_gear at standstill and while moving forward; TBD-7: no phase drives in
-                           reverse, so the reverse and neutral indices stay unmeasured)
+                           reverse, so the reverse and neutral indices stay unmeasured), shift_loops (windows in world
+                           time: world_time_ms, else the running sum of timeslice_s), merged_fixed_steps (also for
+                           e02a: the probe's engine fixed steps that the 1.8 fixedframe fallback merged into one call,
+                           footer minus header; above 1% the step-based timing results need review)
   RESULT PASS when the car moved and every identification has a value.
 
 E-02a (r2 4.4: "fit usable by llc_v1"): per cell the steady window is the last half of excite, steps within
@@ -66,6 +69,7 @@ SHIFT_LOOP_WINDOW_S = 2.0
 SHIFT_LOOP_MAX_CHANGES = 2
 SHIFT_LOOP_SPEED_KMH = 5.0
 GEAR_HONOURED_SHARE = 0.9
+MERGED_SHARE_LIMIT = 0.01
 
 CHANNELS = (
     ("steer", "cmd_steer", "input_pre_steer", "input_post_steer"),
@@ -452,6 +456,9 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
                 resets += int(float(token.split(":", 1)[1] or 0))
     verdict.info("persistent_handbrake_resets", "%d steps on which the controller had set it again" % resets)
     verdict.info("phases", " ".join("%s=%s" % (r["phase"], r["result"]) for r in phases))
+    merged = merged_steps_text(play)
+    if merged:
+        verdict.info("merged_fixed_steps", merged)
     for key in sorted(k for k in play.header if k.split("params.", 1)[-1].startswith("rerun19.")):
         verdict.info(key.split("params.", 1)[-1], play.header[key])
     return verdict
@@ -510,6 +517,28 @@ def local_axes(verdict, steps, steer_phases):
                           matches if measured else "undecided"))
 
 
+def merged_steps_text(play):
+    """The probe's own merged fixed steps (DC_ProbeRunner fixedframe fallback): run_footer.txt clock.engine_fixed_steps
+    and clock.merged_fixed_steps minus the run header's clock.start_* values. None for a play written before those
+    keys existed. The phases count covered engine steps, so their lengths hold in world time, but a dispatched step
+    that covers n merged engine steps holds its command for all n and is one row: above MERGED_SHARE_LIMIT the
+    step-based results (delays in steps, PRBS bit edges, kappa windows) need review."""
+    footer = play.footer or {}
+    names = ("engine_fixed_steps", "merged_fixed_steps")
+    start = [probe_common.to_int(play.header.get("clock.start_" + name)) for name in names]
+    end = [probe_common.to_int(footer.get("clock." + name)) for name in names]
+    if None in start or None in end:
+        return None
+    engine = end[0] - start[0]
+    merged = end[1] - start[1]
+    share = float(merged) / engine if engine > 0 else 0.0
+    text = "%d of %d engine fixed steps during the probe were merged into a fallback call (%.2f%%)" % (
+        merged, engine, 100.0 * share)
+    if share > MERGED_SHARE_LIMIT:
+        text += "; above %.0f%%: the step-based timing results need review" % (100.0 * MERGED_SHARE_LIMIT)
+    return text
+
+
 def gear_indices(steps):
     """cur_gear values at standstill (settle, < 0.5 km/h) and while moving forward (driving, >= 5 km/h, vel_l_z > 0).
     Reverse and neutral cannot be told from these: no E-01 phase drives in reverse (TBD-7)."""
@@ -531,25 +560,39 @@ def gear_indices(steps):
         text(standstill), text(forward))
 
 
+def row_seconds(rows):
+    """World seconds of each step row of one phase (rows in step order): world_time_ms / 1000 when every row has it,
+    else the running sum of timeslice_s. Never physics_step x timeslice_s: on a merged fallback step timeslice_s is
+    n x dt (DC_ProbeRunner STEP TIMING), so that product jumps to n times the row's real time."""
+    world = [num(row.get("world_time_ms")) for row in rows]
+    if rows and None not in world:
+        return [w / 1000.0 for w in world]
+    out, total = [], 0.0
+    for row in rows:
+        total += num(row["timeslice_s"]) or 0.0
+        out.append(total)
+    return out
+
+
 def count_shift_loops(steps):
-    """Windows of SHIFT_LOOP_WINDOW_S with more than SHIFT_LOOP_MAX_CHANGES cur_gear changes while the speed changed
-    by less than SHIFT_LOOP_SPEED_KMH (counted once per window start, windows do not overlap)."""
+    """Windows of SHIFT_LOOP_WINDOW_S world seconds (row_seconds) with more than SHIFT_LOOP_MAX_CHANGES cur_gear changes
+    while the speed changed by less than SHIFT_LOOP_SPEED_KMH (counted once per window start, windows do not
+    overlap)."""
     loops = 0
     for rows in steps.by_phase.values():
         changes = []
         previous = None
-        for row in rows:
+        for row, t in zip(rows, row_seconds(rows)):
             if row["segment"] not in DRIVING:
                 previous = None
                 continue
             gear = int(float(row["cur_gear"]))
-            t = int(row["physics_step"]) * (num(row["timeslice_s"]) or 0.0)
             if previous is not None and gear != previous:
                 changes.append((t, num(row["speed_kmh"]) or 0.0))
             previous = gear
         i = 0
         while i < len(changes):
-            window = [c for c in changes[i:] if c[0] - changes[i][0] <= SHIFT_LOOP_WINDOW_S]
+            window = [c for c in changes[i:] if 0.0 <= c[0] - changes[i][0] <= SHIFT_LOOP_WINDOW_S]
             speeds = [c[1] for c in window]
             if len(window) > SHIFT_LOOP_MAX_CHANGES and max(speeds) - min(speeds) < SHIFT_LOOP_SPEED_KMH:
                 loops += 1
@@ -656,6 +699,9 @@ def analyse_e02a(play, min_cells=3, min_r2=0.9, max_alat=4.0, steady_kmh=1.0, mi
         verdict.info("flagged", line)
     verdict.info("usable", "fit usable by llc_v1: %s [design target; E-02Q at T3 qualifies]" % (
         "yes" if usable else "no"))
+    merged = merged_steps_text(play)
+    if merged:
+        verdict.info("merged_fixed_steps", merged)
     return verdict
 
 

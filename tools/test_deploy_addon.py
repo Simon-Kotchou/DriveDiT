@@ -163,9 +163,9 @@ class DeployAddonTest(unittest.TestCase):
             self.assertFalse(os.path.exists(self.target), "%s: refusal still wrote the target" % request)
 
     def test_partial_deploy_of_a_manifest_member(self):
-        rc, out = self.run_tool("src/enfusion/datacapture/SCR_MLDataCollector.c")
+        rc, out = self.run_tool("src/enfusion/datacapture/DC_LaunchGuard.c")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(listing(self.target), {SCRIPT_DST + "/SCR_MLDataCollector.c", SCRIPT_DST + "/DC_BuildInfo.c",
+        self.assertEqual(listing(self.target), {SCRIPT_DST + "/DC_LaunchGuard.c", SCRIPT_DST + "/DC_BuildInfo.c",
                                                 ".deploy_state.json"})
         with open(os.path.join(self.target, SCRIPT_DST, "DC_BuildInfo.c")) as f:
             self.assertIn("DEPLOY_PARTIAL = true;", f.read())
@@ -360,10 +360,10 @@ class DeployAddonTest(unittest.TestCase):
 
     def test_refuses_to_delete_a_changed_file_without_force(self):
         self.assertEqual(self.run_tool()[0], 0)
-        anchor = os.path.join(self.target, SCRIPT_DST, "SCR_AnchorFrameSelector.c")
+        anchor = os.path.join(self.target, SCRIPT_DST, "DC_RoadDump.c")
         with open(anchor, "a") as f:
             f.write("// local edit\n")
-        keep = ["addon addons/DataCapture/addon.gproj", "script src/enfusion/datacapture/SCR_MLDataCollector.c"]
+        keep = ["addon addons/DataCapture/addon.gproj", "script src/enfusion/datacapture/DC_LaunchGuard.c"]
         rc, out = self.run_tool("--manifest", self.write_manifest(keep))
         self.assertEqual(rc, 2, out)
         self.assertTrue(os.path.exists(anchor))

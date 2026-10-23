@@ -12,8 +12,13 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
   - the fit recovers the map per speed, the offset, steer_sign and yaw_axis_sign, the dead time and lag (the
     delay + first-order structure wins on the held-out PRBS half), the echoing input, the throttle and brake gains,
     the automatic gearbox and the forward gear indices; steer_sign +1 too;
-  - an identified card needs one pin and one build_key (--build-key fills a dd-launch/1 header), complete plays and a
-    usable E-02a fit; Everon inputs are refused;
+  - the engine input path: a rate limit (1 /s, 18 /s) is input_shaping rate_limit with its limit, a 0.08 s lag is
+    lag with its tau and no limit (review F-05); the limiter rule needs a known path (F-04);
+  - a scripted gearbox stores E-01's clutch dip and is refused without it (F-02); a neutral index reported while
+    rolling stays in gear_indices_forward (TBD-7) but can never be a scripted gear (Codex CX-1);
+  - an identified card needs one pin, one build_key (--build-key fills a dd-launch/1 header), one fixed time slice
+    (F-11), complete plays and a usable E-02a fit with gains >= MIN_KAPPA_PER_STEER, and is checked as written
+    against llc_v1's load rules (F-12); Everon inputs are refused;
   - the committed card tools/ident/cards/1.8.0.13/S105.json is exactly the generator's PLACEHOLDER (status
     placeholder, no identification session, build_key null);
   - every card keeps the format llc_v1 reads: each scanned array key once, numbers without exponent, ASCII + LF, the
@@ -71,11 +76,17 @@ def gain(v):
 
 class Truth:
     """Vehicle with a known actuator: contract steer c = steer_sign x engine steer, curvature kappa follows
-    gain(v) x c(t - delay) + offset with a first-order lag tau; a longitudinal dead time; throttle 3 m/s2 per unit,
-    brake 8 m/s2 per unit; an automatic gearbox that shifts up every 20 km/h (input gear 3, 4, 5, 6)."""
+    gain_scale x gain(v) x c(t - delay) + offset with a first-order lag tau; a longitudinal dead time; throttle 3 m/s2
+    per unit, brake 8 m/s2 per unit; an automatic gearbox that shifts up every 20 km/h (input gear 3, 4, 5, 6), or
+    without one gear 3 unless SetGear sets another; optionally a neutral index reported while braking above 5 km/h."""
 
-    def __init__(self, steer_sign=-1, delay=4, tau=0.1, offset=0.001, long_delay=6, input_rate=None):
-        self.input_rate = input_rate      # an engine-side steering rate limit on the input [1/s], None = echo
+    def __init__(self, steer_sign=-1, delay=4, tau=0.1, offset=0.001, long_delay=6, input_rate=None, input_tau=None,
+                 automatic=True, neutral_when_braking=None, gain_scale=1.0):
+        self.input_rate = input_rate      # an engine-side steering rate limit on the input [1/s], None = none
+        self.input_alpha = None if input_tau is None else 1.0 - math.exp(-DT / input_tau)   # an engine input lag
+        self.automatic = automatic
+        self.neutral_when_braking = neutral_when_braking
+        self.gain_scale = gain_scale
         self.steer_input = 0.0
         self.steer_sign = steer_sign
         self.delay = delay
@@ -97,11 +108,13 @@ class Truth:
     def run(self, phase, segment, n, steer=0.0, throttle=0.0, brake=0.0, gear=-1, handbrake=False, hold=-1.0,
             speed=None):
         self.step += 1
-        if self.input_rate is None:
-            self.steer_input = steer
-        else:
+        if self.input_rate is not None:
             limit = self.input_rate * DT
             self.steer_input += max(-limit, min(limit, steer - self.steer_input))
+        elif self.input_alpha is not None:
+            self.steer_input += self.input_alpha * (steer - self.steer_input)
+        else:
+            self.steer_input = steer
         self.steer_hist.append(self.steer_input)
         self.long_hist.append((throttle, brake, handbrake))
         delayed = self.steer_hist[-1 - self.delay] if len(self.steer_hist) > self.delay else 0.0
@@ -114,7 +127,7 @@ class Truth:
             acc = 0.0
             self.speed = speed
         self.speed = max(0.0, self.speed + acc * DT)
-        target = gain(self.speed) * self.steer_sign * delayed + self.offset
+        target = self.gain_scale * gain(self.speed) * self.steer_sign * delayed + self.offset
         self.kappa += self.alpha * (target - self.kappa)
         yaw = self.speed * self.kappa if self.speed > 0.3 else 0.0
         self.heading += math.degrees(yaw * DT)
@@ -122,7 +135,14 @@ class Truth:
         self.x += self.speed * math.sin(rad) * DT
         self.z += self.speed * math.cos(rad) * DT
         kmh = self.speed * 3.6
-        cur = 3 + min(3, int(kmh / 20.0)) if gear < 0 else gear
+        if gear >= 0:
+            cur = gear
+        elif self.neutral_when_braking is not None and brake > 0 and kmh >= 5.0:
+            cur = self.neutral_when_braking
+        elif self.automatic:
+            cur = 3 + min(3, int(kmh / 20.0))
+        else:
+            cur = 3
         self.rows.append({
             "physics_step": self.step, "world_time_ms": "%.3f" % (self.step * DT * 1000), "timeslice_s": "%.6f" % DT,
             "phase": phase, "segment": segment, "phase_step": n, "force_sim": 0, "cmd_steer": "%.4f" % steer,
@@ -143,16 +163,21 @@ class Truth:
         return kmh
 
 
-def header(probe, build_key="bk-test-1", pin="1.8.0.13", map_id="arland", prefab=None):
-    return {"schema": "dc-probe-run/1", "probe": probe, "launch.id": LAUNCH_ID, "launch.pin_id": pin,
-            "launch.build_key": build_key, "engine.fixed_time_slice_s": "%.6f" % DT, "world.map_id": map_id,
-            "ego.prefab": prefab or fit.PREFABS["S105"], "params.dt_s": "%.6f" % DT}
+def header(probe, build_key="bk-test-1", pin="1.8.0.13", map_id="arland", prefab=None, slice_s=DT, clutch_dip=None):
+    out = {"schema": "dc-probe-run/1", "probe": probe, "launch.id": LAUNCH_ID, "launch.pin_id": pin,
+           "launch.build_key": build_key, "engine.fixed_time_slice_s": "%.6f" % slice_s, "world.map_id": map_id,
+           "ego.prefab": prefab or fit.PREFABS["S105"], "params.dt_s": "%.6f" % slice_s}
+    if clutch_dip is not None:
+        out["params.m_fGearClutchDipS"] = "%.3f" % clutch_dip      # DC_ProbeSequences.GetProbeParams
+    return out
 
 
 FOOTER = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
 
 
-def build_e01(play_dir, truth, **head):
+def build_e01(play_dir, truth, gear_sequence=(), **head):
+    """The E-01 phases the fit reads; gear_sequence adds a gear_scripted phase (SetGear to each gear for 3 s at
+    throttle 0.4, as DC_ProbeSequences' GEAR_SCRIPTED)."""
     phases = []
 
     def phase(name, target, amplitude, body):
@@ -232,6 +257,14 @@ def build_e01(play_dir, truth, **head):
         stop(name, n)
         return "ok"
 
+    def gear_scripted(name, n):
+        for gear in gear_sequence:
+            for _ in range(180):
+                truth.run(name, "excite", n, throttle=0.4, gear=gear)
+                n += 1
+        stop(name, n)
+        return "ok"
+
     phase("move_check", "", "0.5000", move_check)
     phase("steer_prbs", "20.000", "0.3000", prbs)
     phase("steer_reversal", "20.000", "0.3000", reversal)
@@ -240,6 +273,8 @@ def build_e01(play_dir, truth, **head):
     for value in (0.3, 0.6, 1.0):
         phase("brake_%.2f" % value, "40.000", "%.4f" % value, brake_step(value))
     phase("gear_observe", "", "0.7000", gear_observe)
+    if gear_sequence:
+        phase("gear_scripted", "", "0.4000", gear_scripted)
     probe_common.write_synthetic_play(play_dir, header("e01", **head), {
         "e01_steps": (STEP_COLUMNS, truth.rows), "e01_phases": (PHASE_COLUMNS, phases)}, FOOTER)
 
@@ -407,7 +442,8 @@ class FitTests(unittest.TestCase):
         for f in ss["fits"]:
             self.assertGreater(f["r2"], 0.99)
         raw = card["actuator"]["raw_engine_path"]
-        self.assertEqual((raw["input_echo"], raw["steer_rate_limit_per_s"]), (True, None))
+        self.assertEqual((raw["input_echo"], raw["input_shaping"], raw["steer_rate_limit_per_s"], raw["input_lag_tau_s"]),
+                         (True, "echo", None, None))
         self.assertEqual(raw["selected_structure"], "delay_first_order")
         prbs = raw["bins"][0]["structures"]
         self.assertEqual(prbs["delay_first_order"]["dead_time_steps"], 4)
@@ -422,7 +458,9 @@ class FitTests(unittest.TestCase):
         self.assertEqual(card["llc_v1"]["throttle_per_mps2"], lon["throttle"]["per_mps2"])
         self.assertEqual(card["llc_v1"]["steer_rate_per_s"], 0.0)
         self.assertEqual(card["gearbox"]["mode"], "automatic")
+        self.assertEqual(card["gearbox"]["clutch_dip_s"], 0.0)          # no SetGear, no dip
         self.assertEqual(card["gear_indices_forward"], [3, 4, 5, 6])
+        self.assertEqual(card["gearbox"]["detail"]["propulsion_gears"], [3, 4, 5, 6])
         self.assertIsNone(card["gear_index_neutral"])
         self.assertIsNone(card["gear_index_reverse"])
 
@@ -452,7 +490,9 @@ class FitTests(unittest.TestCase):
             card = json.load(f)
         raw = card["actuator"]["raw_engine_path"]
         self.assertFalse(raw["input_echo"])
+        self.assertEqual(raw["input_shaping"], "rate_limit")
         self.assertAlmostEqual(raw["steer_rate_limit_per_s"], 1.0, delta=0.01)
+        self.assertIsNone(raw["input_lag_tau_s"])
         self.assertEqual(card["llc_v1"]["steer_rate_per_s"], 0.0)       # the identity: never stacks (CC-08)
 
     def test_a_fast_engine_limit_is_not_an_echo(self):
@@ -465,7 +505,106 @@ class FitTests(unittest.TestCase):
         with open(out, "r", encoding="ascii") as f:
             raw = json.load(f)["actuator"]["raw_engine_path"]
         self.assertFalse(raw["input_echo"])
+        self.assertEqual(raw["input_shaping"], "rate_limit")       # the lag model misses the arrival steps
         self.assertAlmostEqual(raw["steer_rate_limit_per_s"], 18.0, delta=0.1)
+
+    def test_an_engine_lag_is_not_a_rate_limit(self):
+        # F-05: a 0.08 s first-order lag on the input has an initial slope (6.8 /s here), not a rate limit; an llc
+        # limiter would stack with it, so the card identifies no limit and llc_v1 may run only the identity
+        e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_12")
+        build_e01(e01, Truth(input_tau=0.08))
+        out = os.path.join(self.tmp, "lagged_input.json")
+        code, text = run_fit(["--e01", e01, "--e02a", self.e02a, "--out", out])
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            card = json.load(f)
+        raw = card["actuator"]["raw_engine_path"]
+        self.assertEqual((raw["input_echo"], raw["input_shaping"], raw["steer_rate_limit_per_s"]), (False, "lag", None))
+        self.assertAlmostEqual(raw["input_lag_tau_s"], 0.08, delta=0.004)
+        self.assertAlmostEqual(raw["input_max_slope_per_s"], 0.6 * (1.0 - math.exp(-DT / 0.08)) / DT, delta=0.05)
+        self.assertEqual(fit.enforce_load_check(card), [])
+        card["llc_v1"]["steer_rate_per_s"] = 2.0                    # "slower" than the slope, but it would stack
+        self.assertTrue(any("steer_rate_per_s" in v for v in fit.enforce_load_check(card)))
+
+    def test_limiter_rule_needs_a_known_engine_path(self):
+        # F-04: a non-identity llc limiter only with an echoing input or an identified pure rate limit (and then
+        # strictly slower); a placeholder (engine path unknown) keeps the identity
+        with open(CARD, "r", encoding="ascii") as f:
+            placeholder = json.load(f)
+        self.assertEqual(fit.enforce_load_check(placeholder), [])
+        placeholder["llc_v1"]["steer_rate_per_s"] = 2.0
+        self.assertTrue(any("steer_rate_per_s" in v for v in fit.enforce_load_check(placeholder)))
+        card = json.loads(self.card_text)                           # input echo
+        card["llc_v1"]["steer_rate_per_s"] = 2.0
+        self.assertEqual(fit.enforce_load_check(card), [])
+        card["actuator"]["raw_engine_path"].update({"input_echo": False, "input_shaping": "rate_limit",
+                                                    "steer_rate_limit_per_s": 4.0})
+        self.assertEqual(fit.enforce_load_check(card), [])
+        card["llc_v1"]["steer_rate_per_s"] = 4.0
+        self.assertTrue(any("not slower" in v for v in fit.enforce_load_check(card)))
+        card["actuator"]["raw_engine_path"]["input_shaping"] = "unknown"
+        self.assertTrue(fit.enforce_load_check(card))                # a limit without a rate_limit shaping
+
+    def test_scripted_gearbox_carries_the_clutch_dip(self):
+        # F-02: a scripted card stores the clutch dip E-01's gear_scripted phase ran with (llc_v1 reproduces it) and is
+        # refused when the run header does not say it
+        args = ["--e02a", self.e02a, "--scripted-gears", "3,4,5", "--upshift-mps", "5,10", "--downshift-mps", "4,8"]
+        e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_13")
+        build_e01(e01, Truth(automatic=False), gear_sequence=(3, 4, 5), clutch_dip=0.25)
+        out = os.path.join(self.tmp, "scripted.json")
+        code, text = run_fit(["--e01", e01, "--out", out] + args)
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            card = json.load(f)
+        gearbox = card["gearbox"]
+        self.assertEqual((gearbox["mode"], gearbox["scripted_gears"], gearbox["clutch_dip_s"]), ("scripted", [3, 4, 5], 0.25))
+        self.assertEqual(card["gear_indices_forward"], [3, 4, 5])
+        self.assertEqual(fit.enforce_load_check(card), [])
+        undeclared = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_14")
+        build_e01(undeclared, Truth(automatic=False), gear_sequence=(3, 4, 5))
+        code, text = run_fit(["--e01", undeclared] + args)
+        self.assertEqual(code, 2, text)
+        self.assertIn("m_fGearClutchDipS", text)
+        card["gearbox"]["mode"] = "automatic"                        # a dip without SetGear is no card llc_v1 loads
+        self.assertTrue(fit.enforce_load_check(card))
+
+    def test_neutral_reported_while_rolling_is_no_scripted_gear(self):
+        # Codex CX-1 reproduced: a neutral index (1) reported while braking above 5 km/h enters gear_indices_forward
+        # (the TBD-7 definition, kept), but it shows no propulsion, so it can never be a scripted gear
+        e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_15")
+        build_e01(e01, Truth(neutral_when_braking=1))
+        steps = fit.e01_actuation.Steps(probe_common.Play(e01).csv("e01_steps"))
+        automatic, forward, propulsion, _ = fit.fit_gearbox(steps)
+        self.assertEqual((automatic, forward, propulsion), (True, [1, 3, 4, 5, 6], [3, 4, 5, 6]))
+        bad = type("Args", (), {"scripted_gears": "1,3", "upshift_mps": "5", "downshift_mps": "4"})()
+        with self.assertRaises(fit.Refusal) as caught:
+            fit.scripted_gearbox(bad, forward, propulsion)
+        self.assertIn("propulsion", str(caught.exception))
+        good = type("Args", (), {"scripted_gears": "3,4", "upshift_mps": "5", "downshift_mps": "4"})()
+        self.assertEqual(fit.scripted_gearbox(good, forward, propulsion), ([3, 4], [5.0], [4.0]))
+
+    def test_plays_of_two_time_slices_are_refused(self):
+        # F-11: the PRBS bin, the E-02a step responses and the delays are fitted with one dt
+        e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_16")
+        build_e02a(e02a, Truth(), slice_s=1.0 / 120.0)
+        code, text = run_fit(["--e01", self.e01, "--e02a", e02a])
+        self.assertEqual(code, 2, text)
+        self.assertIn("time slice", text)
+
+    def test_a_gain_too_small_for_llc_v1_is_refused(self):
+        # F-12: a slope below MIN_KAPPA_PER_STEER makes the fit unusable, and a card whose gain the 6-decimal
+        # serialization would turn into 0 is refused before it is written (DC_VehicleCard.CheckMap refuses gain <= 0)
+        e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_17")
+        build_e02a(e02a, Truth(gain_scale=0.003))
+        code, text = run_fit(["--e01", self.e01, "--e02a", e02a])
+        self.assertEqual(code, 2, text)
+        self.assertIn("not usable", text)
+        card = json.loads(self.card_text)
+        card["kappa_ss"]["kappa_per_steer"][0] = 0.0000399996
+        self.assertEqual(fit.clean(card["kappa_ss"]["kappa_per_steer"][0]), 0.0)
+        with self.assertRaises(fit.Refusal) as caught:
+            fit.card_text(card)
+        self.assertIn("kappa_per_steer", str(caught.exception))
 
     def test_a_cell_that_never_reached_its_speed(self):
         e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_10")
@@ -512,12 +651,12 @@ class FitTests(unittest.TestCase):
 
     def test_scripted_gearbox_arguments_are_checked(self):
         args = type("Args", (), {"scripted_gears": "3,4,5", "upshift_mps": "5,10", "downshift_mps": "4,8"})()
-        self.assertEqual(fit.scripted_gearbox(args, [3, 4, 5, 6]), ([3, 4, 5], [5.0, 10.0], [4.0, 8.0]))
+        self.assertEqual(fit.scripted_gearbox(args, [3, 4, 5, 6], [3, 4, 5, 6]), ([3, 4, 5], [5.0, 10.0], [4.0, 8.0]))
         for gears, up, down in (("3,4,5", "5", "4"), ("3,4", "5", "6"), ("3,4,5", "10,5", "4,3"), ("3,9", "5", "4"),
                                 ("3,x", "5", "4")):
             bad = type("Args", (), {"scripted_gears": gears, "upshift_mps": up, "downshift_mps": down})()
             with self.assertRaises(fit.Refusal, msg=(gears, up, down)):
-                fit.scripted_gearbox(bad, [3, 4, 5, 6])
+                fit.scripted_gearbox(bad, [3, 4, 5, 6], [3, 4, 5, 6])
 
     def test_unusable_e02a_is_refused(self):
         e02a = os.path.join(self.tmp, "e02a", LAUNCH_ID, "play_05")
@@ -591,6 +730,7 @@ class FitTests(unittest.TestCase):
             self.assertEqual(speeds, sorted(speeds))
             self.assertTrue(all(g > 0 for g in card["kappa_ss"]["kappa_per_steer"]))
             self.assertNotRegex(json.dumps(card), r'": -?[0-9.]+e')
+            self.assertEqual(fit.enforce_load_check(card), [])              # the rules llc_v1 loads it with
 
     def test_enforce_reader_asks_for_the_written_keys(self):
         with open(LLC_SOURCE, "r", encoding="ascii") as f:
@@ -603,10 +743,17 @@ class FitTests(unittest.TestCase):
         self.assertEqual(sorted(scanned), sorted(set(fit.ENGINE_SCANNED_KEYS) - set(fit.ENGINE_ARRAY_KEYS)))
         with open(CARD, "r", encoding="ascii") as f:
             card = json.load(f)
-        for key in re.findall(r'context\.ReadValue\("(\w+)"', source.split("class DC_VehicleCard", 1)[1].split(
-                "class DC_LLCv1", 1)[0]):
+        reader = source.split("class DC_VehicleCard", 1)[1].split("class DC_LLCv1", 1)[0]
+        keys = re.findall(r'context\.ReadValue\("(\w+)"', reader)
+        keys += re.findall(r'ReadContextNumber\(context, "(\w+)"', reader.split("protected bool ReadLlcNumbers", 1)[0])
+        self.assertIn("clutch_dip_s", keys)
+        self.assertIn("input_shaping", keys)
+        for key in keys:
             self.assertTrue(key in card or key in card["signs"] or key in card["gearbox"]
                             or key in card["actuator"]["raw_engine_path"], key)
+        shapings = re.search(r"s_aInputShapings = \{([^}]*)\}", reader).group(1)
+        self.assertEqual(tuple(re.findall(r'"(\w+)"', shapings)), fit.INPUT_SHAPINGS)
+        self.assertIn("CLUTCH_DIP_MAX_S = %g;" % fit.CLUTCH_DIP_MAX_S, reader)
 
     def test_enforce_sha256(self):
         with open(LLC_SOURCE, "r", encoding="ascii") as f:

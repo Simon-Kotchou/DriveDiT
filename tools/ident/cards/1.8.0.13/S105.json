@@ -28,7 +28,8 @@
     "has_automatic_gearbox": null,
     "scripted_gears": [],
     "upshift_mps": [],
-    "downshift_mps": []
+    "downshift_mps": [],
+    "clutch_dip_s": 0.0
   },
   "kappa_ss": {
     "speeds_mps": [
@@ -53,7 +54,11 @@
   "actuator": {
     "raw_engine_path": {
       "input_echo": null,
+      "input_shaping": "unknown",
       "steer_rate_limit_per_s": null,
+      "input_lag_tau_s": null,
+      "input_max_slope_per_s": null,
+      "shaping_fit": null,
       "selected_structure": null,
       "dead_time_steps": null,
       "bins": []

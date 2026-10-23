@@ -216,6 +216,15 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(sha(os.path.join(REPO, "addons/DataCapture/Configs/routes/arland_t0_loop.json")),
                          sha(os.path.join(self.target, "Configs/routes/arland_t0_loop.json")))
 
+    def test_config_entries_never_name_the_sealed_map(self):
+        # Everon (terrain eden) is the sealed zero-shot test map: no route or card naming it deploys, in any case
+        for src in ("addons/DataCapture/Configs/routes/everon_test_loop.json",
+                    "addons/DataCapture/Configs/routes/Eden_loop.json",
+                    "tools/ident/cards/1.8.0.13-EVERON/S105.json"):
+            with self.assertRaises(deploy_addon.Refusal, msg=src) as caught:
+                deploy_addon.manifest_entry("config", src)
+            self.assertIn("sealed", str(caught.exception))
+
     def test_refuses_c_drive_and_wsl_disk_targets(self):
         # Checked in-process on the pure target_reason(): no C: or WSL-disk path is ever passed to the tool's argv.
         probes = ["/mnt/c/__dd_deploy_selftest_missing__/DataCapture",

@@ -23,21 +23,24 @@
 //              forward-only (the core fails the session first); llc_v1 brakes.
 //   gearbox    the card's gearbox mode (E-04 / E-01): "automatic" = no SetGear and clutch 1 (llc_gear and llc_clutch
 //              empty), as the probe kit's speed hold; "scripted" = SetGear every step to the card's forward gears
-//              by speed with hysteresis, clutch 1; every scripted gear must be one of the card's measured
-//              gear_indices_forward. Forward gears only: no neutral or reverse logic until their indices are
-//              measured (TBD-7).
+//              by speed with hysteresis; every scripted gear must be one of the card's measured
+//              gear_indices_forward. The clutch is 1, dipped to 0 for the card's clutch_dip_s after each change of
+//              the commanded gear (the first SetGear of an episode included), as the probe kit's E-01 gear_scripted
+//              phase dips it at the start of every gear hold (m_fGearClutchDipS); llc_clutch records the value
+//              passed. Forward gears only: no neutral or reverse logic until their indices are measured (TBD-7).
 //
 // VEHICLE CARD (tools/ident/cards/<pin_id>/<vehicle>.json in the repo, deployed to Configs/ident/cards/; r3 scope note)
 //   - loaded once per session (DC_VehicleCard.Load); its sha256 (over the file bytes, the value the DD-5-min reader
 //     compares with session.json control.vehicle_card_sha) is logged and stamped;
-//   - refused when its build_key differs from the session's; on a dd-launch/1 session (no build_key) its pin_id must
-//     be the session's and the build_key is not compared (WARNING);
+//   - refused when its pin_id is not the session's, and when its build_key differs from the session's; on a
+//     dd-launch/1 session (no build_key) the build_key is not compared (WARNING);
 //   - status "placeholder" (no identification session ids): accepted only for qualification (use_class dev or
 //     probe), refused at any other use_class, production included; status "identified" needs the identification
 //     session ids and a build_key;
-//   - limiter rule (CC-08, M3): llc's own rate limiter is the identity or strictly slower than the engine's
-//     identified steering rate limit, so the two never stack; an identified engine path that shapes the input
-//     (input_echo false) without an identified limit allows only the identity. The card stores the identified
+//   - limiter rule (CC-08, M3): llc's own rate limiter is the identity unless the engine path is known to pass the
+//     input through (input_shaping echo) or to be a pure rate limit (input_shaping rate_limit with its identified
+//     steer_rate_limit_per_s), and then strictly slower than that limit, so the two never stack; an unknown path (a
+//     placeholder), a lag or an unidentified shaping allows only the identity. The card stores the identified
 //     actuator structure (raw engine path and full llc path, per speed and amplitude bin); llc_v1 reads only what it
 //     needs. The first-pass fit writes the identity limiter.
 //
@@ -538,6 +541,14 @@ class DC_VehicleCard
 	static const string STATUS_IDENTIFIED = "identified";
 	static const string GEARBOX_AUTOMATIC = "automatic";
 	static const string GEARBOX_SCRIPTED = "scripted";
+	static const string SHAPING_ECHO = "echo";
+	static const string SHAPING_RATE_LIMIT = "rate_limit";
+	static const string SHAPING_LAG = "lag";
+	static const string SHAPING_UNKNOWN = "unknown";
+	static const float CLUTCH_DIP_MAX_S = 2;	//!< the probe kit's m_fGearClutchDipS range (0..2 s)
+
+	//! actuator.raw_engine_path.input_shaping values (fit_steer_kappa.py input_path)
+	protected static ref array<string> s_aInputShapings = {"echo", "rate_limit", "lag", "unknown"};
 
 	string m_sPath;
 	string m_sSha256;					//!< sha256 of the file bytes (control.vehicle_card_sha)
@@ -551,9 +562,11 @@ class DC_VehicleCard
 	int m_iYawAxisSign;					//!< contract yaw rate = sign x angvel_local_y (TBD-5)
 	bool m_bSignsMeasured;
 	string m_sGearbox;					//!< automatic or scripted (E-04 / E-01)
+	float m_fClutchDipS;				//!< gearbox.clutch_dip_s: clutch 0 this long after each scripted gear change (E-01)
 	float m_fEngineSteerRateLimit;		//!< identified engine steering rate limit [1/s]; <= 0 = none (or unknown on a placeholder)
 	bool m_bInputEchoKnown;				//!< actuator.raw_engine_path.input_echo is true or false (null on a placeholder)
 	bool m_bInputEcho;					//!< the engine passes the steering input through unchanged (E-01)
+	string m_sInputShaping;				//!< actuator.raw_engine_path.input_shaping: echo, rate_limit, lag or unknown (E-01)
 	ref array<float> m_aForwardGears = {};	//!< gear_indices_forward (E-01; empty on a placeholder)
 
 	// kappa_ss: steady-state curvature per contract steer by speed (E-02a)
@@ -691,17 +704,18 @@ class DC_VehicleCard
 			return false;
 		}
 
-		bool gearboxOk = context.ReadValue("mode", m_sGearbox);
+		bool gearboxOk = context.ReadValue("mode", m_sGearbox) && DC_JsonScan.ReadContextNumber(context, "clutch_dip_s", m_fClutchDipS);
 		context.EndObject();
 		if (!gearboxOk)
 		{
-			failure = "gearbox.mode is required";
+			failure = "gearbox.mode and gearbox.clutch_dip_s are required";
 			return false;
 		}
 
-		// actuator.raw_engine_path: steer_rate_limit_per_s a number, or null when none was found (or unknown);
-		// input_echo true, false, or null when unknown
+		// actuator.raw_engine_path: steer_rate_limit_per_s a number, or null when no pure rate limit was identified;
+		// input_echo true, false, or null when unknown; input_shaping one of s_aInputShapings (CheckActuator)
 		m_fEngineSteerRateLimit = 0;
+		m_sInputShaping = string.Empty;
 		if (context.StartObject("actuator"))
 		{
 			if (context.StartObject("raw_engine_path"))
@@ -712,6 +726,9 @@ class DC_VehicleCard
 
 				if (m_bInputEchoKnown && !context.ReadValue("input_echo", m_bInputEcho))
 					m_bInputEchoKnown = false;
+
+				if (!context.ReadValue("input_shaping", m_sInputShaping))
+					m_sInputShaping = string.Empty;
 
 				context.EndObject();
 			}
@@ -783,7 +800,7 @@ class DC_VehicleCard
 			return false;
 		}
 
-		if (!CheckMap(failure) || !CheckGearbox(failure))
+		if (!CheckMap(failure) || !CheckGearbox(failure) || !CheckActuator(failure))
 			return false;
 
 		bool steerOk = m_fSteerMax > 0 && m_fSteerMax <= 1 && m_fSteerRatePerS >= 0 && m_fSteerLagTauS >= 0 && m_fKappaTrimGain >= 0 && m_fKappaTrimMax >= 0 && m_fTrimMinSpeedMps >= 0;
@@ -831,8 +848,20 @@ class DC_VehicleCard
 	//------------------------------------------------------------------------------------------------
 	protected bool CheckGearbox(out string failure)
 	{
+		if (m_fClutchDipS < 0 || m_fClutchDipS > CLUTCH_DIP_MAX_S)
+		{
+			failure = string.Format("gearbox.clutch_dip_s %1 is outside [0, %2] s", m_fClutchDipS, CLUTCH_DIP_MAX_S);
+			return false;
+		}
+
 		if (m_sGearbox == GEARBOX_AUTOMATIC)
 		{
+			if (m_fClutchDipS > 0)
+			{
+				failure = "gearbox.clutch_dip_s applies to a scripted gearbox only (0 with automatic: no SetGear)";
+				return false;
+			}
+
 			failure = string.Empty;
 			return true;
 		}
@@ -867,6 +896,36 @@ class DC_VehicleCard
 				failure = string.Format("scripted gear %1 is not one of gear_indices_forward (the forward gears E-01 measured)", gear);
 				return false;
 			}
+		}
+
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The raw engine path's fields agree: an identified limit exactly with input_shaping rate_limit, input_echo true
+	//! exactly with echo, and an unknown input_echo (a placeholder) only with unknown
+	protected bool CheckActuator(out string failure)
+	{
+		if (s_aInputShapings.Find(m_sInputShaping) < 0)
+		{
+			failure = "actuator.raw_engine_path.input_shaping '" + m_sInputShaping + "' is none of echo, rate_limit, lag, unknown";
+			return false;
+		}
+
+		bool rateLimit = m_sInputShaping == SHAPING_RATE_LIMIT;
+		bool limitSet = m_fEngineSteerRateLimit > 0;
+		if (rateLimit != limitSet)
+		{
+			failure = string.Format("steer_rate_limit_per_s (%1) is a positive number exactly when input_shaping is rate_limit (it is %2)", m_fEngineSteerRateLimit, m_sInputShaping);
+			return false;
+		}
+
+		bool echo = m_sInputShaping == SHAPING_ECHO;
+		if ((m_bInputEchoKnown && m_bInputEcho != echo) || (!m_bInputEchoKnown && m_sInputShaping != SHAPING_UNKNOWN))
+		{
+			failure = "input_echo and input_shaping disagree (input_echo true exactly with echo, null only with unknown)";
+			return false;
 		}
 
 		failure = string.Empty;
@@ -925,6 +984,9 @@ class DC_LLCv1
 	protected float m_fSpeedRef;
 	protected float m_fIntegral;			//!< [m/s] (integral of the speed error)
 	protected int m_iGearSlot;
+	protected int m_iLastGear;				//!< the last scripted gear passed to SetGear; -1 = none yet this episode
+	protected int m_iClutchDipSteps;		//!< card clutch_dip_s in physics steps (the probe kit's StepsFor rounding)
+	protected int m_iDipStepsLeft;
 
 	//------------------------------------------------------------------------------------------------
 	//! The r3 card rules (see the header) for this session. false (failure) refuses the card; warning is a line to
@@ -935,6 +997,13 @@ class DC_LLCv1
 		if (card.IsPlaceholder() && s_aQualificationUseClasses.Find(useClass) < 0)
 		{
 			failure = "card " + card.m_sCardId + " is a PLACEHOLDER (no identification session): accepted only for qualification (use_class dev or probe), this session is use_class '" + useClass + "'";
+			return false;
+		}
+
+		// the card's own pin, whatever the folder it was found in (a card copied into another pin's folder is refused)
+		if (card.m_sPinId != sessionPinId)
+		{
+			failure = "card " + card.m_sCardId + " is for pin " + card.m_sPinId + ", the session runs pin " + sessionPinId;
 			return false;
 		}
 
@@ -954,30 +1023,30 @@ class DC_LLCv1
 		}
 		else
 		{
-			if (card.m_sPinId != sessionPinId)
-			{
-				failure = "card " + card.m_sCardId + " is for pin " + card.m_sPinId + ", the session runs pin " + sessionPinId + " (dd-launch/1: no build_key to compare)";
-				return false;
-			}
-
 			warning = "the session has no build_key (dd-launch/1 record): card matched by pin_id " + sessionPinId + " only";
 		}
 
 		if (card.m_sBuildKey.IsEmpty() && warning.IsEmpty())
 			warning = "the placeholder card is not bound to a build (build_key null)";
 
-		// limiter rule: llc's own limiter is the identity or strictly slower than the engine's (CC-08, M3)
-		if (card.m_fEngineSteerRateLimit > 0 && card.m_fSteerRatePerS > 0 && card.m_fSteerRatePerS >= card.m_fEngineSteerRateLimit)
+		// limiter rule (CC-08, M3): llc's own limiter is the identity unless the engine path echoes the input or is an
+		// identified pure rate limit, and then strictly slower than that limit; an unknown path (a placeholder: no
+		// engine limit is known), a lag or an unidentified shaping leaves only the identity, the two would stack
+		if (card.m_fSteerRatePerS > 0)
 		{
-			failure = string.Format("llc steer_rate_per_s %1 is not slower than the identified engine limit %2 /s: the two limiters would stack", card.m_fSteerRatePerS, card.m_fEngineSteerRateLimit);
-			return false;
-		}
+			bool echo = card.m_bInputEchoKnown && card.m_bInputEcho && card.m_sInputShaping == DC_VehicleCard.SHAPING_ECHO;
+			bool rateLimit = card.m_sInputShaping == DC_VehicleCard.SHAPING_RATE_LIMIT && card.m_fEngineSteerRateLimit > 0;
+			if (!echo && !rateLimit)
+			{
+				failure = string.Format("llc steer_rate_per_s %1 needs an engine path that echoes the input or an identified engine rate limit (input_shaping '%2'): only the identity (0) is safe", card.m_fSteerRatePerS, card.m_sInputShaping);
+				return false;
+			}
 
-		// an engine path that shapes the input without an identified limit leaves only the identity
-		if (!card.IsPlaceholder() && card.m_bInputEchoKnown && !card.m_bInputEcho && card.m_fEngineSteerRateLimit <= 0 && card.m_fSteerRatePerS > 0)
-		{
-			failure = "the engine shapes the steering input (input_echo false) but no limit was identified: llc steer_rate_per_s must be 0 (the identity)";
-			return false;
+			if (rateLimit && card.m_fSteerRatePerS >= card.m_fEngineSteerRateLimit)
+			{
+				failure = string.Format("llc steer_rate_per_s %1 is not slower than the identified engine limit %2 /s: the two limiters would stack", card.m_fSteerRatePerS, card.m_fEngineSteerRateLimit);
+				return false;
+			}
 		}
 
 		failure = string.Empty;
@@ -1055,6 +1124,8 @@ class DC_LLCv1
 		if (card.m_fSteerLagTauS > 0)
 			m_fLagAlpha = 1 - Math.Pow(Math.E, -m_fTimeSlice / card.m_fSteerLagTauS);
 
+		int dipSteps = Math.Round(card.m_fClutchDipS / m_fTimeSlice);
+		m_iClutchDipSteps = dipSteps;
 		Reset();
 		failure = string.Empty;
 		return true;
@@ -1062,7 +1133,7 @@ class DC_LLCv1
 
 	//------------------------------------------------------------------------------------------------
 	//! Episode start: steering from centre (the core parked the car with steering 0), speed reference at the speed,
-	//! no integral or trim, the gear slot from the speed
+	//! no integral or trim, the gear slot from the speed, no scripted gear passed yet (the first one dips the clutch)
 	void Reset()
 	{
 		m_fSteerLimited = 0;
@@ -1071,6 +1142,8 @@ class DC_LLCv1
 		m_fIntegral = 0;
 		m_fSpeedRef = 0;
 		m_iGearSlot = 0;
+		m_iLastGear = -1;
+		m_iDipStepsLeft = 0;
 		if (!m_Simulation)
 			return;
 
@@ -1122,16 +1195,28 @@ class DC_LLCv1
 		else
 			Stop(held.m_fAccel, speed, throttle, brake);
 
-		// gearbox: automatic = no SetGear; scripted = forward gears by speed
+		// gearbox: automatic = no SetGear, clutch 1; scripted = forward gears by speed, the clutch dipped to 0 for
+		// clutch_dip_s after each change of the commanded gear (E-01 gear_scripted), recorded as passed
 		int gear = -1;
+		float clutch = 1;
 		float clutchRecorded = -1;
 		if (m_Card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED)
 		{
 			gear = ScriptedGear(speed);
-			clutchRecorded = 1;
+			if (gear != m_iLastGear)
+				m_iDipStepsLeft = m_iClutchDipSteps;
+
+			m_iLastGear = gear;
+			if (m_iDipStepsLeft > 0)
+			{
+				clutch = 0;
+				m_iDipStepsLeft--;
+			}
+
+			clutchRecorded = clutch;
 		}
 
-		m_Actuator.Apply(m_fSteerOut, throttle, brake, false, 1, gear);
+		m_Actuator.Apply(m_fSteerOut, throttle, brake, false, clutch, gear);
 
 		llc.m_bActive = true;
 		llc.m_fSteerRaw = steerRaw;
@@ -1257,6 +1342,6 @@ class DC_LLCv1
 		if (!m_Card)
 			return VERSION + " (no card)";
 
-		return string.Format("%1: card %2 (%3, pin %4, build_key '%5', sessions %6) steer_sign %7 yaw_axis_sign %8 (measured %9)", VERSION, m_Card.m_sCardId, m_Card.m_sStatus, m_Card.m_sPinId, m_Card.m_sBuildKey, m_Card.GetSessionsText(), m_Card.m_iSteerSign, m_Card.m_iYawAxisSign, m_Card.m_bSignsMeasured) + string.Format(", gearbox %1, limiter %2 /s, lag %3 s, engine limit %4 /s, kappa_ss bins %5", m_Card.m_sGearbox, m_Card.m_fSteerRatePerS, m_Card.m_fSteerLagTauS, m_Card.m_fEngineSteerRateLimit, m_Card.m_aSpeedsMps.Count());
+		return string.Format("%1: card %2 (%3, pin %4, build_key '%5', sessions %6) steer_sign %7 yaw_axis_sign %8 (measured %9)", VERSION, m_Card.m_sCardId, m_Card.m_sStatus, m_Card.m_sPinId, m_Card.m_sBuildKey, m_Card.GetSessionsText(), m_Card.m_iSteerSign, m_Card.m_iYawAxisSign, m_Card.m_bSignsMeasured) + string.Format(", gearbox %1 (clutch dip %2 s), limiter %3 /s, lag %4 s, engine input %5 (limit %6 /s), kappa_ss bins %7", m_Card.m_sGearbox, m_Card.m_fClutchDipS, m_Card.m_fSteerRatePerS, m_Card.m_fSteerLagTauS, m_Card.m_sInputShaping, m_Card.m_fEngineSteerRateLimit, m_Card.m_aSpeedsMps.Count());
 	}
 }

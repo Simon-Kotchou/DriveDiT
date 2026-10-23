@@ -106,9 +106,12 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_fKappaMax 0.2
    m_fEndToleranceM 5
    m_fStopKmh 1
-   m_fDeviationM 6
-   m_fStuckS 10
-   m_fStuckKmh 2
+   m_fDeviationM 30
+   m_fCorridorHalfWidthM 2
+   m_fOffroadMarginM 0.5
+   m_fOffroadS 3
+   m_fStuckS 20
+   m_fStuckKmh 1
    m_fEpisodeTimeoutS 480
    m_fRolloverDeg 60
    m_fEngineOffS 2

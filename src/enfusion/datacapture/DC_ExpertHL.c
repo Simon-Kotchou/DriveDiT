@@ -7,11 +7,14 @@
 // GameMode_DataCapture in the DC_Arland layer. It owns the route (DC_Route), the expert (DC_ExpertHL), the vehicle
 // card (DC_VehicleCard) and llc_v1 (DC_LLCv1), and is called by the core on its physics-step counters (no CallLater
 // clock):
-//   GetSpawnPose   the route start (point 0) facing along the route;
-//   BeginDriver    sha256 self-test; route (trial conf "route", else m_sDefaultRouteId) checked against the session's
-//                  map and the allowed splits (never Everon); vehicle card for the session's pin, accepted by llc_v1's
-//                  card rules (use_class from the launch record); llc_sha and expert_sha = sha256 of DC_LLCv1.c and
-//                  DC_ExpertHL.c as deployed; stamps and signs to session.json control.*;
+//   GetSpawnPose   the route start (point 0) facing along the route; the route (trial conf "route", else
+//                  m_sDefaultRouteId) is loaded here, once: a route id naming the sealed map (Everon) is refused
+//                  before any path is resolved, and the file's map (the session's), split (m_sAllowedSplits) and
+//                  sealed-map checks run before the route is used for the spawn;
+//   BeginDriver    sha256 self-test; the route as loaded (a refused route refuses readiness); vehicle card for the
+//                  session's pin, accepted by llc_v1's card rules (use_class from the launch record); llc_sha and
+//                  expert_sha = sha256 of DC_LLCv1.c and DC_ExpertHL.c as deployed; stamps and signs to session.json
+//                  control.*;
 //   BeginEpisode   at a decision step after the warm-up, when the ego stands at the route start (distance, heading,
 //                  speed), at most m_iMaxEpisodes, m_fEpisodeGapS after the previous one: mode E, driver expert;
 //   ApplyStep      every physics step with a held command: llc_v1 (EOnSimulate);
@@ -33,12 +36,16 @@
 //              m_fSpeedPreviewS - speed), clamped to [-m_fBrakeMaxMps2, m_fAccelMaxMps2];
 //   dir        +1 (forward-only, T0-MIN); 0 once the ego stands within m_fEndToleranceM of the route end;
 //   held       the command of decision t is held over (P_t, P_t + N] by the core (zero-order hold, [t, t + 100 ms)).
-// Terminations (the first one reported wins, at the next decision step): route_complete (at the end and stopped),
-// route_deviation (|lane_lat_err_m| > m_fDeviationM), stuck (slower than m_fStuckKmh for m_fStuckS while dir +1),
-// timeout (m_fEpisodeTimeoutS, the r2 3.6 cap of 8 min), rollover (up axis tilted beyond m_fRolloverDeg),
-// engine_off (engine off for m_fEngineOffS).
-// Every constant is a parameter with a stated basis (r2 3.6, style_v1 nominal a_lat,max 2.75 m/s2, the S105); none
-// is ported from the Everon-built navigation code (EL-002).
+// Terminations (the first one reported wins, at the next decision step), with the r2 1.3 definitions dc-2.0 9.6
+// names by default: route_complete (stopped at the end: progress >= 98 % of the route and within m_fEndToleranceM
+// of its last point), route_deviation (|lane_lat_err_m| > m_fDeviationM, 30 m), offroad (|lane_lat_err_m| beyond
+// the lane corridor half width m_fCorridorHalfWidthM + m_fOffroadMarginM for more than m_fOffroadS, w/2 + 0.5 m for
+// 3 s), stuck (slower than m_fStuckKmh for m_fStuckS, 1 km/h for 20 s; also an events row of kind stuck, which
+// DD-5-min C17 counts), rollover (up axis tilted beyond m_fRolloverDeg, up.worldUp < 0.5), timeout
+// (m_fEpisodeTimeoutS, the r2 3.6 cap of 8 min; r2 1.3's twice-the-expert-time rule is the evaluator's), engine_off
+// (engine off for m_fEngineOffS). The thresholds are logged in BeginDriver.
+// Every constant is a parameter with a stated basis (r2 1.3, r2 3.6, style_v1 nominal a_lat,max 2.75 m/s2, the S105);
+// none is ported from the Everon-built navigation code (EL-002).
 //
 // ROUTE FILE (drivedit.route/1, tools/routes/make_t0_loop.py): scalar keys through JsonLoadContext, the polyline by
 // DC_JsonScan (number arrays, see DC_LLCv1.c), checked against source.n_points and length_m. episodes.route_sha256
@@ -380,6 +387,16 @@ class DC_Route
 
 		return true;
 	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true when a route id, map id or split names the sealed test map: everon or its terrain eden, in any case (the
+	//! rule of make_t0_loop.py and fit_steer_kappa.py)
+	static bool IsSealedName(string name)
+	{
+		string lower = name;
+		lower.ToLower();
+		return lower.Contains("everon") || lower.Contains("eden");
+	}
 }
 
 //------------------------------------------------------------------------------------------------
@@ -390,6 +407,7 @@ class DC_ExpertHL
 	static const string VERSION = "expert_min_v1";
 	static const string SOURCE_FILE = "DC_ExpertHL.c";
 	static const float MIN_TARGET_DISTANCE_M = 1;	//!< closer pursuit targets (the route end) give kappa 0
+	static const float COMPLETE_MIN_FRACTION = 0.98;	//!< r2 1.3 full-route success: progress >= 98 % of the route
 
 	// parameters (DC_ExpertDriver attributes)
 	float m_fCruiseMps = 11.1;
@@ -414,6 +432,7 @@ class DC_ExpertHL
 	protected float m_fDistance;
 	protected float m_fLateral;
 	protected float m_fHeadingError;
+	protected float m_fGoalDistance;		//!< horizontal distance to the route's last point [m]
 	protected int m_iDir = 1;
 
 	//------------------------------------------------------------------------------------------------
@@ -453,6 +472,7 @@ class DC_ExpertHL
 		m_fDistance = 0;
 		m_fLateral = 0;
 		m_fHeadingError = 0;
+		m_fGoalDistance = 0;
 		m_iDir = 1;
 	}
 
@@ -480,6 +500,9 @@ class DC_ExpertHL
 		float remaining = m_Route.m_fLengthM - m_fProgress;
 		if (remaining <= m_fEndToleranceM && speed < m_fStopSpeedMps)
 			m_iDir = 0;
+
+		vector goal = m_Route.PointAt(m_Route.m_fLengthM);
+		m_fGoalDistance = Math.Sqrt((position[0] - goal[0]) * (position[0] - goal[0]) + (position[2] - goal[2]) * (position[2] - goal[2]));
 
 		// speed profile, looked up ahead by the preview time
 		float target = ProfileAt(m_fProgress + speed * m_fSpeedPreviewS);
@@ -549,10 +572,11 @@ class DC_ExpertHL
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! At the route end and stopped (dir 0)
-	bool IsFinished()
+	//! route_complete (r2 1.3): stopped at the end (dir 0), progress >= 98 % of the route and the ego within
+	//! m_fEndToleranceM of the route's last point (a car stopped beside the end projects onto it but is not there)
+	bool IsComplete()
 	{
-		return m_iDir == 0;
+		return m_iDir == 0 && m_fProgress >= COMPLETE_MIN_FRACTION * m_Route.m_fLengthM && m_fGoalDistance <= m_fEndToleranceM;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -632,26 +656,35 @@ class DC_ExpertDriver : DC_DriverInterface
 	[Attribute("0.2", UIWidgets.Slider, "Curvature command limit [1/m] (about the S105's tightest turn, radius 5 m)", "0.01 0.5 0.01", category: "Expert")]
 	protected float m_fKappaMax;
 
-	[Attribute("5", UIWidgets.Slider, "The route counts as complete within this distance of its end, stopped [m] (the preview of the stop profile stops the car up to a few metres early)", "0.5 20 0.5", category: "Expert")]
+	[Attribute("5", UIWidgets.Slider, "The route counts as complete stopped within this distance of its last point and of its end along the route [m] (r2 1.3: within 5 m of the goal; the preview of the stop profile stops the car up to a few metres early)", "0.5 20 0.5", category: "Expert")]
 	protected float m_fEndToleranceM;
 
 	[Attribute("1", UIWidgets.Slider, "Stopped below this speed [km/h]", "0.1 5 0.1", category: "Expert")]
 	protected float m_fStopKmh;
 
-	// === TERMINATIONS ===
-	[Attribute("6", UIWidgets.Slider, "route_deviation beyond this lateral distance from the driving line [m] (the far edge of an 8 m road from the right lane centre)", "1 30 0.5", category: "Terminations")]
+	// === TERMINATIONS (defaults: the r2 1.3 definitions dc-2.0 9.6 refers to) ===
+	[Attribute("30", UIWidgets.Slider, "route_deviation beyond this lateral distance from the driving line [m] (r2 1.3: more than 30 m from the route)", "1 100 0.5", category: "Terminations")]
 	protected float m_fDeviationM;
 
-	[Attribute("10", UIWidgets.Slider, "stuck after this long below m_fStuckKmh while the expert drives forward [s]", "1 60 1", category: "Terminations")]
+	[Attribute("2", UIWidgets.Slider, "Half width w/2 of the lane corridor around the driving line [m] (the T0 loop drives the 4 m right lane of 8 m roads)", "0.5 10 0.1", category: "Terminations")]
+	protected float m_fCorridorHalfWidthM;
+
+	[Attribute("0.5", UIWidgets.Slider, "offroad margin beyond the lane corridor [m] (r2 1.3: dist_lane_corridor > w/2 + 0.5 m)", "0 5 0.1", category: "Terminations")]
+	protected float m_fOffroadMarginM;
+
+	[Attribute("3", UIWidgets.Slider, "offroad after more than this long beyond the corridor and its margin [s] (r2 1.3: more than 3 s)", "0.1 30 0.1", category: "Terminations")]
+	protected float m_fOffroadS;
+
+	[Attribute("20", UIWidgets.Slider, "stuck after this long below m_fStuckKmh [s] (r2 1.3: 20 s)", "1 120 1", category: "Terminations")]
 	protected float m_fStuckS;
 
-	[Attribute("2", UIWidgets.Slider, "stuck speed [km/h]", "0.1 10 0.1", category: "Terminations")]
+	[Attribute("1", UIWidgets.Slider, "stuck speed [km/h] (r2 1.3: under 1 km/h)", "0.1 10 0.1", category: "Terminations")]
 	protected float m_fStuckKmh;
 
 	[Attribute("480", UIWidgets.Slider, "timeout of an episode [s] (r2 3.6: hard cap 8 min)", "10 1800 10", category: "Terminations")]
 	protected float m_fEpisodeTimeoutS;
 
-	[Attribute("60", UIWidgets.Slider, "rollover when the up axis tilts beyond this [deg]", "10 90 1", category: "Terminations")]
+	[Attribute("60", UIWidgets.Slider, "rollover when the up axis tilts beyond this [deg] (r2 1.3: up.worldUp < 0.5)", "10 90 1", category: "Terminations")]
 	protected float m_fRolloverDeg;
 
 	[Attribute("2", UIWidgets.Slider, "engine_off after the engine is off this long [s]", "0.1 30 0.1", category: "Terminations")]
@@ -674,7 +707,7 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected float m_fStartMaxKmh;
 
 	// === CONSTANTS ===
-	protected static ref array<string> s_aSealedSplits = {"everon_harness", "everon_test"};
+	static const string TERMINATION_STUCK = "stuck";	//!< episodes.termination_reason and events kind (dc-2.0 9.5, 9.6)
 
 	// === STATE ===
 	protected DC_DriverContext m_Context;
@@ -698,6 +731,8 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected int m_iDecisionStep = -1;
 	protected int m_iSlowSinceMs = -1;
 	protected int m_iEngineOffSinceMs = -1;
+	protected int m_iOffCorridorSinceMs = -1;
+	protected string m_sReported;			//!< the first termination this driver reported in the episode
 	protected string m_sWaiting;
 	protected int m_iSamples;
 	protected float m_fSumAbsLateral;
@@ -727,12 +762,10 @@ class DC_ExpertDriver : DC_DriverInterface
 			return false;
 		}
 
-		if (!LoadRoute() || !CheckRoute(ctx, failure))
+		// loaded and checked (map, split, sealed map) in GetSpawnPose, before the spawn
+		if (!LoadRoute())
 		{
-			if (failure.IsEmpty())
-				failure = m_sRouteFailure;
-
-			ctx.Error("route: " + failure);
+			ctx.Error("route: " + m_sRouteFailure);
 			return false;
 		}
 
@@ -791,6 +824,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		ctx.Log(string.Format("vehicle card %1 sha256 %2 (use_class %3)", m_Card.m_sPath, m_Card.m_sSha256, m_sUseClass));
 		ctx.Log(string.Format("route %1 (%2, split %3, %4 m, %5 points) sha256 %6; speed profile %7..%8 km/h", m_Route.m_sRouteId, m_Route.m_sPath, m_Route.m_sSplit, lengthM.ToString(-1, 1), m_Route.GetPointCount(), m_Route.m_sSha256, lowestKmh.ToString(-1, 1), highestKmh.ToString(-1, 1)));
 		ctx.Log(string.Format("%1 llc_sha %2, %3 expert_sha %4", DC_LLCv1.VERSION, m_sLlcSha, DC_ExpertHL.VERSION, m_sExpertSha));
+		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, rollover > %8 deg, timeout %9 s", m_fEndToleranceM, m_fDeviationM, m_fCorridorHalfWidthM, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fRolloverDeg, m_fEpisodeTimeoutS));
 		m_bReady = true;
 		return true;
 	}
@@ -837,6 +871,8 @@ class DC_ExpertDriver : DC_DriverInterface
 		m_iDecisionStep = -1;
 		m_iSlowSinceMs = -1;
 		m_iEngineOffSinceMs = -1;
+		m_iOffCorridorSinceMs = -1;
+		m_sReported = string.Empty;
 		m_sWaiting = string.Empty;
 		m_iSamples = 0;
 		m_fSumAbsLateral = 0;
@@ -888,6 +924,13 @@ class DC_ExpertDriver : DC_DriverInterface
 		post.m_fLaneHeadErrRad = m_Expert.GetHeadingError();
 		post.m_fRouteProgressM = m_Expert.GetProgress();
 		post.m_sTermination = CheckTermination(transform[1], speed, simulation);
+		if (!post.m_sTermination.IsEmpty() && m_sReported.IsEmpty())
+		{
+			m_sReported = post.m_sTermination;
+			// the stuck event of dc-2.0 9.5 (DD-5-min C17 counts these rows), once, with the termination it ends
+			if (m_sReported == TERMINATION_STUCK && !m_Context.LogEvent(TERMINATION_STUCK, "termination_reason=stuck"))
+				m_Context.Warn("the stuck event of this episode was not recorded");
+		}
 
 		float absLateral = Math.AbsFloat(m_Expert.GetLateral());
 		m_iSamples++;
@@ -936,7 +979,9 @@ class DC_ExpertDriver : DC_DriverInterface
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The route of the trial conf ("route": an id or <id>.json), else m_sDefaultRouteId; once per session
+	//! The route of the trial conf ("route": an id or <id>.json), else m_sDefaultRouteId; once per session, from
+	//! GetSpawnPose (before the spawn). A sealed-map id is refused before any path is resolved; the file's map, split
+	//! and sealed-map checks (CheckRoute) run before the route is kept
 	protected bool LoadRoute()
 	{
 		if (m_bRouteTried)
@@ -946,9 +991,13 @@ class DC_ExpertDriver : DC_DriverInterface
 		string routeId = m_sDefaultRouteId;
 		string trialRoute;
 		DC_Session session = DC_Session.Cast(GetOwner().FindComponent(DC_Session));
-		if (session)
-			trialRoute = session.GetTrialRoute();
+		if (!session)
+		{
+			m_sRouteFailure = "no DC_Session on the game mode (the session's map is unknown)";
+			return false;
+		}
 
+		trialRoute = session.GetTrialRoute();
 		trialRoute = trialRoute.Trim();
 		if (!trialRoute.IsEmpty())
 			routeId = trialRoute;
@@ -959,6 +1008,12 @@ class DC_ExpertDriver : DC_DriverInterface
 		if (!DC_Route.IsValidRouteId(routeId))
 		{
 			m_sRouteFailure = "route id '" + routeId + "' is not a drivedit_nav route id";
+			return false;
+		}
+
+		if (DC_Route.IsSealedName(routeId))
+		{
+			m_sRouteFailure = "route id '" + routeId + "' names the sealed test map (Everon): never read here";
 			return false;
 		}
 
@@ -983,23 +1038,29 @@ class DC_ExpertDriver : DC_DriverInterface
 			return false;
 		}
 
+		if (!CheckRoute(route, session.GetMapId(), failure))
+		{
+			m_sRouteFailure = failure;
+			return false;
+		}
+
 		m_Route = route;
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The route's map is the session's, its split is allowed, and it is never on the sealed map
-	protected bool CheckRoute(notnull DC_DriverContext ctx, out string failure)
+	//! The route is never on the sealed map, its map is the session's and its split is allowed
+	protected bool CheckRoute(notnull DC_Route route, string sessionMapId, out string failure)
 	{
-		if (m_Route.m_sMapId == "everon" || s_aSealedSplits.Find(m_Route.m_sSplit) >= 0 || m_Route.m_sSplit.StartsWith("everon"))
+		if (DC_Route.IsSealedName(route.m_sMapId) || DC_Route.IsSealedName(route.m_sSplit))
 		{
-			failure = "route " + m_Route.m_sRouteId + " is on the sealed test map (Everon): never driven here";
+			failure = "route " + route.m_sRouteId + " is on the sealed test map (Everon): never driven here";
 			return false;
 		}
 
-		if (m_Route.m_sMapId != ctx.GetMapId())
+		if (route.m_sMapId != sessionMapId)
 		{
-			failure = "route " + m_Route.m_sRouteId + " is on map " + m_Route.m_sMapId + ", the session on " + ctx.GetMapId();
+			failure = "route " + route.m_sRouteId + " is on map " + route.m_sMapId + ", the session on " + sessionMapId;
 			return false;
 		}
 
@@ -1008,13 +1069,13 @@ class DC_ExpertDriver : DC_DriverInterface
 		bool allowed = false;
 		foreach (string split : splits)
 		{
-			if (split.Trim() == m_Route.m_sSplit)
+			if (split.Trim() == route.m_sSplit)
 				allowed = true;
 		}
 
 		if (!allowed)
 		{
-			failure = "route " + m_Route.m_sRouteId + " has split " + m_Route.m_sSplit + ", allowed: " + m_sAllowedSplits;
+			failure = "route " + route.m_sRouteId + " has split " + route.m_sSplit + ", allowed: " + m_sAllowedSplits;
 			return false;
 		}
 
@@ -1122,11 +1183,24 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected string CheckTermination(vector up, float speed, notnull VehicleWheeledSimulation simulation)
 	{
 		int now = m_Context.GetWorldMs();
-		if (m_Expert.IsFinished())
+		if (m_Expert.IsComplete())
 			return "route_complete";
 
-		if (Math.AbsFloat(m_Expert.GetLateral()) > m_fDeviationM)
+		float absLateral = Math.AbsFloat(m_Expert.GetLateral());
+		if (absLateral > m_fDeviationM)
 			return "route_deviation";
+
+		if (absLateral > m_fCorridorHalfWidthM + m_fOffroadMarginM)
+		{
+			if (m_iOffCorridorSinceMs < 0)
+				m_iOffCorridorSinceMs = now;
+			else if (now - m_iOffCorridorSinceMs > m_fOffroadS * 1000)
+				return "offroad";
+		}
+		else
+		{
+			m_iOffCorridorSinceMs = -1;
+		}
 
 		if (up[1] < Math.Cos(m_fRolloverDeg * Math.DEG2RAD))
 			return "rollover";
@@ -1148,7 +1222,7 @@ class DC_ExpertDriver : DC_DriverInterface
 			if (m_iSlowSinceMs < 0)
 				m_iSlowSinceMs = now;
 			else if (now - m_iSlowSinceMs >= m_fStuckS * 1000)
-				return "stuck";
+				return TERMINATION_STUCK;
 		}
 		else
 		{

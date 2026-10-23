@@ -13,7 +13,7 @@ What it copies (nothing else, ever):
       config tools/ident/cards/<pin_id>/<id>.json     -> <target>/Configs/ident/cards/<pin_id>/<id>.json (vehicle
                                                          cards: the repo keeps them where the DD-5-min reader looks)
     Config files are copied byte for byte, so the sha256 llc_v1 and the expert compute in the engine is the
-    repo file's.
+    repo file's; a config path naming eden or everon (the sealed test map) is refused.
   * a generated build stamp <target>/Scripts/Game/DataCapture/DC_BuildInfo.c (git sha, branch, dirty flag,
     deploy UTC time, manifest hash, content hash), because Enforce Script cannot run git;
   * with --emcp-handlers DIR, the EMCP_WB_*.c files found directly in DIR
@@ -68,6 +68,9 @@ SCRIPT_SRC_DIR = "src/enfusion/datacapture/"
 CONFIG_ROOTS = (("addons/DataCapture/Configs/", "Configs/"), ("tools/ident/cards/", "Configs/ident/cards/"))
 CONFIG_EXT = ".json"
 CONFIG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Everon is the sealed zero-shot test map: no config naming it (or its terrain, eden) is ever deployed (the rule of
+# make_t0_loop.py and fit_steer_kappa.py; DC_ExpertDriver refuses such a route id before reading it)
+CONFIG_SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
 SCRIPT_DST_DIR = "Scripts/Game/DataCapture"
 EMCP_DST_DIR = "Scripts/WorkbenchGame/EnfusionMCP"
 BUILDINFO_DST = SCRIPT_DST_DIR + "/DC_BuildInfo.c"
@@ -224,6 +227,8 @@ def manifest_entry(kind, src_rel):
     if kind == GROUP_CONFIG:
         if not src_rel.endswith(CONFIG_EXT):
             raise Refusal("%s: 'config' entries are %s files" % (src_rel, CONFIG_EXT))
+        if CONFIG_SEALED_RE.search(src_rel):
+            raise Refusal("%s names the sealed test map (eden / everon); Everon configs are never deployed" % src_rel)
         for src_root, dst_root in CONFIG_ROOTS:
             if src_rel.startswith(src_root):
                 rest = src_rel[len(src_root):]

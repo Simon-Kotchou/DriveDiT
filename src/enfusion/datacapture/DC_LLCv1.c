@@ -27,7 +27,13 @@
 //              gear_indices_forward. The clutch is 1, dipped to 0 for the card's clutch_dip_s after each change of
 //              the commanded gear (the first SetGear of an episode included), as the probe kit's E-01 gear_scripted
 //              phase dips it at the start of every gear hold (m_fGearClutchDipS); llc_clutch records the value
-//              passed. Forward gears only: no neutral or reverse logic until their indices are measured (TBD-7).
+//              passed. Forward gears only (TBD-7): the scripted gears increase (the episode starts in the first one,
+//              Reset picks the slot from the speed), lie above the card's gear_index_neutral and are never neutral
+//              or reverse; gear_index_neutral / gear_index_reverse are recorded (E-04 by the vanilla rule), never
+//              commanded. Init checks the card against the ego's gearbox (DC_Actuator, DD-4-min): the S105 has a
+//              manual one (T0-ENG run 2: reverse 0, neutral 1, forward 2..5), on which an automatic card would never
+//              leave neutral, so it is refused; every scripted gear lies in the ego's forward range and the card's
+//              neutral is the ego's. Between episodes and before the first command the core parks the ego in neutral.
 //
 // VEHICLE CARD (tools/ident/cards/<pin_id>/<vehicle>.json in the repo, deployed to Configs/ident/cards/; r3 scope note)
 //   - loaded once per session (DC_VehicleCard.Load); its sha256 (over the file bytes, the value the DD-5-min reader
@@ -512,6 +518,38 @@ class DC_JsonScan
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! "key": an integer >= 0 (a gear index), or null (value -1). false (failure) when the key is missing or repeated,
+	//! or the value is neither
+	static bool ReadIndexOrNull(string text, string key, out float value, out string failure)
+	{
+		value = -1;
+		int index = FindValue(text, key);
+		if (index < 0)
+		{
+			failure = "key \"" + key + "\" is missing or repeated";
+			return false;
+		}
+
+		if (IsNull(text, key))
+		{
+			failure = string.Empty;
+			return true;
+		}
+
+		float number;
+		int next;
+		if (!ReadNumber(text, index, number, next) || number < 0 || number != Math.Round(number))
+		{
+			failure = "\"" + key + "\" is neither null nor an integer >= 0";
+			return false;
+		}
+
+		value = number;
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! A JSON number of an open JsonLoadContext object as float: written as a decimal or as an integer (the
 	//! DC_Session.ReadNumber rule)
 	static bool ReadContextNumber(notnull JsonLoadContext context, string key, out float value)
@@ -567,7 +605,9 @@ class DC_VehicleCard
 	bool m_bInputEchoKnown;				//!< actuator.raw_engine_path.input_echo is true or false (null on a placeholder)
 	bool m_bInputEcho;					//!< the engine passes the steering input through unchanged (E-01)
 	string m_sInputShaping;				//!< actuator.raw_engine_path.input_shaping: echo, rate_limit, lag or unknown (E-01)
-	ref array<float> m_aForwardGears = {};	//!< gear_indices_forward (E-01; empty on a placeholder)
+	ref array<float> m_aForwardGears = {};	//!< gear_indices_forward (E-01; on the placeholder E-04 by the vanilla rule)
+	float m_fNeutralGear = -1;			//!< gear_index_neutral (E-04 by the vanilla rule); -1 = null. Never commanded
+	float m_fReverseGear = -1;			//!< gear_index_reverse (E-04 by the vanilla rule); -1 = null. Never commanded
 
 	// kappa_ss: steady-state curvature per contract steer by speed (E-02a)
 	ref array<float> m_aSpeedsMps = {};
@@ -675,6 +715,12 @@ class DC_VehicleCard
 			return false;
 
 		if (!DC_JsonScan.ReadNumbers(text, "downshift_mps", m_aDownshiftMps, failure))
+			return false;
+
+		if (!DC_JsonScan.ReadIndexOrNull(text, "gear_index_neutral", m_fNeutralGear, failure))
+			return false;
+
+		if (!DC_JsonScan.ReadIndexOrNull(text, "gear_index_reverse", m_fReverseGear, failure))
 			return false;
 
 		m_bInputEchoKnown = !DC_JsonScan.IsNull(text, "input_echo");
@@ -854,6 +900,13 @@ class DC_VehicleCard
 			return false;
 		}
 
+		// the recorded indices follow the vanilla rule (SCR_VehicleGearCondition.c:32-36): reverse below neutral
+		if (m_fNeutralGear >= 0 && m_fReverseGear >= 0 && m_fReverseGear >= m_fNeutralGear)
+		{
+			failure = string.Format("gear_index_reverse %1 is not below gear_index_neutral %2 (the vanilla rule)", m_fReverseGear, m_fNeutralGear);
+			return false;
+		}
+
 		if (m_sGearbox == GEARBOX_AUTOMATIC)
 		{
 			if (m_fClutchDipS > 0)
@@ -888,7 +941,9 @@ class DC_VehicleCard
 			}
 		}
 
-		// forward-only (TBD-7): every scripted gear is a measured forward gear index, never neutral or reverse
+		// forward-only (TBD-7): every scripted gear is a measured forward gear index, never neutral or reverse; the
+		// gears increase, so slot 0 (Reset below the first upshift speed) is the first gear an episode starts in
+		float previous = -1;
 		foreach (float gear : m_aScriptedGears)
 		{
 			if (gear < 0 || gear != Math.Round(gear) || m_aForwardGears.Find(gear) < 0)
@@ -896,6 +951,20 @@ class DC_VehicleCard
 				failure = string.Format("scripted gear %1 is not one of gear_indices_forward (the forward gears E-01 measured)", gear);
 				return false;
 			}
+
+			if (gear <= previous)
+			{
+				failure = string.Format("scripted gear %1 does not follow %2: scripted_gears must increase (the first is the start gear)", gear, previous);
+				return false;
+			}
+
+			if (m_fNeutralGear >= 0 && gear <= m_fNeutralGear)
+			{
+				failure = string.Format("scripted gear %1 is not above gear_index_neutral %2: never neutral or reverse while driving", gear, m_fNeutralGear);
+				return false;
+			}
+
+			previous = gear;
 		}
 
 		failure = string.Empty;
@@ -1120,6 +1189,9 @@ class DC_LLCv1
 			return false;
 		}
 
+		if (!CheckEgoGearbox(card, actuator, failure))
+			return false;
+
 		m_fLagAlpha = 1;
 		if (card.m_fSteerLagTauS > 0)
 			m_fLagAlpha = 1 - Math.Pow(Math.E, -m_fTimeSlice / card.m_fSteerLagTauS);
@@ -1127,6 +1199,54 @@ class DC_LLCv1
 		int dipSteps = Math.Round(card.m_fClutchDipS / m_fTimeSlice);
 		m_iClutchDipSteps = dipSteps;
 		Reset();
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The card's gearbox against the ego's (DC_Actuator: HasAutomaticGearbox and the vanilla gear indices of
+	//! SCR_ToggleHandbrakeAction.c:99-108). An automatic card on a manual gearbox never calls SetGear, and the ego stays
+	//! in the neutral the park selected (T0-ENG run 2): refused. A scripted card needs the ego's indices: every scripted
+	//! gear in the ego's forward range [first, top] and the card's gear_index_neutral, when set, equal to the ego's
+	protected static bool CheckEgoGearbox(notnull DC_VehicleCard card, notnull DC_Actuator actuator, out string failure)
+	{
+		string kind = actuator.GetGearboxKind();
+		if (card.m_sGearbox == DC_VehicleCard.GEARBOX_AUTOMATIC)
+		{
+			if (kind == DC_Actuator.GEARBOX_MANUAL)
+			{
+				failure = "card " + card.m_sCardId + " has an automatic gearbox (no SetGear), the ego a manual one: it would stay in neutral (T0-ENG run 2); a scripted card is needed";
+				return false;
+			}
+
+			failure = string.Empty;
+			return true;
+		}
+
+		int first = actuator.GetFirstGear();
+		int top = actuator.GetTopGear();
+		if (first < 0 || top < first)
+		{
+			failure = "card " + card.m_sCardId + " has a scripted gearbox, but the ego's gear indices are unknown (gearbox '" + kind + "')";
+			return false;
+		}
+
+		foreach (float gear : card.m_aScriptedGears)
+		{
+			if (gear < first || gear > top)
+			{
+				failure = string.Format("scripted gear %1 is outside the ego's forward gears %2..%3 (the vanilla rule)", gear, first, top);
+				return false;
+			}
+		}
+
+		int neutral = actuator.GetNeutralGear();
+		if (card.m_fNeutralGear >= 0 && card.m_fNeutralGear != neutral)
+		{
+			failure = string.Format("card gear_index_neutral %1 is not the ego's neutral %2 (the vanilla rule)", card.m_fNeutralGear, neutral);
+			return false;
+		}
+
 		failure = string.Empty;
 		return true;
 	}

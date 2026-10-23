@@ -20,7 +20,13 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     (F-11), complete plays and a usable E-02a fit with gains >= MIN_KAPPA_PER_STEER, and is checked as written
     against llc_v1's load rules (F-12); Everon inputs are refused;
   - the committed card tools/ident/cards/1.8.0.13/S105.json is exactly the generator's PLACEHOLDER (status
-    placeholder, no identification session, build_key null);
+    placeholder, no identification session, build_key null) with the S105's manual gearbox of T0-ENG probe run 2
+    (E-04: 6 gears, 4 forward -> scripted forward gears 2..5, neutral 1, reverse 0 by the vanilla rule);
+  - llc_v1's scripted-gear policy (a Python mirror of DC_LLCv1 Reset / ScriptedGear / the clutch dip, tied to the
+    Enforce source) drives the placeholder's 4 forward gears: first gear at the start, one up and one down shift per
+    shift speed with hysteresis, never neutral or reverse, engine speeds within the prefab's range, the clutch dip
+    after every change; the gear-index rules (reverse below neutral, increasing scripted gears above neutral) and
+    E-04's indices in an identified card; llc_v1 refuses an automatic card on the manual ego (CheckEgoGearbox);
   - every card keeps the format llc_v1 reads: each scanned array key once, numbers without exponent, ASCII + LF, the
     keys DC_VehicleCard.Load requires; a Python mirror of DC_JsonScan.ReadNumbers reads the same arrays as json;
   - the Enforce reader (src/enfusion/datacapture/DC_LLCv1.c) asks for exactly the llc_v1 keys and arrays the
@@ -65,6 +71,7 @@ CELL_COLUMNS = actuation_tests.CELL_COLUMNS
 CARD = os.path.join(REPO, "tools", "ident", "cards", "1.8.0.13", "S105.json")
 ROUTE = os.path.join(REPO, "addons", "DataCapture", "Configs", "routes", "arland_t0_loop.json")
 LLC_SOURCE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_LLCv1.c")
+ACTUATOR_SOURCE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_StreamRecorder.c")
 LLC_KEYS = [name for name, _ in fit.LLC_DEFAULTS]
 LAUNCH_ID = "20261023T101500Z-wb-00a1"
 
@@ -312,6 +319,57 @@ def build_e02a(play_dir, truth, starve_speed=None, starved=(), **head):
                           "result": "no_speed" if no_speed else "ok", "note": ""})
     probe_common.write_synthetic_play(play_dir, header("e02a", **head), {
         "e02a_steps": (STEP_COLUMNS, truth.rows), "e02a_cells": (CELL_COLUMNS, cells)}, FOOTER)
+
+
+# The S105 drivetrain of the 1.8.0.13 prefab (S105_base.et: Gearbox Forward 3.8 2.12 1.41 0.96, Diff_02 Ratio 5.25)
+# per engine gear index of the vanilla rule, and the rolling radius the placeholder's shift speeds assume
+S105_RATIOS = {2: 3.8, 3: 2.12, 4: 1.41, 5: 0.96}
+S105_FINAL_DRIVE = 5.25
+S105_RADIUS_M = 0.29
+
+
+def engine_rpm(speed, gear):
+    return speed / (2.0 * math.pi * S105_RADIUS_M) * 60.0 * S105_RATIOS[gear] * S105_FINAL_DRIVE
+
+
+class LlcGears:
+    """Python mirror of llc_v1's scripted gearbox (DC_LLCv1.c: Init's dip steps, Reset's gear slot from the speed,
+    ScriptedGear's one-slot hysteresis, Step's clutch dip after each change of the commanded gear)."""
+
+    def __init__(self, card, dt):
+        gearbox = card["gearbox"]
+        self.gears, self.up, self.down = gearbox["scripted_gears"], gearbox["upshift_mps"], gearbox["downshift_mps"]
+        self.dip_steps = int(math.floor(gearbox["clutch_dip_s"] / dt + 0.5))     # Math.Round
+        self.reset(0.0)
+
+    def reset(self, speed):
+        self.slot, self.last, self.dip_left = 0, -1, 0
+        while self.slot < len(self.up) and speed >= self.up[self.slot]:
+            self.slot += 1
+
+    def step(self, speed):
+        last = len(self.gears) - 1
+        if self.slot < last and speed >= self.up[self.slot]:
+            self.slot += 1
+        elif self.slot > 0 and speed < self.down[self.slot - 1]:
+            self.slot -= 1
+        gear = int(round(self.gears[self.slot]))
+        if gear != self.last:
+            self.dip_left = self.dip_steps
+        self.last = gear
+        clutch = 1.0
+        if self.dip_left > 0:
+            clutch = 0.0
+            self.dip_left -= 1
+        return gear, clutch
+
+
+def enforce_body(source, cls, method):
+    """One method of an Enforce class, whitespace collapsed (the statements the Python mirrors follow)."""
+    body = source.split("\nclass %s" % cls, 1)[1]
+    found = re.search(r"\n\t(?:(?:override|protected|static) )*\w+ %s\(" % method, body)
+    body = body[found.end():].split("\n\t}\n", 1)[0]
+    return " ".join(body.split())
 
 
 def run_fit(argv):
@@ -703,7 +761,161 @@ class FitTests(unittest.TestCase):
         self.assertEqual((card["card_id"], card["pin_id"]), ("S105", "1.8.0.13"))
         self.assertIn("PLACEHOLDER", card["note"])
         self.assertIn("production", card["use"])
-        self.assertEqual(card["gear_indices_forward"], [])
+        # the S105's manual gearbox (T0-ENG probe run 2, E-04: has_automatic_gearbox 0, 6 gears, 4 forward) by the
+        # vanilla rule: reverse 0, neutral 1, forward 2..5; driven by SetGear over all four forward gears
+        self.assertEqual(fit.vanilla_gear_indices(6, 4), {"neutral": 1, "reverse": 0, "forward": [2, 3, 4, 5]})
+        self.assertEqual((card["gear_indices_forward"], card["gear_index_neutral"], card["gear_index_reverse"]),
+                         ([2, 3, 4, 5], 1, 0))
+        gearbox = card["gearbox"]
+        self.assertEqual((gearbox["mode"], gearbox["has_automatic_gearbox"], gearbox["scripted_gears"]),
+                         ("scripted", False, [2, 3, 4, 5]))
+        self.assertEqual((len(gearbox["upshift_mps"]), len(gearbox["downshift_mps"]), gearbox["clutch_dip_s"]),
+                         (3, 3, 0.0))
+        self.assertEqual(fit.enforce_load_check(card), [])
+
+    def test_vanilla_gear_indices(self):
+        self.assertEqual(fit.vanilla_gear_indices(7, 4), {"neutral": 2, "reverse": 1, "forward": [3, 4, 5, 6]})
+        self.assertEqual(fit.vanilla_gear_indices(5, 4), {"neutral": 0, "reverse": None, "forward": [1, 2, 3, 4]})
+        for gears, forward in ((4, 4), (6, 0), (None, 4), (6, None)):
+            self.assertIsNone(fit.vanilla_gear_indices(gears, forward), (gears, forward))
+        # the same rule as the Mode A actuator of the ego (DC_ActuatorModeA.Init, DD-4-min)
+        with open(ACTUATOR_SOURCE, "r", encoding="ascii") as f:
+            init = enforce_body(f.read(), "DC_ActuatorModeA", "Init")
+        for statement in ("int neutral = m_iGearCount - m_iForwardGearCount - 1;",
+                          "bool indicesKnown = m_iForwardGearCount >= 1 && neutral >= 0;",
+                          "m_iNeutralGear = neutral; m_iFirstGear = neutral + 1; m_iTopGear = m_iGearCount - 1;",
+                          "m_iParkGear = m_iNeutralGear;"):
+            self.assertIn(statement, init)
+
+    def test_placeholder_scripted_policy_drives_four_forward_gears(self):
+        # llc_v1's scripted gearbox on the placeholder card: the mirror follows the Enforce statements ...
+        with open(LLC_SOURCE, "r", encoding="ascii") as f:
+            source = f.read()
+        reset = enforce_body(source, "DC_LLCv1", "Reset")
+        self.assertIn("while (m_Card && m_iGearSlot < m_Card.m_aUpshiftMps.Count() && m_fSpeedRef >= "
+                      "m_Card.m_aUpshiftMps[m_iGearSlot]) { m_iGearSlot++; }", reset)
+        self.assertIn("m_iLastGear = -1;", reset)
+        shift = enforce_body(source, "DC_LLCv1", "ScriptedGear")
+        self.assertIn("if (m_iGearSlot < last && speed >= m_Card.m_aUpshiftMps[m_iGearSlot]) m_iGearSlot++; else if "
+                      "(m_iGearSlot > 0 && speed < m_Card.m_aDownshiftMps[m_iGearSlot - 1]) m_iGearSlot--;", shift)
+        step = enforce_body(source, "DC_LLCv1", "Step")
+        self.assertIn("gear = ScriptedGear(speed); if (gear != m_iLastGear) m_iDipStepsLeft = m_iClutchDipSteps; "
+                      "m_iLastGear = gear;", step)
+        self.assertIn("m_Actuator.Apply(m_fSteerOut, throttle, brake, false, clutch, gear);", step)
+        with open(CARD, "r", encoding="ascii") as f:
+            card = json.load(f)
+        neutral, reverse = card["gear_index_neutral"], card["gear_index_reverse"]
+        up, down = card["gearbox"]["upshift_mps"], card["gearbox"]["downshift_mps"]
+        # ... over an episode from standstill: 0 -> 20 m/s at 1.5 m/s2, 2 s at 20 m/s, back to 0 at 2 m/s2
+        speeds = [min(20.0, 1.5 * DT * i) for i in range(int(20.0 / 1.5 / DT) + 120)]
+        speeds += [max(0.0, 20.0 - 2.0 * DT * i) for i in range(1, int(20.0 / 2.0 / DT) + 30)]
+        llc = LlcGears(card, DT)
+        llc.reset(speeds[0])
+        trace = [(v,) + llc.step(v) for v in speeds]
+        gears = [g for _, g, _ in trace]
+        self.assertEqual(gears[0], 2)                                   # first gear at the start
+        self.assertEqual(set(gears), {2, 3, 4, 5})                      # all four forward gears are used
+        self.assertTrue(all(g > neutral and g != reverse for g in gears))   # never neutral or reverse
+        changes = [(trace[i][0], gears[i - 1], gears[i]) for i in range(1, len(trace)) if gears[i] != gears[i - 1]]
+        self.assertEqual([(a, b) for _, a, b in changes], [(2, 3), (3, 4), (4, 5), (5, 4), (4, 3), (3, 2)])
+        for speed, before, after in changes:
+            slot = card["gearbox"]["scripted_gears"].index(min(before, after))
+            if after > before:
+                self.assertGreaterEqual(speed, up[slot])
+            else:
+                self.assertLess(speed, down[slot])
+        # engine speeds the prefab's ratios give (rolling radius 0.29 m): never above 4200 rpm, and at least 1400 rpm
+        # whenever the car is above the lowest downshift speed
+        rpms = [(v, engine_rpm(v, g)) for v, g, _ in trace]
+        self.assertLessEqual(max(r for _, r in rpms), 4200.0)
+        self.assertGreaterEqual(min(r for v, r in rpms if v >= down[0]), 1400.0)
+        # no dip on the placeholder (clutch 1, as vanilla VehicleCinematicTrack)
+        self.assertTrue(all(c == 1.0 for _, _, c in trace))
+        # hysteresis: speed jitter of +-0.3 m/s around an upshift speed shifts once
+        llc.reset(up[0] - 0.5)
+        jitter = [2] + [llc.step(up[0] + 0.3 * math.sin(i / 3.0))[0] for i in range(600)]
+        self.assertEqual(sum(1 for a, b in zip(jitter, jitter[1:]) if a != b), 1)
+        # an episode that begins while rolling at 12 m/s starts in the gear for that speed (third: index 4)
+        llc.reset(12.0)
+        self.assertEqual(llc.step(12.0)[0], 4)
+        # with a clutch dip (E-01's m_fGearClutchDipS), clutch 0 for the dip after the first SetGear and every change
+        dipped = dict(card, gearbox=dict(card["gearbox"], clutch_dip_s=0.25))
+        llc = LlcGears(dipped, DT)
+        llc.reset(0.0)
+        trace = [llc.step(v) for v in speeds]
+        steps = int(math.floor(0.25 / DT + 0.5))
+        starts = [0] + [i for i in range(1, len(trace)) if trace[i][0] != trace[i - 1][0]]
+        self.assertEqual(len(starts), 7)
+        for start in starts:
+            self.assertEqual([c for _, c in trace[start:start + steps + 1]], [0.0] * steps + [1.0])
+        self.assertEqual(sum(1 for _, c in trace if c == 0.0), 7 * steps)
+
+    def test_gear_index_rules(self):
+        # the card's gear indices as DC_VehicleCard.CheckGearbox checks them (gearbox_violations mirrors it)
+        with open(CARD, "r", encoding="ascii") as f:
+            card = json.load(f)
+
+        def violations(**changes):
+            changed = json.loads(json.dumps(card))
+            for key, value in changes.items():
+                if key in changed["gearbox"]:
+                    changed["gearbox"][key] = value
+                else:
+                    changed[key] = value
+            return fit.gearbox_violations(changed)
+
+        self.assertEqual(violations(), [])
+        self.assertTrue(violations(gear_index_reverse=1))                     # reverse not below neutral
+        self.assertTrue(violations(gear_index_neutral=True))                   # neither null nor an index
+        self.assertTrue(violations(gear_index_reverse=-1))
+        self.assertTrue(violations(scripted_gears=[3, 2, 4, 5]))               # not increasing: start gear unclear
+        self.assertTrue(violations(gear_indices_forward=[1, 2, 3, 4, 5], scripted_gears=[1, 2, 3, 4]))   # neutral
+        self.assertEqual(violations(gear_index_neutral=None, gear_index_reverse=None), [])
+        self.assertTrue(violations(mode="automatic", clutch_dip_s=0.0, gear_index_reverse=2))
+        with open(LLC_SOURCE, "r", encoding="ascii") as f:
+            source = f.read()
+        check = enforce_body(source, "DC_VehicleCard", "CheckGearbox")
+        for statement in ("m_fNeutralGear >= 0 && m_fReverseGear >= 0 && m_fReverseGear >= m_fNeutralGear",
+                          "if (gear <= previous)", "if (m_fNeutralGear >= 0 && gear <= m_fNeutralGear)"):
+            self.assertIn(statement, check)
+        # llc_v1 checks the card against the ego (DC_Actuator, DD-4-min): no automatic card on a manual gearbox, the
+        # scripted gears in the ego's forward range and the card's neutral the ego's
+        ego = enforce_body(source, "DC_LLCv1", "CheckEgoGearbox")
+        for statement in ("if (kind == DC_Actuator.GEARBOX_MANUAL)", "if (first < 0 || top < first)",
+                          "if (gear < first || gear > top)",
+                          "if (card.m_fNeutralGear >= 0 && card.m_fNeutralGear != neutral)"):
+            self.assertIn(statement, ego)
+        self.assertIn("if (!CheckEgoGearbox(card, actuator, failure)) return false;",
+                      enforce_body(source, "DC_LLCv1", "Init"))
+
+    def test_e04_gives_the_neutral_and_reverse_indices(self):
+        # an identified card records E-04's indices by the vanilla rule (here 7 gears, 4 forward: neutral 2, reverse
+        # 1, forward 3..6 as the synthetic gearbox); scripted gears must lie above that neutral
+        args = ["--e02a", self.e02a, "--scripted-gears", "3,4,5", "--upshift-mps", "5,10", "--downshift-mps", "4,8"]
+        e01 = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_21")
+        build_e01(e01, Truth(automatic=False), gear_sequence=(3, 4, 5), clutch_dip=0.0)
+
+        def e04(name, gears, forward, automatic=0):
+            play = os.path.join(self.tmp, "e04", LAUNCH_ID, name)
+            text = "has_automatic_gearbox=%d\ngearbox_gears=%d\ngearbox_forward_gears=%d\n" % (automatic, gears, forward)
+            probe_common.write_synthetic_play(play, header("e04"), {}, FOOTER, {"e04_vehicle.txt": text.encode("ascii")})
+            return play
+
+        out = os.path.join(self.tmp, "e04.json")
+        code, text = run_fit(["--e01", e01, "--e04", e04("play_22", 7, 4), "--out", out] + args)
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            card = json.load(f)
+        self.assertEqual((card["gear_index_neutral"], card["gear_index_reverse"]), (2, 1))
+        self.assertEqual(card["gearbox"]["has_automatic_gearbox"], False)
+        self.assertEqual(card["gearbox"]["detail"]["e04"]["gearbox_gears"], 7)
+        self.assertEqual(fit.enforce_load_check(card), [])
+        code, text = run_fit(["--e01", e01, "--e04", e04("play_23", 8, 4)] + args)    # neutral 3: gear 3 is no forward
+        self.assertEqual(code, 2, text)
+        self.assertIn("above the neutral index", text)
+        code, text = run_fit(["--e01", self.e01, "--e02a", self.e02a, "--e04", e04("play_24", 7, 4)])
+        self.assertEqual(code, 2, text)                                 # E-01 automatic, E-04 manual: disagree
+        self.assertIn("disagree", text)
 
     def test_cards_keep_the_llc_v1_format(self):
         with open(CARD, "r", encoding="ascii", newline="") as f:
@@ -719,6 +931,8 @@ class FitTests(unittest.TestCase):
             self.assertEqual(scan_numbers(text, "kappa_per_steer"), card["kappa_ss"]["kappa_per_steer"])
             self.assertEqual(scan_numbers(text, "kappa_offset"), card["kappa_ss"]["kappa_offset"])
             self.assertEqual(scan_numbers(text, "upshift_mps"), card["gearbox"]["upshift_mps"])
+            self.assertEqual(scan_numbers(text, "scripted_gears"), card["gearbox"]["scripted_gears"])
+            self.assertEqual(scan_numbers(text, "gear_indices_forward"), card["gear_indices_forward"])
             self.assertEqual(card["schema"], "drivedit.vehicle_card/1")
             self.assertIn(card["signs"]["steer_sign"], (-1, 1))
             self.assertIn(card["signs"]["yaw_axis_sign"], (-1, 1))
@@ -739,7 +953,7 @@ class FitTests(unittest.TestCase):
         self.assertEqual(sorted(re.findall(r'ReadContextNumber\(context, "(\w+)"', body)), sorted(LLC_KEYS))
         arrays = re.findall(r'DC_JsonScan\.ReadNumbers\(text, "(\w+)"', source)
         self.assertEqual(sorted(arrays), sorted(fit.ENGINE_ARRAY_KEYS))
-        scanned = re.findall(r'DC_JsonScan\.(?:ReadStrings|IsNull)\(text, "(\w+)"', source)
+        scanned = re.findall(r'DC_JsonScan\.(?:ReadStrings|IsNull|ReadIndexOrNull)\(text, "(\w+)"', source)
         self.assertEqual(sorted(scanned), sorted(set(fit.ENGINE_SCANNED_KEYS) - set(fit.ENGINE_ARRAY_KEYS)))
         with open(CARD, "r", encoding="ascii") as f:
             card = json.load(f)

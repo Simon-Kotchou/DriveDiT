@@ -45,11 +45,14 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
   gearbox      "automatic" when E-01's gear_observe shifts up by itself (the e01_actuation.py rule), else "scripted",
                which needs --scripted-gears / --upshift-mps / --downshift-mps (forward gears only, TBD-7);
                gear_indices_forward = the input_post_gear values seen while driving forward (>= 5 km/h, the TBD-7
-               definition); neutral and reverse stay null (forward-only until a probe measures them); scripted gears
-               must be among them and must also show propulsion (throttle > 0 with forward acceleration in that
-               gear: a neutral index reported while rolling is not a gear to drive in). clutch_dip_s is the clutch dip
-               of E-01's gear_scripted phase (params.m_fGearClutchDipS, required for a scripted card): llc_v1 dips the
-               clutch the same way after each scripted gear change; 0 with an automatic gearbox.
+               definition); gear_index_neutral and gear_index_reverse come from E-04's gearbox counts by the vanilla
+               rule (vanilla_gear_indices) and stay null without --e04: recorded, never commanded (forward-only);
+               scripted gears must be among gear_indices_forward, increase (llc_v1 starts an episode in the first),
+               lie above the neutral index and must also show propulsion (throttle > 0 with forward acceleration in
+               that gear: a neutral index reported while rolling is not a gear to drive in). clutch_dip_s is the
+               clutch dip of E-01's gear_scripted phase (params.m_fGearClutchDipS, required for a scripted card):
+               llc_v1 dips the clutch the same way after each scripted gear change; 0 with an automatic gearbox.
+               llc_v1 also refuses an automatic card on an ego with a manual gearbox (DC_LLCv1.CheckEgoGearbox).
   llc_v1       the controller parameters of DC_LLCv1 (LLC_DEFAULTS) with the fitted throttle and brake gains; the llc
                steering rate limiter is the identity (CC-08: it never stacks with an engine limit).
 
@@ -67,8 +70,10 @@ headers, or --build-key when the headers carry none: dd-launch/1), a usable E-02
 otherwise nothing is written (exit 2). Every card is checked after serialization against the rules llc_v1 applies when
 it loads and accepts it (enforce_load_check: DC_VehicleCard.Check and the AcceptCard limiter rule), so a card that
 says usable is never one the engine refuses. --placeholder writes the PLACEHOLDER card instead: status placeholder, no
-identification session, build_key null, the TBD-5 draft signs and guessed kappa_ss; llc_v1 accepts it only for
-qualification (use_class dev or probe) and refuses it at any other use_class, production included.
+identification session, build_key null, the TBD-5 draft signs and guessed kappa_ss, and the S105's manual gearbox as
+E-04 measured it in T0-ENG probe run 2 (scripted forward gears 2..5, neutral 1, reverse 0; guessed shift speeds);
+llc_v1 accepts it only for qualification (use_class dev or probe) and refuses it at any other use_class, production
+included.
 
 Sealed map: any path or run header naming eden / everon is refused with exit 2 before anything is fitted.
 Exit codes: 0 card built (and written or equal), 1 --check found a difference, 2 refused (input, fit or path).
@@ -96,7 +101,8 @@ DEFAULT_VEHICLE = "S105"
 PREFABS = {"S105": "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et"}
 ENGINE_ARRAY_KEYS = ("speeds_mps", "kappa_per_steer", "kappa_offset", "scripted_gears", "upshift_mps", "downshift_mps",
                      "gear_indices_forward")
-ENGINE_SCANNED_KEYS = ENGINE_ARRAY_KEYS + ("identification_sessions", "build_key", "input_echo")
+ENGINE_SCANNED_KEYS = ENGINE_ARRAY_KEYS + ("identification_sessions", "build_key", "input_echo", "gear_index_neutral",
+                                           "gear_index_reverse")
 
 # E-02a "usable" criterion and steady window: the probe kit's defaults (e01_actuation.py analyse_e02a)
 MIN_CELLS = 3
@@ -150,6 +156,17 @@ LLC_DEFAULTS = (
 PLACEHOLDER_SPEEDS_MPS = (4.17, 8.33, 13.89)
 PLACEHOLDER_KAPPA_PER_STEER = (0.2, 0.12, 0.07)
 PLACEHOLDER_SIGNS = (-1, 1)
+
+# The S105's gearbox as E-04 read it in T0-ENG probe run 2 (1.8.0.13: has_automatic_gearbox 0, gearbox_gears 6,
+# gearbox_forward_gears 4): a manual gearbox, so the placeholder drives it with SetGear (scripted) over all 4 forward
+# gears, indices by the vanilla rule (reverse 0, neutral 1, forward 2..5). The shift speeds are GUESSED from the
+# prefab's ratios (S105_base.et Gearbox Forward 3.8 2.12 1.41 0.96, differential 5.25) at an assumed rolling radius
+# of 0.29 m (1.52 / 2.73 / 4.10 / 6.03 m/s per 1000 rpm): up near 4000 rpm, down near 1500-1800 rpm in the higher
+# gear. No clutch dip: vanilla VehicleCinematicTrack drives with SetGear at clutch 1 (VehicleCinematicTrack.c:149-159)
+PLACEHOLDER_E04 = {"has_automatic_gearbox": False, "gearbox_gears": 6, "gearbox_forward_gears": 4}
+PLACEHOLDER_UPSHIFT_MPS = (6.0, 11.0, 16.5)
+PLACEHOLDER_DOWNSHIFT_MPS = (4.0, 7.5, 11.0)
+PLACEHOLDER_CLUTCH_DIP_S = 0.0
 
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
 FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
@@ -220,10 +237,23 @@ def vehicle_prefab(plays, vehicle):
     return prefabs[0]
 
 
-def scripted_gearbox(args, forward, propulsion):
+def vanilla_gear_indices(gears, forward):
+    """Engine gear indices of a gearbox with `gears` ratios (neutral included) and `forward` forward gears by the
+    vanilla rule (SCR_ToggleHandbrakeAction.c:99-108, SCR_VehicleGearCondition.c:32-44): neutral = gears - forward - 1,
+    forward gears neutral + 1 .. gears - 1, reverse below neutral (gear_index_reverse: the one next to neutral, None
+    without one). None when the counts give no neutral and first gear. S105 (6, 4): reverse 0, neutral 1, 2..5."""
+    if gears is None or forward is None or forward < 1 or gears - forward - 1 < 0:
+        return None
+    neutral = gears - forward - 1
+    return {"neutral": neutral, "reverse": neutral - 1 if neutral >= 1 else None,
+            "forward": list(range(neutral + 1, gears))}
+
+
+def scripted_gearbox(args, forward, propulsion, neutral=None):
     """(gears, upshift, downshift) of --scripted-gears / --upshift-mps / --downshift-mps, checked as llc_v1 checks a
-    card (DC_VehicleCard.CheckGearbox): n >= 1 forward gears, n - 1 up and down shift speeds, down < up, up
-    increasing; every gear one the plays drove forward in and one with propulsion (fit_gearbox)."""
+    card (DC_VehicleCard.CheckGearbox): n >= 1 increasing forward gears above the neutral index (when E-04 gives
+    it), n - 1 up and down shift speeds, down < up, up increasing; every gear one the plays drove forward in and one
+    with propulsion (fit_gearbox)."""
     try:
         gears = [int(v) for v in args.scripted_gears.split(",")]
         up = [float(v) for v in args.upshift_mps.split(",") if v.strip()]
@@ -232,9 +262,13 @@ def scripted_gearbox(args, forward, propulsion):
         raise Refusal("scripted gearbox arguments: %s" % e)
     ok = gears and len(up) == len(gears) - 1 and len(down) == len(gears) - 1
     ok = ok and all(d < u for d, u in zip(down, up)) and all(b > a for a, b in zip(up, up[1:]))
+    ok = ok and all(b > a for a, b in zip(gears, gears[1:]))
     if not ok:
-        raise Refusal("scripted gearbox: n >= 1 gears, n - 1 upshift and downshift speeds, downshift < upshift, "
-                      "upshifts increasing (got %s / %s / %s)" % (gears, up, down))
+        raise Refusal("scripted gearbox: n >= 1 increasing gears, n - 1 upshift and downshift speeds, downshift < "
+                      "upshift, upshifts increasing (got %s / %s / %s)" % (gears, up, down))
+    if neutral is not None and any(g <= neutral for g in gears):
+        raise Refusal("scripted gears %s are not all above the neutral index %s (E-04, vanilla rule): forward-only"
+                      % (gears, neutral))
     unseen = [g for g in gears if g not in forward]
     if unseen:
         raise Refusal("scripted gears %s were not seen while driving forward (gear_indices_forward %s)"
@@ -259,6 +293,16 @@ def clutch_dip(play):
     if value < 0 or value > CLUTCH_DIP_MAX_S:
         raise Refusal("E-01 clutch dip %s s is outside [0, %s] s" % (value, CLUTCH_DIP_MAX_S))
     return value
+
+
+def e04_values(play):
+    """E-04's keys: the run header, overridden by e04_vehicle.txt (has_automatic_gearbox, gearbox_gears,
+    gearbox_forward_gears, ...; DC_ProbeEngine writes them there)."""
+    out = dict(play.header)
+    kv = os.path.join(play.dir, "e04_vehicle.txt")
+    if os.path.isfile(kv):
+        out.update(probe_common.read_kv(kv))
+    return out
 
 
 def time_slice(plays):
@@ -702,12 +746,20 @@ def build_identified(args):
         "upshifts without SetGear" if automatic else "no upshift without SetGear: scripted gearbox needed"),
         "has_automatic_gearbox": None, "scripted_gears": [], "upshift_mps": [], "downshift_mps": [],
         "clutch_dip_s": 0.0, "detail": gear_detail}
+    indices = None
     if e04_play:
-        flag = e04_play.header.get("has_automatic_gearbox")
-        kv = os.path.join(e04_play.dir, "e04_vehicle.txt")
-        if os.path.isfile(kv):
-            flag = probe_common.read_kv(kv).get("has_automatic_gearbox", flag)
+        e04 = e04_values(e04_play)
+        flag = e04.get("has_automatic_gearbox")
         gearbox["has_automatic_gearbox"] = None if flag in (None, "") else flag in ("1", "true", "True")
+        counts = tuple(probe_common.to_float(e04.get(k)) for k in ("gearbox_gears", "gearbox_forward_gears"))
+        if None not in counts:
+            indices = vanilla_gear_indices(int(counts[0]), int(counts[1]))
+            gear_detail["e04"] = {"gearbox_gears": int(counts[0]), "gearbox_forward_gears": int(counts[1]),
+                                  "rule": "vanilla: neutral = gears - forward - 1, reverse next below it"}
+    neutral = indices["neutral"] if indices else None
+    if automatic and gearbox["has_automatic_gearbox"] is False:
+        raise Refusal("E-01 saw automatic upshifts without SetGear, but E-04 says the gearbox is manual: the plays "
+                      "disagree")
     if not automatic:
         if not (args.scripted_gears and args.upshift_mps and args.downshift_mps):
             raise Refusal("E-01 says a scripted gearbox is needed: pass --scripted-gears, --upshift-mps and "
@@ -716,7 +768,7 @@ def build_identified(args):
         raise Refusal("no forward gear index seen while driving (input_post_gear >= 5 km/h)")
     if not automatic:
         gearbox["scripted_gears"], gearbox["upshift_mps"], gearbox["downshift_mps"] = scripted_gearbox(
-            args, forward, propulsion)
+            args, forward, propulsion, neutral)
         gearbox["clutch_dip_s"] = clutch_dip(e01_play)
     vehicle = args.vehicle
     sessions = [session_id(p) for p in plays]
@@ -735,8 +787,8 @@ def build_identified(args):
         "generator": {"tool": GENERATOR, "version": GENERATOR_VERSION},
         "signs": {"steer_sign": steer_sign, "yaw_axis_sign": yaw_axis_sign, "measured": True, "detail": sign_detail},
         "gear_indices_forward": forward,
-        "gear_index_neutral": None,
-        "gear_index_reverse": None,
+        "gear_index_neutral": neutral,
+        "gear_index_reverse": indices["reverse"] if indices else None,
         "gearbox": gearbox,
         "kappa_ss": {"speeds_mps": kappa_ss["speeds_mps"], "kappa_per_steer": kappa_ss["kappa_per_steer"],
                      "kappa_offset": kappa_ss["kappa_offset"],
@@ -761,6 +813,7 @@ def build_placeholder(args):
     if not args.pin_id or not PIN_RE.match(args.pin_id):
         raise Refusal("--placeholder needs --pin-id (the pin the card is placed under)")
     vehicle = args.vehicle
+    indices = vanilla_gear_indices(PLACEHOLDER_E04["gearbox_gears"], PLACEHOLDER_E04["gearbox_forward_gears"])
     return {
         "schema": CARD_SCHEMA,
         "card_id": vehicle,
@@ -772,18 +825,27 @@ def build_placeholder(args):
         "identification_sessions": [],
         "use": "PLACEHOLDER: qualification only. llc_v1 accepts it at use_class dev or probe and refuses it at any "
                "other use_class, production included",
-        "note": "PLACEHOLDER card (DD-7-min): no E-01 / E-02a play exists yet (the user's probe Plays are pending). Signs "
-                "are the TBD-5 draft defaults, kappa_ss is guessed, the actuator is unidentified. Replace it with "
-                "fit_steer_kappa.py --e01 --e02a once the plays exist; data driven with it is qualification-only.",
+        "note": "PLACEHOLDER card (DD-7-min): no usable E-01 / E-02a play exists yet (T0-ENG probe run 2 found the "
+                "S105 in neutral). Signs are the TBD-5 draft defaults, kappa_ss is guessed, the actuator is "
+                "unidentified; the gearbox is E-04's (manual, 4 forward gears) with guessed shift speeds. Replace it "
+                "with fit_steer_kappa.py --e01 --e02a --e04 once the plays exist; data driven with it is "
+                "qualification-only.",
         "generator": {"tool": GENERATOR, "version": GENERATOR_VERSION},
         "signs": {"steer_sign": PLACEHOLDER_SIGNS[0], "yaw_axis_sign": PLACEHOLDER_SIGNS[1], "measured": False,
                   "detail": "dc-2.0 TBD-5 draft: CarSteering +1 = left (steer_sign -1); +angvel_local_y clockwise"},
-        "gear_indices_forward": [],
-        "gear_index_neutral": None,
-        "gear_index_reverse": None,
-        "gearbox": {"mode": "automatic", "basis": "dc-2.0 TBD-7 draft (HasAutomaticGearbox, driverless); E-04 / E-01 "
-                    "decide", "has_automatic_gearbox": None, "scripted_gears": [], "upshift_mps": [],
-                    "downshift_mps": [], "clutch_dip_s": 0.0},
+        "gear_indices_forward": indices["forward"],
+        "gear_index_neutral": indices["neutral"],
+        "gear_index_reverse": indices["reverse"],
+        "gearbox": {"mode": "scripted",
+                    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, "
+                             "so a manual gearbox driven by SetGear; indices by the vanilla rule "
+                             "(SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5 (not yet seen "
+                             "driving: E-01 is pending). Shift speeds GUESSED from the prefab ratios (3.8, 2.12, 1.41, "
+                             "0.96; differential 5.25) at an assumed 0.29 m rolling radius: up near 4000 rpm, down "
+                             "near 1500-1800 rpm. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1)",
+                    "has_automatic_gearbox": PLACEHOLDER_E04["has_automatic_gearbox"],
+                    "scripted_gears": indices["forward"], "upshift_mps": list(PLACEHOLDER_UPSHIFT_MPS),
+                    "downshift_mps": list(PLACEHOLDER_DOWNSHIFT_MPS), "clutch_dip_s": PLACEHOLDER_CLUTCH_DIP_S},
         "kappa_ss": {"speeds_mps": list(PLACEHOLDER_SPEEDS_MPS), "kappa_per_steer": list(PLACEHOLDER_KAPPA_PER_STEER),
                      "kappa_offset": [0.0] * len(PLACEHOLDER_SPEEDS_MPS),
                      "basis": "GUESSED (E-02a grid speeds 15 / 30 / 50 km/h); not a fit", "fits": [], "cells": []},
@@ -886,6 +948,12 @@ def gearbox_violations(card):
     dip, mode = gearbox.get("clutch_dip_s"), gearbox.get("mode")
     if not isinstance(dip, (int, float)) or isinstance(dip, bool) or not 0 <= dip <= CLUTCH_DIP_MAX_S:
         return ["gearbox.clutch_dip_s %r is not a number in [0, %s] s" % (dip, CLUTCH_DIP_MAX_S)]
+    neutral, reverse = card.get("gear_index_neutral"), card.get("gear_index_reverse")
+    for name, value in (("gear_index_neutral", neutral), ("gear_index_reverse", reverse)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            return ["%s %r is neither null nor an integer >= 0" % (name, value)]
+    if neutral is not None and reverse is not None and reverse >= neutral:
+        return ["gear_index_reverse %s is not below gear_index_neutral %s (the vanilla rule)" % (reverse, neutral)]
     if mode == "automatic":
         return ["gearbox.clutch_dip_s applies to a scripted gearbox only"] if dip > 0 else []
     if mode != "scripted":
@@ -898,6 +966,11 @@ def gearbox_violations(card):
     forward = card.get("gear_indices_forward") or []
     if any(g < 0 or g != round(g) or g not in forward for g in gears):
         return ["scripted gears %s are not all in gear_indices_forward %s" % (gears, forward)]
+    if any(b <= a for a, b in zip(gears, gears[1:])):
+        return ["scripted gears %s do not increase (the first is the gear an episode starts in)" % gears]
+    if neutral is not None and any(g <= neutral for g in gears):
+        return ["scripted gears %s are not all above gear_index_neutral %s (never neutral or reverse)"
+                % (gears, neutral)]
     return []
 
 

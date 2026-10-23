@@ -227,6 +227,23 @@ class E05Tests(TempCase):
         with self.assertRaises(probe_common.InputError):
             e05_images.evaluate(play_dir, None)
 
+    def test_shuttle_drive_info(self):
+        # The gearbox fix (probe run 2: the manual S105 sat in neutral) adds the drive lines to the e05 run header;
+        # the shuttle's own speed comes from e05_frames.csv (veh_speed_kmh of the drive frames, 30.0 here)
+        play_dir, log_path = build_e05_play(self.base)
+        found = items(e05_images.evaluate(play_dir, log_path))
+        self.assertNotIn("drive", found, "a play without params.drive=1 is a static capture")
+        with open(os.path.join(play_dir, "run_header.txt"), "a", encoding="ascii", newline="") as handle:
+            handle.write("params.drive=1\nvehicle.gearbox=manual\ndrive.force_sim=1\ndrive.force_sim_e01=needed\n"
+                         "gear_policy.shifts=4\nphysics_wake.calls=7\nphysics_wake.asleep_before=7\n")
+        verdict = e05_images.evaluate(play_dir, log_path)
+        found = items(verdict)
+        self.assertEqual(verdict.result(), "PASS", verdict.items)
+        self.assertEqual(found["drive"][0], "INFO")
+        self.assertIn("max veh_speed_kmh 30.00 over 130 drive frames; gearbox manual; force_sim 1 (e01 decision "
+                      "needed); gear policy shifts 4; physics wake 7 calls, 7 with the body asleep before",
+                      found["drive"][1])
+
 
 class E06Tests(TempCase):
     def test_one_undecodable_in_700_passes(self):

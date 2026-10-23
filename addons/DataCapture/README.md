@@ -304,6 +304,23 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e05 | R1 camera, 10 Hz screenshots (E-05, E-06) | 10 min | `e05_images.py <play_dir> --log <console.log>`, `e06_fiducial.py <play_dir>` |
 | e06a | marker reprojection alignment (60 and 30 FPS, backlog) | ~3-5 min | `tools/validator/e06a_reproject.py <play_dir> [--header-geometry]` |
 
+Notes on the driving probes (e01, e02a, e05, e06a; all drive `DC_Ego` through `DC_ProbeActuator`):
+- The S105 has a manual gearbox (`HasAutomaticGearbox` 0, 6 gear indices, 4 forward). Probe run 2 left it in
+  neutral, so the throttle only revved the engine. The actuator now derives the indices once per probe start as
+  vanilla does (`neutral = gears - forward - 1`, `first = gears - forward`, `top = gears - 1`; S105: 0 reverse,
+  1 neutral, 2..5 first..fourth) and writes them to the run header (`vehicle.gearbox`, `vehicle.gear_index_*`).
+- Without an explicit phase gear its shift policy picks the gear: neutral while the handbrake is on, first gear when
+  it is released (before the throttle), then up at >= 4500 rpm and down at <= 1800 rpm, at least 1.5 s apart, first
+  gear below 8 km/h, never neutral or reverse while driving (`DC_ProbeSequences` category Gearbox; e05 and e06a
+  use the same values as defaults). `cmd_gear` in the step CSVs is the gear the policy chose. The move checks hold
+  first gear, `gear_scripted` still calls `SetGear` every step, and `gear_observe` is skipped with the note
+  `manual_gearbox`.
+- Each release of the handbrake also wakes the car's physics as vanilla does (`Physics.SetActive(ActiveState.ACTIVE)`).
+  The phase notes (`wakes`, `asleep_at_wake`, `shifts`) and the run header lines appended at the stop
+  (`gear_policy.*`, `physics_wake.*`) count these wakes and the gear changes.
+- e05 and e06a latch `ForceEnableSimulation` unless e01 of the same Play found it not needed (`drive.force_sim`,
+  `drive.force_sim_e01` in their run headers).
+
 Notes on the image probes:
 - e05 and e06a drive from 2 x `m_fAreaMarginM` along the test area (6 m with the layer's margin), inside the area
   their drive check uses; a start point outside it refuses the probe at its start.

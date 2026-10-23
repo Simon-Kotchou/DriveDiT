@@ -11,6 +11,10 @@ removes it afterwards. The fixtures are generated here from a small vehicle mode
   - E-01: a 4-step steering dead time with a first-order yaw lag, steer_sign -1, a 6-step longitudinal dead time and
     an automatic gearbox that shifts up -> every identification has a value, PASS, and the identified values match;
   - E-01 with a car that never moves -> FAIL (moves), and ForceEnableSimulation "does not help";
+  - E-01 with a manual gearbox driven by the probe's shift policy (cmd_gear = the policy gear, neutral 1 with the
+    handbrake, gear_observe skipped with note manual_gearbox, the gearbox lines of the run header) -> PASS, gearbox
+    "scripted gearbox needed", INFO gear_policy, gear_indices (TBD-7) and physics_wake; a probe-run-2-like play
+    (manual gearbox known only from vehicle.has_automatic_gearbox=0, no motion) -> the same gearbox answer;
   - E-02a with kappa = G(v) * s -> R2 ~ 1, PASS; one speed with only 2 valid cells -> FAIL;
   - the PRBS generator mirrors DC_ProbePrbs: maximum length for every supported order;
   - the step-CSV header of the fixtures is built from the Enforce source (DC_ProbeSequences.c: the stepColumns list,
@@ -81,8 +85,9 @@ class Car:
     automatic gearbox. Writes one e01/e02a step row per physics step."""
 
     def __init__(self, steer_delay=4, yaw_tau=6.0, long_delay=6, steer_sign=-1, yaw_gain_deg=30.0, moves=True,
-                 seed=7):
+                 seed=7, manual=False):
         self.rng = random.Random(seed)
+        self.manual = manual          # S105-like manual gearbox: the probe's shift policy writes cmd_gear
         self.steer_delay = steer_delay
         self.alpha = 1.0 - math.exp(-1.0 / yaw_tau)
         self.long_delay = long_delay
@@ -137,6 +142,9 @@ class Car:
         self.x += self.speed * math.sin(rad) * DT
         self.z += self.speed * math.cos(rad) * DT
         kmh = self.speed * 3.6
+        if self.manual and gear < 0:
+            # DC_ProbeActuator's shift policy: neutral (1) with the handbrake, else first (2) .. top (5) by speed
+            gear = 1 if handbrake else 2 + min(3, int(kmh / 25.0))
         cur_gear = 1 + min(3, int(kmh / 20.0)) if gear < 0 else gear
         self.rows.append({
             "physics_step": self.step, "world_time_ms": "%.3f" % (self.step * DT * 1000), "timeslice_s": "%.6f" % DT,
@@ -160,9 +168,14 @@ class Car:
         return kmh
 
 
-def build_e01(play_dir, moves=True):
-    car = Car(moves=moves)
+def build_e01(play_dir, moves=True, manual=False):
+    """manual: the S105 case after the gearbox fix (the shift policy's cmd_gear, gear_observe skipped with note
+    manual_gearbox, phase notes wakes/asleep_at_wake/shifts, the gearbox and drive-summary lines of the run header)."""
+    car = Car(moves=moves, manual=manual)
     phases = []
+    note = "phb_resets:0"
+    if manual:
+        note += "/wakes:1/asleep_at_wake:1/shifts:0"
 
     def phase(name, target_kmh, amplitude, body):
         car.reset()
@@ -174,7 +187,7 @@ def build_e01(play_dir, moves=True):
         result = body(name, n)
         phases.append({"phase_idx": len(phases), "phase": name, "start_step": start, "end_step": car.step,
                        "start_world_ms": "", "end_world_ms": "", "target_kmh": target_kmh, "amplitude": amplitude,
-                       "force_sim": 0, "result": result, "note": "phb_resets:0"})
+                       "force_sim": 0, "result": result, "note": note})
         return result
 
     def accel(name, n, target):
@@ -275,12 +288,26 @@ def build_e01(play_dir, moves=True):
             phase("throttle_%.2f" % value, "", "%.4f" % value, throttle_step(value))
         for value in (0.3, 0.6, 1.0):
             phase("brake_%.2f" % value, "40.000", "%.4f" % value, brake_step(value))
-        phase("gear_observe", "", "0.7000", gear_observe)
+        if manual:
+            phases.append({"phase_idx": len(phases), "phase": "gear_observe", "target_kmh": "", "amplitude": "0.7000",
+                           "force_sim": 0, "result": "skipped", "note": "manual_gearbox"})
+        else:
+            phase("gear_observe", "", "0.7000", gear_observe)
         phase("gear_scripted", "", "0.4000", gear_scripted)
 
     header = {"schema": "dc-probe-run/1", "probe": "e01", "engine.fixed_time_slice_s": "%.6f" % DT,
               "params.m_iAssumedSteerSign": "-1", "params.dt_s": "%.6f" % DT,
               "rerun19.compare": "e01_actuation.py e01 on both play dirs"}
+    if manual:
+        # DC_ProbeActuator.AppendGearboxLines at the start, AppendDriveSummaryLines at the stop (S105: 6 gears, 4 forward)
+        header.update({"vehicle.has_automatic_gearbox": "0", "vehicle.gearbox_gears": "6",
+                       "vehicle.gearbox_forward_gears": "4", "vehicle.gearbox": "manual",
+                       "vehicle.gear_index_neutral": "1", "vehicle.gear_index_first": "2", "vehicle.gear_index_top": "5",
+                       "gear_policy.active": "1", "gear_policy.upshift_rpm": "4500.0",
+                       "gear_policy.downshift_rpm": "1800.0", "gear_policy.min_shift_s": "1.500",
+                       "gear_policy.first_below_kmh": "8.000", "gear_policy.clutch_dip_s": "0.000",
+                       "gear_policy.shifts": "9", "gear_policy.setgear_calls": "40", "gear_policy.reasserts": "0",
+                       "physics_wake.calls": "11", "physics_wake.asleep_before": "11", "physics_wake.no_physics": "0"})
     footer = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
     probe_common.write_synthetic_play(play_dir, header, {"e01_steps": (STEP_COLUMNS, car.rows),
                                                          "e01_phases": (PHASE_COLUMNS, phases)}, footer)
@@ -412,6 +439,49 @@ class ActuationTests(unittest.TestCase):
         self.assertIn("x_right -1", text)
         self.assertIn("x right, z forward: no", text)
 
+    def test_e01_manual_gearbox_with_the_shift_policy(self):
+        play = os.path.join(self.base, "e01_manual")
+        build_e01(play, manual=True)
+        code, text = run_tool(["e01", play])
+        self.assertEqual(code, 0, text)
+        self.assertIn("[PASS] moves", text)
+        self.assertIn("[PASS] gearbox: scripted gearbox needed: manual gearbox (vehicle.gearbox=manual); "
+                      "gear_observe skipped (manual_gearbox)", text)
+        self.assertNotIn("automatic works", text)
+        self.assertIn("[INFO] gear_policy: active 1 (up >= 4500.0 rpm, down <= 1800.0 rpm, >= 1.500 s apart, first "
+                      "below 8.000 km/h, clutch dip 0.000 s)", text)
+        self.assertIn("readback = cmd_gear on 100%", text)
+        self.assertIn("(header: shifts 9, SetGear calls 40, re-asserts 0)", text)
+        self.assertIn("[INFO] gear_indices: TBD-7 from the gear counts (vanilla rule): reverse below 1, neutral 1, "
+                      "first 2, top 5 (gearbox manual); standstill cur_gear 1 (", text)
+        self.assertIn("reverse not driven", text)
+        self.assertIn("[INFO] physics_wake: 11 calls at handbrake releases, 11 with the body asleep before "
+                      "(Physics.IsActive 0), 0 without physics (run header)", text)
+        self.assertIn("2:honoured", text)
+        self.assertIn("gear_observe=skipped", text)
+
+    def test_e01_run2_like_manual_gearbox_without_motion(self):
+        # Probe run 2 (55c77f8): no vehicle.gearbox line yet, the S105 sat in neutral and never moved
+        play = os.path.join(self.base, "e01_run2")
+        build_e01(play, moves=False)
+        append_kv(os.path.join(play, "run_header.txt"), {"vehicle.has_automatic_gearbox": "0"})
+        code, text = run_tool(["e01", play])
+        self.assertEqual(code, 1, text)
+        self.assertIn("[FAIL] moves", text)
+        self.assertIn("[PASS] gearbox: scripted gearbox needed: manual gearbox (vehicle.has_automatic_gearbox=0); "
+                      "gear_observe not in e01_phases.csv", text)
+        self.assertIn("[INFO] physics_wake: not recorded", text)
+        self.assertNotIn("[INFO] gear_policy", text)
+        self.assertIn("reverse and neutral not measured (TBD-7)", text)
+
+    def test_physics_wake_from_the_phase_notes(self):
+        class FakePlay:
+            header = {}
+        rows = [{"note": "max_kmh:0.000/phb_resets:0/wakes:1/asleep_at_wake:1/shifts:0"},
+                {"note": "max_kmh:21.000/phb_resets:0/wakes:1/asleep_at_wake:0/shifts:2"}, {"note": "skipped"}]
+        self.assertEqual(e01.physics_wake_text(FakePlay(), rows),
+                         "2 calls at handbrake releases, 1 with the body asleep before (phase notes)")
+
     def test_e01_no_motion_fails(self):
         play = os.path.join(self.base, "e01_still")
         build_e01(play, moves=False)
@@ -435,6 +505,7 @@ class ActuationTests(unittest.TestCase):
         for speed in (15, 30, 50):
             self.assertIn("[PASS] fit_%dkmh" % speed, text)
         self.assertIn("R2 1.0000", text)
+        self.assertIn("[INFO] physics_wake: not recorded", text)
 
     def test_e02a_two_valid_cells_fail(self):
         play = os.path.join(self.base, "e02a_starved")

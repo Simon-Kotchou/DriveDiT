@@ -19,7 +19,11 @@
 //     margin-inset area), settle (brake and handbrake for m_fSettleS), drive (speed hold m_fDriveKmh, steering 0)
 //     until the far end or the area edge, stop (brake to < 1 km/h), and again. Without m_bDrive the car is not
 //     commanded and the segment is "static". The teleport itself runs in OnProbeFrame, never inside a physics step
-//     (the rule of DC_ProbeSequences): the reset segment waits for it;
+//     (the rule of DC_ProbeSequences): the reset segment waits for it. The gears come from DC_ProbeActuator as in
+//     e01/e02a (manual gearbox: neutral with the handbrake, first gear at its release, then the shift policy with
+//     the actuator's defaults; physics wake at every release), and ForceEnableSimulation is latched unless e01 of
+//     this Play found it not needed (DC_ProbeSequences.ApplyPlayForceDecision); run header vehicle.gearbox,
+//     vehicle.gear_index_*, gear_policy.*, drive.force_sim*, and at the stop gear_policy.shifts and physics_wake.*;
 //   - after m_fDurationS of world time no new slot is issued; the requests still in flight are drained with the
 //     camera and the bands kept (DC_ImageSlotScheduler.StopIssuing), then the probe is done. OnProbeStop resolves
 //     what is left (only on a timeout or a Stop), parks the car, removes the bands and gives the camera back.
@@ -783,6 +787,17 @@ class DC_ProbeImages : DC_ProbeComponent
 
 		AppendAreaLines(header, m_Area);
 		header.Insert("area.start_along_m=" + m_fStartAlongM.ToString(-1, 3));
+		if (m_Actuator)
+			m_Actuator.AppendGearboxLines(header);
+
+		string forceE01 = "not_driving";
+		if (m_bDrive)
+		{
+			forceE01 = DC_ProbeSequences.ApplyPlayForceDecision(GetOwner(), m_Actuator);
+			header.Insert("drive.force_sim=" + BoolText(m_Actuator.IsSimulationForced()));
+			header.Insert("drive.force_sim_e01=" + forceE01);
+		}
+
 		header.Insert("capture.frames_dir=" + frameDir);
 		header.Insert("capture.request_name=f_<slot_id:08d> (no extension)");
 		header.Insert("capture.start_world_ms=" + m_fStartWorldMs.ToString(-1, 3));
@@ -793,6 +808,7 @@ class DC_ProbeImages : DC_ProbeComponent
 		{
 			m_Actuator.SetSpeedGains(m_fSpeedKp, m_fSpeedKi, m_fBrakeScale);
 			m_Actuator.StartModeA();
+			ctx.Log(m_Actuator.DescribeGearbox() + "; force_sim " + BoolText(m_Actuator.IsSimulationForced()) + " (e01 decision " + forceE01 + ")");
 			EnterReset();
 		}
 		else
@@ -993,13 +1009,22 @@ class DC_ProbeImages : DC_ProbeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! Brake and handbrake, applied at once (DC_ProbeActuator.Park): no physics step of this probe follows, and a
-	//! driverless car keeps the last setter values
+	//! driverless car keeps the last setter values. Then logs the gear policy and physics wake counts and appends them
+	//! to the run header (gear_policy.shifts, physics_wake.*)
 	protected void ParkVehicle()
 	{
 		if (!m_bDrive || !m_Actuator)
 			return;
 
 		m_Actuator.Park();
+		if (!m_Ctx)
+			return;
+
+		m_Ctx.Log(m_Actuator.DescribeDrive());
+		array<string> driveLines = {};
+		m_Actuator.AppendDriveSummaryLines(driveLines);
+		if (!m_Ctx.AppendHeaderLines(driveLines))
+			m_Ctx.Warn("could not append the gear policy / physics wake summary to run_header.txt");
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -5,23 +5,38 @@
 // A DC_ProbeComponent on the probe game mode (GameMode_DCProbes in DC_Probes_Arland), started, stepped and stopped by
 // DC_ProbeRunner (PROBE_DESIGN.md 4.4, 5.3). It drives the placed, driverless S105 DC_Ego in Mode A (r2 3.2):
 // SetPersistentHandBrake(false) and ForceStartEngine as in vanilla Game/Cinematics/VehicleCinematicTrack.c:127 and
-// :140, then SetSteering/SetThrottle/SetBreak/SetClutch (and SetGear in the gear phases) on every physics step from
-// OnProbeSimulate. The inputs are read back right after the setters (input_pre_*) and after the step in
-// OnProbePostSimulate (input_post_*), next to the commanded values (cmd_*), so every step carries command, pre and
-// post. The vanilla zeroing of the noise-steer and roughness sensitivities (VehicleCinematicTrack.c:125-126) is NOT
-// copied (r2 3.2 X6): they are only read and echoed into the run header.
+// :140, then SetSteering/SetBreak/SetGear/SetClutch/SetThrottle on every physics step from OnProbeSimulate. The
+// inputs are read back right after the setters (input_pre_*) and after the step in OnProbePostSimulate
+// (input_post_*), next to the commanded values (cmd_*), so every step carries command, pre and post. The vanilla
+// zeroing of the noise-steer and roughness sensitivities (VehicleCinematicTrack.c:125-126) is NOT copied (r2 3.2 X6):
+// they are only read and echoed into the run header.
+//
+// GEARBOX (probe run 2, 55c77f8: the S105 has a manual gearbox, HasAutomaticGearbox 0, and sat in neutral, so the
+// throttle only revved the engine). DC_ProbeActuator.Init reads HasAutomaticGearbox, GearboxGearsCount and
+// GearboxForwardGearsCount once per probe start and derives the indices as vanilla does: neutral = gears - forward -
+// 1, first = gears - forward (SCR_ToggleHandbrakeAction.c:99-108), top = gears - 1 (SCR_VehicleGearCondition.c LAST);
+// below neutral is reverse (S105: 0 reverse, 1 neutral, 2..5 first..fourth; TBD-7). With a manual gearbox and no
+// explicit gear (cmd gear -1) the actuator's shift policy picks the gear: neutral while the handbrake is commanded,
+// first gear at its release (set before the throttle of that step), then first..top by rpm (attributes in category
+// Gearbox), never neutral or reverse while driving; the chosen gear is the cmd_gear column. gear_scripted keeps its
+// explicit SetGear every step; gear_observe (automatic shifting) is skipped with note manual_gearbox on a manual
+// gearbox; the move checks hold first gear. At every release of the commanded handbrake the actuator also wakes the
+// vehicle's physics as vanilla does (Physics.SetActive(ActiveState.ACTIVE), SCR_ToggleHandbrakeAction.c:97), on
+// top of the ForceEnableSimulation latch; the phase notes and the run header count it.
 //
 // WHAT IT DOES (authority, play mode, only while the runner has started the probe)
 //   e01  phases in this order; each starts with a teleport to the area start (segment reset) and m_fSettleS of
 //        brake 1 + handbrake (settle):
-//          move_check          throttle m_fMoveCheckThrottle for m_fMoveCheckS, no ForceEnableSimulation;
+//          move_check          throttle m_fMoveCheckThrottle for m_fMoveCheckS in first gear (manual gearbox), no
+//                              ForceEnableSimulation;
 //          move_check_forced   only after a no_motion: ForceEnableSimulation, then the same (latched for the probe);
 //          steer_prbs          speed hold m_fPrbsSpeedKmh, steering +-m_fPrbsAmplitude from DC_ProbePrbs, one period;
 //          steer_reversal      speed hold, steering +-m_fReversalAmplitude reversed every m_fReversalPeriodS / 2,
 //                              m_iReversalCount reversals, then one half period of zero steering (centering);
 //          throttle_<v>        throttle v from standstill for m_fThrottleHoldS, then brake 1 to a stop;
 //          brake_<v>           speed hold to m_fBrakeFromKmh, then brake v until below m_fSpeedTolKmh;
-//          gear_observe        throttle m_fGearObserveThrottle for m_fGearObserveS, gear left to the gearbox;
+//          gear_observe        throttle m_fGearObserveThrottle for m_fGearObserveS, gear left to the gearbox
+//                              (automatic gearbox only; skipped with note manual_gearbox otherwise);
 //          gear_scripted       SetGear(g) every step for each g of m_sGearSequence, m_fGearHoldS each.
 //        e01_steps.csv (one row per physics step) and e01_phases.csv (one row per phase).
 //   e02a cells over m_sE02aGrid (speed km/h : steering levels): teleport to the side of the area away from the turn,
@@ -258,7 +273,8 @@ class DC_ProbePrbs
 //------------------------------------------------------------------------------------------------
 //! Mode A actuation of one driverless vehicle (r2 3.2): a held command applied every physics step, inputs read back
 //! after the setters (input_pre) and after the step (input_post). One instance per running probe; probes are
-//! exclusive, so only one actuator drives at a time.
+//! exclusive, so only one actuator drives at a time. Every probe that drives DC_Ego (e01, e02a, e05, e06a) drives it
+//! through this class, so the gearbox handling below is the same for all of them.
 class DC_ProbeActuator
 {
 	//! Speed-hold defaults (probe-only PI, not llc_v1); DC_ProbeSequences passes its attributes with SetSpeedGains
@@ -266,12 +282,57 @@ class DC_ProbeActuator
 	static const float DEFAULT_SPEED_KI = 0.02;
 	static const float DEFAULT_BRAKE_SCALE = 0.5;
 
+	//! Shift-policy defaults for a manual gearbox (probe-only, not llc_v1); DC_ProbeSequences passes its attributes with
+	//! SetShiftPolicy, DC_ProbeImages and DC_ProbeMarkers drive with these. S105 (e04, run 2): rpm idle 800, peak power
+	//! 4800, max 8000; in neutral throttle 0.5 revved it to 5800
+	static const float DEFAULT_UPSHIFT_RPM = 4500;
+	static const float DEFAULT_DOWNSHIFT_RPM = 1800;
+	static const float DEFAULT_MIN_SHIFT_S = 1.5;
+	static const float DEFAULT_FIRST_BELOW_KMH = 8;
+	//! A policy gear that neither GetGear nor the controller's future gear shows this long after its SetGear is set again
+	static const float GEAR_REASSERT_S = 1;
+
 	protected IEntity m_Vehicle;
 	protected CarControllerComponent m_Controller;
 	protected VehicleWheeledSimulation m_Simulation;
 	protected string m_sFailure = "not initialised";
 	protected bool m_bForced;					//!< ForceSimulation was called (re-applied every step)
 	protected int m_iPersistentHandbrakeResets;	//!< steps on which the controller had set the persistent handbrake again
+
+	// Gearbox, read once by Init (DetectGearbox); indices derived as vanilla
+	protected bool m_bAutomaticGearbox;
+	protected int m_iGearsCount;
+	protected int m_iForwardGearsCount;
+	protected int m_iGearNeutral = -1;
+	protected int m_iGearFirst = -1;
+	protected int m_iGearTop = -1;
+	protected bool m_bShiftPolicy;				//!< manual gearbox with usable indices: commands with gear -1 use the policy
+
+	// Shift policy (SetShiftPolicy) and its state
+	protected float m_fUpshiftRpm = DEFAULT_UPSHIFT_RPM;
+	protected float m_fDownshiftRpm = DEFAULT_DOWNSHIFT_RPM;
+	protected float m_fMinShiftS = DEFAULT_MIN_SHIFT_S;
+	protected float m_fFirstBelowKmh = DEFAULT_FIRST_BELOW_KMH;
+	protected float m_fShiftDipS;				//!< clutch 0 for this long after each policy change into a forward gear
+	protected bool m_bFirstGearOnly;			//!< SetFirstGearOnly: the policy stays in first gear (move checks)
+	protected int m_iPolicyGear = -1;			//!< gear chosen by the policy, -1 = none yet
+	protected int m_iPolicySetGear = -1;		//!< gear of the policy's last SetGear call
+	protected float m_fSinceShiftS;				//!< world time since the policy's last gear change [s]
+	protected float m_fSinceSetGearS;			//!< world time since the policy's last SetGear call [s]
+	protected float m_fDipLeftS;
+	protected int m_iPolicyShifts;				//!< policy changes between two forward gears
+	protected int m_iSetGearCalls;				//!< SetGear calls of the policy (changes and re-asserts)
+	protected int m_iGearReasserts;
+
+	// Physics wake at every release of the commanded handbrake (vanilla SCR_ToggleHandbrakeAction.c:96-97)
+	protected bool m_bAppliedHandbrake = true;	//!< handbrake of the last ApplyStep (the placed car starts parked)
+	protected int m_iWakeCalls;					//!< Physics.SetActive(ActiveState.ACTIVE) calls
+	protected int m_iWakeAsleep;				//!< of those, with Physics.IsActive() false before the call
+	protected int m_iWakeNoPhysics;				//!< releases without a Physics object (no call)
+
+	// Applied in the last ApplyStep (columns cmd_gear, cmd_clutch): the explicit or the policy gear, the dip clutch
+	protected int m_iAppliedGear = -1;			//!< -1 = no gear command
+	protected float m_fAppliedClutch = 1;
 
 	// Held command (cmd_*): applied by every ApplyStep until changed
 	protected float m_fCmdSteer;
@@ -341,7 +402,148 @@ class DC_ProbeActuator
 		}
 
 		m_sFailure = string.Empty;
+		DetectGearbox();
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Once per probe start (Init): HasAutomaticGearbox and the gear counts; neutral = gears - forward - 1 and first =
+	//! gears - forward exactly as vanilla SCR_ToggleHandbrakeAction.c:99-108, top = gears - 1 as
+	//! SCR_VehicleGearCondition.c (LAST), reverse below neutral. The shift policy is on for a manual gearbox with at
+	//! least one forward gear and a neutral index >= 0.
+	protected void DetectGearbox()
+	{
+		m_bAutomaticGearbox = m_Controller.HasAutomaticGearbox();
+		m_iGearsCount = m_Simulation.GearboxGearsCount();
+		m_iForwardGearsCount = m_Simulation.GearboxForwardGearsCount();
+		m_iGearNeutral = m_iGearsCount - m_iForwardGearsCount - 1;
+		m_iGearFirst = m_iGearsCount - m_iForwardGearsCount;
+		m_iGearTop = m_iGearsCount - 1;
+		m_bShiftPolicy = !m_bAutomaticGearbox && m_iForwardGearsCount > 0 && m_iGearNeutral >= 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Shift policy parameters (manual gearbox, commands with gear -1): up one gear at rpm >= upshiftRpm, down one at
+	//! rpm <= downshiftRpm, at most one change per minShiftS, first gear below firstBelowKmh, clutch 0 for clutchDipS
+	//! after each change into a forward gear (0 = no dip)
+	void SetShiftPolicy(float upshiftRpm, float downshiftRpm, float minShiftS, float firstBelowKmh, float clutchDipS)
+	{
+		m_fUpshiftRpm = upshiftRpm;
+		m_fDownshiftRpm = downshiftRpm;
+		m_fMinShiftS = minShiftS;
+		m_fFirstBelowKmh = firstBelowKmh;
+		m_fShiftDipS = clutchDipS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true: the shift policy stays in first gear while driving (E-01 move checks)
+	void SetFirstGearOnly(bool firstOnly)
+	{
+		m_bFirstGearOnly = firstOnly;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! HasAutomaticGearbox() was false at Init
+	bool IsManualGearbox()
+	{
+		return !m_bAutomaticGearbox;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool IsShiftPolicyOn()
+	{
+		return m_bShiftPolicy;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetPolicyShifts()
+	{
+		return m_iPolicyShifts;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetWakeCalls()
+	{
+		return m_iWakeCalls;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetWakeAsleep()
+	{
+		return m_iWakeAsleep;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Run header lines of the gearbox (vehicle.gearbox, vehicle.gear_index_*: TBD-7), the engine rpm marks, the shift
+	//! policy (gear_policy.*) and the physics wake rule
+	void AppendGearboxLines(notnull array<string> lines)
+	{
+		string kind = "manual";
+		if (m_bAutomaticGearbox)
+			kind = "automatic";
+
+		lines.Insert("vehicle.gearbox=" + kind);
+		lines.Insert("vehicle.gear_index_neutral=" + m_iGearNeutral.ToString());
+		lines.Insert("vehicle.gear_index_first=" + m_iGearFirst.ToString());
+		lines.Insert("vehicle.gear_index_top=" + m_iGearTop.ToString());
+		lines.Insert("vehicle.gear_index_rule=neutral gears-forward-1, first gears-forward, top gears-1, reverse below neutral (vanilla SCR_ToggleHandbrakeAction, SCR_VehicleGearCondition)");
+		if (m_Simulation)
+		{
+			float rpmIdle = m_Simulation.EngineGetRPMIdle();
+			float rpmPeakPower = m_Simulation.EngineGetRPMPeakPower();
+			float rpmMax = m_Simulation.EngineGetRPMMax();
+			lines.Insert("vehicle.rpm_idle=" + rpmIdle.ToString(-1, 1));
+			lines.Insert("vehicle.rpm_peak_power=" + rpmPeakPower.ToString(-1, 1));
+			lines.Insert("vehicle.rpm_max=" + rpmMax.ToString(-1, 1));
+		}
+
+		float reassert = GEAR_REASSERT_S;
+		lines.Insert("gear_policy.active=" + DC_LaunchGuard.BoolText(m_bShiftPolicy));
+		lines.Insert("gear_policy.upshift_rpm=" + m_fUpshiftRpm.ToString(-1, 1));
+		lines.Insert("gear_policy.downshift_rpm=" + m_fDownshiftRpm.ToString(-1, 1));
+		lines.Insert("gear_policy.min_shift_s=" + m_fMinShiftS.ToString(-1, 3));
+		lines.Insert("gear_policy.first_below_kmh=" + m_fFirstBelowKmh.ToString(-1, 3));
+		lines.Insert("gear_policy.clutch_dip_s=" + m_fShiftDipS.ToString(-1, 3));
+		lines.Insert("gear_policy.reassert_s=" + reassert.ToString(-1, 3));
+		lines.Insert("gear_policy.rule=manual gearbox and cmd gear -1: neutral while the handbrake is commanded, first gear at its release (SetGear before SetThrottle), then first..top by rpm; SetGear on change, again after reassert_s without readback; cmd_gear = the policy gear");
+		lines.Insert("physics_wake.rule=Physics.SetActive(ActiveState.ACTIVE) at every release of the commanded handbrake (vanilla SCR_ToggleHandbrakeAction), on top of ForceEnableSimulation");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Run header lines appended at the probe stop: what the shift policy and the physics wake did
+	void AppendDriveSummaryLines(notnull array<string> lines)
+	{
+		lines.Insert("gear_policy.shifts=" + m_iPolicyShifts.ToString());
+		lines.Insert("gear_policy.setgear_calls=" + m_iSetGearCalls.ToString());
+		lines.Insert("gear_policy.reasserts=" + m_iGearReasserts.ToString());
+		lines.Insert("physics_wake.calls=" + m_iWakeCalls.ToString());
+		lines.Insert("physics_wake.asleep_before=" + m_iWakeAsleep.ToString());
+		lines.Insert("physics_wake.no_physics=" + m_iWakeNoPhysics.ToString());
+		lines.Insert("drive.force_sim=" + DC_LaunchGuard.BoolText(m_bForced));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One log line: gearbox kind, indices and the shift policy
+	string DescribeGearbox()
+	{
+		string kind = "manual";
+		if (m_bAutomaticGearbox)
+			kind = "automatic";
+
+		string policy = "off (automatic gearbox: no SetGear unless a phase sets one)";
+		if (m_bShiftPolicy)
+			policy = string.Format("on: neutral with the handbrake, first gear at its release, up at >= %1 rpm, down at <= %2 rpm, >= %3 s apart, first below %4 km/h, clutch dip %5 s", m_fUpshiftRpm.ToString(-1, 0), m_fDownshiftRpm.ToString(-1, 0), m_fMinShiftS.ToString(-1, 2), m_fFirstBelowKmh.ToString(-1, 1), m_fShiftDipS.ToString(-1, 2));
+		else if (!m_bAutomaticGearbox)
+			policy = "off (unusable gear counts)";
+
+		return string.Format("gearbox %1: %2 gears, %3 forward -> neutral %4, first %5, top %6 (vanilla rule); shift policy %7", kind, m_iGearsCount, m_iForwardGearsCount, m_iGearNeutral, m_iGearFirst, m_iGearTop, policy);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One log line: shifts, SetGear calls and physics wakes so far
+	string DescribeDrive()
+	{
+		return string.Format("gear policy %1 shifts, %2 SetGear calls (%3 re-asserted); physics wake %4 calls, %5 with the body asleep before, %6 without physics; force_sim %7", m_iPolicyShifts, m_iSetGearCalls, m_iGearReasserts, m_iWakeCalls, m_iWakeAsleep, m_iWakeNoPhysics, DC_LaunchGuard.BoolText(m_bForced));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -399,7 +601,8 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Open-loop command, held until changed. gear < 0 = no SetGear call. Clamped: steer [-1,1], others [0,1].
+	//! Open-loop command, held until changed. gear >= 0: SetGear(gear) every step; gear < 0: the shift policy picks
+	//! the gear on a manual gearbox, no SetGear call on an automatic one. Clamped: steer [-1,1], others [0,1].
 	//! Clears a speed hold.
 	void SetCommand(float steer, float throttle, float brake, float clutch, int gear, bool handbrake)
 	{
@@ -449,8 +652,10 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Call from OnProbeSimulate: runs the PI, calls SetSteering/SetThrottle/SetBreak/SetClutch (+ SetGear when
-	//! gear >= 0) every step, then reads input_pre_*
+	//! Call from OnProbeSimulate: runs the PI and the shift policy, wakes the physics at a release of the commanded
+	//! handbrake, calls SetSteering/SetBreak/SetGear/SetClutch/SetThrottle every step (gear before clutch and throttle,
+	//! the order of VehicleCinematicTrack.c:149-162), then reads input_pre_*. SetGear: an explicit gear (SetCommand
+	//! gear >= 0) every step; a policy gear on change and again after GEAR_REASSERT_S without readback (ApplyPolicyGear)
 	void ApplyStep(float timeSlice)
 	{
 		if (!m_Simulation)
@@ -469,12 +674,32 @@ class DC_ProbeActuator
 			m_iPersistentHandbrakeResets++;
 		}
 
+		// Every drive start releases the commanded handbrake: wake the physics there, as vanilla does
+		if (!m_bCmdHandbrake && m_bAppliedHandbrake)
+			WakePhysics();
+
+		m_bAppliedHandbrake = m_bCmdHandbrake;
+		m_iAppliedGear = m_iCmdGear;
+		m_fAppliedClutch = m_fCmdClutch;
+		if (m_iCmdGear < 0 && m_bShiftPolicy)
+		{
+			m_iAppliedGear = RunShiftPolicy(timeSlice);
+			if (m_fDipLeftS > 0)
+			{
+				m_fAppliedClutch = 0;
+				m_fDipLeftS -= timeSlice;
+			}
+		}
+
 		m_Simulation.SetSteering(m_fCmdSteer);
-		m_Simulation.SetThrottle(m_fCmdThrottle);
 		m_Simulation.SetBreak(m_fCmdBrake, m_bCmdHandbrake);
-		m_Simulation.SetClutch(m_fCmdClutch);
 		if (m_iCmdGear >= 0)
 			m_Simulation.SetGear(m_iCmdGear);
+		else if (m_iAppliedGear >= 0)
+			ApplyPolicyGear(m_iAppliedGear, timeSlice);
+
+		m_Simulation.SetClutch(m_fAppliedClutch);
+		m_Simulation.SetThrottle(m_fCmdThrottle);
 
 		m_fPreSteer = m_Simulation.GetSteering();
 		m_fPreThrottle = m_Simulation.GetThrottle();
@@ -509,6 +734,91 @@ class DC_ProbeActuator
 			m_fCmdThrottle = 0;
 			m_fCmdBrake = Math.Clamp(-output * m_fBrakeScale, 0, 1);
 		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Gear of this step for a manual gearbox without an explicit gear. Neutral while the handbrake is commanded and
+	//! first gear at its release, as vanilla SCR_ToggleHandbrakeAction.c:99-108 does; while driving only first..top:
+	//! first gear below m_fFirstBelowKmh or with SetFirstGearOnly, else up one gear at rpm >= m_fUpshiftRpm and down
+	//! one at rpm <= m_fDownshiftRpm, at most one change per m_fMinShiftS. rpm and speed are those of the last
+	//! ReadPost, so the policy is deterministic in the recorded state. A change into a forward gear starts the clutch
+	//! dip (m_fShiftDipS; 0 = none).
+	protected int RunShiftPolicy(float timeSlice)
+	{
+		m_fSinceShiftS += timeSlice;
+		int gear = m_iPolicyGear;
+		if (m_bCmdHandbrake)
+		{
+			gear = m_iGearNeutral;
+			m_fDipLeftS = 0;
+		}
+		else if (gear < m_iGearFirst || gear > m_iGearTop)
+		{
+			gear = m_iGearFirst;
+		}
+		else if (m_bFirstGearOnly || m_fSpeedKmh < m_fFirstBelowKmh)
+		{
+			gear = m_iGearFirst;
+		}
+		else if (m_fSinceShiftS >= m_fMinShiftS)
+		{
+			if (m_fRpm >= m_fUpshiftRpm && gear < m_iGearTop)
+				gear++;
+			else if (m_fRpm <= m_fDownshiftRpm && gear > m_iGearFirst)
+				gear--;
+		}
+
+		if (gear == m_iPolicyGear)
+			return gear;
+
+		if (m_iPolicyGear >= m_iGearFirst && gear >= m_iGearFirst)
+			m_iPolicyShifts++;
+
+		if (gear >= m_iGearFirst)
+			m_fDipLeftS = m_fShiftDipS;
+
+		m_iPolicyGear = gear;
+		m_fSinceShiftS = 0;
+		return gear;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SetGear for the policy gear: when it changes (the vanilla pattern, VehicleCinematicTrack.c:152-156), and again
+	//! when GEAR_REASSERT_S after the last call neither GetGear nor the controller's future gear (last ReadPost) shows it
+	protected void ApplyPolicyGear(int gear, float timeSlice)
+	{
+		m_fSinceSetGearS += timeSlice;
+		bool changed = gear != m_iPolicySetGear;
+		bool shown = m_iPostGear == gear || m_iFutGear == gear;
+		if (!changed && (shown || m_fSinceSetGearS < GEAR_REASSERT_S))
+			return;
+
+		if (!changed)
+			m_iGearReasserts++;
+
+		m_Simulation.SetGear(gear);
+		m_iPolicySetGear = gear;
+		m_fSinceSetGearS = 0;
+		m_iSetGearCalls++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! vehicleEntity.GetPhysics().SetActive(ActiveState.ACTIVE) as vanilla SCR_ToggleHandbrakeAction.c:96-97 does when
+	//! the parking brake is released; counts the calls and how often the body was asleep (IsActive false) before
+	protected void WakePhysics()
+	{
+		Physics physics = m_Vehicle.GetPhysics();
+		if (!physics)
+		{
+			m_iWakeNoPhysics++;
+			return;
+		}
+
+		if (!physics.IsActive())
+			m_iWakeAsleep++;
+
+		physics.SetActive(ActiveState.ACTIVE);
+		m_iWakeCalls++;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -589,8 +899,9 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Brake 1 + handbrake, throttle 0, steering 0, applied at once (no physics step needed). For probe stops: a
-	//! driverless car keeps the last setter values when nobody calls the setters any more.
+	//! Brake 1 + handbrake, throttle 0, steering 0 (and neutral through the shift policy on a manual gearbox), applied
+	//! at once (no physics step needed). For probe stops: a driverless car keeps the last setter values when nobody
+	//! calls the setters any more.
 	void Park()
 	{
 		SetCommand(0, 0, 1, 1, -1, true);
@@ -690,15 +1001,16 @@ class DC_ProbeActuator
 
 	//------------------------------------------------------------------------------------------------
 	//! The values of the last step, in AddStepColumns order. Decimals: inputs 4, speeds 3, angular velocity 6,
-	//! acceleration 4, positions 3, unit axes 6, heading 5
+	//! acceleration 4, positions 3, unit axes 6, heading 5. cmd_clutch and cmd_gear are the applied values: the
+	//! shift policy's gear (-1 only without a gear command) and clutch 0 during its dip
 	void AddStepValues(notnull DC_ProbeRow row)
 	{
 		row.AddBool(m_bForced);
 		row.AddFloat(m_fCmdSteer, 4);
 		row.AddFloat(m_fCmdThrottle, 4);
 		row.AddFloat(m_fCmdBrake, 4);
-		row.AddFloat(m_fCmdClutch, 4);
-		row.AddInt(m_iCmdGear);
+		row.AddFloat(m_fAppliedClutch, 4);
+		row.AddInt(m_iAppliedGear);
 		row.AddBool(m_bCmdHandbrake);
 		row.AddFloat(m_fHoldKmh, 3);
 		row.AddFloat(m_fPreSteer, 4);
@@ -777,6 +1089,9 @@ class DC_ProbeSequencePhase
 	float m_fTurnDeg;				//!< heading change during excite (right turn positive)
 	int m_iEngineOffSteps;			//!< steps with engine_on 0 after the settle
 	int m_iHandbrakeResetsAtStart;
+	int m_iWakesAtStart;			//!< DC_ProbeActuator counters at the phase start (phase notes wakes, asleep_at_wake, shifts)
+	int m_iWakeAsleepAtStart;
+	int m_iShiftsAtStart;
 
 	//------------------------------------------------------------------------------------------------
 	void DC_ProbeSequencePhase(DC_EProbeSequenceKind kind, string name, float targetKmh, float amplitude, float lateralM)
@@ -903,13 +1218,13 @@ class DC_ProbeSequences : DC_ProbeComponent
 	[Attribute("0.3,0.6,1.0", UIWidgets.EditBox, "Brake steps, comma-separated (one phase brake_<v> each, held until below the speed tolerance)", category: "E-01")]
 	protected string m_sBrakeSteps;
 
-	[Attribute("0.7", UIWidgets.Slider, "Throttle of the automatic gear observation (no SetGear)", "0 1 0.05", category: "E-01")]
+	[Attribute("0.7", UIWidgets.Slider, "Throttle of the automatic gear observation (no SetGear; automatic gearbox only, skipped on a manual one)", "0 1 0.05", category: "E-01")]
 	protected float m_fGearObserveThrottle;
 
 	[Attribute("15", UIWidgets.Slider, "Duration of the automatic gear observation [s]", "1 120 1", category: "E-01")]
 	protected float m_fGearObserveS;
 
-	[Attribute("2,3,4,3,2", UIWidgets.EditBox, "Scripted SetGear sequence (gear indices, comma-separated); empty skips the phase. Index 2 is VehicleCinematicTrack's default gear [inference: first forward gear]; the readback decides", category: "E-01")]
+	[Attribute("2,3,4,3,2", UIWidgets.EditBox, "Scripted SetGear sequence (gear indices, comma-separated); empty skips the phase. Indices as vanilla: neutral = gears - forward - 1, first = gears - forward (S105: 0 reverse, 1 neutral, 2..5 first..fourth; run header vehicle.gear_index_*)", category: "E-01")]
 	protected string m_sGearSequence;
 
 	[Attribute("3", UIWidgets.Slider, "Hold time of each scripted gear [s]", "0.5 30 0.5", category: "E-01")]
@@ -918,8 +1233,21 @@ class DC_ProbeSequences : DC_ProbeComponent
 	[Attribute("0.4", UIWidgets.Slider, "Throttle during the scripted gear phase", "0 1 0.05", category: "E-01")]
 	protected float m_fGearScriptedThrottle;
 
-	[Attribute("0", UIWidgets.Slider, "Clutch dip at each scripted gear change [s]: clutch 0 for this long after SetGear changes, then 1. 0 = no dip (the 1.8 sequence); a 1.9 re-run may need one (stall on clutch release, MIGRATION_1_9.md F8)", "0 2 0.05", category: "E-01")]
+	[Attribute("0", UIWidgets.Slider, "Clutch dip at each scripted gear change and at each shift-policy change into a forward gear [s]: clutch 0 for this long, then 1. 0 = no dip (the 1.8 sequence); a 1.9 re-run may need one (stall on clutch release, MIGRATION_1_9.md F8)", "0 2 0.05", category: "E-01")]
 	protected float m_fGearClutchDipS;
+
+	// === GEARBOX (shift policy of a manual gearbox, DC_ProbeActuator.SetShiftPolicy; e01 and e02a) ===
+	[Attribute("4500", UIWidgets.Slider, "Shift policy (manual gearbox, phases without an explicit gear): up one gear at rpm >= this [S105 e04: idle 800, peak power 4800, max 8000]", "1000 10000 50", category: "Gearbox")]
+	protected float m_fShiftUpRpm;
+
+	[Attribute("1800", UIWidgets.Slider, "Shift policy: down one gear at rpm <= this (never below first while driving)", "500 8000 50", category: "Gearbox")]
+	protected float m_fShiftDownRpm;
+
+	[Attribute("1.5", UIWidgets.Slider, "Shift policy: minimum time between two gear changes [s]", "0.1 10 0.1", category: "Gearbox")]
+	protected float m_fShiftMinS;
+
+	[Attribute("8", UIWidgets.Slider, "Shift policy: first gear below this speed [km/h]", "0 50 0.5", category: "Gearbox")]
+	protected float m_fShiftFirstBelowKmh;
 
 	// === E-02a ===
 	[Attribute("15:-0.5,-0.25,0.1,0.25,0.5;30:-0.25,-0.12,0.05,0.12,0.25;50:-0.12,-0.06,0.03,0.06,0.12", UIWidgets.EditBox, "Cells: groups '<speed km/h>:<steer>,<steer>,...' separated by ';' [design default: smaller steering at speed to stay near a_lat <= 4 m/s2]", category: "E-02a")]
@@ -1062,6 +1390,10 @@ class DC_ProbeSequences : DC_ProbeComponent
 		outKeyValues.Insert("m_fGearHoldS=" + m_fGearHoldS.ToString(-1, 3));
 		outKeyValues.Insert("m_fGearScriptedThrottle=" + m_fGearScriptedThrottle.ToString(-1, 4));
 		outKeyValues.Insert("m_fGearClutchDipS=" + m_fGearClutchDipS.ToString(-1, 3));
+		outKeyValues.Insert("m_fShiftUpRpm=" + m_fShiftUpRpm.ToString(-1, 1));
+		outKeyValues.Insert("m_fShiftDownRpm=" + m_fShiftDownRpm.ToString(-1, 1));
+		outKeyValues.Insert("m_fShiftMinS=" + m_fShiftMinS.ToString(-1, 3));
+		outKeyValues.Insert("m_fShiftFirstBelowKmh=" + m_fShiftFirstBelowKmh.ToString(-1, 3));
 		outKeyValues.Insert("m_sE02aGrid=" + m_sE02aGrid);
 		outKeyValues.Insert("m_fE02aReachS=" + m_fE02aReachS.ToString(-1, 3));
 		outKeyValues.Insert("m_fE02aHoldS=" + m_fE02aHoldS.ToString(-1, 3));
@@ -1104,8 +1436,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Run header extras of PROBE_DESIGN.md 5.3 (area.*, vehicle.*, rerun19.* for e01), appended to run_header.txt
-	protected void AppendRunHeaderExtras(string probeId, notnull DC_ProbeContext ctx, notnull IEntity ego, float relief, float minY, float maxY)
+	//! Run header extras of PROBE_DESIGN.md 5.3 (area.*, vehicle.*, rerun19.* for e01), appended to run_header.txt;
+	//! with an initialised actuator also its gearbox lines (vehicle.gearbox, vehicle.gear_index_*, gear_policy.*)
+	protected void AppendRunHeaderExtras(string probeId, notnull DC_ProbeContext ctx, notnull IEntity ego, DC_ProbeActuator actuator, float relief, float minY, float maxY)
 	{
 		array<string> lines = {};
 		m_Area.AppendHeaderLines(lines, "area");
@@ -1117,6 +1450,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 		lines.Insert("area.max_y=" + maxY.ToString(-1, 3));
 		lines.Insert("area.relief_grid_m=" + grid.ToString(-1, 1));
 		AppendVehicleLines(lines, ego);
+		if (actuator)
+			actuator.AppendGearboxLines(lines);
+
 		if (probeId == PROBE_E01)
 		{
 			lines.Insert("rerun19.same_sequences=attributes of DC_ProbeSequences, no code change");
@@ -1209,22 +1545,30 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_Area = new DC_ProbeArea();
 		m_Area.Set(m_vAreaStart, m_fAreaHeadingDeg, m_fAreaLengthM, m_fAreaHalfWidthM);
 		m_fStartAlongM = 2 * m_fAreaMarginM;
+
+		// The actuator reads the gearbox once here (DetectGearbox); its lines go into the run header extras
+		m_Actuator = new DC_ProbeActuator();
+		DC_ProbeActuator readyActuator;
+		if (m_Actuator.Init(ego))
+		{
+			m_Actuator.SetSpeedGains(m_fSpeedKp, m_fSpeedKi, m_fBrakeScale);
+			m_Actuator.SetShiftPolicy(m_fShiftUpRpm, m_fShiftDownRpm, m_fShiftMinS, m_fShiftFirstBelowKmh, m_fGearClutchDipS);
+			readyActuator = m_Actuator;
+		}
+
 		float minY;
 		float maxY;
 		float relief = m_Area.MeasureRelief(world, RELIEF_GRID_M, minY, maxY);
-		AppendRunHeaderExtras(probeId, ctx, ego, relief, minY, maxY);
+		AppendRunHeaderExtras(probeId, ctx, ego, readyActuator, relief, minY, maxY);
 		string reliefText = string.Format("area relief %1 m (surface y %2 .. %3, %4 m grid), limit %5 m", relief.ToString(-1, 2), minY.ToString(-1, 2), maxY.ToString(-1, 2), RELIEF_GRID_M, m_fMaxAreaReliefM.ToString(-1, 2));
 		if (relief > m_fMaxAreaReliefM)
 			return RefuseStart(reliefText + " - the area is not flat enough, probe not started (change m_vAreaStart / m_fAreaHeadingDeg)");
 
 		ctx.Log(reliefText);
-
-		m_Actuator = new DC_ProbeActuator();
-		if (!m_Actuator.Init(ego))
+		if (!readyActuator)
 			return RefuseStart(m_Actuator.GetFailure() + " - probe not started");
 
-		m_Actuator.SetSpeedGains(m_fSpeedKp, m_fSpeedKi, m_fBrakeScale);
-
+		ctx.Log(m_Actuator.DescribeGearbox());
 		ComputeStepCounts();
 		m_aPhases = {};
 		if (probeId == PROBE_E01)
@@ -1374,7 +1718,14 @@ class DC_ProbeSequences : DC_ProbeComponent
 			}
 
 			if (m_Actuator)
+			{
 				m_Actuator.Park();
+				LogInfo(m_Actuator.DescribeDrive());
+				array<string> driveLines = {};
+				m_Actuator.AppendDriveSummaryLines(driveLines);
+				if (m_Ctx && !m_Ctx.AppendHeaderLines(driveLines))
+					LogWarning("the gear policy / physics wake summary could not be appended to the run header");
+			}
 
 			if (probeId == PROBE_E01)
 				LogInfo(string.Format("summary: move check %1, force_sim %2, steer_sign %3 (sum %4 over %5 steps; +1 = positive steer turns right)", ForceDecisionText(), m_sForceDecisionSource, m_iMeasuredSteerSign, m_fSteerSignSum.ToString(-1, 2), m_iSteerSignSamples));
@@ -1570,7 +1921,14 @@ class DC_ProbeSequences : DC_ProbeComponent
 	//------------------------------------------------------------------------------------------------
 	protected string ForceDecisionText()
 	{
-		switch (m_iForceDecision)
+		return ForceDecisionName(m_iForceDecision);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! not_needed (0), needed (1), does_not_help (2), else unknown
+	static string ForceDecisionName(int decision)
+	{
+		switch (decision)
 		{
 			case 0: return "not_needed";
 			case 1: return "needed";
@@ -1578,6 +1936,35 @@ class DC_ProbeSequences : DC_ProbeComponent
 		}
 
 		return "unknown";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! ForceEnableSimulation decision of this Play (e01 move checks or an e02a retry): -1 unknown, 0 not needed,
+	//! 1 needed, 2 does not help
+	int GetForceDecision()
+	{
+		return m_iForceDecision;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! For the image probes (e05, e06a), which drive DC_Ego but identify nothing: latches ForceEnableSimulation unless
+	//! e01 of this Play found it not needed (decision 0). Probe run 2 (55c77f8) showed a driverless S105 whose engine
+	//! ignored the throttle without it. owner: the probe game mode that carries DC_ProbeSequences. Returns the decision
+	//! name used (run header drive.force_sim_e01).
+	static string ApplyPlayForceDecision(IEntity owner, notnull DC_ProbeActuator actuator)
+	{
+		int decision = -1;
+		if (owner)
+		{
+			DC_ProbeSequences sequences = DC_ProbeSequences.Cast(owner.FindComponent(DC_ProbeSequences));
+			if (sequences)
+				decision = sequences.GetForceDecision();
+		}
+
+		if (decision != 0)
+			actuator.ForceSimulation();
+
+		return ForceDecisionName(decision);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1594,6 +1981,15 @@ class DC_ProbeSequences : DC_ProbeComponent
 	protected void BeginPhase()
 	{
 		DC_ProbeSequencePhase phase = GetPhase();
+
+		// gear_observe watches automatic shifting (cmd_gear -1, no SetGear): a manual gearbox has none to watch
+		while (phase && phase.m_eKind == DC_EProbeSequenceKind.GEAR_OBSERVE && m_Actuator.IsManualGearbox())
+		{
+			SkipPhase(phase, "manual_gearbox", "HasAutomaticGearbox() is false, there is no automatic shifting to observe; the shift policy drives every phase without an explicit gear");
+			m_iCursor++;
+			phase = GetPhase();
+		}
+
 		if (!phase)
 		{
 			m_bProbeDone = true;
@@ -1612,6 +2008,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 			m_Prbs.Init(m_iPrbsOrder, m_iPrbsSeed);
 
 		phase.m_iHandbrakeResetsAtStart = m_Actuator.GetPersistentHandbrakeResets();
+		phase.m_iWakesAtStart = m_Actuator.GetWakeCalls();
+		phase.m_iWakeAsleepAtStart = m_Actuator.GetWakeAsleep();
+		phase.m_iShiftsAtStart = m_Actuator.GetPolicyShifts();
 		m_eSegment = DC_EProbeSequenceSegment.RESET;
 		m_iSegStep = 0;
 		m_iPhaseStep = 0;
@@ -1628,9 +2027,12 @@ class DC_ProbeSequences : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Command of this step from the phase, its segment and the steps done in the segment
+	//! Command of this step from the phase, its segment and the steps done in the segment. The move checks hold first
+	//! gear on a manual gearbox (SetFirstGearOnly); every command with gear -1 goes through the actuator's shift policy
 	protected void SetStepCommand(notnull DC_ProbeSequencePhase phase)
 	{
+		bool moveCheck = phase.m_eKind == DC_EProbeSequenceKind.MOVE_CHECK || phase.m_eKind == DC_EProbeSequenceKind.MOVE_CHECK_FORCED;
+		m_Actuator.SetFirstGearOnly(moveCheck);
 		switch (m_eSegment)
 		{
 			case DC_EProbeSequenceSegment.RESET:
@@ -2020,10 +2422,28 @@ class DC_ProbeSequences : DC_ProbeComponent
 		if (m_Actuator)
 		{
 			int resets = m_Actuator.GetPersistentHandbrakeResets() - phase.m_iHandbrakeResetsAtStart;
+			int wakes = m_Actuator.GetWakeCalls() - phase.m_iWakesAtStart;
+			int asleep = m_Actuator.GetWakeAsleep() - phase.m_iWakeAsleepAtStart;
+			int shifts = m_Actuator.GetPolicyShifts() - phase.m_iShiftsAtStart;
 			phase.AddNote("phb_resets:" + resets.ToString());
+			phase.AddNote("wakes:" + wakes.ToString());
+			phase.AddNote("asleep_at_wake:" + asleep.ToString());
+			phase.AddNote("shifts:" + shifts.ToString());
 		}
 
 		WritePhaseRow(phase);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Writes a skipped row (note token) for a phase that does not apply and logs why; the caller moves the cursor on
+	protected void SkipPhase(notnull DC_ProbeSequencePhase phase, string noteToken, string reason)
+	{
+		phase.m_iIdx = m_iPhasesStarted;
+		m_iPhasesStarted++;
+		phase.m_sResult = "skipped";
+		phase.AddNote(noteToken);
+		WritePhaseRow(phase);
+		LogInfo(string.Format("phase %1 %2: skipped, %3 (%4)", phase.m_iIdx, phase.m_sName, noteToken, reason));
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -28,7 +28,9 @@
 //     and at the end of the phase checks whether a prefab marker moved (> MOVED_M), writes e06a_markers_end.csv rows
 //     and restores MaxFps. A slalom, backlog or curve that leaves the area (minus m_fAreaMarginM) goes on with the
 //     next segment; its row says aborted_area. The teleports run in OnProbeFrame, never inside a physics step (the
-//     rule of DC_ProbeSequences): a reset segment waits for its teleport;
+//     rule of DC_ProbeSequences): a reset segment waits for its teleport. Gears, physics wake and
+//     ForceEnableSimulation as the e05 shuttle (DC_ProbeImages): DC_ProbeActuator's shift policy with its defaults,
+//     ForceEnableSimulation unless e01 of this Play found it not needed;
 //   - after the last FPS phase no new slot is issued and the requests in flight are drained with the camera and
 //     the bands kept (DC_ImageSlotScheduler.StopIssuing); then the probe is done;
 //   - every render frame: DC_Fiducial.Show, the scheduler, one e06a_frames.csv row and, on frames that issued a
@@ -463,6 +465,10 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		header.Insert("area.start_along_m=" + m_fStartAlongM.ToString(-1, 3));
 		header.Insert("area.ring_start_along_m=" + ringStartAlongM.ToString(-1, 3));
 		AppendMarkerLines(header);
+		m_Actuator.AppendGearboxLines(header);
+		string forceE01 = DC_ProbeSequences.ApplyPlayForceDecision(GetOwner(), m_Actuator);
+		header.Insert("drive.force_sim=" + BoolText(m_Actuator.IsSimulationForced()));
+		header.Insert("drive.force_sim_e01=" + forceE01);
 		header.Insert("capture.frames_dir=" + frameDir);
 		header.Insert("capture.request_name=f_<slot_id:08d> (no extension)");
 		if (!ctx.AppendHeaderLines(header))
@@ -470,6 +476,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 
 		m_Actuator.SetSpeedGains(m_fSpeedKp, m_fSpeedKi, m_fBrakeScale);
 		m_Actuator.StartModeA();
+		ctx.Log(m_Actuator.DescribeGearbox() + "; force_sim " + BoolText(m_Actuator.IsSimulationForced()) + " (e01 decision " + forceE01 + ")");
 		m_bRunning = true;
 		StartFpsPhase();
 
@@ -583,6 +590,15 @@ class DC_ProbeMarkers : DC_ProbeComponent
 
 		RestoreMaxFps();
 		m_Actuator.Park();
+		if (m_Ctx)
+		{
+			m_Ctx.Log(m_Actuator.DescribeDrive());
+			array<string> driveLines = {};
+			m_Actuator.AppendDriveSummaryLines(driveLines);
+			if (!m_Ctx.AppendHeaderLines(driveLines))
+				m_Ctx.Warn("could not append the gear policy / physics wake summary to run_header.txt");
+		}
+
 		ReleaseAll();
 	}
 

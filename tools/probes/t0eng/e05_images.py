@@ -16,7 +16,9 @@ r2 4.4 criterion of E-05, printed as checks:
   * saved_count_eq_files the "Screenshot saved" lines between the START and END markers of this play equal the files
   * fps_p5_ge_30        p5 of the per-frame FPS (1 / frame time slice) >= 30, segments reset and settle excluded
 and as INFO: the request->file latency distribution (in-engine done_tick_ms - issue_tick_ms), raw MB per frame, the
-engine-written name (TBD-4) and the decision for TBD-2:
+engine-written name (TBD-4), with params.drive=1 the shuttle ("drive": max veh_speed_kmh over the drive frames, the
+gearbox, ForceEnableSimulation and its e01 decision, shift-policy shifts and physics wakes from the run header) and
+the decision for TBD-2:
   DECISION image_hz=10 when missing <= 1% and latency p95 <= 100 ms, else image_hz=5 (fallback).
 
 run_footer (probe_common.Verdict.check_footer): a play that did not end normally is analysed as far as possible
@@ -134,6 +136,24 @@ def latency_text(values):
         probe_common.percentile(values, 99), max(values), len(values))
 
 
+def drive_text(header, frames):
+    """INFO drive of a shuttle play (params.drive=1): max veh_speed_kmh over the frames of segment drive, then the run
+    header's vehicle.gearbox, drive.force_sim / drive.force_sim_e01, gear_policy.shifts and physics_wake.* (the last
+    two are appended at the probe stop). None for a static capture."""
+    if header.get("params.drive") != "1":
+        return None
+    speeds = [value for row, value in zip(frames, probe_common.floats(frames, "veh_speed_kmh"))
+              if value is not None and row.get("segment") == "drive"]
+    moved = "no drive frame with veh_speed_kmh"
+    if speeds:
+        moved = "max veh_speed_kmh %.2f over %d drive frames" % (max(speeds), len(speeds))
+    return "%s; gearbox %s; force_sim %s (e01 decision %s); gear policy shifts %s; physics wake %s calls, %s with " \
+           "the body asleep before" % (
+               moved, header.get("vehicle.gearbox", "n/a"), header.get("drive.force_sim", "n/a"),
+               header.get("drive.force_sim_e01", "n/a"), header.get("gear_policy.shifts", "n/a"),
+               header.get("physics_wake.calls", "n/a"), header.get("physics_wake.asleep_before", "n/a"))
+
+
 def evaluate(play_dir, log_path=None):
     """Builds the E-05 verdict of one e05 play directory (raises probe_common.InputError on bad input)."""
     play = probe_common.Play(play_dir)
@@ -238,6 +258,9 @@ def evaluate(play_dir, log_path=None):
     else:
         verdict.info("raw_mb_per_frame", "no file")
     verdict.info("engine_suffix", ", ".join("%s (%d)" % item for item in sorted(suffixes.items())) or "none found")
+    drive = drive_text(play.header, frames)
+    if drive is not None:
+        verdict.info("drive", drive)
 
     p95 = None
     if latencies:

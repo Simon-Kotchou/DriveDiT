@@ -51,6 +51,6 @@ TBD-1 to TBD-5 block the dc-2.0 freeze; TBD-6 to TBD-9 may be settled after it (
 | TBD-4 engine-written screenshot file name | E-05 | PENDING |
 | TBD-5 steer_sign normalisation and vehicle-local axes (`local_axes`) | E-01 | PENDING |
 | TBD-6 launch id visible in Workbench Play | E-11 | PENDING |
-| TBD-7 gearbox and gear index semantics (forward indices only; reverse and neutral are not probed) | E-04, E-01 | PENDING |
+| TBD-7 gearbox and gear index semantics (run header `vehicle.gearbox`, `vehicle.gear_index_*`: derived from the gear counts with the vanilla rule, neutral = gears - forward - 1, first = gears - forward; e01 reads them back; reverse is not driven) | E-04, E-01 | S105 manual gearbox: 0 reverse, 1 neutral, 2..5 first..fourth (probe run 2: e04 counts 6 / 4, vanilla `SCR_ToggleHandbrakeAction`); readback PENDING |
 | TBD-8 render-settings dump keys | E-20 | PENDING |
 | TBD-9 road key of the in-engine road dump | E-08a | PENDING |

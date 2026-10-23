@@ -34,17 +34,21 @@
 //      only queued call (FallbackStart) is removed, so ScriptCallQueue.Dump() shows no DC_* entry afterwards.
 //
 // WRITES (all under $profile:DC_Sessions/<session_id>/, never anywhere else; dc-2.0 section 4)
-//   session.json, heartbeat.csv and session_end.json go through DC_ProbeCsv.WriteLines (DD-4-probe): every line is
-//   one FileHandle.Write whose return must equal the byte count (TBD-3), files are never rewritten in place. The
-//   stream chunks belong to the modules' DC_SessionStream writers, which the session owns (RegisterStream) so that it
-//   can still commit them on world teardown without calling another component.
+//   session.json and session_end.json are new files written by ONE FileHandle.Write each, with no final LF, so the
+//   closing brace is the last byte and a short write never leaves a file that parses. heartbeat.csv rows go through
+//   DC_ProbeCsv.WriteLines (DD-4-probe) or the handle kept open. Every Write return must equal the byte count
+//   (TBD-3); files are never rewritten in place. With the TBD-3 fallback m_bVerifyChunkLength the length of every
+//   file is also read back after each write (chunks, commit.csv, heartbeat.csv, both JSON files), and a heartbeat.csv
+//   kept open is closed and checked before session_end.json, which stays the last write. The stream chunks belong to
+//   the modules' DC_SessionStream writers, which the session owns (RegisterStream) so that it can still commit them
+//   on world teardown without calling another component.
 //
 // TBD PARAMETERS (dc-2.0 section 1; [Attribute]s with the draft default, recorded in session.json): TBD-1 k rule
-//   (computed from GetFixedTimeSlice and the decision rate), TBD-2 image rate, in-flight timeout and lead, TBD-3
-//   writer semantics (keep logs open, re-check chunk lengths), TBD-6 Workbench escape (off on DC_Arland; the probe
-//   layer alone has it on), TBD-8 render-settings modules. Facts the engine reveals at run time (step source, the
-//   screenshot name, steps without a world-time advance) are written to the extra "observed" objects of session.json
-//   and session_end.json.
+//   (computed from GetFixedTimeSlice, the decision rate and the telemetry period bound m_fTelemetryMaxPeriodS),
+//   TBD-2 image rate, in-flight timeout and lead, TBD-3 writer semantics (keep logs open, re-check file lengths),
+//   TBD-6 Workbench escape (off on DC_Arland; the probe layer alone has it on), TBD-8 render-settings modules. Facts
+//   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance) are
+//   written to the extra "observed" objects of session.json and session_end.json.
 //
 // FAULT CASES (m_sFaultCase, empty in the layer; for the acceptance runbook only, every one ends in an ERROR or a
 //   failed session): readiness_timeout, session_dir_exists, zero_ego, chunk_dir_blocked.
@@ -447,6 +451,9 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected bool m_bEscapeBindToProcessStart;
 
 	// === CLOCKS (TBD-1, TBD-2) ===
+	[Attribute("0.05", UIWidgets.Slider, "TBD-1 rule: telemetry_every_k is the largest divisor k of physics_steps_per_decision with k x GetFixedTimeSlice() <= this period [s] (+1 us), at least 1 (session.json clocks.telemetry_max_period_s)", "0.001 1 0.001", category: "Clocks")]
+	protected float m_fTelemetryMaxPeriodS;
+
 	[Attribute("10", UIWidgets.Slider, "Image slot rate [Hz] (TBD-2: 10, or the 5 Hz fallback). The HL decision rate equals it; physics_steps_per_decision and telemetry_every_k follow the TBD-1 rule", "1 30 1", category: "Clocks")]
 	protected float m_fImageHz;
 
@@ -476,7 +483,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	[Attribute("0", UIWidgets.CheckBox, "TBD-3 fallback: keep commit.csv and heartbeat.csv open for the session instead of one open-APPEND-write-close cycle per line (the e19kill e19_commit.csv pattern)", category: "Writer")]
 	protected bool m_bKeepLogsOpen;
 
-	[Attribute("0", UIWidgets.CheckBox, "TBD-3 fallback: after a chunk is closed, read its length back through a READ handle before the commit line (when E-19 shows that Write does not report short writes)", category: "Writer")]
+	[Attribute("0", UIWidgets.CheckBox, "TBD-3 fallback (when E-19 shows that Write does not report short writes): read the length of every file back after each write before its rows count as acknowledged: a chunk before its commit line, commit.csv and heartbeat.csv after each line (through the handle when kept open), session.json and session_end.json", category: "Writer")]
 	protected bool m_bVerifyChunkLength;
 
 	// === PROVENANCE (TBD-8) ===
@@ -505,8 +512,10 @@ class DC_Session : SCR_BaseGameModeComponent
 
 	//! dc-2.0 section 6 / schema: sessions are at most 30 min (the fiducial code is unique for 73 min at 60 FPS)
 	static const float MAX_SESSION_S = 1800;
-	//! TBD-1 rule: the telemetry period is at most 50 ms (+1 us)
-	static const float TELEMETRY_MAX_PERIOD_S = 0.050001;
+	//! TBD-1 rule: tolerance added to m_fTelemetryMaxPeriodS (1 us)
+	static const float TELEMETRY_PERIOD_TOL_S = 0.000001;
+	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
+	static const int TRIAL_CONF_MAX_BYTES = 4096;
 
 	static const string STEP_SIMULATE = "simulate";
 	static const string STEP_FIXEDFRAME = "fixedframe";
@@ -547,6 +556,10 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected float m_fDurationS;
 	protected int m_iTrialSeed;
 	protected bool m_bTrialImages = true;
+	protected bool m_bTrialRouteRead;			//!< the conf has a "route" (trial.conf holds only the keys present)
+	protected bool m_bTrialImagesRead;			//!< the conf has an "images"
+	protected string m_sTrialConfRaw;			//!< the conf file's text (observed.trial_conf_raw), empty when not copied
+	protected string m_sTrialConfRawNote;		//!< why it was not copied
 
 	// build and map
 	protected string m_sBuildVersion;
@@ -591,6 +604,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected int m_iDrainStartWorldMs;
 	protected int m_iNextHeartbeatMs;
 	protected int m_iHeartbeats;
+	protected int m_iHeartbeatBytes;			//!< heartbeat.csv bytes written so far (TBD-3 length check)
 	protected ref FileHandle m_HeartbeatFile;	//!< only with m_bKeepLogsOpen
 	protected int m_iEventSeq;
 	protected ref DC_ProbeRow m_EventRow = new DC_ProbeRow();
@@ -824,11 +838,17 @@ class DC_Session : SCR_BaseGameModeComponent
 
 		string route;
 		if (context.DoesKeyExist("route") && context.ReadValue("route", route))
+		{
 			m_sTrialRoute = route;
+			m_bTrialRouteRead = true;
+		}
 
 		bool images;
 		if (context.DoesKeyExist("images") && context.ReadValue("images", images))
+		{
 			m_bTrialImages = images;
+			m_bTrialImagesRead = true;
+		}
 
 		if (m_fDurationS <= 0 || m_fWarmupS < 0 || m_fWarmupS + m_fDurationS > MAX_SESSION_S)
 		{
@@ -836,8 +856,61 @@ class DC_Session : SCR_BaseGameModeComponent
 			return false;
 		}
 
+		ReadTrialConfText(confPath);
+		if (!m_sTrialConfRawNote.IsEmpty())
+			Print(LOG + "WARNING: trial conf text not copied into session.json observed.trial_conf_raw: " + m_sTrialConfRawNote, LogLevel.WARNING);
+
 		Print(string.Format(LOG + "trial %1 (%2): warm-up %3 s, duration %4 s, seed %5, route '%6', images %7", m_sTrialId, m_sTrialSource, m_fWarmupS.ToString(-1, 1), m_fDurationS.ToString(-1, 1), m_iTrialSeed, m_sTrialRoute, DC_LaunchGuard.BoolText(m_bTrialImages)), LogLevel.NORMAL);
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The conf file's text for session.json observed.trial_conf_raw (dc-2.0 10.1 asks for the conf as parsed; the 1.8
+	//! JsonLoadContext cannot list a file's keys, so trial.conf holds only the keys this component reads). Copied only
+	//! when the whole file was read back (FileHandle.Read count = GetLength), is at most TRIAL_CONF_MAX_BYTES long and
+	//! holds printable ASCII, TAB, CR and LF only (session.json stays ASCII); otherwise m_sTrialConfRawNote says why
+	protected void ReadTrialConfText(string confPath)
+	{
+		m_sTrialConfRaw = string.Empty;
+		m_sTrialConfRawNote = string.Empty;
+		FileHandle file = FileIO.OpenFile(confPath, FileMode.READ);
+		if (!file)
+		{
+			m_sTrialConfRawNote = "FileIO.OpenFile(" + confPath + ", READ) returned null";
+			return;
+		}
+
+		int length = file.GetLength();
+		string text;
+		int read = -1;
+		if (length > 0 && length <= TRIAL_CONF_MAX_BYTES)
+			read = file.Read(text, length);
+
+		file.Close();
+		if (length <= 0 || length > TRIAL_CONF_MAX_BYTES)
+		{
+			m_sTrialConfRawNote = string.Format("the conf has %1 bytes (copied when 1 to %2)", length, TRIAL_CONF_MAX_BYTES);
+			return;
+		}
+
+		if (read != length || text.Length() != length)
+		{
+			m_sTrialConfRawNote = string.Format("FileHandle.Read returned %1 bytes (%2 characters) of %3", read, text.Length(), length);
+			return;
+		}
+
+		for (int i = 0; i < length; i++)
+		{
+			int c = text.ToAscii(i);
+			bool printable = c >= 32 && c <= 126;
+			if (!printable && c != 9 && c != 10 && c != 13)	// 9 TAB, 10 LF, 13 CR
+			{
+				m_sTrialConfRawNote = string.Format("byte %1 at offset %2 is not printable ASCII", c, i);
+				return;
+			}
+		}
+
+		m_sTrialConfRaw = text;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -943,13 +1016,13 @@ class DC_Session : SCR_BaseGameModeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! TBD-1 in this order: N = floor(1 / decision_hz / slice + 0.5), then k = the largest divisor of N with
-	//! k x slice <= 50 ms (+1 us), at least 1. The decision rate is the image rate (TBD-2)
+	//! k x slice <= m_fTelemetryMaxPeriodS (draft 50 ms, +1 us), at least 1. The decision rate is the image rate (TBD-2)
 	protected bool ComputeClocks(out string failure)
 	{
 		m_fFixedTimeSliceS = GetGame().GetWorld().GetFixedTimeSlice();
-		if (m_fFixedTimeSliceS <= 0 || m_fImageHz <= 0)
+		if (m_fFixedTimeSliceS <= 0 || m_fImageHz <= 0 || m_fTelemetryMaxPeriodS <= 0)
 		{
-			failure = string.Format("fixed time slice %1 s, image rate %2 Hz", m_fFixedTimeSliceS, m_fImageHz);
+			failure = string.Format("fixed time slice %1 s, image rate %2 Hz, telemetry period bound %3 s", m_fFixedTimeSliceS, m_fImageHz, m_fTelemetryMaxPeriodS);
 			return false;
 		}
 
@@ -957,14 +1030,15 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (m_iStepsPerDecision < 1)
 			m_iStepsPerDecision = 1;
 
+		float maxPeriodS = m_fTelemetryMaxPeriodS + TELEMETRY_PERIOD_TOL_S;
 		m_iTelemetryEveryK = 1;
 		for (int divisor = 1; divisor <= m_iStepsPerDecision; divisor++)
 		{
-			if (m_iStepsPerDecision % divisor == 0 && divisor * m_fFixedTimeSliceS <= TELEMETRY_MAX_PERIOD_S)
+			if (m_iStepsPerDecision % divisor == 0 && divisor * m_fFixedTimeSliceS <= maxPeriodS)
 				m_iTelemetryEveryK = divisor;
 		}
 
-		Print(string.Format(LOG + "clocks: slice %1 s, decisions and images at %2 Hz, N=%3 steps per decision, telemetry every k=%4 steps", m_fFixedTimeSliceS.ToString(-1, 6), m_fImageHz.ToString(-1, 1), m_iStepsPerDecision, m_iTelemetryEveryK), LogLevel.NORMAL);
+		Print(string.Format(LOG + "clocks: slice %1 s, decisions and images at %2 Hz, N=%3 steps per decision, telemetry every k=%4 steps (k x slice <= %5 s)", m_fFixedTimeSliceS.ToString(-1, 6), m_fImageHz.ToString(-1, 1), m_iStepsPerDecision, m_iTelemetryEveryK, m_fTelemetryMaxPeriodS.ToString(-1, 6)), LogLevel.NORMAL);
 		return true;
 	}
 
@@ -1229,13 +1303,18 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.BeginObject("trial");
 		json.AddString("trial_id", m_sTrialId);
 		json.AddString("source", m_sTrialSource);
+		// The keys present in the conf as parsed (observed.trial_conf_raw holds the file's text)
 		json.BeginObject("conf");
 		json.AddString("trial_id", m_sTrialId);
-		json.AddFloat("duration_s", m_fDurationS, 3);
-		json.AddFloat("warmup_s", m_fWarmupS, 3);
+		json.AddFloat("duration_s", m_fDurationS, 6);
+		json.AddFloat("warmup_s", m_fWarmupS, 6);
 		json.AddInt("seed", m_iTrialSeed);
-		json.AddString("route", m_sTrialRoute);
-		json.AddBool("images", m_bTrialImages);
+		if (m_bTrialRouteRead)
+			json.AddString("route", m_sTrialRoute);
+
+		if (m_bTrialImagesRead)
+			json.AddBool("images", m_bTrialImages);
+
 		json.EndObject();
 		json.AddInt("seed", m_iTrialSeed);
 		json.AddFloat("warmup_s", m_fWarmupS, 3);
@@ -1310,6 +1389,7 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.BeginObject("clocks");
 		json.AddInt("telemetry_every_k", m_iTelemetryEveryK);
 		json.AddInt("physics_steps_per_decision", m_iStepsPerDecision);
+		json.AddFloat("telemetry_max_period_s", m_fTelemetryMaxPeriodS, 6);
 		json.AddFloat("decision_hz", m_fImageHz, 3);
 		json.AddFloat("image_hz", m_fImageHz, 3);
 		json.AddInt("img_inflight_timeout_ms", m_iImgInflightTimeoutMs);
@@ -1357,15 +1437,68 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.AddBool("keep_logs_open", m_bKeepLogsOpen);
 		json.AddBool("verify_chunk_length", m_bVerifyChunkLength);
 		json.AddString("fault_case", m_sFaultCase);
+		json.AddStringOrNull("trial_conf_raw", m_sTrialConfRaw);
+		json.AddStringOrNull("trial_conf_raw_note", m_sTrialConfRawNote);
 		json.EndObject();
 
 		json.EndObject();
 
 		string failure;
-		if (DC_ProbeCsv.WriteLines(m_sSessionDir + "/" + SESSION_JSON, json.GetLines(), false, failure))
+		if (WriteJsonFile(SESSION_JSON, json.GetLines(), failure))
 			return true;
 
 		FailWrite("session.json: " + failure);
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A new JSON file of the session (an existing one is refused) written by ONE FileHandle.Write: the lines joined
+	//! with LF and no final LF, so the closing brace is the last byte and any short write leaves text that does not
+	//! parse. With the TBD-3 fallback the closed file's length is read back too.
+	//! \param[out] failure one line, empty on success
+	protected bool WriteJsonFile(string name, notnull array<string> lines, out string failure)
+	{
+		failure = string.Empty;
+		string path = m_sSessionDir + "/" + name;
+		if (FileIO.FileExists(path))
+		{
+			failure = "refusing to overwrite the existing file " + path;
+			return false;
+		}
+
+		string text;
+		for (int i = 0, count = lines.Count(); i < count; i++)
+		{
+			if (i > 0)
+				text += "\n";
+
+			text += lines[i];
+		}
+
+		FileHandle file = FileIO.OpenFile(path, FileMode.WRITE);
+		if (!file)
+		{
+			failure = "FileIO.OpenFile(" + path + ", WRITE) returned null";
+			return false;
+		}
+
+		int expected = text.Length();
+		int written = file.Write(text);
+		file.Close();
+		if (written != expected)
+		{
+			failure = string.Format("short or failed write of %1: FileHandle.Write returned %2 of %3 bytes", path, written, expected);
+			return false;
+		}
+
+		if (!m_bVerifyChunkLength)
+			return true;
+
+		int lengthClosed = ReadFileLength(path);
+		if (lengthClosed == expected)
+			return true;
+
+		failure = string.Format("%1 has %2 bytes after the close, %3 were written (TBD-3 length check)", path, lengthClosed, expected);
 		return false;
 	}
 
@@ -1502,11 +1635,14 @@ class DC_Session : SCR_BaseGameModeComponent
 		string failure;
 		if (!m_bKeepLogsOpen)
 		{
-			if (DC_ProbeCsv.WriteLines(path, header, false, failure))
-				return true;
+			if (!DC_ProbeCsv.WriteLines(path, header, false, failure))
+			{
+				FailWrite("heartbeat.csv: " + failure);
+				return false;
+			}
 
-			FailWrite("heartbeat.csv: " + failure);
-			return false;
+			m_iHeartbeatBytes = HEARTBEAT_HEADER.Length() + 1;
+			return VerifyHeartbeatLength();
 		}
 
 		m_HeartbeatFile = FileIO.OpenFile(path, FileMode.WRITE);
@@ -1521,7 +1657,7 @@ class DC_Session : SCR_BaseGameModeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! One heartbeat row (dc-2.0 section 8): appended by one open-APPEND-write-close cycle, or through the handle kept
-	//! open (TBD-3 fallback). Then the DC_STOP check
+	//! open (TBD-3 fallback); counted once written (and, with the TBD-3 length check, read back). Then the DC_STOP check
 	protected void WriteHeartbeat(int worldMs)
 	{
 		int unixTime = System.GetUnixTime();
@@ -1539,7 +1675,14 @@ class DC_Session : SCR_BaseGameModeComponent
 			string failure;
 			written = DC_ProbeCsv.WriteLines(m_sSessionDir + "/" + HEARTBEAT_CSV, lines, true, failure);
 			if (!written)
+			{
 				FailWrite("heartbeat.csv: " + failure);
+			}
+			else
+			{
+				m_iHeartbeatBytes += line.Length() + 1;
+				written = VerifyHeartbeatLength();
+			}
 		}
 
 		if (written)
@@ -1558,11 +1701,73 @@ class DC_Session : SCR_BaseGameModeComponent
 		string data = line + "\n";
 		int expected = data.Length();
 		int written = m_HeartbeatFile.Write(data);
-		if (written == expected)
+		if (written != expected)
+		{
+			FailWrite(string.Format("heartbeat.csv: short or failed write: FileHandle.Write returned %1 of %2 bytes", written, expected));
+			return false;
+		}
+
+		m_iHeartbeatBytes += expected;
+		return VerifyHeartbeatLength();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! TBD-3 fallback (m_bVerifyChunkLength): heartbeat.csv must hold exactly the bytes written so far, read back through
+	//! the handle kept open (its GetLength; E-19 c03 records what it reports) or a READ handle on the closed file
+	protected bool VerifyHeartbeatLength()
+	{
+		if (!m_bVerifyChunkLength)
 			return true;
 
-		FailWrite(string.Format("heartbeat.csv: short or failed write: FileHandle.Write returned %1 of %2 bytes", written, expected));
+		int length;
+		if (m_HeartbeatFile)
+			length = m_HeartbeatFile.GetLength();
+		else
+			length = ReadFileLength(m_sSessionDir + "/" + HEARTBEAT_CSV);
+
+		if (length == m_iHeartbeatBytes)
+			return true;
+
+		FailWrite(string.Format("heartbeat.csv: %1 bytes on disk, %2 were written (TBD-3 length check)", length, m_iHeartbeatBytes));
 		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Closes a heartbeat.csv kept open, before session_end.json (which stays the last write); with the TBD-3 fallback
+	//! its closed length is read back, and a difference is a write failure of the seal
+	protected void CloseHeartbeat()
+	{
+		if (!m_HeartbeatFile)
+			return;
+
+		m_HeartbeatFile.Close();
+		m_HeartbeatFile = null;
+		if (!m_bVerifyChunkLength || m_bWriteFailed)
+			return;
+
+		int length = ReadFileLength(m_sSessionDir + "/" + HEARTBEAT_CSV);
+		if (length == m_iHeartbeatBytes)
+			return;
+
+		m_bWriteFailed = true;
+		string detail = string.Format("heartbeat.csv: %1 bytes after the close, %2 were written (TBD-3 length check)", length, m_iHeartbeatBytes);
+		if (m_sFailureDetail.IsEmpty())
+			m_sFailureDetail = detail;
+
+		Print(LOG + "ERROR: write_fail at the seal: " + detail, LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Length of a closed file read back through a READ handle (TBD-3 fallback check), -1 when it cannot be opened
+	static int ReadFileLength(string path)
+	{
+		FileHandle file = FileIO.OpenFile(path, FileMode.READ);
+		if (!file)
+			return -1;
+
+		int length = file.GetLength();
+		file.Close();
+		return length;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1854,6 +2059,8 @@ class DC_Session : SCR_BaseGameModeComponent
 			CloseStreams(endReason);
 		}
 
+		// session_end.json is the last write: a heartbeat.csv kept open is closed (and checked) before it
+		CloseHeartbeat();
 		if (m_bWriteFailed)
 			endReason = END_WRITE_FAIL;
 
@@ -1862,12 +2069,6 @@ class DC_Session : SCR_BaseGameModeComponent
 			status = "failed";
 
 		bool endWritten = WriteSessionEnd(status, endReason);
-		if (m_HeartbeatFile)
-		{
-			m_HeartbeatFile.Close();
-			m_HeartbeatFile = null;
-		}
-
 		string line = string.Format(LOG + "END session %1 status=%2 end_reason=%3 physics_steps=%4 frames=%5 heartbeats=%6 images issued %7 ok %8 failed %9", m_sSessionId, status, endReason, m_iLastPostStep + 1, m_iFrameCount, m_iHeartbeats, m_iImagesIssued, m_iImagesOk, m_iImagesFailed);
 		if (!m_sFailureDetail.IsEmpty())
 			line += " (" + m_sFailureDetail + ")";
@@ -1945,7 +2146,8 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! session_end.json (dc-2.0 section 10.2), written last. \return false when it could not be written
+	//! session_end.json (dc-2.0 section 10.2), written last by one Write that ends with the closing brace (a short write
+	//! leaves no parseable seal). \return false when it could not be written
 	protected bool WriteSessionEnd(string status, string endReason)
 	{
 		DC_JsonWriter json = new DC_JsonWriter();
@@ -2019,7 +2221,7 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.EndObject();
 
 		string failure;
-		if (DC_ProbeCsv.WriteLines(m_sSessionDir + "/" + SESSION_END_JSON, json.GetLines(), false, failure))
+		if (WriteJsonFile(SESSION_END_JSON, json.GetLines(), failure))
 			return true;
 
 		Print(LOG + "ERROR: session_end.json: " + failure, LogLevel.ERROR);
@@ -2057,8 +2259,9 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Modules released (not on world teardown: no other component is called during deletion, each module drops its
-	//! references in its own OnDelete), event mask cleared, FallbackStart removed. Idempotent
+	//! Modules released (not on world teardown: no other component is called during deletion, so a module keeps what
+	//! it holds, e.g. the fiducial widgets; a normal Play stop releases them through OnGameEnd before the deletion),
+	//! event mask cleared, FallbackStart removed. Idempotent
 	protected void Release(bool teardown)
 	{
 		if (!teardown)

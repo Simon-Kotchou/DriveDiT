@@ -10,7 +10,9 @@
 // PER PHYSICS STEP P (docs/capture_contract/dc-2.0.md section 6, the R-01 decision boundary; no CallLater clock)
 //   OnStepPre (EOnSimulate): a decision taken at P - 1 becomes the held command (hl_seq + 1, so hl_seq changes only
 //     at P mod N == 1); inside an episode with a held command the driver's ApplyStep runs (llc_v1 calls the setters
-//     through the DC_Actuator); then input_pre_* is read back through the actuator.
+//     through the DC_Actuator); every other step (warm-up, the null driver, the first window of an episode, between
+//     episodes) re-applies the actuator's Park(), so Mode A calls the setters on every step (llc_* stay empty: the
+//     park is the core's, not llc_v1's); then input_pre_* is read back through the actuator.
 //   OnStepPost (EOnPostSimulate): input_post_* read back; inside an episode the driver's PostStep re-evaluates the
 //     expert on the state after P (exp_*_now, lane errors, route progress, termination); the ctl row of P is
 //     buffered, then the telemetry row when P mod k == 0.
@@ -49,7 +51,8 @@
 //   streams.
 //
 // Failure handling: a failed write reports DC_Session.FailWrite (script_error:write_fail); a missing ego simulation
-// in a step fails the session with ego_lost; an invalid driver output fails it with script_error:other.
+// in a step fails the session with ego_lost (zero_ego before the first ctl row); an invalid driver output fails it
+// with script_error:other.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -210,7 +213,8 @@ class DC_Actuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Brake 1, handbrake, throttle 0, steering 0, applied at once
+	//! Brake 1, handbrake, throttle 0, steering 0, applied at once. The core calls it on every physics step without a
+	//! held command and on every readiness poll of the settle (Mode A: setters every step)
 	void Park()
 	{
 	}
@@ -682,6 +686,7 @@ class DC_StreamRecorder : DC_SessionModule
 	protected TimeAndWeatherManagerEntity m_Weather;
 	protected RoadNetworkManager m_Roads;
 	protected string m_sEndReason = "refused";
+	protected bool m_bCtlRowWritten;			//!< the first ctl row is buffered (an ego lost before it is zero_ego)
 
 	// HL command state
 	protected ref DC_HLCommand m_Held = new DC_HLCommand();
@@ -836,7 +841,9 @@ class DC_StreamRecorder : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! A decision of the previous step becomes the held command; the driver applies it; input_pre_* read back
+	//! A decision of the previous step becomes the held command; the driver applies it, else the park is applied again
+	//! (Mode A: setters every step, as DD-4-probe's DC_ProbeActuator latches and re-applies its command); input_pre_*
+	//! read back
 	override void OnStepPre(int physicsStep, float timeSlice)
 	{
 		if (m_Session.GetEpisodeId() < 0)
@@ -856,6 +863,8 @@ class DC_StreamRecorder : DC_SessionModule
 		DC_DriverInterface driver = GetDriver();
 		if (m_bHasHeld && driver)
 			driver.ApplyStep(physicsStep, timeSlice, m_Held, m_Llc);
+		else if (m_Actuator)
+			m_Actuator.Park();
 
 		if (m_Actuator)
 			m_Actuator.ReadInputs(m_Pre);
@@ -872,7 +881,11 @@ class DC_StreamRecorder : DC_SessionModule
 
 		if (!ego || !simulation)
 		{
-			m_Session.Fail(DC_Session.END_EGO_LOST, string.Format("no ego simulation in physics step %1", physicsStep));
+			string lostReason = DC_Session.END_EGO_LOST;
+			if (!m_bCtlRowWritten)
+				lostReason = DC_Session.END_ZERO_EGO;
+
+			m_Session.Fail(lostReason, string.Format("no ego simulation in physics step %1", physicsStep));
 			return;
 		}
 
@@ -1094,7 +1107,12 @@ class DC_StreamRecorder : DC_SessionModule
 		m_Row.AddBool(false);		// noise_active (no N mode in T0-MIN)
 		m_Row.AddInt(-1);			// noise_id
 		AddEmpty(5);				// steer_signal_raw, wheel angles, react_*: reserved
-		if (m_Ctl && !m_Ctl.AddRow(m_Row, physicsStep, worldMs))
+		if (!m_Ctl)
+			return;
+
+		if (m_Ctl.AddRow(m_Row, physicsStep, worldMs))
+			m_bCtlRowWritten = true;
+		else
 			m_Session.FailWrite("ctl: " + m_Ctl.GetFailure());
 	}
 
@@ -1323,6 +1341,13 @@ class DC_StreamRecorder : DC_SessionModule
 		m_EpisodeInfo = null;
 		m_bHasPending = false;
 		m_sTermination = string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once the first ctl row was buffered: an ego lost before it ends the session zero_ego (dc-2.0 5.3)
+	bool HasCtlRow()
+	{
+		return m_bCtlRowWritten;
 	}
 
 	//------------------------------------------------------------------------------------------------

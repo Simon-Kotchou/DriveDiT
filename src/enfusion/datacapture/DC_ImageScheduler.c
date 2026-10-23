@@ -12,8 +12,10 @@
 //     an ego or camera loss ends the session instead of skipping slots). A slot is handled in the first frame whose
 //     world time is at or past its due time: issued when no request is in flight (System.MakeScreenshot with the
 //     extension-less path frames/f_<slot:08d>; a false return is make_failed, its issue fields kept), else
-//     skipped_busy. One frame that spans several grid points issues the first and skips the others. There is no
-//     fallback writer and no other file name;
+//     skipped_busy. One frame that spans several grid points issues the first and skips the others: MakeScreenshot is
+//     called at most once per frame, so issue_render_frame strictly increases, and a grid point due in the same frame
+//     after a make_failed is skipped_busy too although nothing is in flight (dc-2.0 9.4 names only the in-flight case:
+//     a freeze item). There is no fallback writer and no other file name;
 //   - COMPLETION: the request in flight is resolved when one of the TBD-4 candidate files exists (as DD-4-probe's
 //     DC_ImageSlotScheduler: .png, .bmp.png, .bmp, .jpg, the bare path; the suffix seen is counted in
 //     session_end observed.screenshot_suffix_counts) -> heartbeat img_ok; after clocks.img_inflight_timeout_ms of

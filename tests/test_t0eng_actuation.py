@@ -334,6 +334,27 @@ def run_tool(argv):
     return code, out.getvalue()
 
 
+def append_kv(path, mapping):
+    """Appends key=value lines (the readers take the last value of a key, as for DC_ProbeContext.AppendHeaderLines)."""
+    with open(path, "a", encoding="ascii", newline="") as handle:
+        handle.write("".join("%s=%s\n" % item for item in mapping.items()))
+
+
+def shift_rows(dt, merged_step, change_steps, count=600, kmh=30.0):
+    """gear_observe excite rows at constant speed; the row of merged_step covers 3 fixed steps (timeslice 3 x dt,
+    world time 3 x dt later) as in the runner's fixedframe fallback; cur_gear rises by one at every change step."""
+    rows, world_s, gear = [], 0.0, 1
+    for step in range(1, count + 1):
+        slice_s = 3 * dt if step == merged_step else dt
+        world_s += slice_s
+        if step in change_steps:
+            gear += 1
+        rows.append({"physics_step": str(step), "world_time_ms": "%.3f" % (world_s * 1000.0),
+                     "timeslice_s": "%.6f" % slice_s, "phase": "gear_observe", "segment": "excite",
+                     "heading_deg": "0.00000", "cur_gear": str(gear), "speed_kmh": "%.3f" % kmh})
+    return rows
+
+
 class ActuationTests(unittest.TestCase):
     def setUp(self):
         self.base = probe_common.make_temp_dir("t0eng_actuation_")
@@ -427,6 +448,54 @@ class ActuationTests(unittest.TestCase):
     def test_missing_play_is_input_error(self):
         code, _ = run_tool(["e01", os.path.join(self.base, "no_such_play")])
         self.assertEqual(code, 2)
+
+    def test_e01_merged_fixed_steps_are_info(self):
+        play = os.path.join(self.base, "e01_merged")
+        build_e01(play)
+        append_kv(os.path.join(play, "run_header.txt"),
+                  {"clock.start_engine_fixed_steps": "1000", "clock.start_merged_fixed_steps": "2"})
+        append_kv(os.path.join(play, "run_footer.txt"),
+                  {"clock.engine_fixed_steps": "11000", "clock.merged_fixed_steps": "152"})
+        code, text = run_tool(["e01", play])
+        self.assertEqual(code, 0, text)
+        self.assertIn("[INFO] merged_fixed_steps: 150 of 10000 engine fixed steps during the probe were merged into a "
+                      "fallback call (1.50%); above 1%: the step-based timing results need review", text)
+
+    def test_e02a_merged_fixed_steps_below_the_limit(self):
+        play = os.path.join(self.base, "e02a_merged")
+        build_e02a(play)
+        append_kv(os.path.join(play, "run_header.txt"),
+                  {"clock.start_engine_fixed_steps": "5000", "clock.start_merged_fixed_steps": "7"})
+        append_kv(os.path.join(play, "run_footer.txt"),
+                  {"clock.engine_fixed_steps": "15000", "clock.merged_fixed_steps": "12"})
+        code, text = run_tool(["e02a", play])
+        self.assertEqual(code, 0, text)
+        self.assertIn("[INFO] merged_fixed_steps: 5 of 10000 engine fixed steps during the probe were merged into a "
+                      "fallback call (0.05%)", text)
+        self.assertNotIn("need review", text)
+
+    def test_e01_without_clock_keys_has_no_merged_info(self):
+        play = os.path.join(self.base, "e01_noclock")
+        build_e01(play)
+        code, text = run_tool(["e01", play])
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("merged_fixed_steps", text)
+
+    def test_shift_loops_use_world_time_on_a_merged_step(self):
+        # Stall-fix review R-2: physics_step x timeslice_s put the merged row (timeslice 3 x dt) at 30 s and accepted
+        # the negative differences to the later changes, so these three changes 3.3 s apart counted as one shift loop
+        dt = 1.0 / 30.0
+        rows = shift_rows(dt, merged_step=300, change_steps=(300, 400, 500))
+        self.assertEqual(e01.count_shift_loops(e01.Steps(rows)), 0)
+        for row in rows:
+            del row["world_time_ms"]
+        self.assertEqual(e01.count_shift_loops(e01.Steps(rows)), 0, "running sum of timeslice_s")
+        # control: three changes within 2 s at constant speed, one of them on a merged row, are one loop
+        rows = shift_rows(dt, merged_step=300, change_steps=(290, 300, 320))
+        self.assertEqual(e01.count_shift_loops(e01.Steps(rows)), 1)
+        for row in rows:
+            del row["world_time_ms"]
+        self.assertEqual(e01.count_shift_loops(e01.Steps(rows)), 1, "running sum of timeslice_s")
 
     def test_prbs_matches_dc_probe_prbs(self):
         for order in range(5, 11):

@@ -6,6 +6,9 @@
 #           deployed to the same path relative to the addon root
 #   script  an Enforce script at the top level of src/enfusion/datacapture/,
 #           deployed to Scripts/Game/DataCapture/
+#   config  a .json file under addons/DataCapture/Configs/ (deployed to the same path, e.g. Configs/routes/), or a
+#           vehicle card tools/ident/cards/<pin_id>/<id>.json (deployed to Configs/ident/cards/<pin_id>/<id>.json);
+#           copied byte for byte (llc_v1 and the expert hash what they load)
 #
 # The tool refuses these even if they are listed here:
 #   - core/, modules/ and every other subfolder of src/enfusion/datacapture/
@@ -47,3 +50,12 @@ script src/enfusion/datacapture/DC_VehicleRegistry.c
 script src/enfusion/datacapture/DC_EgoSession.c
 script src/enfusion/datacapture/DC_HfRecorder.c
 script src/enfusion/datacapture/DC_ImageScheduler.c
+
+# The dc-2.0 driver (DD-7-min): llc_v1, the minimal expert with its driver component DC_ExpertDriver, and the T0 loop
+# route (Arland TRAIN).
+script src/enfusion/datacapture/DC_LLCv1.c
+script src/enfusion/datacapture/DC_ExpertHL.c
+config addons/DataCapture/Configs/routes/arland_t0_loop.json
+# The vehicle card llc_v1 loads for the session's pin (Configs/ident/cards/<pin_id>/S105.json). PLACEHOLDER until the
+# E-01 / E-02a fit (qualification use only); DC_ExpertDriver is attached to GameMode_DataCapture on DC_Arland with it.
+config tools/ident/cards/1.8.0.13/S105.json

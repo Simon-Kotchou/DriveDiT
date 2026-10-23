@@ -1,0 +1,95 @@
+{
+  "schema": "drivedit.vehicle_card/1",
+  "card_id": "S105",
+  "vehicle": "S105",
+  "prefab": "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et",
+  "status": "placeholder",
+  "pin_id": "1.8.0.13",
+  "build_key": null,
+  "identification_sessions": [],
+  "use": "PLACEHOLDER: qualification only. llc_v1 accepts it at use_class dev or probe and refuses it at any other use_class, production included",
+  "note": "PLACEHOLDER card (DD-7-min): no E-01 / E-02a play exists yet (the user's probe Plays are pending). Signs are the TBD-5 draft defaults, kappa_ss is guessed, the actuator is unidentified. Replace it with fit_steer_kappa.py --e01 --e02a once the plays exist; data driven with it is qualification-only.",
+  "generator": {
+    "tool": "tools/ident/fit_steer_kappa.py",
+    "version": 1
+  },
+  "signs": {
+    "steer_sign": -1,
+    "yaw_axis_sign": 1,
+    "measured": false,
+    "detail": "dc-2.0 TBD-5 draft: CarSteering +1 = left (steer_sign -1); +angvel_local_y clockwise"
+  },
+  "gear_indices_forward": [],
+  "gear_index_neutral": null,
+  "gear_index_reverse": null,
+  "gearbox": {
+    "mode": "automatic",
+    "basis": "dc-2.0 TBD-7 draft (HasAutomaticGearbox, driverless); E-04 / E-01 decide",
+    "has_automatic_gearbox": null,
+    "scripted_gears": [],
+    "upshift_mps": [],
+    "downshift_mps": [],
+    "clutch_dip_s": 0.0
+  },
+  "kappa_ss": {
+    "speeds_mps": [
+      4.17,
+      8.33,
+      13.89
+    ],
+    "kappa_per_steer": [
+      0.2,
+      0.12,
+      0.07
+    ],
+    "kappa_offset": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "basis": "GUESSED (E-02a grid speeds 15 / 30 / 50 km/h); not a fit",
+    "fits": [],
+    "cells": []
+  },
+  "actuator": {
+    "raw_engine_path": {
+      "input_echo": null,
+      "input_shaping": "unknown",
+      "steer_rate_limit_per_s": null,
+      "input_lag_tau_s": null,
+      "input_max_slope_per_s": null,
+      "shaping_fit": null,
+      "selected_structure": null,
+      "dead_time_steps": null,
+      "bins": []
+    },
+    "full_llc_path": {
+      "structure": null,
+      "bins": [],
+      "note": "kappa target -> kappa realised needs llc_v1 sessions (CC-08, DD-7-ident)"
+    }
+  },
+  "longitudinal": null,
+  "llc_v1": {
+    "steer_max": 1.0,
+    "steer_rate_per_s": 0.0,
+    "steer_lag_tau_s": 0.03,
+    "kappa_trim_gain": 0.0,
+    "kappa_trim_max": 0.1,
+    "trim_min_speed_mps": 3.0,
+    "speed_kp": 0.8,
+    "speed_ki": 0.2,
+    "speed_window_mps": 2.0,
+    "integral_max_mps2": 1.5,
+    "throttle_per_mps2": 0.35,
+    "brake_per_mps2": 0.15,
+    "throttle_max": 0.8,
+    "coast_band_mps2": 0.05,
+    "brake_hold": 0.6,
+    "stop_speed_mps": 0.3
+  },
+  "mode_a": {
+    "force_enable_simulation": null
+  },
+  "fit": null
+}

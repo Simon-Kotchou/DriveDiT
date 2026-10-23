@@ -9,6 +9,11 @@ What it copies (nothing else, ever):
   * the files listed in addons/DataCapture/deploy_manifest.txt:
       addon  <path under addons/DataCapture/>         -> <target>/<same relative path>
       script src/enfusion/datacapture/<Name>.c        -> <target>/Scripts/Game/DataCapture/<Name>.c
+      config addons/DataCapture/Configs/<path>.json   -> <target>/Configs/<path>.json (routes, DD-7-min)
+      config tools/ident/cards/<pin_id>/<id>.json     -> <target>/Configs/ident/cards/<pin_id>/<id>.json (vehicle
+                                                         cards: the repo keeps them where the DD-5-min reader looks)
+    Config files are copied byte for byte, so the sha256 llc_v1 and the expert compute in the engine is the
+    repo file's; a config path naming eden or everon (the sealed test map) is refused.
   * a generated build stamp <target>/Scripts/Game/DataCapture/DC_BuildInfo.c (git sha, branch, dirty flag,
     deploy UTC time, manifest hash, content hash), because Enforce Script cannot run git;
   * with --emcp-handlers DIR, the EMCP_WB_*.c files found directly in DIR
@@ -59,6 +64,13 @@ DEFAULT_MANIFEST = os.path.join(REPO_ROOT, "addons", "DataCapture", "deploy_mani
 
 ADDON_SRC_DIR = "addons/DataCapture/"
 SCRIPT_SRC_DIR = "src/enfusion/datacapture/"
+# config sources -> deployed folder (DD-7-min): routes under the addon's Configs/, vehicle cards from tools/ident/cards/
+CONFIG_ROOTS = (("addons/DataCapture/Configs/", "Configs/"), ("tools/ident/cards/", "Configs/ident/cards/"))
+CONFIG_EXT = ".json"
+CONFIG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Everon is the sealed zero-shot test map: no config naming it (or its terrain, eden) is ever deployed (the rule of
+# make_t0_loop.py and fit_steer_kappa.py; DC_ExpertDriver refuses such a route id before reading it)
+CONFIG_SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
 SCRIPT_DST_DIR = "Scripts/Game/DataCapture"
 EMCP_DST_DIR = "Scripts/WorkbenchGame/EnfusionMCP"
 BUILDINFO_DST = SCRIPT_DST_DIR + "/DC_BuildInfo.c"
@@ -96,6 +108,8 @@ DENIED_SCRIPTS_LOWER = {name.lower(): reason for name, reason in DENIED_SCRIPTS.
 
 GROUP_ADDON = "addon"
 GROUP_SCRIPT = "script"
+GROUP_CONFIG = "config"
+VERSIONED_GROUPS = (GROUP_ADDON, GROUP_SCRIPT, GROUP_CONFIG)
 GROUP_BUILDINFO = "buildinfo"
 GROUP_EMCP = "emcp"
 
@@ -210,7 +224,19 @@ def manifest_entry(kind, src_rel):
         if not name or "/" in name or not SCRIPT_NAME_RE.match(name):
             raise Refusal("%s: 'script' entries must be %s<Name>.c (top level only)" % (src_rel, SCRIPT_SRC_DIR))
         return GROUP_SCRIPT, SCRIPT_DST_DIR + "/" + name
-    raise Refusal("unknown manifest kind %r for %s (expected 'addon' or 'script')" % (kind, src_rel))
+    if kind == GROUP_CONFIG:
+        if not src_rel.endswith(CONFIG_EXT):
+            raise Refusal("%s: 'config' entries are %s files" % (src_rel, CONFIG_EXT))
+        if CONFIG_SEALED_RE.search(src_rel):
+            raise Refusal("%s names the sealed test map (eden / everon); Everon configs are never deployed" % src_rel)
+        for src_root, dst_root in CONFIG_ROOTS:
+            if src_rel.startswith(src_root):
+                rest = src_rel[len(src_root):]
+                if not all(CONFIG_NAME_RE.match(part) for part in rest.split("/")):
+                    raise Refusal("%s: config path parts must be [A-Za-z0-9._-]" % src_rel)
+                return GROUP_CONFIG, dst_root + rest
+        raise Refusal("%s: 'config' entries must live under %s" % (src_rel, " or ".join(r for r, _ in CONFIG_ROOTS)))
+    raise Refusal("unknown manifest kind %r for %s (expected 'addon', 'script' or 'config')" % (kind, src_rel))
 
 
 def read_manifest(path, refusals):
@@ -547,7 +573,7 @@ def main(argv=None):
         refusals.append("the target was deployed for addon GUID %s, but the manifest's addon.gproj has GUID %s; "
                         "refusing to mix two addons in one folder" % (state["addon_guid"], manifest_guid))
 
-    repo_sources = [it["src_rel"] for it in items if it["group"] in (GROUP_ADDON, GROUP_SCRIPT)]
+    repo_sources = [it["src_rel"] for it in items if it["group"] in VERSIONED_GROUPS]
     if inside(manifest_path, REPO_ROOT):
         repo_sources.append(os.path.relpath(manifest_path, REPO_ROOT).replace(os.sep, "/"))
     sha, branch, dirty = git_info(repo_sources) if repo_sources else ("", "", True)
@@ -564,9 +590,9 @@ def main(argv=None):
             payload[it["dst"]] = f.read()
 
     versioned = {rel: meta["sha256"] for rel, meta in old_files.items()
-                 if meta.get("group") in (GROUP_ADDON, GROUP_SCRIPT)} if partial else {}
+                 if meta.get("group") in VERSIONED_GROUPS} if partial else {}
     for it in items:
-        if it["group"] in (GROUP_ADDON, GROUP_SCRIPT):
+        if it["group"] in VERSIONED_GROUPS:
             versioned[it["dst"]] = sha256_bytes(payload[it["dst"]])
     content_sha, content_count = content_hash(versioned)
     addon_id, addon_guid = gproj_identity([it for it in all_items if it["group"] == GROUP_ADDON])
@@ -605,7 +631,7 @@ def main(argv=None):
                             "overwrite it. Inspect it, then rerun with --force to back it up and replace it" % (dst, why))
 
     if not partial:
-        active = {GROUP_ADDON, GROUP_SCRIPT, GROUP_BUILDINFO}
+        active = set(VERSIONED_GROUPS) | {GROUP_BUILDINFO}
         if args.emcp_handlers:
             active.add(GROUP_EMCP)
         planned = {dst for _, _, dst in plan}

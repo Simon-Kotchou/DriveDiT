@@ -11,8 +11,14 @@
 //   - registers it in the slot registry (DC_VehicleRegistry: slot id + IEntity.GetID() token; the ego slot is fixed
 //     for the whole session and every episode);
 //   - Mode A as in DD-4-probe: DC_ActuatorModeA (persistent handbrake off, engine started), parked (brake 1 and
-//     handbrake) and parked again on every readiness poll of the settle, handed to DC_StreamRecorder (the one
-//     actuation path, r3 P1), which re-applies the park on every physics step without a held command;
+//     handbrake, plus neutral on a manual gearbox: the S105's is manual, T0-ENG run 2) and parked again on every
+//     readiness poll of the settle, handed to DC_StreamRecorder (the one actuation path, r3 P1), which re-applies the
+//     park on every physics step without a held command; the driver selects the forward gear and the actuator wakes
+//     the body at drive start (DC_StreamRecorder.c, DC_ACTUATOR);
+//   - session.json observed.ego_gearbox* / ego_gear_index_* / ego_park_gear / ego_gear_at_open: the gearbox kind
+//     (HasAutomaticGearbox), its counts and the vanilla gear indices (neutral, first, top); session_end.json
+//     observed.ego_*: the drive-start and sleep wakes, the persistent handbrake resets and the driving steps on a
+//     manual gearbox without a gear;
 //   - ready after m_fSettleS of world time with the ego alive and slower than m_fSettleMaxKmh. A spawn failure or an
 //     ego lost during the settle refuses readiness; DC_Session's timeout refuses it too (ERROR, no directory).
 //
@@ -158,6 +164,7 @@ class DC_EgoSession : DC_SessionModule
 		m_fSpawnWorldMs = GetGame().GetWorld().GetWorldTime();
 
 		Print(string.Format(LOG + "ego %1 spawned at %2 heading %3 deg (pose from %4): slot %5, entity %6; settling %7 s", m_sPrefab, DC_RigR1.FormatVector(m_Ego.GetOrigin(), 2), headingDeg.ToString(-1, 2), poseSource, m_iSlotId, m_Registry.GetEntityId(m_iSlotId), m_fSettleS.ToString(-1, 1)), LogLevel.NORMAL);
+		Print(string.Format(LOG + "gearbox %1: %2 gears, %3 forward; vanilla indices neutral %4, first %5, top %6; park gear %7 (-1 = no SetGear)", m_Actuator.GetGearboxKind(), m_Actuator.GetGearCount(), m_Actuator.GetForwardGearCount(), m_Actuator.GetNeutralGear(), m_Actuator.GetFirstGear(), m_Actuator.GetTopGear(), m_Actuator.GetParkGear()), LogLevel.NORMAL);
 		return true;
 	}
 
@@ -240,6 +247,25 @@ class DC_EgoSession : DC_SessionModule
 	{
 		if (section == "rig")
 			json.AddString("ego_prefab", m_sPrefab);
+
+		if (section != "observed" || !m_Actuator)
+			return;
+
+		// The ego's gearbox (E-04's keys) and the gear indices of the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108):
+		// what the vehicle card's gear indices are checked against; the gear read back after the settle's park
+		json.AddString("ego_gearbox", m_Actuator.GetGearboxKind());
+		json.AddInt("ego_gearbox_gears", m_Actuator.GetGearCount());
+		json.AddInt("ego_gearbox_forward_gears", m_Actuator.GetForwardGearCount());
+		json.AddInt("ego_gear_index_neutral", m_Actuator.GetNeutralGear());
+		json.AddInt("ego_gear_index_first", m_Actuator.GetFirstGear());
+		json.AddInt("ego_gear_index_top", m_Actuator.GetTopGear());
+		json.AddInt("ego_park_gear", m_Actuator.GetParkGear());
+		VehicleWheeledSimulation simulation = m_Actuator.GetSimulation();
+		string failure;
+		if (simulation && IsEgoAlive(failure))
+			json.AddInt("ego_gear_at_open", simulation.GetGear());
+		else
+			json.AddNull("ego_gear_at_open");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -335,9 +361,22 @@ class DC_EgoSession : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! An episode still open at the seal ends at the last step: session_stop, or script_error after an error
+	//! The actuator's counters (session_end.json observed); an episode still open at the seal ends at the last step:
+	//! session_stop, or script_error after an error
 	override void OnSessionClosing(string endReason)
 	{
+		if (m_Actuator)
+		{
+			int driveStartWakes = m_Actuator.GetDriveStartWakes();
+			int sleepWakes = m_Actuator.GetSleepWakes();
+			int handbrakeResets = m_Actuator.GetPersistentHandbrakeResets();
+			int stepsWithoutGear = m_Actuator.GetManualStepsWithoutGear();
+			m_Session.NoteObserved("ego_drive_start_wakes", driveStartWakes.ToString());
+			m_Session.NoteObserved("ego_sleep_wakes", sleepWakes.ToString());
+			m_Session.NoteObserved("ego_persistent_handbrake_resets", handbrakeResets.ToString());
+			m_Session.NoteObserved("ego_manual_steps_without_gear", stepsWithoutGear.ToString());
+		}
+
 		if (m_iEpisodeId < 0)
 			return;
 

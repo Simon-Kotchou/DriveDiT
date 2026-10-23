@@ -49,6 +49,15 @@
 //   through one DC_Actuator, Mode A now (DC_ActuatorModeA: driverless, setters every step, as DD-4-probe's
 //   DC_ProbeActuator), Mode B later (DD-4-rig DC_ModeB.c), so a Mode B promotion touches neither llc_v1 nor the
 //   streams.
+//   No automatic gearbox is assumed: the S105 has a manual one (T0-ENG run 2, E-04: HasAutomaticGearbox 0, 6 gears, 4
+//   forward), and driverless it sat in neutral at 800 rpm under throttle 0.5. The actuator reads the gearbox kind and
+//   derives the gear indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108, SCR_VehicleGearCondition.c:32-44:
+//   neutral = gears - forward - 1, first = neutral + 1, top = gears - 1, reverse below neutral; S105: reverse 0,
+//   neutral 1, forward 2..5). Park = brake 1 + handbrake, plus SetGear(neutral) on a manual gearbox; a driver selects
+//   the forward gear itself (llc_v1's scripted gearbox, a vehicle card with gearbox mode scripted). Drive start = the
+//   first step with the handbrake released after a park: the body is woken as vanilla does on a handbrake release
+//   (SCR_ToggleHandbrakeAction.c:97), and again whenever it fell asleep while driving (the vanilla IsActive pattern,
+//   SCR_DestructionTireComponent.c:155-156): setter inputs alone do not wake a sleeping body.
 //
 // Failure handling: a failed write reports DC_Session.FailWrite (script_error:write_fail); a missing ego simulation
 // in a step fails the session with ego_lost (zero_ego before the first ctl row); an invalid driver output fails it
@@ -173,11 +182,42 @@ class DC_InputReadback
 //! ReadInputs and GetSimulation (telemetry)
 class DC_Actuator
 {
+	static const string GEARBOX_AUTOMATIC = "automatic";	//!< CarControllerComponent.HasAutomaticGearbox() true
+	static const string GEARBOX_MANUAL = "manual";			//!< false: a driver must select a forward gear (SetGear)
+
 	//------------------------------------------------------------------------------------------------
 	//! session.json control.actuation_mode: "A" or "B"
 	string GetMode()
 	{
 		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GEARBOX_AUTOMATIC or GEARBOX_MANUAL; empty = unknown
+	string GetGearboxKind()
+	{
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine gear index of neutral by the vanilla rule (GearboxGearsCount - GearboxForwardGearsCount - 1); -1 = unknown
+	int GetNeutralGear()
+	{
+		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine gear index of the first forward gear (neutral + 1); -1 = unknown
+	int GetFirstGear()
+	{
+		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine gear index of the top forward gear (GearboxGearsCount - 1); -1 = unknown
+	int GetTopGear()
+	{
+		return -1;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -213,8 +253,9 @@ class DC_Actuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Brake 1, handbrake, throttle 0, steering 0, applied at once. The core calls it on every physics step without a
-	//! held command and on every readiness poll of the settle (Mode A: setters every step)
+	//! Brake 1, handbrake, throttle 0, steering 0, applied at once, plus neutral on a manual gearbox. The core calls it
+	//! on every physics step without a held command and on every readiness poll of the settle (Mode A: setters every
+	//! step)
 	void Park()
 	{
 	}
@@ -229,7 +270,9 @@ class DC_Actuator
 //! Mode A (r2 3.2, as DD-4-probe DC_ProbeActuator): a driverless vehicle driven by the VehicleWheeledSimulation
 //! setters every step. Start = SetPersistentHandBrake(false) + ForceStartEngine (vanilla VehicleCinematicTrack.c:127,
 //! :140); the noise-steer and roughness sensitivities are left at their defaults (r2 X6). A controller that sets the
-//! persistent handbrake again while the command releases it is overridden and counted (1.9 robustness).
+//! persistent handbrake again while the command releases it is overridden and counted (1.9 robustness). The gearbox
+//! kind and the vanilla gear indices are read once in Init; Park selects neutral on a manual gearbox; the body is woken
+//! at drive start and whenever it sleeps while driving (see the DC_ACTUATOR note in the header)
 class DC_ActuatorModeA : DC_Actuator
 {
 	protected IEntity m_Vehicle;
@@ -239,6 +282,21 @@ class DC_ActuatorModeA : DC_Actuator
 	protected bool m_bForceSimulation;
 	protected int m_iPersistentHandbrakeResets;
 
+	// gearbox (read in Init; vanilla rule of SCR_ToggleHandbrakeAction.c:99-108)
+	protected string m_sGearboxKind;
+	protected int m_iGearCount = -1;			//!< GearboxGearsCount (neutral included)
+	protected int m_iForwardGearCount = -1;		//!< GearboxForwardGearsCount
+	protected int m_iNeutralGear = -1;
+	protected int m_iFirstGear = -1;
+	protected int m_iTopGear = -1;
+	protected int m_iParkGear = -1;				//!< the gear Park selects: neutral on a manual gearbox, -1 (no SetGear) else
+
+	// drive start and sleep (Apply)
+	protected bool m_bParked = true;			//!< the last Apply set the handbrake (the spawned ego counts as parked)
+	protected int m_iDriveStartWakes;			//!< SetActive(ACTIVE) at the first step with the handbrake released
+	protected int m_iSleepWakes;				//!< SetActive(ACTIVE) on a body found asleep while driving
+	protected int m_iManualStepsWithoutGear;	//!< driving steps on a manual gearbox without a SetGear (no gear chosen)
+
 	//------------------------------------------------------------------------------------------------
 	override string GetMode()
 	{
@@ -246,7 +304,9 @@ class DC_ActuatorModeA : DC_Actuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! CarControllerComponent and its VehicleWheeledSimulation (GetSimulation; GetWheeledSimulation is obsolete)
+	//! CarControllerComponent and its VehicleWheeledSimulation (GetSimulation; GetWheeledSimulation is obsolete), then
+	//! the gearbox. false on a manual gearbox whose counts give no neutral and first gear by the vanilla rule (Park
+	//! could not select neutral, a driver no forward gear)
 	override bool Init(notnull IEntity vehicle)
 	{
 		m_Vehicle = vehicle;
@@ -267,8 +327,97 @@ class DC_ActuatorModeA : DC_Actuator
 			return false;
 		}
 
+		m_sGearboxKind = GEARBOX_MANUAL;
+		if (m_Controller.HasAutomaticGearbox())
+			m_sGearboxKind = GEARBOX_AUTOMATIC;
+
+		m_iGearCount = m_Simulation.GearboxGearsCount();
+		m_iForwardGearCount = m_Simulation.GearboxForwardGearsCount();
+		int neutral = m_iGearCount - m_iForwardGearCount - 1;
+		bool indicesKnown = m_iForwardGearCount >= 1 && neutral >= 0;
+		if (indicesKnown)
+		{
+			m_iNeutralGear = neutral;
+			m_iFirstGear = neutral + 1;
+			m_iTopGear = m_iGearCount - 1;
+		}
+
+		if (m_sGearboxKind == GEARBOX_MANUAL)
+		{
+			if (!indicesKnown)
+			{
+				m_sFailure = string.Format("manual gearbox with %1 gears, %2 forward: no neutral and first gear by the vanilla rule (neutral = gears - forward - 1)", m_iGearCount, m_iForwardGearCount);
+				return false;
+			}
+
+			m_iParkGear = m_iNeutralGear;
+		}
+
 		m_sFailure = string.Empty;
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override string GetGearboxKind()
+	{
+		return m_sGearboxKind;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override int GetNeutralGear()
+	{
+		return m_iNeutralGear;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override int GetFirstGear()
+	{
+		return m_iFirstGear;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override int GetTopGear()
+	{
+		return m_iTopGear;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GearboxGearsCount (neutral included); -1 before Init
+	int GetGearCount()
+	{
+		return m_iGearCount;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GearboxForwardGearsCount; -1 before Init
+	int GetForwardGearCount()
+	{
+		return m_iForwardGearCount;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The gear Park passes to SetGear: neutral on a manual gearbox, -1 (no SetGear call) on an automatic one
+	int GetParkGear()
+	{
+		return m_iParkGear;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetDriveStartWakes()
+	{
+		return m_iDriveStartWakes;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetSleepWakes()
+	{
+		return m_iSleepWakes;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetManualStepsWithoutGear()
+	{
+		return m_iManualStepsWithoutGear;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -323,6 +472,18 @@ class DC_ActuatorModeA : DC_Actuator
 			m_iPersistentHandbrakeResets++;
 		}
 
+		if (handbrake)
+		{
+			m_bParked = true;
+		}
+		else
+		{
+			WakeBody(m_bParked);
+			m_bParked = false;
+			if (gear < 0 && m_sGearboxKind == GEARBOX_MANUAL)
+				m_iManualStepsWithoutGear++;
+		}
+
 		m_Simulation.SetSteering(Math.Clamp(steer, -1, 1));
 		m_Simulation.SetThrottle(Math.Clamp(throttle, 0, 1));
 		m_Simulation.SetBreak(Math.Clamp(brake, 0, 1), handbrake);
@@ -332,9 +493,37 @@ class DC_ActuatorModeA : DC_Actuator
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Brake 1 and handbrake (setters every step), plus SetGear(neutral) on a manual gearbox as vanilla parks it
+	//! (SCR_ToggleHandbrakeAction.c:99-108); no SetGear on an automatic gearbox
 	override void Park()
 	{
-		Apply(0, 0, 1, true, 1, -1);
+		Apply(0, 0, 1, true, 1, m_iParkGear);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Physics.SetActive(ActiveState.ACTIVE) at drive start, as vanilla on a handbrake release
+	//! (SCR_ToggleHandbrakeAction.c:97), else only when the body sleeps (SCR_DestructionTireComponent.c:155-156)
+	protected void WakeBody(bool driveStart)
+	{
+		if (!m_Vehicle)
+			return;
+
+		Physics body = m_Vehicle.GetPhysics();
+		if (!body)
+			return;
+
+		if (driveStart)
+		{
+			body.SetActive(ActiveState.ACTIVE);
+			m_iDriveStartWakes++;
+			return;
+		}
+
+		if (body.IsActive())
+			return;
+
+		body.SetActive(ActiveState.ACTIVE);
+		m_iSleepWakes++;
 	}
 
 	//------------------------------------------------------------------------------------------------

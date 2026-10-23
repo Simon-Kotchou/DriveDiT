@@ -1,0 +1,210 @@
+SCR_AIWorld : "{E0A05C76552E7F58}Prefabs/AI/SCR_AIWorld.et" {
+ components {
+  NavmeshWorldComponent "{5584F30E67F617AD}" {
+   NavmeshSettings NavmeshWorld "{50FC63BEBE3973C5}" {
+    NavmeshFilesConfig BaseNavmeshFilesConfig "{65BA709AA9F38222}" {
+     NavmeshFile "{D8EF7131FB31AF97}worlds/GameMaster/Navmeshes/GM_Arland.nmn"
+    }
+   }
+  }
+  NavmeshWorldComponent "{5584F30EEFEE1223}" {
+   NavmeshSettings ChimeraNavmeshWorld "{50FC63BEBE3973C5}" {
+    NavmeshFilesConfig BaseNavmeshFilesConfig "{60CA9BE5536BF701}" {
+     NavmeshFile "{A0AEEB1E7EF474FA}worlds/GameMaster/Navmeshes/GM_Arland_vehicles.nmn"
+    }
+   }
+  }
+  NavmeshWorldComponent "{5C8C9B750D124A63}" {
+   NavmeshSettings NavmeshWorld "{5C8C9B750B60C6E2}" {
+    NavmeshFilesConfig BaseNavmeshFilesConfig "{5C90BD0EC793647D}" {
+     NavmeshFile "{804386FFEB7B7EFD}worlds/MP/Navmeshes/LowResArland.nmn"
+    }
+   }
+  }
+ }
+ coords 2746.276 77.434 1661.958
+ "Accepted Road Types" 79
+ "Collision detection layers" 9437888
+}
+SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/GameMode_Plain.et" {
+ components {
+  SCR_RespawnSystemComponent "{56B2B4793051E7C9}" {
+   m_SpawnLogic SCR_SpawnLogic "{5D36888CC966608A}" {
+   }
+  }
+  DC_ProbeRunner "{DC4A50B300000001}" {
+   m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e05,e06a"
+   m_sEgoName "DC_Ego"
+   m_sMapId "arland"
+   m_sTerrain "Arland"
+   m_sRequiredProfileRoot "E:/DriveDiT"
+   m_bAllowWorkbenchWithoutLaunchId 1
+   m_bEscapeBindToProcessStart 1
+   m_fWarmupS 3
+   m_fGapS 1
+  }
+  DC_ProbeEngine "{DC4A50B300000002}" {
+   m_fE10TelemetryPeriodS 0.05
+   m_bE10StepRows 1
+   m_iE19LargeBytes 1048576
+   m_fE19KillWindowS 300
+   m_fE19KillChunkS 0.1
+   m_iE19KillRowsPerChunk 6
+   m_sE20EngineModules "VideoUserSettings,DisplayUserSettings"
+   m_sE20GameModules "SCR_VideoSettings"
+  }
+  DC_ProbeSequences "{DC4A50B300000003}" {
+   m_vAreaStart 659.6 0 2572.4
+   m_fAreaHeadingDeg 75.11
+   m_fAreaLengthM 1100
+   m_fAreaHalfWidthM 25
+   m_fAreaMarginM 3
+   m_fMaxAreaReliefM 5
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSpeedKp 0.08
+   m_fSpeedKi 0.02
+   m_fBrakeScale 0.5
+   m_fSpeedTolKmh 1
+   m_fMoveCheckThrottle 0.5
+   m_fMoveCheckS 5
+   m_fMoveCheckMinKmh 3
+   m_fPrbsAmplitude 0.3
+   m_fPrbsSpeedKmh 20
+   m_fPrbsBitS 0.2
+   m_iPrbsOrder 7
+   m_iPrbsSeed 1
+   m_fReversalAmplitude 0.3
+   m_fReversalPeriodS 2
+   m_iReversalCount 6
+   m_sThrottleSteps "0.3,0.6,1.0"
+   m_fThrottleHoldS 6
+   m_fBrakeFromKmh 40
+   m_sBrakeSteps "0.3,0.6,1.0"
+   m_fGearObserveThrottle 0.7
+   m_fGearObserveS 15
+   m_sGearSequence "2,3,4,3,2"
+   m_fGearHoldS 3
+   m_fGearScriptedThrottle 0.4
+   m_fGearClutchDipS 0
+   m_sE02aGrid "15:-0.5,-0.25,0.1,0.25,0.5;30:-0.25,-0.12,0.05,0.12,0.25;50:-0.12,-0.06,0.03,0.06,0.12"
+   m_fE02aReachS 25
+   m_fE02aHoldS 8
+   m_fE02aMaxTurnDeg 330
+   m_iAssumedSteerSign -1
+  }
+  DC_ProbeImages "{DC4A50B300000004}" {
+   m_vMountPos 0 1.25 0.3
+   m_fMountPitchDeg -4
+   m_fVerticalFovDeg 50
+   m_fNearPlaneM 0.1
+   m_fFarPlaneM 3000
+   m_fImageHz 10
+   m_fDurationS 600
+   m_iInFlightTimeoutMs 2000
+   m_bFiducial 1
+   m_iPatchPx 32
+   m_iMarginPx 16
+   m_iGapPx 8
+   m_bDrive 1
+   m_fDriveKmh 30
+   m_vAreaStart 659.6 0 2572.4
+   m_fAreaHeadingDeg 75.11
+   m_fAreaLengthM 1100
+   m_fAreaHalfWidthM 25
+   m_fAreaMarginM 3
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSpeedKp 0.08
+   m_fSpeedKi 0.02
+   m_fBrakeScale 0.5
+  }
+  DC_ProbeMarkers "{DC4A50B300000005}" {
+   m_vMountPos 0 1.25 0.3
+   m_fMountPitchDeg -4
+   m_fVerticalFovDeg 50
+   m_fNearPlaneM 0.1
+   m_fFarPlaneM 3000
+   m_iPatchPx 32
+   m_iMarginPx 16
+   m_iGapPx 8
+   m_vAreaStart 659.6 0 2572.4
+   m_fAreaHeadingDeg 75.11
+   m_fAreaLengthM 1100
+   m_fAreaHalfWidthM 25
+   m_fAreaMarginM 3
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSpeedKp 0.08
+   m_fSpeedKi 0.02
+   m_fBrakeScale 0.5
+   m_eMarkerKind 0
+   m_sMarkerPrefab "{25C8B889A777399D}Prefabs/Props/Infrastructure/ConeTraffic/ConeTraffic_01_red.et"
+   m_vMarkerColor 1 0 1
+   m_fMarkerRadiusM 0.25
+   m_fStraightFromM 20
+   m_fStraightToM 400
+   m_fStraightStepM 20
+   m_fMarkerLateralM 10
+   m_sMarkerHeights "0.6,1.6"
+   m_fRingAlongM 700
+   m_fRingRadiusM 25
+   m_iRingCount 24
+   m_fRingHeightM 0.8
+   m_fSlalomKmh 40
+   m_fSlalomAmplitude 0.3
+   m_fSlalomPeriodS 3
+   m_fSlalomS 30
+   m_fBacklogS 10
+   m_fBrakeFromKmh 40
+   m_fCurveKmh 25
+   m_fCurveSteer 0.2
+   m_fCurveS 15
+   m_fImageHz 10
+   m_iInFlightTimeoutMs 2000
+   m_sFpsPhases "60,30"
+   m_iProjMarkersPerFrame 16
+   m_fProjMaxDistM 150
+  }
+  DC_RoadDump "{DC4A50B300000006}" {
+   m_fTileM 256
+   m_iTilesPerFrame 4
+   m_fAabbMinY -500
+   m_fAabbMaxY 2000
+   m_iCapSuspect 64
+  }
+ }
+ coords 2759.086 80.111 1664.452
+ m_bAllowFactionChange 0
+}
+ScriptedChatEntity : "{536D80EB494DDC43}Prefabs/MP/Campaign/CampaignMPChatEntity.et" {
+ coords 2742.402 77.857 1675.119
+}
+SCR_FactionManager FactionManager : "{589540B35EBA8CDC}Prefabs/MP/Managers/Factions/FactionManager_USxUSSR.et" {
+ coords 2756.882 78.926 1666.877
+ Factions {
+  SCR_Faction "{56B2B46E9AF80999}" {
+   m_bIsPlayable 0
+  }
+ }
+}
+RadioManagerEntity : "{B8E09FAB91C4ECCD}Prefabs/Systems/Radio/RadioManager.et" {
+ coords 2761.461 79.788 1706.195
+}
+SCR_SpawnPoint : "{4FEA25583D0975F7}Prefabs/MP/Spawning/SpawnPoint_USSR.et" {
+ coords 2741.421 77.594 1613.211
+}
+SCR_SpawnPoint : "{5A2220DD0C16958B}Prefabs/MP/Spawning/SpawnPoint_US.et" {
+ coords 2745.148 77.438 1661.807
+}
+SCR_LoadoutManager : "{AA4E7419A1FF65B0}Prefabs/MP/Managers/Loadouts/LoadoutManager_Base.et" {
+ coords 2746.328 77.526 1618.818
+}
+SCR_ManualCamera ManualCamera {
+ coords 1495 60 2560
+ angleY 0
+}
+Vehicle DC_Ego : "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et" {
+ coords 2749.877 77.366 1663.289
+ angleY 0
+}

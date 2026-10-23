@@ -235,7 +235,11 @@ A visible command line without `-dcLaunchId` always refuses: Workbench was then 
 5. `[DC_Probe] runner heartbeat #<n> via=frame: world_ms=... step_source=undecided ...` about once per world second
    until the step source is decided, then every 30 world seconds while the plan runs. `via=fixedframe` or
    `via=watchdog` means that EOnFrame missed the heartbeat; `plan_calls` greater than `plan_entries` means that EOnFrame
-   calls the sequencer (AdvancePlan) but the call does not reach it.
+   calls the sequencer (AdvancePlan) but the call does not reach it. The heartbeat runs on world time: while the world
+   is paused it is silent, and after about 10 s the WARNING `runner: world time has not advanced for 10 watchdog
+   ticks ...` appears instead (and `runner: world time advances again ...` once it moves). A WARNING `watchdog:
+   AdvancePlan has not run for <s> world s (...): it stops <id> (timeout|write_fail)` means that a probe callback fails
+   on every frame: send the log folder.
 6. After the warm-up `[DC_Probe] step source: simulate (...)`, or on the probe world in 1.8 the WARNING
    `step source: fixedframe - no EOnSimulate on the game mode entity ...`, each with `decided by frame at world <ms> ms;
    step dt <s> s (<engine|measured>) ...`. An ERROR `step source: none` means that neither EOnSimulate nor
@@ -259,7 +263,8 @@ every Play of one Workbench start shares the launch id.
   `/mnt/e/DriveDiT/wb_profile/profile/DC_Probes/` in WSL.
 - Each play folder holds:
   - `run_header.txt`: build stamp (git sha, dirty flag), launch id and pin, build version, fixed time slice,
-    world, clocks, and every probe parameter as `params.*`;
+    world, clocks (including the run's fixed and merged step counts at the probe start), and every probe parameter
+    as `params.*`;
   - the probe's CSV files, each with one header row;
   - `run_footer.txt`, written when the probe ends: status, reason, rows and bytes per file, and the run's step
     timing (`clock.step_source`, `clock.step_dt_s` and the engine's raw values, see the DC_ProbeRunner header). A play

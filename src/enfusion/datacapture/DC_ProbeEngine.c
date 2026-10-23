@@ -10,7 +10,9 @@
 //            Step and telemetry rows also carry world_ts_ms = BaseWorld.GetTimestamp().DiffMilliseconds(start): the
 //            dc-2.0 clock, next to GetWorldTime (TBD-1). e10 starts before the warm-up, so k uses GetFixedTimeSlice
 //            of the start frame. In the runner's fixedframe fallback the step rows' timeslice_* are the runner's
-//            n x GetStepDtS (DC_ProbeRunner STEP TIMING); the engine's raw values are in run_footer.txt (clock.*).
+//            n x GetStepDtS (DC_ProbeRunner STEP TIMING); engine_timeslice_pre_s / engine_timeslice_post_s hold the
+//            engine's raw callback argument and covered_steps the n of the step (1 outside the fallback), and the
+//            run's ranges are in run_footer.txt (clock.*).
 //   e04      one shot, needs DC_Ego. Reads the S105's prefab, component classes, gearbox, assistance mode and engine
 //            facts (e04_vehicle.txt, e04_components.csv). Read only: nothing on the vehicle is changed.
 //   e20      one shot. Dumps every variable of the engine and game user-settings modules generically
@@ -100,6 +102,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 	protected int m_iE10PreStep = -1;			//!< step number of the last pre call not yet written, -1 = none
 	protected float m_fE10PreWorldMs;
 	protected float m_fE10PreTimeSliceS;
+	protected float m_fE10PreEngineSliceS;		//!< the engine's raw argument of the pre call (DC_ProbeRunner)
 	protected int m_iE10PreRenderFrame;
 	protected int m_iE10LastTelemetryStep = -1;
 	protected WorldTimestamp m_E10StartTimestamp;	//!< BaseWorld.GetTimestamp() at the start of e10
@@ -222,6 +225,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 
 		m_fE10PreWorldMs = runner.GetWorldTimeMs();
 		m_iE10PreRenderFrame = runner.GetRenderFrame();
+		m_fE10PreEngineSliceS = runner.GetDispatchEngineSliceS();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -257,6 +261,15 @@ class DC_ProbeEngine : DC_ProbeComponent
 			m_Row.AddFloat(timeSlice, 6);
 			m_Row.AddInt(runner.GetRenderFrame());
 			m_Row.AddFloat(GetE10TimestampMs(), 3);
+
+			// The engine's raw arguments and the steps covered (the timeslice_* columns are n x GetStepDtS)
+			if (m_iE10PreStep == physicsStep)
+				m_Row.AddFloat(m_fE10PreEngineSliceS, 6);
+			else
+				m_Row.AddEmpty();
+
+			m_Row.AddFloat(runner.GetDispatchEngineSliceS(), 6);
+			m_Row.AddInt(runner.GetDispatchCoveredSteps());
 			m_E10Steps.WriteRow(m_Row);
 			m_iE10PreStep = -1;
 		}
@@ -401,7 +414,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 
 		if (m_bE10StepRows)
 		{
-			array<string> stepColumns = {"physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre", "world_time_ms_post", "timeslice_post_s", "render_frame_post", "world_ts_ms_post"};
+			array<string> stepColumns = {"physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre", "world_time_ms_post", "timeslice_post_s", "render_frame_post", "world_ts_ms_post", "engine_timeslice_pre_s", "engine_timeslice_post_s", "covered_steps"};
 			m_E10Steps = ctx.OpenCsv("e10_steps", stepColumns);
 			if (!m_E10Steps)
 				return false;

@@ -32,7 +32,10 @@
 //
 // Segment transitions are decided in OnProbePostSimulate from the state after the step; the commands of the next
 // step are set in OnProbeSimulate. Teleports run in OnProbeFrame (never inside a physics step). The step row of step
-// N carries the phase and segment whose commands were applied in step N.
+// N carries the phase and segment whose commands were applied in step N. The segment and phase counters advance by
+// the engine steps a dispatched step covers (CoveredSteps: round(timeSlice / dt), n on a frame whose n fixed steps
+// the runner's fixedframe fallback merges into one call, else 1), so every duration holds in world time at any frame
+// rate; phase_step in the step rows counts covered steps, and a PRBS bit is drawn for every bit start reached.
 //
 // SHARED CLASSES (PROBE_DESIGN.md 4.8; DC_ProbeImages and DC_ProbeMarkers use them): DC_ProbeArea (test area
 // geometry), DC_ProbeActuator (Mode A driver of one vehicle), DC_ProbePrbs (maximum-length LFSR).
@@ -958,8 +961,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 	protected int m_iPhasesStarted;
 	protected bool m_bProbeDone;
 	protected DC_EProbeSequenceSegment m_eSegment;
-	protected int m_iSegStep;					//!< steps completed in the current segment
-	protected int m_iPhaseStep;					//!< steps completed in the current phase
+	protected int m_iSegStep;					//!< engine steps covered in the current segment (CoveredSteps)
+	protected int m_iPhaseStep;					//!< engine steps covered in the current phase
+	protected int m_iPrbsBitsDrawn;				//!< PRBS bits drawn in the current segment
 	protected bool m_bTeleportDone;
 	protected bool m_bHasPrevHeading;
 	protected float m_fPrevHeadingDeg;
@@ -1305,9 +1309,10 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_Actuator.ReadPost();
 		bool inArea = m_Area.Contains(m_Actuator.GetPosition(), m_fAreaMarginM);
 		WriteStepRow(physicsStep, timeSlice, phase, inArea);
-		TrackStep(phase);
-		m_iSegStep++;
-		m_iPhaseStep++;
+		TrackStep(phase, timeSlice);
+		int covered = CoveredSteps(timeSlice);
+		m_iSegStep += covered;
+		m_iPhaseStep += covered;
 		Advance(phase, inArea);
 	}
 
@@ -1410,6 +1415,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_eSegment = DC_EProbeSequenceSegment.RESET;
 		m_iSegStep = 0;
 		m_iPhaseStep = 0;
+		m_iPrbsBitsDrawn = 0;
 		m_bTeleportDone = false;
 		m_bHasPrevHeading = false;
 		m_iLastStep = 0;
@@ -1455,6 +1461,19 @@ class DC_ProbeSequences : DC_ProbeComponent
 			return 0;
 
 		int steps = Math.Round(seconds / dt);
+		return steps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine steps one dispatched step covers: round(timeSlice / m_fDt), at least 1. The runner's fixedframe
+	//! fallback passes n x GetStepDtS for a call that covers n fixed steps (DC_ProbeRunner STEP TIMING); counting
+	//! calls instead would stretch every phase by n in world time on such frames
+	protected int CoveredSteps(float timeSlice)
+	{
+		int steps = StepsFor(timeSlice, m_fDt);
+		if (steps < 1)
+			steps = 1;
+
 		return steps;
 	}
 
@@ -1596,6 +1615,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_eSegment = DC_EProbeSequenceSegment.RESET;
 		m_iSegStep = 0;
 		m_iPhaseStep = 0;
+		m_iPrbsBitsDrawn = 0;
 		m_bTeleportDone = false;
 		m_bHasPrevHeading = false;
 		m_fPrbsSteer = 0;
@@ -1653,12 +1673,17 @@ class DC_ProbeSequences : DC_ProbeComponent
 
 			case DC_EProbeSequenceKind.STEER_PRBS:
 			{
-				if (m_iSegStep % m_iPrbsBitSteps == 0)
+				// Bit b starts at covered step b x m_iPrbsBitSteps: draw every bit whose start the segment reached, so
+				// a step that covers several engine steps (CoveredSteps) neither skips a bit nor shifts the sequence
+				int bitIdx = m_iSegStep / m_iPrbsBitSteps;
+				while (m_iPrbsBitsDrawn <= bitIdx)
 				{
 					if (m_Prbs.NextBit() == 1)
 						m_fPrbsSteer = phase.m_fAmplitude;
 					else
 						m_fPrbsSteer = -phase.m_fAmplitude;
+
+					m_iPrbsBitsDrawn++;
 				}
 
 				m_Actuator.SetSpeedHold(phase.m_fTargetKmh, m_fPrbsSteer);
@@ -1719,8 +1744,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Online bookkeeping after each step: max speed, heading change, steer-sign sum, stall watch
-	protected void TrackStep(notnull DC_ProbeSequencePhase phase)
+	//! Online bookkeeping after each step: max speed, heading change, steer-sign sum, stall watch. timeSlice: the world
+	//! time the step covers (n x dt on a merged fallback step), for the heading rate
+	protected void TrackStep(notnull DC_ProbeSequencePhase phase, float timeSlice)
 	{
 		float heading = m_Actuator.GetHeadingDeg();
 		float delta = 0;
@@ -1746,9 +1772,9 @@ class DC_ProbeSequences : DC_ProbeComponent
 
 		phase.m_fTurnDeg += delta;
 		bool steering = phase.m_eKind == DC_EProbeSequenceKind.STEER_PRBS || phase.m_eKind == DC_EProbeSequenceKind.STEER_REVERSAL;
-		if (steering && m_fDt > 0)
+		if (steering && timeSlice > 0)
 		{
-			m_fSteerSignSum += m_Actuator.GetCommandSteer() * delta / m_fDt;
+			m_fSteerSignSum += m_Actuator.GetCommandSteer() * delta / timeSlice;
 			m_iSteerSignSamples++;
 		}
 	}
@@ -1932,6 +1958,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	{
 		m_eSegment = segment;
 		m_iSegStep = 0;
+		m_iPrbsBitsDrawn = 0;
 	}
 
 	//------------------------------------------------------------------------------------------------

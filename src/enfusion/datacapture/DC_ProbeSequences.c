@@ -18,11 +18,16 @@
 // below neutral is reverse (S105: 0 reverse, 1 neutral, 2..5 first..fourth; TBD-7). With a manual gearbox and no
 // explicit gear (cmd gear -1) the actuator's shift policy picks the gear: neutral while the handbrake is commanded,
 // first gear at its release (set before the throttle of that step), then first..top by rpm (attributes in category
-// Gearbox), never neutral or reverse while driving; the chosen gear is the cmd_gear column. gear_scripted keeps its
-// explicit SetGear every step; gear_observe (automatic shifting) is skipped with note manual_gearbox on a manual
-// gearbox; the move checks hold first gear. At every release of the commanded handbrake the actuator also wakes the
-// vehicle's physics as vanilla does (Physics.SetActive(ActiveState.ACTIVE), SCR_ToggleHandbrakeAction.c:97), on
-// top of the ForceEnableSimulation latch; the phase notes and the run header count it.
+// Gearbox), never neutral or reverse while driving; the chosen gear is the cmd_gear column. That park/drive choice
+// is the probe's own: vanilla SCR_ToggleHandbrakeAction.c:93-108 releases into neutral and parks in first gear.
+// gear_scripted keeps its explicit SetGear every step, and the policy continues from its last gear; gear_observe
+// (automatic shifting) is skipped with note manual_gearbox on a manual gearbox; the move checks hold first gear; a
+// probe stop sets neutral on a manual gearbox. At every release of the commanded handbrake the actuator also wakes
+// the vehicle's physics as vanilla does (Physics.SetActive(ActiveState.ACTIVE), SCR_ToggleHandbrakeAction.c:97), and
+// on every later step with the handbrake released it wakes a body found asleep again (Physics.IsActive false, the
+// SCR_DestructionTireComponent.c:155-156 pattern), on top of the ForceEnableSimulation latch; the phase notes and the
+// run header count both. e05 and e06a also latch ForceEnableSimulation when the car stays below 3 km/h for 10 s
+// after a drive start (DC_ProbeActuator.SetStuckForce, WARNING in the log).
 //
 // WHAT IT DOES (authority, play mode, only while the runner has started the probe)
 //   e01  phases in this order; each starts with a teleport to the area start (segment reset) and m_fSettleS of
@@ -291,6 +296,10 @@ class DC_ProbeActuator
 	static const float DEFAULT_FIRST_BELOW_KMH = 8;
 	//! A policy gear that neither GetGear nor the controller's future gear shows this long after its SetGear is set again
 	static const float GEAR_REASSERT_S = 1;
+	//! Stuck guard of the image probes (SetStuckForce): a drive start after which the speed stays below STUCK_BELOW_KMH
+	//! for STUCK_AFTER_S latches ForceEnableSimulation. Probe run 2: e05 drove its whole 10 min at 0 km/h
+	static const float STUCK_AFTER_S = 10;
+	static const float STUCK_BELOW_KMH = 3;
 
 	protected IEntity m_Vehicle;
 	protected CarControllerComponent m_Controller;
@@ -329,6 +338,15 @@ class DC_ProbeActuator
 	protected int m_iWakeCalls;					//!< Physics.SetActive(ActiveState.ACTIVE) calls
 	protected int m_iWakeAsleep;				//!< of those, with Physics.IsActive() false before the call
 	protected int m_iWakeNoPhysics;				//!< releases without a Physics object (no call)
+	protected int m_iSleepWakes;				//!< later released steps that found the body asleep and woke it
+
+	// Stuck guard (SetStuckForce; e05, e06a): checked once per drive start
+	protected float m_fStuckAfterS = -1;		//!< -1 = off
+	protected float m_fStuckBelowKmh;
+	protected float m_fSinceDriveStartS = -1;	//!< world time since the last release while its check is pending, else -1
+	protected float m_fMaxKmhSinceDriveStart;
+	protected int m_iStuckForces;				//!< drive starts that latched ForceEnableSimulation
+	protected bool m_bStuckWarningDue;			//!< ConsumeStuckWarning: the caller logs the latch once
 
 	// Applied in the last ApplyStep (columns cmd_gear, cmd_clutch): the explicit or the policy gear, the dip clutch
 	protected int m_iAppliedGear = -1;			//!< -1 = no gear command
@@ -474,6 +492,40 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
+	int GetSleepWakes()
+	{
+		return m_iSleepWakes;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Stuck guard for the probes that only need motion (e05, e06a; never e01/e02a, whose move checks decide
+	//! ForceEnableSimulation): afterS after each drive start, a car whose speed never reached belowKmh since the
+	//! release latches ForceSimulation, unless it is already forced. afterS <= 0 turns it off.
+	void SetStuckForce(float afterS, float belowKmh)
+	{
+		m_fStuckAfterS = afterS;
+		m_fStuckBelowKmh = belowKmh;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once after the stuck guard latched ForceEnableSimulation; the caller logs DescribeStuck as a WARNING
+	bool ConsumeStuckWarning()
+	{
+		if (!m_bStuckWarningDue)
+			return false;
+
+		m_bStuckWarningDue = false;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One log line for the stuck guard's latch
+	string DescribeStuck()
+	{
+		return string.Format("car stuck: below %1 km/h (max %2) for %3 s after a drive start, ForceEnableSimulation latched from now on (drive.stuck_forces %4, physics sleep re-wakes %5)", m_fStuckBelowKmh.ToString(-1, 1), m_fMaxKmhSinceDriveStart.ToString(-1, 2), m_fStuckAfterS.ToString(-1, 1), m_iStuckForces, m_iSleepWakes);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Run header lines of the gearbox (vehicle.gearbox, vehicle.gear_index_*: TBD-7), the engine rpm marks, the shift
 	//! policy (gear_policy.*) and the physics wake rule
 	void AppendGearboxLines(notnull array<string> lines)
@@ -505,8 +557,8 @@ class DC_ProbeActuator
 		lines.Insert("gear_policy.first_below_kmh=" + m_fFirstBelowKmh.ToString(-1, 3));
 		lines.Insert("gear_policy.clutch_dip_s=" + m_fShiftDipS.ToString(-1, 3));
 		lines.Insert("gear_policy.reassert_s=" + reassert.ToString(-1, 3));
-		lines.Insert("gear_policy.rule=manual gearbox and cmd gear -1: neutral while the handbrake is commanded, first gear at its release (SetGear before SetThrottle), then first..top by rpm; SetGear on change, again after reassert_s without readback; cmd_gear = the policy gear");
-		lines.Insert("physics_wake.rule=Physics.SetActive(ActiveState.ACTIVE) at every release of the commanded handbrake (vanilla SCR_ToggleHandbrakeAction), on top of ForceEnableSimulation");
+		lines.Insert("gear_policy.rule=manual gearbox and cmd gear -1: neutral while the handbrake is commanded, first gear at its release (SetGear before SetThrottle), then first..top by rpm; SetGear on change, again after reassert_s without readback, and after every explicit gear (the policy continues from it); SetGear(neutral) at the probe stop; cmd_gear = the policy gear");
+		lines.Insert("physics_wake.rule=Physics.SetActive(ActiveState.ACTIVE) at every release of the commanded handbrake (vanilla SCR_ToggleHandbrakeAction), and on every later step with the handbrake released whose body is asleep (Physics.IsActive false, SCR_DestructionTireComponent), on top of ForceEnableSimulation");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -519,6 +571,10 @@ class DC_ProbeActuator
 		lines.Insert("physics_wake.calls=" + m_iWakeCalls.ToString());
 		lines.Insert("physics_wake.asleep_before=" + m_iWakeAsleep.ToString());
 		lines.Insert("physics_wake.no_physics=" + m_iWakeNoPhysics.ToString());
+		lines.Insert("physics_wake.sleep_wakes=" + m_iSleepWakes.ToString());
+		lines.Insert("drive.stuck_force_after_s=" + m_fStuckAfterS.ToString(-1, 3));
+		lines.Insert("drive.stuck_force_below_kmh=" + m_fStuckBelowKmh.ToString(-1, 3));
+		lines.Insert("drive.stuck_forces=" + m_iStuckForces.ToString());
 		lines.Insert("drive.force_sim=" + DC_LaunchGuard.BoolText(m_bForced));
 	}
 
@@ -540,10 +596,11 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One log line: shifts, SetGear calls and physics wakes so far
+	//! One log line: shifts, SetGear calls, physics wakes and the stuck guard so far
 	string DescribeDrive()
 	{
-		return string.Format("gear policy %1 shifts, %2 SetGear calls (%3 re-asserted); physics wake %4 calls, %5 with the body asleep before, %6 without physics; force_sim %7", m_iPolicyShifts, m_iSetGearCalls, m_iGearReasserts, m_iWakeCalls, m_iWakeAsleep, m_iWakeNoPhysics, DC_LaunchGuard.BoolText(m_bForced));
+		string drive = string.Format("gear policy %1 shifts, %2 SetGear calls (%3 re-asserted); physics wake %4 calls, %5 with the body asleep before, %6 without physics; force_sim %7", m_iPolicyShifts, m_iSetGearCalls, m_iGearReasserts, m_iWakeCalls, m_iWakeAsleep, m_iWakeNoPhysics, DC_LaunchGuard.BoolText(m_bForced));
+		return drive + string.Format("; %1 sleep re-wakes while driving; stuck force latches %2", m_iSleepWakes, m_iStuckForces);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -653,9 +710,11 @@ class DC_ProbeActuator
 
 	//------------------------------------------------------------------------------------------------
 	//! Call from OnProbeSimulate: runs the PI and the shift policy, wakes the physics at a release of the commanded
-	//! handbrake, calls SetSteering/SetBreak/SetGear/SetClutch/SetThrottle every step (gear before clutch and throttle,
-	//! the order of VehicleCinematicTrack.c:149-162), then reads input_pre_*. SetGear: an explicit gear (SetCommand
-	//! gear >= 0) every step; a policy gear on change and again after GEAR_REASSERT_S without readback (ApplyPolicyGear)
+	//! handbrake and an asleep body on the later released steps, runs the stuck guard, calls
+	//! SetSteering/SetBreak/SetGear/SetClutch/SetThrottle every step (gear before clutch and throttle, the order of
+	//! VehicleCinematicTrack.c:149-162), then reads input_pre_*. SetGear: an explicit gear (SetCommand gear >= 0) every
+	//! step, which the policy then continues from (AdoptExplicitGear); a policy gear on change and again after
+	//! GEAR_REASSERT_S without readback (ApplyPolicyGear)
 	void ApplyStep(float timeSlice)
 	{
 		if (!m_Simulation)
@@ -674,9 +733,19 @@ class DC_ProbeActuator
 			m_iPersistentHandbrakeResets++;
 		}
 
-		// Every drive start releases the commanded handbrake: wake the physics there, as vanilla does
+		// Every drive start releases the commanded handbrake: wake the physics there, as vanilla does at a release.
+		// While the handbrake stays released, a body found asleep is woken again and the stuck guard runs.
 		if (!m_bCmdHandbrake && m_bAppliedHandbrake)
+		{
 			WakePhysics();
+			m_fSinceDriveStartS = 0;
+			m_fMaxKmhSinceDriveStart = 0;
+		}
+		else if (!m_bCmdHandbrake)
+		{
+			RewakeAsleepBody();
+			CheckStuck(timeSlice);
+		}
 
 		m_bAppliedHandbrake = m_bCmdHandbrake;
 		m_iAppliedGear = m_iCmdGear;
@@ -694,9 +763,14 @@ class DC_ProbeActuator
 		m_Simulation.SetSteering(m_fCmdSteer);
 		m_Simulation.SetBreak(m_fCmdBrake, m_bCmdHandbrake);
 		if (m_iCmdGear >= 0)
+		{
 			m_Simulation.SetGear(m_iCmdGear);
+			AdoptExplicitGear(m_iCmdGear);
+		}
 		else if (m_iAppliedGear >= 0)
+		{
 			ApplyPolicyGear(m_iAppliedGear, timeSlice);
+		}
 
 		m_Simulation.SetClutch(m_fAppliedClutch);
 		m_Simulation.SetThrottle(m_fCmdThrottle);
@@ -738,7 +812,9 @@ class DC_ProbeActuator
 
 	//------------------------------------------------------------------------------------------------
 	//! Gear of this step for a manual gearbox without an explicit gear. Neutral while the handbrake is commanded and
-	//! first gear at its release, as vanilla SCR_ToggleHandbrakeAction.c:99-108 does; while driving only first..top:
+	//! first gear at its release, the indices derived as vanilla SCR_ToggleHandbrakeAction.c:99-108 does; the park/drive
+	//! choice is the probe's own (vanilla PerformAction, :93-108, releases into neutral and parks in first gear, i.e.
+	//! in gear for a parked player car; the probe needs first gear to drive off). While driving only first..top:
 	//! first gear below m_fFirstBelowKmh or with SetFirstGearOnly, else up one gear at rpm >= m_fUpshiftRpm and down
 	//! one at rpm <= m_fDownshiftRpm, at most one change per m_fMinShiftS. rpm and speed are those of the last
 	//! ReadPost, so the policy is deterministic in the recorded state. A change into a forward gear starts the clutch
@@ -803,6 +879,21 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! After an explicit SetGear (gear_scripted): the policy continues from that gear (a forward gear, else from first
+	//! gear at the next release) and calls SetGear again at its next step, so neither the stop after an explicit phase
+	//! nor Park keeps the gear cached before it; the explicit gear counts as the last change (m_fMinShiftS)
+	protected void AdoptExplicitGear(int gear)
+	{
+		m_iPolicyGear = -1;
+		if (gear >= m_iGearFirst && gear <= m_iGearTop)
+			m_iPolicyGear = gear;
+
+		m_iPolicySetGear = -1;
+		m_fSinceShiftS = 0;
+		m_fDipLeftS = 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! vehicleEntity.GetPhysics().SetActive(ActiveState.ACTIVE) as vanilla SCR_ToggleHandbrakeAction.c:96-97 does when
 	//! the parking brake is released; counts the calls and how often the body was asleep (IsActive false) before
 	protected void WakePhysics()
@@ -819,6 +910,44 @@ class DC_ProbeActuator
 
 		physics.SetActive(ActiveState.ACTIVE);
 		m_iWakeCalls++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! On every step with the handbrake released after the release step: a body found asleep (Physics.IsActive false)
+	//! is woken again, the vanilla SCR_DestructionTireComponent.c:155-156 pattern (DD-4-min Mode A does the same)
+	protected void RewakeAsleepBody()
+	{
+		if (!m_Vehicle)
+			return;
+
+		Physics body = m_Vehicle.GetPhysics();
+		if (!body || body.IsActive())
+			return;
+
+		body.SetActive(ActiveState.ACTIVE);
+		m_iSleepWakes++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Stuck guard (SetStuckForce), once per drive start: m_fStuckAfterS after the release, a car whose speed (last
+	//! ReadPost) never reached m_fStuckBelowKmh latches ForceSimulation unless it is already forced
+	protected void CheckStuck(float timeSlice)
+	{
+		if (m_fStuckAfterS <= 0 || m_fSinceDriveStartS < 0)
+			return;
+
+		m_fSinceDriveStartS += timeSlice;
+		m_fMaxKmhSinceDriveStart = Math.Max(m_fMaxKmhSinceDriveStart, Math.AbsFloat(m_fSpeedKmh));
+		if (m_fSinceDriveStartS < m_fStuckAfterS)
+			return;
+
+		m_fSinceDriveStartS = -1;
+		if (m_bForced || m_fMaxKmhSinceDriveStart >= m_fStuckBelowKmh)
+			return;
+
+		ForceSimulation();
+		m_iStuckForces++;
+		m_bStuckWarningDue = true;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -899,12 +1028,14 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Brake 1 + handbrake, throttle 0, steering 0 (and neutral through the shift policy on a manual gearbox), applied
+	//! Brake 1 + handbrake, throttle 0, steering 0 and, on a manual gearbox with the shift policy, SetGear(neutral)
+	//! always (also when the cached policy gear already reads neutral, e.g. after an interrupted gear_scripted), applied
 	//! at once (no physics step needed). For probe stops: a driverless car keeps the last setter values when nobody
 	//! calls the setters any more.
 	void Park()
 	{
 		SetCommand(0, 0, 1, 1, -1, true);
+		m_iPolicySetGear = -1;
 		ApplyStep(0);
 	}
 
@@ -1092,6 +1223,7 @@ class DC_ProbeSequencePhase
 	int m_iWakesAtStart;			//!< DC_ProbeActuator counters at the phase start (phase notes wakes, asleep_at_wake, shifts)
 	int m_iWakeAsleepAtStart;
 	int m_iShiftsAtStart;
+	int m_iSleepWakesAtStart;		//!< phase note sleep_wakes
 
 	//------------------------------------------------------------------------------------------------
 	void DC_ProbeSequencePhase(DC_EProbeSequenceKind kind, string name, float targetKmh, float amplitude, float lateralM)
@@ -2010,6 +2142,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 		phase.m_iHandbrakeResetsAtStart = m_Actuator.GetPersistentHandbrakeResets();
 		phase.m_iWakesAtStart = m_Actuator.GetWakeCalls();
 		phase.m_iWakeAsleepAtStart = m_Actuator.GetWakeAsleep();
+		phase.m_iSleepWakesAtStart = m_Actuator.GetSleepWakes();
 		phase.m_iShiftsAtStart = m_Actuator.GetPolicyShifts();
 		m_eSegment = DC_EProbeSequenceSegment.RESET;
 		m_iSegStep = 0;
@@ -2425,10 +2558,12 @@ class DC_ProbeSequences : DC_ProbeComponent
 			int wakes = m_Actuator.GetWakeCalls() - phase.m_iWakesAtStart;
 			int asleep = m_Actuator.GetWakeAsleep() - phase.m_iWakeAsleepAtStart;
 			int shifts = m_Actuator.GetPolicyShifts() - phase.m_iShiftsAtStart;
+			int sleepWakes = m_Actuator.GetSleepWakes() - phase.m_iSleepWakesAtStart;
 			phase.AddNote("phb_resets:" + resets.ToString());
 			phase.AddNote("wakes:" + wakes.ToString());
 			phase.AddNote("asleep_at_wake:" + asleep.ToString());
 			phase.AddNote("shifts:" + shifts.ToString());
+			phase.AddNote("sleep_wakes:" + sleepWakes.ToString());
 		}
 
 		WritePhaseRow(phase);

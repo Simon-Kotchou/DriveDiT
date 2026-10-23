@@ -21,9 +21,11 @@
 //     commanded and the segment is "static". The teleport itself runs in OnProbeFrame, never inside a physics step
 //     (the rule of DC_ProbeSequences): the reset segment waits for it. The gears come from DC_ProbeActuator as in
 //     e01/e02a (manual gearbox: neutral with the handbrake, first gear at its release, then the shift policy with
-//     the actuator's defaults; physics wake at every release), and ForceEnableSimulation is latched unless e01 of
-//     this Play found it not needed (DC_ProbeSequences.ApplyPlayForceDecision); run header vehicle.gearbox,
-//     vehicle.gear_index_*, gear_policy.*, drive.force_sim*, and at the stop gear_policy.shifts and physics_wake.*;
+//     the actuator's defaults; physics wake at every release and of an asleep body while driving), and
+//     ForceEnableSimulation is latched unless e01 of this Play found it not needed
+//     (DC_ProbeSequences.ApplyPlayForceDecision), or else by the actuator's stuck guard when a drive start stays
+//     below 3 km/h for 10 s (WARNING); run header vehicle.gearbox, vehicle.gear_index_*, gear_policy.*,
+//     drive.force_sim*, and at the stop gear_policy.shifts, physics_wake.* and drive.stuck_*;
 //   - after m_fDurationS of world time no new slot is issued; the requests still in flight are drained with the
 //     camera and the bands kept (DC_ImageSlotScheduler.StopIssuing), then the probe is done. OnProbeStop resolves
 //     what is left (only on a timeout or a Stop), parks the car, removes the bands and gives the camera back.
@@ -794,6 +796,7 @@ class DC_ProbeImages : DC_ProbeComponent
 		if (m_bDrive)
 		{
 			forceE01 = DC_ProbeSequences.ApplyPlayForceDecision(GetOwner(), m_Actuator);
+			m_Actuator.SetStuckForce(DC_ProbeActuator.STUCK_AFTER_S, DC_ProbeActuator.STUCK_BELOW_KMH);
 			header.Insert("drive.force_sim=" + BoolText(m_Actuator.IsSimulationForced()));
 			header.Insert("drive.force_sim_e01=" + forceE01);
 		}
@@ -829,6 +832,8 @@ class DC_ProbeImages : DC_ProbeComponent
 			return;
 
 		m_Actuator.ApplyStep(timeSlice);
+		if (m_Actuator.ConsumeStuckWarning() && m_Ctx)
+			m_Ctx.Warn(m_Actuator.DescribeStuck());
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1008,9 +1013,9 @@ class DC_ProbeImages : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Brake and handbrake, applied at once (DC_ProbeActuator.Park): no physics step of this probe follows, and a
-	//! driverless car keeps the last setter values. Then logs the gear policy and physics wake counts and appends them
-	//! to the run header (gear_policy.shifts, physics_wake.*)
+	//! Brake and handbrake (and neutral on a manual gearbox), applied at once (DC_ProbeActuator.Park): no physics step
+	//! of this probe follows, and a driverless car keeps the last setter values. Then logs the gear policy, physics
+	//! wake and stuck guard counts and appends them to the run header (gear_policy.shifts, physics_wake.*, drive.*)
 	protected void ParkVehicle()
 	{
 		if (!m_bDrive || !m_Actuator)

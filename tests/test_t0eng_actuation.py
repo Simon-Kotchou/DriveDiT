@@ -15,6 +15,9 @@ removes it afterwards. The fixtures are generated here from a small vehicle mode
     handbrake, gear_observe skipped with note manual_gearbox, the gearbox lines of the run header) -> PASS, gearbox
     "scripted gearbox needed", INFO gear_policy, gear_indices (TBD-7) and physics_wake; a probe-run-2-like play
     (manual gearbox known only from vehicle.has_automatic_gearbox=0, no motion) -> the same gearbox answer;
+  - the ForceEnableSimulation detail names the physics wake the move checks ran with (none, at the releases, or also
+    the sleep re-wakes), physics_wake counts the sleep re-wakes, and the header keys and note tokens the analyses
+    read are in the Enforce producer (review R-3, R-4);
   - E-02a with kappa = G(v) * s -> R2 ~ 1, PASS; one speed with only 2 valid cells -> FAIL;
   - the PRBS generator mirrors DC_ProbePrbs: maximum length for every supported order;
   - the step-CSV header of the fixtures is built from the Enforce source (DC_ProbeSequences.c: the stepColumns list,
@@ -481,6 +484,57 @@ class ActuationTests(unittest.TestCase):
                 {"note": "max_kmh:21.000/phb_resets:0/wakes:1/asleep_at_wake:0/shifts:2"}, {"note": "skipped"}]
         self.assertEqual(e01.physics_wake_text(FakePlay(), rows),
                          "2 calls at handbrake releases, 1 with the body asleep before (phase notes)")
+
+    def test_physics_wake_with_the_sleep_rewakes(self):
+        # Review R-4: the actuator also wakes a body it finds asleep on the later steps with the handbrake released
+        class FakePlay:
+            header = {}
+        rows = [{"note": "max_kmh:0.000/phb_resets:0/wakes:1/asleep_at_wake:1/shifts:0/sleep_wakes:2"},
+                {"note": "max_kmh:21.000/phb_resets:0/wakes:1/asleep_at_wake:0/shifts:2/sleep_wakes:0"}]
+        self.assertEqual(e01.physics_wake_text(FakePlay(), rows),
+                         "2 calls at handbrake releases, 1 with the body asleep before; 2 sleep re-wakes on driving "
+                         "steps (phase notes)")
+        FakePlay.header = {"physics_wake.calls": "11", "physics_wake.asleep_before": "1",
+                           "physics_wake.no_physics": "0", "physics_wake.sleep_wakes": "0"}
+        self.assertEqual(e01.physics_wake_text(FakePlay(), rows),
+                         "11 calls at handbrake releases, 1 with the body asleep before (Physics.IsActive 0), 0 "
+                         "without physics; 0 sleep re-wakes on driving steps (run header)")
+
+    def test_force_sim_answer_names_the_physics_wake(self):
+        # Review R-3: "not needed" holds only for a driver that wakes the body as the move checks did
+        def force_line(play):
+            code, text = run_tool(["e01", play])
+            lines = [line for line in text.splitlines() if "] force_enable_simulation: " in line]
+            self.assertEqual(len(lines), 1, text)
+            return lines[0]
+
+        plain = os.path.join(self.base, "e01_plain")
+        build_e01(plain)
+        self.assertTrue(force_line(plain).endswith(
+            "[PASS] force_enable_simulation: not needed (move_check ok, move_check_forced -); without a physics "
+            "wake (a play before the wake)"), force_line(plain))
+        manual = os.path.join(self.base, "e01_manual_wake")
+        build_e01(manual, manual=True)
+        self.assertTrue(force_line(manual).endswith(
+            "not needed (move_check ok, move_check_forced -); with Physics.SetActive at each handbrake release"),
+            force_line(manual))
+        append_kv(os.path.join(manual, "run_header.txt"), {"physics_wake.sleep_wakes": "0"})
+        self.assertTrue(force_line(manual).endswith(
+            "with Physics.SetActive at each handbrake release and on every driving step that found the body asleep"),
+            force_line(manual))
+
+    def test_wake_and_stuck_keys_come_from_the_enforce_producer(self):
+        # The keys and note tokens the analyses read are written by DC_ProbeActuator / DC_ProbeSequences
+        with open(ENFORCE_SEQUENCES, "r", encoding="ascii") as handle:
+            source = handle.read()
+        for key in ("physics_wake.calls", "physics_wake.asleep_before", "physics_wake.no_physics",
+                    "physics_wake.sleep_wakes", "drive.stuck_forces", "drive.force_sim", "gear_policy.reasserts"):
+            self.assertIn('"%s="' % key, source)
+        for token in ("wakes", "asleep_at_wake", "shifts", "sleep_wakes"):
+            self.assertIn('AddNote("%s:"' % token, source)
+        rule = re.search(r'"physics_wake\.rule=([^"]*)"', source)
+        self.assertIsNotNone(rule)
+        self.assertIn("IsActive false", rule.group(1), "e01_actuation.wake_condition reads the re-wake from the rule")
 
     def test_e01_no_motion_fails(self):
         play = os.path.join(self.base, "e01_still")

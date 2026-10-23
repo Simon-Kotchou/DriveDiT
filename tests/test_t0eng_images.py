@@ -243,6 +243,19 @@ class E05Tests(TempCase):
         self.assertIn("max veh_speed_kmh 30.00 over 130 drive frames; gearbox manual; force_sim 1 (e01 decision "
                       "needed); gear policy shifts 4; physics wake 7 calls, 7 with the body asleep before",
                       found["drive"][1])
+        self.assertNotIn("sleep re-wakes", found["drive"][1], "a play before the review fix has no such keys")
+
+    def test_shuttle_drive_info_with_the_stuck_guard(self):
+        # Review R-4: e01 said not_needed, the body kept falling asleep and the stuck guard latched the force at the
+        # stop; the drive.force_sim appended at the stop wins over the start value
+        play_dir, log_path = build_e05_play(self.base)
+        with open(os.path.join(play_dir, "run_header.txt"), "a", encoding="ascii", newline="") as handle:
+            handle.write("params.drive=1\nvehicle.gearbox=manual\ndrive.force_sim=0\ndrive.force_sim_e01=not_needed\n"
+                         "gear_policy.shifts=4\nphysics_wake.calls=7\nphysics_wake.asleep_before=0\n"
+                         "physics_wake.sleep_wakes=12\ndrive.stuck_forces=1\ndrive.force_sim=1\n")
+        found = items(e05_images.evaluate(play_dir, log_path))
+        self.assertIn("force_sim 1 (e01 decision not_needed); gear policy shifts 4; physics wake 7 calls, 0 with the "
+                      "body asleep before; 12 sleep re-wakes while driving; stuck force latches 1", found["drive"][1])
 
 
 class E06Tests(TempCase):

@@ -30,7 +30,8 @@
 //     next segment; its row says aborted_area. The teleports run in OnProbeFrame, never inside a physics step (the
 //     rule of DC_ProbeSequences): a reset segment waits for its teleport. Gears, physics wake and
 //     ForceEnableSimulation as the e05 shuttle (DC_ProbeImages): DC_ProbeActuator's shift policy with its defaults,
-//     ForceEnableSimulation unless e01 of this Play found it not needed;
+//     ForceEnableSimulation unless e01 of this Play found it not needed, or else once a drive start stays below
+//     3 km/h for 10 s (the actuator's stuck guard, WARNING);
 //   - after the last FPS phase no new slot is issued and the requests in flight are drained with the camera and
 //     the bands kept (DC_ImageSlotScheduler.StopIssuing); then the probe is done;
 //   - every render frame: DC_Fiducial.Show, the scheduler, one e06a_frames.csv row and, on frames that issued a
@@ -467,6 +468,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		AppendMarkerLines(header);
 		m_Actuator.AppendGearboxLines(header);
 		string forceE01 = DC_ProbeSequences.ApplyPlayForceDecision(GetOwner(), m_Actuator);
+		m_Actuator.SetStuckForce(DC_ProbeActuator.STUCK_AFTER_S, DC_ProbeActuator.STUCK_BELOW_KMH);
 		header.Insert("drive.force_sim=" + BoolText(m_Actuator.IsSimulationForced()));
 		header.Insert("drive.force_sim_e01=" + forceE01);
 		header.Insert("capture.frames_dir=" + frameDir);
@@ -501,6 +503,8 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		}
 
 		m_Actuator.ApplyStep(timeSlice);
+		if (m_Actuator.ConsumeStuckWarning() && m_Ctx)
+			m_Ctx.Warn(m_Actuator.DescribeStuck());
 	}
 
 	//------------------------------------------------------------------------------------------------

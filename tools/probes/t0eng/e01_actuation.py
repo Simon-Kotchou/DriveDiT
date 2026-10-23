@@ -34,7 +34,11 @@ measured. Auto-gear works or a scripted gearbox is needed. Recorded whether it w
                            vehicle.has_automatic_gearbox=0 in a play before the gearbox fix) answers "scripted gearbox
                            needed" without gear_observe (the probe skips it there, note manual_gearbox); INFO
                            gear_scripted honoured or overridden, shift loops
-  force_enable_simulation  "not needed" (move_check ok), "needed" (only move_check_forced moved), "does not help"
+  force_enable_simulation  "not needed" (move_check ok), "needed" (only move_check_forced moved), "does not help";
+                           the detail names the physics wake the answer was taken with (wake_condition: the
+                           Physics.SetActive at each handbrake release, plus the sleep re-wake on driving steps since
+                           the review fix, or none in a play before the wake), so a consumer that drops the wake
+                           knows the answer does not carry over
   INFO                     engine_on 0 steps while driving (stall watch, expected 0 on 1.8), persistent-handbrake
                            re-releases, the level-correlation peak (dead time plus lag), the rerun19.* checklist,
                            gear_indices (the indices the probe derived from the gear counts with the vanilla rule,
@@ -42,10 +46,11 @@ measured. Auto-gear works or a scripted gearbox is needed. Recorded whether it w
                            drives in reverse), gear_policy (manual gearbox: the actuator's shift policy, cmd_gear on
                            the driving steps outside gear_scripted, readback share, shifts, SetGear calls),
                            physics_wake (Physics.SetActive calls at handbrake releases and how many found the body
-                           asleep), shift_loops (windows in world time: world_time_ms, else the running sum of
-                           timeslice_s), merged_fixed_steps (also for e02a: the probe's engine fixed steps that the 1.8
-                           fixedframe fallback merged into one call, footer minus header; above 1% the step-based
-                           timing results need review). e02a also prints gear_policy and physics_wake.
+                           asleep, and the sleep re-wakes on later driving steps), shift_loops (windows in world time:
+                           world_time_ms, else the running sum of timeslice_s), merged_fixed_steps (also for e02a: the
+                           probe's engine fixed steps that the 1.8 fixedframe fallback merged into one call, footer
+                           minus header; above 1% the step-based timing results need review). e02a also prints
+                           gear_policy and physics_wake.
   RESULT PASS when the car moved and every identification has a value.
 
 E-02a (r2 4.4: "fit usable by llc_v1"): per cell the steady window is the last half of excite, steps within
@@ -456,9 +461,11 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
             decision = None
         else:
             decision = "does not help"
-        verdict.check("force_enable_simulation", decision is not None, "%s (move_check %s, move_check_forced %s)" % (
-            decision or "undecided", checks["move_check"]["result"],
-            checks["move_check_forced"]["result"] if "move_check_forced" in checks else "-"))
+        forced_result = checks["move_check_forced"]["result"] if "move_check_forced" in checks else "-"
+        verdict.check("force_enable_simulation", decision is not None,
+                      "%s (move_check %s, move_check_forced %s); %s" % (
+                          decision or "undecided", checks["move_check"]["result"], forced_result,
+                          wake_condition(play, phases)))
 
     # INFO
     verdict.info("gear_indices", gear_indices(steps, play.header))
@@ -603,26 +610,51 @@ def gear_policy_text(play, steps):
                 header.get("gear_policy.reasserts", "n/a")))
 
 
-def physics_wake_text(play, rows):
-    """INFO physics_wake: Physics.SetActive(ActiveState.ACTIVE) at the handbrake releases, from the run header
-    (physics_wake.*, appended at the probe stop) or else the sum of the phase/cell notes wakes:/asleep_at_wake:."""
-    header = play.header
-    if "physics_wake.calls" in header:
-        return "%s calls at handbrake releases, %s with the body asleep before (Physics.IsActive 0), %s without " \
-               "physics (run header)" % (header["physics_wake.calls"], header.get("physics_wake.asleep_before", "?"),
-                                         header.get("physics_wake.no_physics", "?"))
-    totals = {"wakes": 0, "asleep_at_wake": 0}
-    seen = False
+def note_totals(rows, keys):
+    """Sums of the integer note tokens <key>:<n> over the phase/cell rows; None for a key no row carries."""
+    totals = {}
     for row in rows:
         for token in (row.get("note") or "").split("/"):
             key, _, value = token.partition(":")
-            if key in totals:
-                seen = True
-                totals[key] += int(num(value) or 0)
-    if not seen:
+            if key in keys:
+                totals[key] = totals.get(key, 0) + int(num(value) or 0)
+    return {key: totals.get(key) for key in keys}
+
+
+def physics_wake_text(play, rows):
+    """INFO physics_wake: Physics.SetActive(ActiveState.ACTIVE) at the handbrake releases, from the run header
+    (physics_wake.*, appended at the probe stop) or else the sum of the phase/cell notes wakes:/asleep_at_wake:; then
+    the sleep re-wakes on the later driving steps (physics_wake.sleep_wakes / note sleep_wakes:) when recorded."""
+    header = play.header
+    totals = note_totals(rows, ("wakes", "asleep_at_wake", "sleep_wakes"))
+    if "physics_wake.calls" in header:
+        text = "%s calls at handbrake releases, %s with the body asleep before (Physics.IsActive 0), %s without " \
+               "physics" % (header["physics_wake.calls"], header.get("physics_wake.asleep_before", "?"),
+                            header.get("physics_wake.no_physics", "?"))
+        sleep = header.get("physics_wake.sleep_wakes")
+        if sleep is not None:
+            text += "; %s sleep re-wakes on driving steps" % sleep
+        return text + " (run header)"
+    if totals["wakes"] is None and totals["asleep_at_wake"] is None:
         return "not recorded (a play before the physics wake)"
-    return "%d calls at handbrake releases, %d with the body asleep before (phase notes)" % (
-        totals["wakes"], totals["asleep_at_wake"])
+    text = "%d calls at handbrake releases, %d with the body asleep before" % (
+        totals["wakes"] or 0, totals["asleep_at_wake"] or 0)
+    if totals["sleep_wakes"] is not None:
+        text += "; %d sleep re-wakes on driving steps" % totals["sleep_wakes"]
+    return text + " (phase notes)"
+
+
+def wake_condition(play, rows):
+    """The physics wake the move checks ran with (review R-3): the ForceEnableSimulation answer holds only for a driver
+    that wakes the body the same way (DD-4-min Mode A does both)."""
+    header = play.header
+    totals = note_totals(rows, ("wakes", "sleep_wakes"))
+    rewake = "physics_wake.sleep_wakes" in header or "IsActive false" in header.get("physics_wake.rule", "")
+    if rewake or totals["sleep_wakes"] is not None:
+        return "with Physics.SetActive at each handbrake release and on every driving step that found the body asleep"
+    if any(key in header for key in ("physics_wake.rule", "physics_wake.calls")) or totals["wakes"] is not None:
+        return "with Physics.SetActive at each handbrake release"
+    return "without a physics wake (a play before the wake)"
 
 
 def drive_infos(verdict, play, steps, rows):

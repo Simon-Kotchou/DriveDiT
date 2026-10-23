@@ -138,8 +138,9 @@ def latency_text(values):
 
 def drive_text(header, frames):
     """INFO drive of a shuttle play (params.drive=1): max veh_speed_kmh over the frames of segment drive, then the run
-    header's vehicle.gearbox, drive.force_sim / drive.force_sim_e01, gear_policy.shifts and physics_wake.* (the last
-    two are appended at the probe stop). None for a static capture."""
+    header's vehicle.gearbox, drive.force_sim / drive.force_sim_e01, gear_policy.shifts, physics_wake.* and
+    drive.stuck_forces (the last three are appended at the probe stop; a drive.force_sim appended there wins over the
+    start value, so a stuck-guard latch shows as force_sim 1). None for a static capture."""
     if header.get("params.drive") != "1":
         return None
     speeds = [value for row, value in zip(frames, probe_common.floats(frames, "veh_speed_kmh"))
@@ -147,11 +148,16 @@ def drive_text(header, frames):
     moved = "no drive frame with veh_speed_kmh"
     if speeds:
         moved = "max veh_speed_kmh %.2f over %d drive frames" % (max(speeds), len(speeds))
-    return "%s; gearbox %s; force_sim %s (e01 decision %s); gear policy shifts %s; physics wake %s calls, %s with " \
+    text = "%s; gearbox %s; force_sim %s (e01 decision %s); gear policy shifts %s; physics wake %s calls, %s with " \
            "the body asleep before" % (
                moved, header.get("vehicle.gearbox", "n/a"), header.get("drive.force_sim", "n/a"),
                header.get("drive.force_sim_e01", "n/a"), header.get("gear_policy.shifts", "n/a"),
                header.get("physics_wake.calls", "n/a"), header.get("physics_wake.asleep_before", "n/a"))
+    if "physics_wake.sleep_wakes" in header or "drive.stuck_forces" in header:
+        # The review fix (R-4): re-wakes of an asleep body while driving, and the stuck guard's ForceEnableSimulation
+        text += "; %s sleep re-wakes while driving; stuck force latches %s" % (
+            header.get("physics_wake.sleep_wakes", "n/a"), header.get("drive.stuck_forces", "n/a"))
+    return text
 
 
 def evaluate(play_dir, log_path=None):

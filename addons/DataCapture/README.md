@@ -314,12 +314,17 @@ Notes on the driving probes (e01, e02a, e05, e06a; all drive `DC_Ego` through `D
   gear below 8 km/h, never neutral or reverse while driving (`DC_ProbeSequences` category Gearbox; e05 and e06a
   use the same values as defaults). `cmd_gear` in the step CSVs is the gear the policy chose. The move checks hold
   first gear, `gear_scripted` still calls `SetGear` every step, and `gear_observe` is skipped with the note
-  `manual_gearbox`.
-- Each release of the handbrake also wakes the car's physics as vanilla does (`Physics.SetActive(ActiveState.ACTIVE)`).
-  The phase notes (`wakes`, `asleep_at_wake`, `shifts`) and the run header lines appended at the stop
-  (`gear_policy.*`, `physics_wake.*`) count these wakes and the gear changes.
+  `manual_gearbox`. The park/drive choice is the probe's own: vanilla `SCR_ToggleHandbrakeAction` releases into
+  neutral and parks in first gear. After an explicit gear the policy continues from that gear, and every probe stop
+  sets neutral on a manual gearbox.
+- Each release of the handbrake also wakes the car's physics as vanilla does (`Physics.SetActive(ActiveState.ACTIVE)`),
+  and every later step with the handbrake released wakes a body it finds asleep (`Physics.IsActive` false), as
+  DD-4-min Mode A does. The phase notes (`wakes`, `asleep_at_wake`, `shifts`, `sleep_wakes`) and the run header lines
+  appended at the stop (`gear_policy.*`, `physics_wake.*`) count these wakes and the gear changes. E-01's
+  ForceEnableSimulation answer holds with both wakes; `e01_actuation.py` prints that condition after the answer.
 - e05 and e06a latch `ForceEnableSimulation` unless e01 of the same Play found it not needed (`drive.force_sim`,
-  `drive.force_sim_e01` in their run headers).
+  `drive.force_sim_e01` in their run headers). If e01 found it not needed and a drive start stays below 3 km/h for
+  10 s, the actuator's stuck guard latches it anyway and logs a WARNING (`drive.stuck_forces` at the stop).
 
 Notes on the image probes:
 - e05 and e06a drive from 2 x `m_fAreaMarginM` along the test area (6 m with the layer's margin), inside the area

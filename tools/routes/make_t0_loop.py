@@ -12,7 +12,8 @@ INPUTS (read only)
             width_m, n_pts, ...), arland_road_points.csv (road_idx, pt_idx, x, y, z along each road) and
             arland_roads_footer.txt, which must say complete=1 for map arland with the row counts of both files.
             Default: the versioned copy DEFAULT_DUMP (T0-ENG probe run 1, 1.8.0.13; its source.txt names the play and
-            the sha256 of each file, which must match).
+            the sha256 of each of the three files: a copy whose source.txt lacks one, or whose file differs, is
+            refused).
             An E-08a play directory works too (launch.id from its run_header.txt). The loop's roads are named by the
             road_idx of that dump and checked against their road_key, so another dump (another launch or build) is
             refused until LOOP is derived again on it.
@@ -20,8 +21,9 @@ INPUTS (read only)
   --layer   the DC_Arland layer: the parked vehicles the loop keeps clear of.
   --trails  optional, a CHECK only: the decoder's road polylines (Arland_road_polylines.tsv). Its trails (class
             trail, prefab Type Path) are not in the engine's road network, so no engine junction marks them: the build
-            is refused when a trail crosses the loop (goes on for TRAIL_END_M or more on both sides, as 414 across
-            engine road 121), and the trails that end on the loop's road or within TRAIL_TOUCH_M of it are listed.
+            is refused when a trail crosses the loop (at a point where it meets the line, end points of the segments
+            included, it goes on for TRAIL_END_M or more along the trail on both sides, as 414 across engine road
+            121), and the trails that end on the loop's road or within TRAIL_TOUCH_M of it are listed.
             The route never depends on it (--check gives the same bytes with and without it).
 --out writes the route; --check regenerates it and compares it byte for byte with FILE (exit 1 when they differ);
 without either the route is only built, checked and summarised.
@@ -54,6 +56,14 @@ How the driving line is made (the route polyline is the driving line; drivedit_n
      last point identical.
 Heights are the engine heights of the nearest loop-road centreline point (nav_v1 ignores y; DC_EgoSession puts the
 spawn on the surface).
+
+The lane corridor (source.lane_corridor_s_m and source.lane_corridor_half_width_m, read by DC_Route for DC_ExpertHL's
+offroad termination, r2 1.3: dist_lane_corridor > w/2 + 0.5 m for more than 3 s): the corridor around the driving
+line is the right lane of the nearest loop road that is not a connector, half its engine width wide, so its half
+width w/2 is LANE_CORRIDOR_FRACTION of that width (2 m on the 8 m roads, 1.125 m on the 4.5 m dirt roads, 0.75 m on
+the 3 m road 136). Within CORRIDOR_SPAN_M along the route of a point the narrowest one holds, so a junction between
+roads of different widths has the narrower corridor on both sides. Piece k covers the arc lengths [s_k, s_k+1), the
+first one starts at 0 and the last one runs to the route end.
 
 Checks before anything is written (exit 2 and nothing written when one fails):
   * every point lies in TRAIN: outside the VAL-L box of the splits file dilated by its buffer;
@@ -102,7 +112,7 @@ if REPO not in sys.path:
 import drivedit_nav  # noqa: E402  (the route schema and its validator, DD-11-min)
 
 GENERATOR = "tools/routes/make_t0_loop.py"
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3              # 3: the lane corridor per road (source.lane_corridor_*)
 ROUTE_ID = "arland_t0_loop"
 MAP_ID = "arland"
 SPLIT = "train"
@@ -128,6 +138,9 @@ LOOP = (
 START_ALONG_M = 100.0           # the start (and end) of the closed route, along the first road's lane line
 LANE_WIDTH_FRACTION = 0.25      # right lane centre = a quarter of the engine road width right of the centreline
 CONNECTOR_MAX_W = 1.5           # the engine's junction connectors are 1 m wide pieces of about 11 m
+LANE_CORRIDOR_FRACTION = 0.25   # lane corridor half width w/2: the right lane is half the engine road width
+CORRIDOR_SPAN_M = 20.0          # the narrowest corridor within this far along the route holds (junctions, corners)
+CORRIDOR_DECIMALS = 3
 
 SPLINE_STEP_M = 0.5             # Catmull-Rom sampling of the road centrelines
 JOIN_TOL_M = 4.0                # a loop road's end must lie this close to the next loop road
@@ -162,6 +175,7 @@ TURN_SPAN_M = 20.0
 MANEUVER_STRAIGHT_DEG = 30.0
 TRAIL_TOUCH_M = 6.0
 TRAIL_END_M = 8.0               # a trail ending within this of the route ends on its road: a touch, not a crossing
+CUT_EPS_M = 1e-6                # segments this close meet; meeting points this close along a trail are one
 GRID_M = 32.0
 
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
@@ -256,9 +270,13 @@ def read_dump(path):
         raise Refusal("the road dump %s has %d roads and %d points, its footer says %s and %s"
                       % (path, len(roads), len(rows), footer.get("roads_written"), footer.get("points_total")))
     meta = {}
-    if os.path.isfile(os.path.join(path, "source.txt")):
+    hashed = os.path.isfile(os.path.join(path, "source.txt"))      # a copy: source.txt must name every file's sha256
+    if hashed:
         meta = read_kv(os.path.join(path, "source.txt"))
-    elif os.path.isfile(os.path.join(path, "run_header.txt")):
+        missing = [name for name in DUMP_FILES if not meta.get("sha256." + name)]
+        if missing:
+            raise Refusal("the source.txt of %s names no sha256 of %s" % (path, ", ".join(missing)))
+    elif os.path.isfile(os.path.join(path, "run_header.txt")):     # a play directory: the files as the probe wrote them
         header = read_kv(os.path.join(path, "run_header.txt"))
         meta = {"probe": header.get("probe", ""), "launch_id": header.get("launch.id", ""),
                 "play": os.path.basename(os.path.normpath(path)),
@@ -267,7 +285,7 @@ def read_dump(path):
         raise Refusal("the road dump %s names no E-08a launch (source.txt or run_header.txt)" % path)
     files = {name: sha256_file(os.path.join(path, name)) for name in DUMP_FILES}
     for name, digest in sorted(files.items()):
-        if meta.get("sha256." + name, digest) != digest:
+        if hashed and meta["sha256." + name] != digest:
             raise Refusal("%s in %s is not the file its source.txt names (sha256 %s, source.txt %s)"
                           % (name, path, digest, meta["sha256." + name]))
     provenance = {"probe": "e08a", "launch_id": meta["launch_id"], "play": meta.get("play", ""),
@@ -501,6 +519,34 @@ def segments_cross(a, b, c, d):
     def orient(p, q, r):
         return (q[0] - p[0]) * (r[2] - p[2]) - (q[2] - p[2]) * (r[0] - p[0])
     return (orient(a, b, c) * orient(a, b, d) < 0) and (orient(c, d, a) * orient(c, d, b) < 0)
+
+
+def segment_cuts(a, b, c, d):
+    """The fractions t in [0, 1] along segment ab (horizontal) where it meets segment cd, end points included: the
+    intersection point, or both ends of the overlap when the two lie on one line; [] when they do not meet."""
+    if max(a[0], b[0]) < min(c[0], d[0]) - CUT_EPS_M or min(a[0], b[0]) > max(c[0], d[0]) + CUT_EPS_M \
+            or max(a[2], b[2]) < min(c[2], d[2]) - CUT_EPS_M or min(a[2], b[2]) > max(c[2], d[2]) + CUT_EPS_M:
+        return []
+    rx, rz = b[0] - a[0], b[2] - a[2]
+    sx, sz = d[0] - c[0], d[2] - c[2]
+    qx, qz = c[0] - a[0], c[2] - a[2]
+    r2 = rx * rx + rz * rz
+    scale = max(r2, sx * sx + sz * sz, 1e-12)
+    den = rx * sz - rz * sx
+    if abs(den) > 1e-12 * scale:
+        t = (qx * sz - qz * sx) / den
+        u = (qx * rz - qz * rx) / den
+        slack_t = CUT_EPS_M / math.sqrt(max(r2, 1e-12))
+        slack_u = CUT_EPS_M / math.sqrt(max(sx * sx + sz * sz, 1e-12))
+        if -slack_t <= t <= 1.0 + slack_t and -slack_u <= u <= 1.0 + slack_u:
+            return [min(max(t, 0.0), 1.0)]
+        return []
+    if r2 <= 0 or abs(qx * rz - qz * rx) > CUT_EPS_M * math.sqrt(r2):     # parallel, not on one line
+        return []
+    t0 = (qx * rx + qz * rz) / r2
+    t1 = ((d[0] - a[0]) * rx + (d[2] - a[2]) * rz) / r2
+    lo, hi = max(min(t0, t1), 0.0), min(max(t0, t1), 1.0)
+    return [lo, hi] if lo <= hi else []
 
 
 class SegmentGrid:
@@ -739,6 +785,39 @@ def heights_from(points, legs):
     return out
 
 
+def lane_corridor(points, legs):
+    """(arc lengths [s_k], half widths [w_k / 2]) of the lane corridor of a closed route (module docstring): piece k
+    covers [s_k, s_k+1), the last one to the route end. Each point takes LANE_CORRIDOR_FRACTION of the engine width of
+    its nearest loop road that is not a connector, then the smallest of those within CORRIDOR_SPAN_M along the route
+    (around the closed loop)."""
+    grid = SegmentGrid([(road.idx, road.line) for road in legs if not road.connector])
+    widths = {road.idx: road.width for road in legs}
+    s = arc_lengths(points)
+    length = s[-1]
+    own = []
+    for p in points[:-1]:
+        near = grid.near(p[0], p[2], 2.0 * GRID_M)
+        if not near:
+            raise Refusal("point (%.1f, %.1f) is far from every loop road" % (p[0], p[2]))
+        li = min(near.items(), key=lambda item: item[1][0])[0]
+        own.append(LANE_CORRIDOR_FRACTION * widths[grid.lines[li][0]])
+    halves = []
+    for i in range(len(own)):
+        nearby = [own[j] for j in range(len(own))
+                  if min(abs(s[j] - s[i]), length - abs(s[j] - s[i])) <= CORRIDOR_SPAN_M]
+        halves.append(round(min(nearby), CORRIDOR_DECIMALS))
+    starts, values = [], []
+    scale = 10 ** CORRIDOR_DECIMALS
+    for i, half in enumerate(halves):
+        if not values or half != values[-1]:
+            starts.append(math.floor(s[i] * scale) / scale)       # rounded down: the piece holds its first point
+            values.append(half)
+    if starts[0] != 0.0 or any(b <= a for a, b in zip(starts, starts[1:])) or min(values) <= 0.0:
+        raise Refusal("the lane corridor pieces %s / %s are not ordered from 0 with positive half widths"
+                      % (starts, values))
+    return starts, values
+
+
 def route_curvature(points, s, at):
     """Signed curvature (1/m, right positive) at arc length at: the tangent heading change over +-CURV_WINDOW_M
     (C17's route_curvature, DD-5-min)."""
@@ -944,25 +1023,34 @@ def check_route(points, legs, junctions, events, roads, train_rule, vehicles):
 
 
 def check_trails(points, trails):
-    """(crossings [(trail id, x, z)], touches [(trail id, distance)]) of the decoder trails against the route. A
-    crossing is an intersection with a trail that goes on for at least TRAIL_END_M on both sides of it (414 across
-    engine road 121); a trail that ends on the loop's road (its end within TRAIL_END_M of the intersection) and every
-    trail end within TRAIL_TOUCH_M of the route is a touch (distance 0 when the route passes over the end piece)."""
+    """(crossings [(trail id, x, z)], touches [(trail id, distance)]) of the decoder trails against the route. A trail
+    meets the route at every point where one of its segments meets a route segment, end points included (a trail
+    through a route point, or with a point on the line, meets it there; the same point found from two adjacent
+    segments counts once). A meeting point with at least TRAIL_END_M of the trail on both sides of it, measured along
+    the trail from that point, is a crossing (414 across engine road 121); a trail that meets the line only nearer to
+    one of its ends ends on the loop's road, a touch at distance 0, and so is every trail with an end within
+    TRAIL_TOUCH_M of the route (at that distance)."""
     crossings, touches = [], []
+    route_s = arc_lengths(points)
     for trail_id, line in trails:
         pts = [(x, 0.0, z) for x, z in line]
         along = arc_lengths(pts)
-        touched = None
+        cuts = []
         for k, (a, b) in enumerate(zip(pts, pts[1:])):
             for c, d in zip(points, points[1:]):
-                if not segments_cross(a, b, c, d):
-                    continue
-                s_cut = along[k] + project([a, b], [0.0, along[k + 1] - along[k]], c[0], c[2])[0]
-                if min(s_cut, along[-1] - s_cut) >= TRAIL_END_M:
-                    crossings.append((trail_id, round(c[0], 1), round(c[2], 1)))
-                else:
-                    touched = 0.0
-        route_s = arc_lengths(points)
+                for t in segment_cuts(a, b, c, d):
+                    cuts.append((along[k] + t * (along[k + 1] - along[k]),
+                                 a[0] + t * (b[0] - a[0]), a[2] + t * (b[2] - a[2])))
+        touched = None
+        last = None
+        for s_cut, x, z in sorted(cuts):
+            if last is not None and s_cut - last <= CUT_EPS_M:
+                continue                            # one point, found from two segments sharing a vertex
+            last = s_cut
+            if min(s_cut, along[-1] - s_cut) >= TRAIL_END_M:
+                crossings.append((trail_id, round(x, 1), round(z, 1)))
+            else:
+                touched = 0.0
         for end in (pts[0], pts[-1]):
             distance = project(points, route_s, end[0], end[2])[1]
             if distance <= TRAIL_TOUCH_M and (touched is None or distance < touched):
@@ -998,6 +1086,8 @@ def build_route(dump_path, splits_path, layer_path):
     facts = check_route(pts, legs, junctions, events, roads, train_rule, vehicles)
     maneuvers, junction_facts = maneuvers_of(pts, events)
     facts["junctions"] = junction_facts
+    corridor_s, corridor_half = lane_corridor(pts, legs)
+    facts["lane_corridor"] = list(zip(corridor_s, corridor_half))
     length = arc_lengths(pts)[-1]
     offsets = lane_offsets(legs)
     route = {
@@ -1024,6 +1114,10 @@ def build_route(dump_path, splits_path, layer_path):
             "corners": corners,
             "corner_radius_m": {"right": CORNER_RIGHT_M, "left": CORNER_LEFT_M, "min_cut_m": CORNER_MIN_CUT_M},
             "lane_width_fraction": LANE_WIDTH_FRACTION,
+            "lane_corridor_s_m": corridor_s,
+            "lane_corridor_half_width_m": corridor_half,
+            "lane_corridor_rule": {"half_width_fraction": LANE_CORRIDOR_FRACTION, "narrowest_within_m": CORRIDOR_SPAN_M,
+                                   "road": "nearest loop road that is not a connector"},
             "start_along_m": START_ALONG_M,
             "smoothing": {"step_m": SMOOTH_STEP_M, "max_shift_m": SMOOTH_MAX_SHIFT_M},
             "maneuver_rule": {"arm_tol_m": ARM_TOL_M, "merge_m": MANEUVER_MERGE_M, "turn_span_m": TURN_SPAN_M,
@@ -1094,6 +1188,8 @@ def main(argv=None):
           "|offset - w/4| %.2f m; closest parked vehicle %s at %.1f m" % (
               1.0 / facts["max_abs_kappa"], -facts["on_road_worst_excess_m"], facts["lane_points"],
               facts["lane_dev_max_m"], facts["closest_parked_vehicle"][0], facts["closest_parked_vehicle"][1]))
+    print("  lane corridor half width from s: %s" % ", ".join("%.1f m: %.3f m" % piece
+                                                             for piece in facts["lane_corridor"]))
     print("  TRAIN of %s (status %s)" % (os.path.basename(args.splits), route["source"]["inputs"]["splits"]["status"]))
     for fact in facts["junctions"]:
         kind = next(m["type"] for m in route["maneuvers"] if m["junction_id"] == fact["junction_id"])

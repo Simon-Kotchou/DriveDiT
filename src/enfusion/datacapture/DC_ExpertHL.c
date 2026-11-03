@@ -39,18 +39,22 @@
 // Terminations (the first one reported wins, at the next decision step), with the r2 1.3 definitions dc-2.0 9.6
 // names by default: route_complete (stopped at the end: progress >= 98 % of the route and within m_fEndToleranceM
 // of its last point), route_deviation (|lane_lat_err_m| > m_fDeviationM, 30 m), offroad (|lane_lat_err_m| beyond
-// the lane corridor half width m_fCorridorHalfWidthM + m_fOffroadMarginM for more than m_fOffroadS, w/2 + 0.5 m for
-// 3 s), stuck (slower than m_fStuckKmh for m_fStuckS, 1 km/h for 20 s; also an events row of kind stuck, which
-// DD-5-min C17 counts), rollover (up axis tilted beyond m_fRolloverDeg, up.worldUp < 0.5), timeout
-// (m_fEpisodeTimeoutS, the r2 3.6 cap of 8 min; r2 1.3's twice-the-expert-time rule is the evaluator's), engine_off
-// (engine off for m_fEngineOffS). The thresholds are logged in BeginDriver.
+// the lane corridor half width w/2 + m_fOffroadMarginM for more than m_fOffroadS, w/2 + 0.5 m for 3 s; w/2 is the
+// route's lane corridor at the current progress, the right lane of the road there: 2 m on 8 m roads, 1.125 m on
+// 4.5 m dirt roads; m_fCorridorHalfWidthM on a route without one), stuck (slower than m_fStuckKmh for m_fStuckS,
+// 1 km/h for 20 s; also an events row of kind stuck, which DD-5-min C17 counts), rollover (up axis tilted beyond
+// m_fRolloverDeg, up.worldUp < 0.5), timeout (m_fEpisodeTimeoutS, the r2 3.6 cap of 8 min; r2 1.3's
+// twice-the-expert-time rule is the evaluator's), engine_off (engine off for m_fEngineOffS). The thresholds are logged
+// in BeginDriver.
 // Every constant is a parameter with a stated basis (r2 1.3, r2 3.6, style_v1 nominal a_lat,max 2.75 m/s2, the S105);
 // none is ported from the Everon-built navigation code (EL-002).
 //
 // ROUTE FILE (drivedit.route/1, tools/routes/make_t0_loop.py): scalar keys through JsonLoadContext, the polyline by
-// DC_JsonScan (number arrays, see DC_LLCv1.c), checked against source.n_points and length_m. episodes.route_sha256
-// = sha256 of the file without its final LF, which is drivedit_nav's Route.sha256 for a file in canonical form (the
-// generator writes it so; tests/test_t0_loop_route.py checks it).
+// DC_JsonScan (number arrays, see DC_LLCv1.c), checked against source.n_points and length_m; the lane corridor
+// source.lane_corridor_s_m / source.lane_corridor_half_width_m (pieces [s_k, s_k+1), the last one to the route end;
+// both keys or neither) by DC_JsonScan too. episodes.route_sha256 = sha256 of the file without its final LF, which
+// is drivedit_nav's Route.sha256 for a file in canonical form (the generator writes it so;
+// tests/test_t0_loop_route.py checks it).
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -62,6 +66,8 @@ class DC_Route
 	static const float CURVATURE_HALF_WINDOW_M = 5;	//!< C17 route_curvature: heading change over +-5 m
 	static const float LENGTH_TOL_M = 0.5;			//!< length_m against the float sum of the segments
 	static const float CLOSED_TOL_M = 1;			//!< drivedit_nav CLOSED_TOL_M
+	static const string CORRIDOR_S_KEY = "lane_corridor_s_m";				//!< source key: where each corridor piece begins [m]
+	static const string CORRIDOR_HALF_KEY = "lane_corridor_half_width_m";	//!< source key: its half width w/2 [m]
 
 	string m_sPath;
 	string m_sSha256;			//!< sha256 of the file without its final LF (drivedit_nav Route.sha256 of a canonical file)
@@ -74,6 +80,8 @@ class DC_Route
 	ref array<vector> m_aPoints = {};
 	ref array<float> m_aS = {};
 	ref array<float> m_aKappa = {};
+	ref array<float> m_aCorridorS = {};		//!< lane corridor: the arc length where each piece begins (empty: no corridor)
+	ref array<float> m_aCorridorHalfM = {};	//!< ... and its half width w/2 [m]
 
 	//------------------------------------------------------------------------------------------------
 	//! Reads and checks a route file. false (failure) on a missing file, a parse problem or an inconsistent polyline
@@ -138,7 +146,109 @@ class DC_Route
 			return false;
 		}
 
+		if (!ReadCorridor(text, failure))
+		{
+			failure = path + ": " + failure;
+			return false;
+		}
+
 		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The lane corridor (source.lane_corridor_s_m and source.lane_corridor_half_width_m, by DC_JsonScan): both keys or
+	//! neither (neither: no corridor); as many arc lengths as half widths, at least one; the first piece begins at 0,
+	//! the next ones in increasing order before the route end (m_fLengthM, so after Measure); every half width positive
+	protected bool ReadCorridor(string text, out string failure)
+	{
+		m_aCorridorS.Clear();
+		m_aCorridorHalfM.Clear();
+		bool namesStarts = text.Contains("\"" + CORRIDOR_S_KEY + "\"");
+		bool namesHalves = text.Contains("\"" + CORRIDOR_HALF_KEY + "\"");
+		if (!namesStarts && !namesHalves)
+		{
+			failure = string.Empty;
+			return true;
+		}
+
+		if (!DC_JsonScan.ReadNumbers(text, CORRIDOR_S_KEY, m_aCorridorS, failure))
+			return false;
+
+		if (!DC_JsonScan.ReadNumbers(text, CORRIDOR_HALF_KEY, m_aCorridorHalfM, failure))
+			return false;
+
+		int count = m_aCorridorS.Count();
+		if (count < 1 || count != m_aCorridorHalfM.Count())
+		{
+			failure = string.Format("%1 has %2 values, %3 has %4 (as many, at least one)", CORRIDOR_S_KEY, count, CORRIDOR_HALF_KEY, m_aCorridorHalfM.Count());
+			return false;
+		}
+
+		for (int i = 0; i < count; i++)
+		{
+			float pieceStart = m_aCorridorS[i];
+			float pieceHalf = m_aCorridorHalfM[i];
+			bool startOk = pieceStart < m_fLengthM;
+			if (i == 0)
+				startOk = startOk && pieceStart == 0;
+			else
+				startOk = startOk && pieceStart > m_aCorridorS[i - 1];
+
+			if (!startOk || pieceHalf <= 0)
+			{
+				failure = string.Format("lane corridor piece %1 (from %2 m, half width %3 m): the pieces begin at 0, increase before the route end (%4 m) and have positive half widths", i, pieceStart, pieceHalf, m_fLengthM);
+				return false;
+			}
+		}
+
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Half width w/2 of the lane corridor at arc length s [m]: the piece holding s (before 0: the first one); fallback
+	//! when the route gives no corridor
+	float CorridorHalfWidthAt(float s, float fallback)
+	{
+		int count = m_aCorridorS.Count();
+		if (count == 0)
+			return fallback;
+
+		int piece = 0;
+		for (int i = 1; i < count; i++)
+		{
+			if (m_aCorridorS[i] > s)
+				break;
+
+			piece = i;
+		}
+
+		return m_aCorridorHalfM[piece];
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Number of lane corridor pieces (0: the route gives none)
+	int GetCorridorPieceCount()
+	{
+		return m_aCorridorS.Count();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Smallest and largest half width of the lane corridor [m]; false without a corridor
+	bool GetCorridorRange(out float lowest, out float highest)
+	{
+		if (m_aCorridorHalfM.Count() == 0)
+			return false;
+
+		lowest = m_aCorridorHalfM[0];
+		highest = lowest;
+		foreach (float pieceHalf : m_aCorridorHalfM)
+		{
+			lowest = Math.Min(lowest, pieceHalf);
+			highest = Math.Max(highest, pieceHalf);
+		}
+
 		return true;
 	}
 
@@ -666,7 +776,7 @@ class DC_ExpertDriver : DC_DriverInterface
 	[Attribute("30", UIWidgets.Slider, "route_deviation beyond this lateral distance from the driving line [m] (r2 1.3: more than 30 m from the route)", "1 100 0.5", category: "Terminations")]
 	protected float m_fDeviationM;
 
-	[Attribute("2", UIWidgets.Slider, "Half width w/2 of the lane corridor around the driving line [m] (the T0 loop drives the 4 m right lane of 8 m roads)", "0.5 10 0.1", category: "Terminations")]
+	[Attribute("2", UIWidgets.Slider, "Half width w/2 of the lane corridor around the driving line on a route that gives none [m] (2: the 4 m right lane of an 8 m road). A route with source.lane_corridor_* (the T0 loop: the right lane of each road, 2 m on 8 m asphalt, 1.125 m on 4.5 m dirt, 0.75 m on 3 m) uses its own", "0.5 10 0.1", category: "Terminations")]
 	protected float m_fCorridorHalfWidthM;
 
 	[Attribute("0.5", UIWidgets.Slider, "offroad margin beyond the lane corridor [m] (r2 1.3: dist_lane_corridor > w/2 + 0.5 m)", "0 5 0.1", category: "Terminations")]
@@ -820,11 +930,19 @@ class DC_ExpertDriver : DC_DriverInterface
 		float lowestKmh = lowest * 3.6;
 		float highestKmh = highest * 3.6;
 		float lengthM = m_Route.m_fLengthM;
+		float corridorLowest;
+		float corridorHighest;
+		string corridorText = string.Format("m_fCorridorHalfWidthM %1 m", m_fCorridorHalfWidthM);
+		if (m_Route.GetCorridorRange(corridorLowest, corridorHighest))
+			corridorText = string.Format("the route's lane corridor %1..%2 m (%3 pieces)", corridorLowest.ToString(-1, 3), corridorHighest.ToString(-1, 3), m_Route.GetCorridorPieceCount());
+		else
+			ctx.Warn("route " + m_Route.m_sRouteId + " gives no lane corridor (source." + DC_Route.CORRIDOR_S_KEY + "): offroad uses m_fCorridorHalfWidthM on the whole route");
+
 		ctx.Log(m_LLC.Describe());
 		ctx.Log(string.Format("vehicle card %1 sha256 %2 (use_class %3)", m_Card.m_sPath, m_Card.m_sSha256, m_sUseClass));
 		ctx.Log(string.Format("route %1 (%2, split %3, %4 m, %5 points) sha256 %6; speed profile %7..%8 km/h", m_Route.m_sRouteId, m_Route.m_sPath, m_Route.m_sSplit, lengthM.ToString(-1, 1), m_Route.GetPointCount(), m_Route.m_sSha256, lowestKmh.ToString(-1, 1), highestKmh.ToString(-1, 1)));
 		ctx.Log(string.Format("%1 llc_sha %2, %3 expert_sha %4", DC_LLCv1.VERSION, m_sLlcSha, DC_ExpertHL.VERSION, m_sExpertSha));
-		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, rollover > %8 deg, timeout %9 s", m_fEndToleranceM, m_fDeviationM, m_fCorridorHalfWidthM, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fRolloverDeg, m_fEpisodeTimeoutS));
+		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, rollover > %8 deg, timeout %9 s", m_fEndToleranceM, m_fDeviationM, corridorText, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fRolloverDeg, m_fEpisodeTimeoutS));
 		m_bReady = true;
 		return true;
 	}
@@ -1190,7 +1308,9 @@ class DC_ExpertDriver : DC_DriverInterface
 		if (absLateral > m_fDeviationM)
 			return "route_deviation";
 
-		if (absLateral > m_fCorridorHalfWidthM + m_fOffroadMarginM)
+		// the lane corridor of the route where the ego is (its ordered progress), else the attribute
+		float corridorHalf = m_Route.CorridorHalfWidthAt(m_Expert.GetProgress(), m_fCorridorHalfWidthM);
+		if (absLateral > corridorHalf + m_fOffroadMarginM)
 		{
 			if (m_iOffCorridorSinceMs < 0)
 				m_iOffCorridorSinceMs = now;

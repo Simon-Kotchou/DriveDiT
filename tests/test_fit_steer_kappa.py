@@ -98,6 +98,28 @@ KIT_GEARBOX_LINES = {"vehicle.has_automatic_gearbox": "0", "vehicle.gearbox_gear
                      "gear_policy.active": "1", "gear_policy.clutch_dip_s": "0.000"}
 EARLIER_GEARBOX_LINES = {"vehicle.has_automatic_gearbox": "0", "vehicle.gearbox_gears": "6",
                          "vehicle.gearbox_forward_gears": "4"}
+# The producer lines of what the fit reads, pinned from src/enfusion/datacapture/DC_ProbeSequences.c of probe kit
+# 699d8e2 (feat/t0eng-probe-kit; leading whitespace removed): DC_ProbeActuator.AppendGearboxLines :533-540,
+# DC_ProbeSequencePhase.AddNote :1245, AppendVehicleLines :1613 and :1630-1631, the gear_observe phase :1979,
+# BeginPhase's skip :2120, SkipPhase :2578 and BoolText :2824 / :2826
+KIT_699D8E2_LINES = (
+    'string kind = "manual";',
+    'if (m_bAutomaticGearbox)',
+    'kind = "automatic";',
+    'lines.Insert("vehicle.gearbox=" + kind);',
+    'lines.Insert("vehicle.gear_index_neutral=" + m_iGearNeutral.ToString());',
+    'lines.Insert("vehicle.gear_index_first=" + m_iGearFirst.ToString());',
+    'lines.Insert("vehicle.gear_index_top=" + m_iGearTop.ToString());',
+    'm_sNote += "/" + token;',
+    'lines.Insert("vehicle.has_automatic_gearbox=" + BoolText(controller.HasAutomaticGearbox()));',
+    'lines.Insert("vehicle.gearbox_gears=" + gears.ToString());',
+    'lines.Insert("vehicle.gearbox_forward_gears=" + forwardGears.ToString());',
+    'AddPhase(DC_EProbeSequenceKind.GEAR_OBSERVE, "gear_observe", -1, m_fGearObserveThrottle, 0);',
+    'SkipPhase(phase, "manual_gearbox",',
+    'phase.m_sResult = "skipped";',
+    'return "1";',
+    'return "0";',
+)
 
 
 class Truth:
@@ -1084,12 +1106,16 @@ class FitTests(unittest.TestCase):
         with self.assertRaises(fit.Refusal) as caught:
             fit.fit_gearbox(steps, True)
         self.assertIn("disagrees with itself", str(caught.exception))
-        # E-04 against the E-01 header: the gearbox kind and the indices must agree
+        # E-04 against the E-01 header: the gearbox kind and the indices (neutral, reverse, first and top) must agree;
+        # 4 gears with 2 forward keep neutral 1 and reverse 0 but end at top 3, where the header says 5
         kit = self.manual_e01("play_36", KIT_GEARBOX_LINES)
         speeds = ["--upshift-mps", "4.5,8.5", "--downshift-mps", "3.5,7.0"]
         for name, text, reason in (("play_37", b"has_automatic_gearbox=1\n", "has_automatic_gearbox 1"),
                                    ("play_38", b"has_automatic_gearbox=0\ngearbox_gears=7\ngearbox_forward_gears=4\n",
-                                    "neutral 2 and reverse 1")):
+                                    "neutral 2, reverse 1, first 3 and top 6"),
+                                   ("play_39", b"has_automatic_gearbox=0\ngearbox_gears=4\ngearbox_forward_gears=2\n",
+                                    "neutral 1, reverse 0, first 2 and top 3, the E-01 run header neutral 1, reverse "
+                                    "0, first 2 and top 5")):
             e04 = os.path.join(self.tmp, "e04", LAUNCH_ID, name)
             probe_common.write_synthetic_play(e04, header("e04"), {}, FOOTER, {"e04_vehicle.txt": text})
             code, out = run_fit(["--e01", kit, "--e02a", self.e02a, "--e04", e04] + speeds)
@@ -1098,18 +1124,32 @@ class FitTests(unittest.TestCase):
             self.assertIn("disagree", out)
 
     def test_header_keys_are_the_probe_kits(self):
-        # the run header lines the fit reads are the ones the probe kit writes (DC_ProbeSequences.c of this tree:
-        # AppendVehicleLines; DC_ProbeActuator.AppendGearboxLines of 699d8e2 when that file has it) and the skipped
-        # phase's note token
+        # the run header lines and the phase note the fit reads are the ones the probe kit writes: the lines of
+        # DC_ProbeSequences.c at probe kit 699d8e2 pinned in KIT_699D8E2_LINES (this branch does not have that file's
+        # AppendGearboxLines yet; once it does, its file must hold every pinned line) and AppendVehicleLines of this
+        # tree
         with open(os.path.join(REPO, "src", "enfusion", "datacapture", "DC_ProbeSequences.c"), "r",
                   encoding="ascii") as f:
             source = f.read()
+        pinned = "\n".join(KIT_699D8E2_LINES)
+        for key in (fit.HEADER_KIND, fit.HEADER_AUTOMATIC) + fit.HEADER_GEARS + fit.HEADER_INDICES:
+            self.assertIn('lines.Insert("%s=" +' % key, pinned)
+        self.assertIn('SkipPhase(phase, "%s",' % fit.NOTE_MANUAL, pinned)
+        self.assertIn('phase.m_sResult = "skipped";', pinned)
+        self.assertIn('m_sNote += "/" + token;', pinned)            # note tokens joined by "/", as the fit splits them
+        play = type("Play", (), {"header": {}, "dir": "e01/x/play_01"})()
+        rows = [{"phase": "gear_observe", "result": "skipped", "note": "other_token/" + fit.NOTE_MANUAL}]
+        self.assertEqual(fit.e01_gearbox(play, rows)["manual"], True)
+        self.assertIn('"gear_observe"', pinned)
+        kind = re.search(r'string kind = "(\w+)";\s+if \(m_bAutomaticGearbox\)\s+kind = "(\w+)";', pinned)
+        self.assertEqual(kind.groups(), ("manual", "automatic"))   # the values e01_gearbox accepts
+        self.assertIn('return "1";', pinned)                        # BoolText: has_automatic_gearbox is 0 or 1
+        self.assertIn('return "0";', pinned)
         for key in (fit.HEADER_AUTOMATIC,) + fit.HEADER_GEARS:
             self.assertIn('lines.Insert("%s=" +' % key, source)
         if "AppendGearboxLines" in source:
-            for key in (fit.HEADER_KIND,) + fit.HEADER_INDICES:
-                self.assertIn('lines.Insert("%s=" +' % key, source)
-            self.assertIn('SkipPhase(phase, "%s",' % fit.NOTE_MANUAL, source)
+            for line in KIT_699D8E2_LINES:
+                self.assertIn(line, source)
         self.assertEqual(fit.HEADER_INDICES, ("vehicle.gear_index_neutral", "vehicle.gear_index_first",
                                               "vehicle.gear_index_top"))
         self.assertEqual((fit.HEADER_KIND, fit.NOTE_MANUAL), ("vehicle.gearbox", "manual_gearbox"))

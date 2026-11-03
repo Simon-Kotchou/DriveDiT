@@ -52,7 +52,8 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
                upshifts on a play that says manual are refused. gear_indices_forward = the input_post_gear values
                seen while driving forward (>= 5 km/h, the TBD-7 definition); gear_index_neutral and gear_index_reverse
                (reverse = the index below neutral) come from E-01's header or from E-04's gearbox counts by the
-               vanilla rule (vanilla_gear_indices), which must agree when both exist, and stay null without either:
+               vanilla rule (vanilla_gear_indices); when both exist their neutral, reverse, first and top gear must
+               agree; both stay null without either:
                recorded, never commanded (forward-only). Scripted gears are --scripted-gears, or by default the forward
                gears from the header's first gear upward while E-01 shows propulsion in each (at most the top gear);
                they must be among gear_indices_forward, increase (llc_v1 starts an episode in the first), lie above the
@@ -896,10 +897,12 @@ def build_identified(args):
         if e04_indices:
             gear_detail["e04"] = {"gearbox_gears": int(counts[0]), "gearbox_forward_gears": int(counts[1]),
                                   "rule": "vanilla: neutral = gears - forward - 1, reverse next below it"}
-            if indices and (indices["neutral"], indices["reverse"]) != (e04_indices["neutral"], e04_indices["reverse"]):
-                raise Refusal("E-04's gear counts give neutral %s and reverse %s, the E-01 run header neutral %s and "
-                              "reverse %s: the plays disagree" % (e04_indices["neutral"], e04_indices["reverse"],
-                                                                  indices["neutral"], indices["reverse"]))
+            e04_four = (e04_indices["neutral"], e04_indices["reverse"], e04_indices["forward"][0],
+                        e04_indices["forward"][-1])
+            if indices and (indices["neutral"], indices["reverse"], indices["first"], indices["top"]) != e04_four:
+                raise Refusal("E-04's gear counts give neutral %s, reverse %s, first %s and top %s, the E-01 run "
+                              "header neutral %s, reverse %s, first %s and top %s: the plays disagree"
+                              % (e04_four + (indices["neutral"], indices["reverse"], indices["first"], indices["top"])))
             if not indices:
                 indices = {"neutral": e04_indices["neutral"], "reverse": e04_indices["reverse"],
                            "first": e04_indices["forward"][0], "top": e04_indices["forward"][-1],

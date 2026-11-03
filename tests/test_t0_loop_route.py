@@ -8,26 +8,36 @@ tools/routes/make_t0_loop.py and the engine road dump it is built from (tools/ro
   - the route passes the DD-11-min route schema (drivedit_nav.validate_route / load_route): arland, train, closed,
     right lane, one route_end stop at the end, sorted maneuvers;
   - it is built from the ENGINE road graph: the versioned E-08a dump of probe run 1 (its files are the ones source.txt
-    names by sha256, the footer says complete, and they equal the play's files when the play is on this machine);
-    source.road_graph names that dump, every loop road is an engine road of it with its road_key, every maneuver's
-    junction_id names engine roads only (no decoder road id such as the old j452_458), and the turns are the engine
-    junctions' (e165_167_17, e136_133_48, e133_132, e161_176, all right on this clockwise loop);
-  - every point lies on the engine's road surface (centreline within half the engine width, plus a junction allowance;
-    a 1 m connector counts with the width of the roads it joins), checked here on the engine's own points with
-    straight segments, independently of the generator's spline; away from junctions the line is in the right lane:
-    right of its engine road's centreline by about a quarter of that road's width;
+    names by sha256, the footer says complete, and they equal the play's files when DD_PROBE_PROFILE names the
+    Workbench profile folder that holds the play); source.road_graph names that dump, every loop road is an engine
+    road of it with its road_key, every maneuver's junction_id names engine roads only (no decoder road id such as the
+    old j452_458), and the turns are the engine junctions' (e165_167_17, e136_133_48, e133_132, e161_176, all right on
+    this clockwise loop);
+  - the maneuvers are complete and local: every engine road wider than a connector that is not on the loop and comes
+    within ARM_REACH_M of the line is named by the maneuver where it comes closest, and every road a junction_id names
+    runs within ID_REACH_M of that maneuver's point;
+  - every point lies on the engine's road surface at the REPORTED widths (connectors 1 m), checked here on the
+    engine's own points with straight segments, independently of the generator's spline: away from junctions within
+    half the width minus 0.5 m of a centreline, the generator's limit; beyond every strip only at the two connector
+    gaps listed in CONNECTOR_GAPS (by at most CONNECTOR_ALLOW_M), whose decoder road covers those points when the
+    decoder polylines are on this machine; away from junctions the line is in the right lane: right of its engine
+    road's centreline by about a quarter of that road's width;
+  - the lane corridor (source.lane_corridor_*, DC_ExpertHL's offroad termination) is the right lane of each road: a
+    quarter of the engine width of the nearest loop road away from junctions, never more, so on the 4.5 m dirt roads
+    and the 3 m road 136 a car leaves it before it leaves the road;
   - it lies inside TRAIN: no point in the VAL-L box x in [1536, 2560), z in [512, 1536) or its 150 m buffer
     (dc-2.0.md 4; splits_v2, still PROPOSED);
   - C17 content (DD-5-min): left and right turning each >= 0.2 rad by C17's route curvature (heading change over
     +-5 m), and the left share of its mirror image differs by more than C17's 0.25; turning radius >= 6.5 m;
   - the file is canonical JSON plus one LF, so sha256 of the file without its LF (DC_ExpertHL's episodes.route_sha256)
-    is drivedit_nav's Route.sha256; it keeps the form DC_Route reads (one "polyline" key, numbers without exponent,
-    source.n_points, ASCII) and holds every key DC_Route.Load asks for;
+    is drivedit_nav's Route.sha256; it keeps the form DC_Route reads (one "polyline" key and one key of each lane
+    corridor array, numbers without exponent, source.n_points, ASCII) and holds every key DC_Route.Load asks for;
   - with splits_v2 on this machine the generator rebuilds the committed file byte for byte from the versioned dump
     (skipped elsewhere), and with the decoder polylines there no decoder trail crosses the loop (trail 414, which
-    crossed the old loop, is far away); the trail check tells a crossing from a trail ending on the road; the
-    generator refuses Everon paths, an incomplete or altered dump, a dump whose roads have other keys, and outputs
-    outside E: or RAM.
+    crossed the old loop, is far away); the trail check tells a crossing from a trail ending on the road, also for a
+    trail through a route point and by the trail length at the actual intersection; the generator refuses Everon
+    paths, an incomplete or altered dump, a source.txt without the sha256 of every file, a dump whose roads have other
+    keys, and outputs outside E: or RAM.
 """
 
 import contextlib
@@ -54,7 +64,10 @@ GENERATOR = os.path.join(REPO, "tools", "routes", "make_t0_loop.py")
 DUMP = os.path.join(REPO, "tools", "routes", "data", "e08a_20261023T021038Z-wb-776e")
 DUMP_FILES = ("arland_roads.csv", "arland_road_points.csv", "arland_roads_footer.txt")
 LAUNCH_ID = "20261023T021038Z-wb-776e"
-PLAY = "/mnt/e/DriveDiT/wb_profile/profile/DC_Probes/e08a/%s/play_01" % LAUNCH_ID       # read only, when present
+# the play the dump was copied from ($profile:DC_Probes/e08a/<launch>/play_01, read only), compared byte for byte when
+# DD_PROBE_PROFILE names the Workbench profile folder that holds DC_Probes
+PROBE_PROFILE = os.environ.get("DD_PROBE_PROFILE", "")
+PLAY = os.path.join(PROBE_PROFILE, "DC_Probes", "e08a", LAUNCH_ID, "play_01") if PROBE_PROFILE else ""
 PROGRAM = "/mnt/e/drivedit_realign/program"
 POLYLINES = os.path.join(PROGRAM, "evidence", "maps", "Arland_road_polylines.tsv")
 SPLITS = os.path.join(PROGRAM, "maps", "splits_v2_PROPOSED.json")
@@ -62,9 +75,20 @@ VAL_L_BOX = (1536.0, 2560.0, 512.0, 1536.0)     # dc-2.0.md 4: x in [1536, 2560)
 VAL_L_BUFFER_M = 150.0
 C17_MIN_TURN_RAD = 0.2
 C17_LR_DEV_MAX = 0.25
-SURFACE_TOL_M = 0.6         # beyond half the engine width: the generator's junction allowance and the spline's bulge
+SURFACE_MARGIN_M = 0.5      # away from junctions: within half the reported width minus this (the generator's limit)
+# The engine's 1 m connectors whose gap the line crosses beyond every reported strip, with the decoder road (the prefab
+# road of the decoder's polylines) that covers it: 166 bridges 167 and 137 (decoder dirt road 401, 4.5 m), 179
+# bridges 161 and 163 (decoder asphalt road 95, 8 m). Points beyond every reported strip lie within
+# CONNECTOR_REACH_M of such a connector and at most CONNECTOR_ALLOW_M beyond the nearest strip (0.07, 0.49 and
+# 0.56 m on this route)
+CONNECTOR_GAPS = {166: 401, 179: 95}
+CONNECTOR_REACH_M = 3.0
+CONNECTOR_ALLOW_M = 0.6
 LANE_TOL_M = 0.75           # the right lane, away from junctions (the generator checks 0.6 on its spline)
 JUNCTION_M = 20.0
+ARM_REACH_M = 15.0          # an engine road this close to the line meets the loop: a maneuver names it ...
+ARM_AT_M = 30.0             # ... at most this far along the route from where it comes closest
+ID_REACH_M = 10.0           # every road a junction_id names runs this close to the maneuver's point
 
 
 def load_generator():
@@ -140,6 +164,17 @@ def read_kv(path):
     return out
 
 
+def read_decoder_roads(path, ids):
+    """{road_id: (width_m, [(x, z)])} of the decoder's polylines TSV (prefab roads, read with csv only)."""
+    out = {}
+    with open(path, "r", encoding="ascii", newline="") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            if int(row["road_id"]) in ids:
+                points = [p.split(",") for p in row["points_xyz"].split(";") if p]
+                out[int(row["road_id"])] = (float(row["width_m"]), [(float(p[0]), float(p[2])) for p in points])
+    return out
+
+
 class LoopRouteTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -159,7 +194,7 @@ class LoopRouteTest(unittest.TestCase):
         self.assertEqual(obj["polyline"][0], obj["polyline"][-1])
 
     def test_versioned_dump(self):
-        # the three files are the ones source.txt names, complete, and (on this machine) the play's own files
+        # the three files are the ones source.txt names, complete, and (with DD_PROBE_PROFILE) the play's own files
         source = read_kv(os.path.join(DUMP, "source.txt"))
         self.assertEqual((source["probe"], source["launch_id"], source["play"]), ("e08a", LAUNCH_ID, "play_01"))
         for name in DUMP_FILES:
@@ -168,7 +203,7 @@ class LoopRouteTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256(data).hexdigest(), source["sha256." + name], name)
             self.assertNotIn(b"\r", data)
             data.decode("ascii")
-            if os.path.isdir(PLAY):
+            if PLAY and os.path.isdir(PLAY):
                 with open(os.path.join(PLAY, name), "rb") as f:
                     self.assertEqual(f.read(), data, name)
         footer = read_kv(os.path.join(DUMP, "arland_roads_footer.txt"))
@@ -181,7 +216,7 @@ class LoopRouteTest(unittest.TestCase):
 
     def test_engine_roads_and_junctions(self):
         source = self.obj["source"]
-        self.assertEqual(source["generator_version"], 2)
+        self.assertEqual(source["generator_version"], 3)
         self.assertNotIn("polylines", source.get("inputs", {}))           # no decoder input
         for leg in source["legs"]:
             key, width, _ = self.roads[leg["road"]]
@@ -206,28 +241,65 @@ class LoopRouteTest(unittest.TestCase):
                 line = self.roads[arm][2]
                 self.assertLess(min(math.hypot(x - p[0], z - p[1]) for p in (line[0], line[-1])), 30.0, m)
 
-    def test_on_the_engine_road_surface_and_right_lane(self):
-        wide = {i: r for i, r in self.roads.items() if r[1] > 1.5}
-        surface = {}
-        for idx, (_, width, line) in self.roads.items():
-            if width > 1.5:
-                surface[idx] = width
+    def test_maneuvers_are_complete_and_local(self):
+        # independently of the generator's junction search: every engine road wider than a connector and not on the
+        # loop that comes within ARM_REACH_M of the line is named by a maneuver within ARM_AT_M of where it comes
+        # closest (a dropped maneuver fails), and every road a junction_id names, loop road or arm, runs within
+        # ID_REACH_M of the maneuver's point (an id naming a road of another junction fails)
+        legs = set(leg["road"] for leg in self.obj["source"]["legs"])
+        line = [(p[0], p[2]) for p in self.obj["polyline"]]
+        xs, zs = [p[0] for p in line], [p[1] for p in line]
+        reach = {}
+        for idx, (_, width, road) in self.roads.items():
+            if width <= 1.5 or idx in legs:
                 continue
-            joined = [w for i, (_, w, other) in wide.items()
-                      if min(distance_to(other, p[0], p[1])[0] for p in (line[0], line[-1])) <= 4.0]
-            if joined:
-                surface[idx] = max(joined)              # a connector carries the roads it joins
+            rx, rz = [p[0] for p in road], [p[1] for p in road]
+            if max(rx) < min(xs) - ARM_REACH_M or min(rx) > max(xs) + ARM_REACH_M \
+                    or max(rz) < min(zs) - ARM_REACH_M or min(rz) > max(zs) + ARM_REACH_M:
+                continue
+            best = min([(distance_to(line, x, z)[0], (x, z)) for x, z in road]
+                       + [(distance_to(road, x, z)[0], (x, z)) for x, z in line])
+            if best[0] <= ARM_REACH_M:
+                reach[idx] = self.route.project(best[1][0], best[1][1])[0]
+        named = {}
+        for m in self.obj["maneuvers"]:
+            x, z = self.route.point_at(m["s_m"])
+            for idx in (int(v) for v in m["junction_id"][1:].split("_")):
+                self.assertLessEqual(distance_to(self.roads[idx][2], x, z)[0], ID_REACH_M, (m, idx))
+                if idx not in legs:
+                    named.setdefault(idx, []).append(m["s_m"])
+        self.assertEqual(sorted(reach), sorted(named))
+        self.assertEqual(sorted(reach), [17, 48, 94, 132, 134, 135, 139, 162, 176, 180])
+        for idx, s_near in reach.items():
+            self.assertTrue(any(abs(s_m - s_near) <= ARM_AT_M for s_m in named[idx]), (idx, s_near, named[idx]))
+
+    def test_on_the_engine_road_surface_and_right_lane(self):
+        # every engine road at its reported width, connectors 1 m (no width inherited from the roads they join)
         junctions = [self.route.point_at(m["s_m"]) for m in self.obj["maneuvers"]]
         junctions += [(j["x"], j["z"]) for j in self.obj["source"]["junctions"]]
         legs = set(leg["road"] for leg in self.obj["source"]["legs"])
+        decoder = {}
+        if os.path.isfile(POLYLINES):
+            decoder = read_decoder_roads(POLYLINES, set(CONNECTOR_GAPS.values()))
         points = self.obj["polyline"]
         lane = []
+        beyond = []
         for i, (x, _, z) in enumerate(points[:-1]):
-            near = [(distance_to(self.roads[idx][2], x, z), idx) for idx in surface
-                    if any(abs(px - x) < 60 and abs(pz - z) < 60 for px, pz in self.roads[idx][2])]
-            excess = min(d[0] - surface[idx] / 2.0 for d, idx in near)
-            self.assertLessEqual(excess, SURFACE_TOL_M, (i, x, z))
-            if any(math.hypot(x - jx, z - jz) <= JUNCTION_M for jx, jz in junctions):
+            near = [(distance_to(line, x, z), idx) for idx, (_, _, line) in self.roads.items()
+                    if any(abs(px - x) < 60 and abs(pz - z) < 60 for px, pz in line)]
+            excess, idx = min((d[0] - self.roads[idx][1] / 2.0, idx) for d, idx in near)
+            in_junction = any(math.hypot(x - jx, z - jz) <= JUNCTION_M for jx, jz in junctions)
+            if excess > 0.0:
+                # beyond every reported strip: only at a listed connector gap, and on its decoder road
+                gaps = [c for c in CONNECTOR_GAPS if distance_to(self.roads[c][2], x, z)[0] <= CONNECTOR_REACH_M]
+                self.assertTrue(gaps and excess <= CONNECTOR_ALLOW_M, (i, x, z, excess, idx))
+                beyond.append(i)
+                if decoder:
+                    width, road = decoder[CONNECTOR_GAPS[gaps[0]]]
+                    self.assertLessEqual(distance_to(road, x, z)[0], width / 2.0 - SURFACE_MARGIN_M, (i, gaps))
+            elif not in_junction:
+                self.assertLessEqual(excess, -SURFACE_MARGIN_M, (i, x, z, idx))
+            if in_junction:
                 continue
             (d, fx, fz), idx = min((d, idx) for d, idx in near if idx in legs and self.roads[idx][1] > 1.5)
             a, b = points[i - 1], points[i + 1]
@@ -237,6 +309,34 @@ class LoopRouteTest(unittest.TestCase):
             lane.append(abs(offset - self.roads[idx][1] / 4.0))
         self.assertGreater(len(lane), 0.7 * len(points))
         self.assertLessEqual(max(lane), LANE_TOL_M)
+        self.assertEqual(beyond, [512, 513, 1235])     # 166's gap (s 1024-1026) and 179's (s 2470)
+
+    def test_lane_corridor_is_the_right_lane_of_each_road(self):
+        # DC_ExpertHL terminates offroad beyond the lane corridor half width w/2 + 0.5 m (r2 1.3). The corridor is the
+        # right lane, half the road: away from junctions w/2 is a quarter of the engine width of the nearest loop road,
+        # and nowhere more, so on the 4.5 m dirt roads (1.125 m) and the 3 m road 136 (0.75 m) the threshold lies at
+        # most 0.5 m beyond the road edge, as on the 8 m roads (2 m)
+        source = self.obj["source"]
+        starts, halves = source["lane_corridor_s_m"], source["lane_corridor_half_width_m"]
+        self.assertEqual(len(starts), len(halves))
+        self.assertEqual(starts[0], 0.0)                        # as DC_Route.ReadCorridor checks them
+        self.assertTrue(all(b > a for a, b in zip(starts, starts[1:])), starts)
+        self.assertLess(starts[-1], self.obj["length_m"])
+        self.assertTrue(all(h > 0 for h in halves), halves)
+        self.assertEqual(sorted(set(halves)), [0.75, 1.125, 2.0])
+        junctions = [self.route.point_at(m["s_m"]) for m in self.obj["maneuvers"]]
+        junctions += [(j["x"], j["z"]) for j in source["junctions"]]
+        legs = [leg["road"] for leg in source["legs"] if leg["width_m"] > 1.5]
+        dirt = 0
+        for (x, _, z), s in zip(self.obj["polyline"][:-1], self.route.s[:-1]):
+            half = halves[max(k for k, start in enumerate(starts) if start <= s + 1e-9)]
+            _, idx = min((distance_to(self.roads[i][2], x, z)[0], i) for i in legs)
+            quarter = self.roads[idx][1] / 4.0
+            self.assertLessEqual(half, quarter + 1e-9, (s, idx))
+            if not any(math.hypot(x - jx, z - jz) <= JUNCTION_M for jx, jz in junctions):
+                self.assertEqual(half, quarter, (s, idx))
+                dirt += self.roads[idx][1] < 5.0
+        self.assertGreater(dirt, 300)                           # the dirt roads are a large part of the loop
 
     def test_inside_train(self):
         x0, x1, z0, z1 = VAL_L_BOX
@@ -285,6 +385,17 @@ class LoopRouteTest(unittest.TestCase):
         for key in keys:
             self.assertTrue(key in self.obj or key in self.obj["source"], key)
         self.assertIn('FindValue(text, "polyline")', source)
+        # the lane corridor arrays DC_Route.ReadCorridor reads by DC_JsonScan.ReadNumbers: each key once, flat number
+        # arrays without exponent, in source
+        corridor = dict(re.findall(r'static const string (CORRIDOR_\w+_KEY) = "(\w+)";', load))
+        self.assertEqual(sorted(corridor.values()), ["lane_corridor_half_width_m", "lane_corridor_s_m"])
+        text = self.raw.decode("ascii")
+        for name, key in corridor.items():
+            self.assertIn("DC_JsonScan.ReadNumbers(text, %s, " % name, load)
+            self.assertEqual(text.count('"%s"' % key), 1, key)
+            self.assertIn(key, self.obj["source"])
+            value = text.split('"%s":' % key, 1)[1].split("]", 1)[0]
+            self.assertRegex(value, r"^\[-?[0-9]+(\.[0-9]+)?(,-?[0-9]+(\.[0-9]+)?)*$", key)
 
     def test_rebuilt_from_the_engine_dump(self):
         if not os.path.isfile(SPLITS):
@@ -310,9 +421,19 @@ class LoopRouteTest(unittest.TestCase):
         crossing = (7, [(-20.0, 20.0), (20.0, 21.0)])               # goes on 20 m on both sides
         ending = (8, [(-30.0, 11.0), (1.5, 11.0)])                   # ends 1.5 m past the line: meets the road
         near = (9, [(-30.0, 31.0), (-4.0, 31.0)])                    # ends 4 m short of it
-        crossings, touches = generator.check_trails(route, [crossing, ending, near])
-        self.assertEqual([c[0] for c in crossings], [7])
-        self.assertEqual(touches, [(8, 0.0), (9, 4.0)])
+        vertex = (10, [(-20.0, 20.0), (20.0, 20.0)])                 # through the route point (0, 20): one crossing
+        # meets the line 8.02 m along the trail (at z 18.72): a crossing; the start of the route segment there,
+        # (0, 18), projects to 7.54 m. Its start lies 6 m from the line: also a touch at 6 m
+        cut = (11, [(-6.0, 13.4), (24.0, 40.0)])
+        on_point = (12, [(-30.0, 30.0), (0.0, 30.0)])               # ends on the route point (0, 30): a touch
+        crossings, touches = generator.check_trails(route, [crossing, ending, near, vertex, cut, on_point])
+        self.assertEqual([c[0] for c in crossings], [7, 10, 11])
+        self.assertEqual(crossings[1:], [(10, 0.0, 20.0), (11, 0.0, 18.7)])
+        self.assertEqual(touches, [(8, 0.0), (9, 4.0), (11, 6.0), (12, 0.0)])
+        self.assertEqual(generator.segment_cuts((-6.0, 0.0, 13.4), (24.0, 0.0, 40.0), (0.0, 0.0, 18.0),
+                                                (0.0, 0.0, 20.0)), [0.2])
+        self.assertEqual(generator.segment_cuts((0.0, 0.0, 0.0), (0.0, 0.0, 4.0), (0.0, 0.0, 2.0),
+                                                (0.0, 0.0, 6.0)), [0.5, 1.0])        # on one line: the overlap
 
     def test_generator_refuses_altered_or_other_dumps(self):
         generator = load_generator()
@@ -329,17 +450,31 @@ class LoopRouteTest(unittest.TestCase):
             shutil.copy(os.path.join(DUMP, "arland_roads_footer.txt"), dump)
             source = os.path.join(dump, "source.txt")
             with open(source, "r", encoding="ascii") as f:
-                kept = [line for line in f if not line.startswith("sha256.")]
-            with open(source, "w", encoding="ascii") as f:
-                f.writelines(kept)
+                lines = f.readlines()
+            with open(source, "w", encoding="ascii") as f:                        # a copy without its hashes
+                f.writelines(line for line in lines if not line.startswith("sha256.arland_roads.csv="))
+            with self.assertRaises(generator.Refusal) as caught:
+                generator.read_dump(dump)
+            self.assertIn("names no sha256 of arland_roads.csv", str(caught.exception))
+            # another dump (other road keys) whose source.txt names its files: read, but its loop roads are refused
             with open(os.path.join(dump, "arland_roads.csv"), "r", encoding="ascii") as f:
                 rows = f.read().replace("86/1682.48:3384.40/2521.30:3088.66", "87/1682.48:3384.40/2521.30:3088.66")
             with open(os.path.join(dump, "arland_roads.csv"), "w", encoding="ascii") as f:
                 f.write(rows)
+            digest = hashlib.sha256(rows.encode("ascii")).hexdigest()
+            with open(source, "w", encoding="ascii") as f:
+                f.writelines("sha256.arland_roads.csv=%s\n" % digest if line.startswith("sha256.arland_roads.csv=")
+                             else line for line in lines)
             roads, _ = generator.read_dump(dump)
             with self.assertRaises(generator.Refusal) as caught:                  # another dump: other keys
                 generator.loop_roads(roads)
             self.assertIn("derived again", str(caught.exception))
+            # a play directory (run_header.txt, no source.txt) has no hashes to check: the files as the probe wrote them
+            os.remove(source)
+            with open(os.path.join(dump, "run_header.txt"), "w", encoding="ascii") as f:
+                f.write("probe=e08a\nlaunch.id=%s\nengine.build_version=1.8.0.13\n" % LAUNCH_ID)
+            _, provenance = generator.read_dump(dump)
+            self.assertEqual((provenance["launch_id"], provenance["play"]), (LAUNCH_ID, "e08a_copy"))
             with open(os.path.join(dump, "arland_roads_footer.txt"), "w", encoding="ascii") as f:
                 f.write("map_id=arland\ncomplete=0\n")
             with self.assertRaises(generator.Refusal) as caught:

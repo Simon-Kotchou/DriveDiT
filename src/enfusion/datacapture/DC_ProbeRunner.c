@@ -13,8 +13,8 @@
 //   3. Builds the plan: -dcProbePlan <ids> when the command line is visible, else m_sPlan. An id without a probe
 //      component is skipped with a WARNING. DC_Ego (m_sEgoName) is looked up once; probes that need it refuse
 //      without it.
-//   4. Sets FRAME | SIMULATE | POSTSIMULATE | FIXEDFRAME | POSTFIXEDFRAME on the game mode entity and starts the
-//      concurrent probes (IsConcurrent: only e10) at once.
+//   4. Sets FRAME | POSTFRAME | SIMULATE | POSTSIMULATE | FIXEDFRAME | POSTFIXEDFRAME on the game mode entity and
+//      starts the concurrent probes (IsConcurrent: only e10) at once.
 //   5. After a warm-up of m_fWarmupS world seconds decides the physics-step source: "simulate" if any EOnSimulate
 //      arrived, else "fixedframe" (WARNING) if any EOnFixedFrame arrived, else "none" (ERROR: probes that need steps
 //      refuse to start), and the step length GetStepDtS (STEP TIMING). Three paths can decide, the first one wins:
@@ -30,7 +30,10 @@
 //   physics step and calls OnProbeSimulate on the running exclusive probe, then on the concurrent ones.
 //   EOnPostSimulate does the same with the same step number (a post without a pre is passed with the last number and
 //   shows up in E-10). In the "fixedframe" fallback EOnFixedFrame / EOnPostFixedFrame do it instead. EOnFrame calls
-//   OnProbeFrame (exclusive first) and then AdvancePlan, which sequences the plan. The plan and the dispatch use no
+//   OnProbeFrame (exclusive first) and then AdvancePlan, which sequences the plan. EOnPostFrame ("after physics
+//   update", IEntity.c:41-45; the camera applies its transform there, CameraBase.c:18) is counted
+//   (clock.postframe_calls) and calls OnProbePostFrame (exclusive first); whether the engine delivers it to the game
+//   mode entity is measured, not assumed (the fiducial shapes, DC_ProbeFiducial.c). The plan and the dispatch use no
 //   CallLater clock; the queued calls are FallbackStart and RunWatchdog (decision backstop and heartbeat only).
 //   AdvancePlan was called Sequence until the Plays of 2026-10-22: Game/generated/AI/Sequence.c declares a class of
 //   that name, so the bare call "Sequence();" compiled as a construction of that class and the method never ran (the
@@ -198,6 +201,13 @@ class DC_ProbeComponent : ScriptComponent
 	//------------------------------------------------------------------------------------------------
 	//! Every render frame (EOnFrame)
 	void OnProbeFrame(string probeId, float timeSlice, int renderFrame)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every render frame after its physics update (EOnPostFrame), when the engine delivers POSTFRAME to the game mode
+	//! entity (counted: DC_ProbeRunner.GetPostFrameCount, footer clock.postframe_calls)
+	void OnProbePostFrame(string probeId, float timeSlice, int renderFrame)
 	{
 	}
 
@@ -595,6 +605,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	protected int m_iFixedFrameCount;
 	protected int m_iPostFixedFrameCount;
 	protected int m_iFrameCount;
+	protected int m_iPostFrameCount;
 
 	// Step timing (STEP TIMING): GetStepDtS and the engine's raw values, from StartRun on
 	protected float m_fStepDtS;					//!< 0 until decided
@@ -931,7 +942,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	protected int GetDispatchEventMask()
 	{
-		return EntityEvent.FRAME | EntityEvent.SIMULATE | EntityEvent.POSTSIMULATE | EntityEvent.FIXEDFRAME | EntityEvent.POSTFIXEDFRAME;
+		return EntityEvent.FRAME | EntityEvent.POSTFRAME | EntityEvent.SIMULATE | EntityEvent.POSTSIMULATE | EntityEvent.FIXEDFRAME | EntityEvent.POSTFIXEDFRAME;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1040,6 +1051,25 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		// Counted here and at the entry of AdvancePlan: calls without entries mean the call does not reach the method
 		m_iPlanCalls++;
 		AdvancePlan();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! After the frame's physics update: OnProbePostFrame (exclusive first). Plan and timing ignore it.
+	override void EOnPostFrame(IEntity owner, float timeSlice)
+	{
+		m_iPostFrameCount++;
+		if (!m_bRunning)
+			return;
+
+		int renderFrame = GetRenderFrame();
+		if (m_CurrentRun && m_CurrentRun.m_bActive && m_CurrentRun.m_Component)
+			m_CurrentRun.m_Component.OnProbePostFrame(m_CurrentRun.m_sProbeId, timeSlice, renderFrame);
+
+		foreach (DC_ProbeRunState state : m_aConcurrentRuns)
+		{
+			if (state.m_bActive && state.m_Component)
+				state.m_Component.OnProbePostFrame(state.m_sProbeId, timeSlice, renderFrame);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1794,6 +1824,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		lines.Insert("clock.fixedframe_timeslice_max_s=" + m_fFixedFrameSliceMaxS.ToString(-1, 6));
 		lines.Insert("clock.fixedframe_timeslice_one_step_s=" + m_fOneStepFixedFrameSliceS.ToString(-1, 6));
 		lines.Insert("clock.simulate_timeslice_s=" + m_fLastSimulateSliceS.ToString(-1, 6));
+		lines.Insert("clock.postframe_calls=" + m_iPostFrameCount.ToString());
 		state.m_Context.AppendFooterLines(lines);
 		lines.Insert("note=" + note.Trim());
 	}
@@ -1974,6 +2005,13 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	int GetFrameCount()
 	{
 		return m_iFrameCount;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! EOnPostFrame calls on the game mode entity (from the event mask on, like the other counts)
+	int GetPostFrameCount()
+	{
+		return m_iPostFrameCount;
 	}
 
 	//------------------------------------------------------------------------------------------------

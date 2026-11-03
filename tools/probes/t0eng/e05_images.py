@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """E-05 analysis: rig R1 camera with 10 Hz System.MakeScreenshot requests (r2 4.4 T0-ENG core; DD-4-probe).
 
-    python3 -I -B tools/probes/t0eng/e05_images.py <e05 play_dir> [--log <console.log>]
+    python3 -I -B tools/probes/t0eng/e05_images.py <e05 play_dir> [--log <console.log>] [--fiducial-every 10]
 
 Input: one play directory of probe e05 (DC_ProbeImages): run_header.txt, run_footer.txt, e05_requests.csv,
 e05_frames.csv and frames/. With --log, the engine console log of the same Workbench session (read only).
@@ -16,7 +16,13 @@ r2 4.4 criterion of E-05, printed as checks:
   * saved_count_eq_files the "Screenshot saved" lines between the START and END markers of this play equal the files
   * fps_p5_ge_30        p5 of the per-frame FPS (1 / frame time slice) >= 30, segments reset and settle excluded
 and as INFO: the request->file latency distribution (in-engine done_tick_ms - issue_tick_ms), raw MB per frame, the
-engine-written name (TBD-4) and the decision for TBD-2:
+engine-written name (TBD-4), with params.drive=1 the shuttle ("drive": max veh_speed_kmh over the drive frames, the
+gearbox, ForceEnableSimulation and its e01 decision, shift-policy shifts and physics wakes from the run header), per
+fiducial carrier the play drew ("fiducial_widget", "fiducial_shape": every --fiducial-every-th present file decoded
+with the presence and plausibility gates of data/dc2/fiducial.py, tools/probes/t0eng/fiducial_carriers.py; 0 skips
+the decode; e06_fiducial.py decodes every file), the widget readback ("fiducial_widget_readback", fiducial.diag.*)
+and the shape placement ("fiducial_shape_placement", fiducial.shape.* residuals) when the play has them, and the
+decision for TBD-2:
   DECISION image_hz=10 when missing <= 1% and latency p95 <= 100 ms, else image_hz=5 (fallback).
 
 run_footer (probe_common.Verdict.check_footer): a play that did not end normally is analysed as far as possible
@@ -32,6 +38,7 @@ import sys
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import probe_common  # noqa: E402  (shared reader and verdict printer, tools/probes/t0eng/probe_common.py)
+import fiducial_carriers  # noqa: E402  (fiducial carriers of the play, per-carrier decode statistics)
 
 LABEL = "E-05 R1 camera and 10 Hz screenshots"
 PROBE = "e05"
@@ -49,6 +56,7 @@ EXCLUDED_FPS_SEGMENTS = ("reset", "settle")
 SUFFIX_NOEXT = "noext"           # found_suffix of a file written exactly at the extension-less request path
 SAVED_MARK = "Screenshot saved"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+DEFAULT_FIDUCIAL_EVERY = 10
 
 
 def image_size(path):
@@ -134,7 +142,72 @@ def latency_text(values):
         probe_common.percentile(values, 99), max(values), len(values))
 
 
-def evaluate(play_dir, log_path=None):
+def drive_text(header, frames):
+    """INFO drive of a shuttle play (params.drive=1): max veh_speed_kmh over the frames of segment drive, then the run
+    header's vehicle.gearbox, drive.force_sim / drive.force_sim_e01, gear_policy.shifts, physics_wake.* and
+    drive.stuck_forces (the last three are appended at the probe stop; a drive.force_sim appended there wins over the
+    start value, so a stuck-guard latch shows as force_sim 1). None for a static capture."""
+    if header.get("params.drive") != "1":
+        return None
+    speeds = [value for row, value in zip(frames, probe_common.floats(frames, "veh_speed_kmh"))
+              if value is not None and row.get("segment") == "drive"]
+    moved = "no drive frame with veh_speed_kmh"
+    if speeds:
+        moved = "max veh_speed_kmh %.2f over %d drive frames" % (max(speeds), len(speeds))
+    text = "%s; gearbox %s; force_sim %s (e01 decision %s); gear policy shifts %s; physics wake %s calls, %s with " \
+           "the body asleep before" % (
+               moved, header.get("vehicle.gearbox", "n/a"), header.get("drive.force_sim", "n/a"),
+               header.get("drive.force_sim_e01", "n/a"), header.get("gear_policy.shifts", "n/a"),
+               header.get("physics_wake.calls", "n/a"), header.get("physics_wake.asleep_before", "n/a"))
+    if "physics_wake.sleep_wakes" in header or "drive.stuck_forces" in header:
+        # The review fix (R-4): re-wakes of an asleep body while driving, and the stuck guard's ForceEnableSimulation
+        text += "; %s sleep re-wakes while driving; stuck force latches %s" % (
+            header.get("physics_wake.sleep_wakes", "n/a"), header.get("drive.stuck_forces", "n/a"))
+    return text
+
+
+def fiducial_info(verdict, play, requests, files, every):
+    """INFO lines per fiducial carrier: a decode of every every-th present file (gates of data/dc2/fiducial.py), the
+    widget readback and the shape placement totals of the run header."""
+    carrier_list = fiducial_carriers.carriers(play.header)
+    if not carrier_list:
+        verdict.info("fiducial", "the play drew no fiducial carrier")
+        return
+    if every <= 0:
+        verdict.info("fiducial", "carriers %s; decode skipped (--fiducial-every 0)" % ", ".join(carrier_list))
+    else:
+        fiducial = fiducial_carriers.load_fiducial()
+        stats = {carrier: fiducial_carriers.CarrierStats(carrier) for carrier in carrier_list}
+        present = []
+        for row in requests:
+            if row["issue_status"] != "issued" or probe_common.to_int(row.get("issue_render_frame", "")) is None:
+                continue
+            path, _ = files.resolve(row["path"], row.get("found_suffix", ""))
+            if path:
+                present.append((row, path))
+        for row, path in present[::every]:
+            try:
+                image = fiducial.load_rgb(path)
+            except ValueError:
+                for carrier in carrier_list:
+                    stats[carrier].add_unreadable()
+                continue
+            done = probe_common.to_int(row.get("done_render_frame", ""))
+            decodes = fiducial_carriers.decode_all(fiducial, image, play.header, carrier_list,
+                                                   int(row["issue_render_frame"]), done)
+            for carrier, (result, capture) in decodes.items():
+                stats[carrier].add(result, capture, done, fiducial_carriers.is_single_flight(row))
+        for carrier in carrier_list:
+            verdict.info("fiducial_" + carrier, "every %d-th present file: %s" % (every, stats[carrier].summary()))
+    readback = fiducial_carriers.readback_text(play.header)
+    if readback:
+        verdict.info("fiducial_widget_readback", readback)
+    placement = fiducial_carriers.placement_text(play.header, play.footer)
+    if placement:
+        verdict.info("fiducial_shape_placement", placement)
+
+
+def evaluate(play_dir, log_path=None, fiducial_every=DEFAULT_FIDUCIAL_EVERY):
     """Builds the E-05 verdict of one e05 play directory (raises probe_common.InputError on bad input)."""
     play = probe_common.Play(play_dir)
     probe = play.header.get("probe", "")
@@ -238,6 +311,10 @@ def evaluate(play_dir, log_path=None):
     else:
         verdict.info("raw_mb_per_frame", "no file")
     verdict.info("engine_suffix", ", ".join("%s (%d)" % item for item in sorted(suffixes.items())) or "none found")
+    drive = drive_text(play.header, frames)
+    if drive is not None:
+        verdict.info("drive", drive)
+    fiducial_info(verdict, play, requests, files, fiducial_every)
 
     p95 = None
     if latencies:
@@ -257,12 +334,14 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description="E-05 analysis of one e05 play directory (r2 4.4).")
     parser.add_argument("play_dir", help="$profile:DC_Probes/e05/<launch_id>/play_NN as a WSL path")
     parser.add_argument("--log", help="engine console.log of the same session (for the 'Screenshot saved' count)")
+    parser.add_argument("--fiducial-every", type=int, default=DEFAULT_FIDUCIAL_EVERY,
+                        help="decode the fiducial carriers of every N-th present file (INFO); 0 = skip; default 10")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    return evaluate(args.play_dir, args.log).report()
+    return evaluate(args.play_dir, args.log, args.fiducial_every).report()
 
 
 if __name__ == "__main__":

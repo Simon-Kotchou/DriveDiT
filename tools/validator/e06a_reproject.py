@@ -9,8 +9,8 @@ Input: one play directory of probe e06a (DC_ProbeMarkers): run_header.txt (rig.v
 e06a_markers.csv, e06a_markers_end.csv, e06a_frames.csv (camera transform per render frame), e06a_requests.csv
 (fps_setting, segment), e06a_phases.csv (one row per segment and FPS phase with its result), e06a_proj.csv and
 frames/. --header-geometry decodes the fiducial at the fiducial.left_x / right_x / y0..y5 keys of the run header
-(as e06_fiducial.py does) instead of the layout of each image's size: for screenshots whose size differs from the
-canvas the bands were laid out on.
+(and fiducial.shape.* for the shape carrier, as e06_fiducial.py does) instead of the layout of each image's size: for
+screenshots whose size differs from the canvas the bands were laid out on.
 
 Method:
   * camera model: pinhole, fy = fx = (H / 2) / tan(vfov / 2) with rig.vfov_read, cx = W / 2, cy = H / 2, in
@@ -19,8 +19,10 @@ Method:
     v = cy - fy y / z. The camera rows are the e06a_frames.csv cam_* columns (CameraBase.GetWorldCameraTransform);
   * model check (INFO, FAIL "camera_model" when p95 > 1 px): the model against the engine's own
     ProjWorldToScreenNative in e06a_proj.csv;
-  * per image: decode fiducial v2 (data/dc2/fiducial.py, loaded by file path), F = unwrap(code,
-    issue_render_frame); detect the marker blobs (colour within --color-tol of --color, outside the fiducial bands,
+  * per image: decode fiducial v2 on every carrier the play drew (rig.fiducial.carrier; data/dc2/fiducial.py with
+    its presence and plausibility gates, tools/probes/t0eng/fiducial_carriers.py), F = the captured frame the
+    plausible carriers agree on (unwrapped against issue_render_frame; none or a disagreement: undecodable); detect
+    the marker blobs (colour within --color-tol of --color, outside the bands of every carrier,
     cv2.connectedComponentsWithStats, centroid, area >= --min-area); for k in -kmax..kmax project every marker
     (moved prefab markers excluded) with the camera of frame F + k; a blob's residual at k is the distance to the
     nearest projection. A blob counts when its smallest residual over all k is within --gate-px, and then it counts
@@ -59,7 +61,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "tools", "probes", "t0eng"))
 import probe_common  # noqa: E402  (shared reader and verdict printer)
 import e05_images  # noqa: E402  (FrameFiles: request path -> engine-written file)
-import e06_fiducial  # noqa: E402  (geometry_from_header: the --header-geometry patch origins)
+import fiducial_carriers  # noqa: E402  (carriers of the play, their geometry and the gated decode)
 
 FIDUCIAL_PATH = os.path.join(REPO, "data", "dc2", "fiducial.py")
 LABEL = "E-06A marker reprojection"
@@ -134,17 +136,11 @@ def parse_color(text):
     return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def band_exclusion(width, header, fiducial):
-    """x ranges [x0, x1) covered by the fiducial bands (patch plus its margin on both sides)."""
-    patch = int(float(header.get("fiducial.patch_px", fiducial.PATCH_PX)))
-    margin = int(float(header.get("fiducial.margin_px", fiducial.MARGIN_PX)))
-    left_x = header.get("fiducial.left_x", "")
-    right_x = header.get("fiducial.right_x", "")
-    if left_x != "" and right_x != "":
-        left_x, right_x = int(float(left_x)), int(float(right_x))
-    else:
-        left_x, right_x = margin, width - margin - patch
-    return [(0, left_x + patch + margin), (max(0, right_x - margin), width)]
+def band_exclusion(width, header, fiducial, header_geometry=False):
+    """x ranges [x0, x1) covered by the fiducial bands of every carrier (patch plus the widget margin on both sides;
+    the shape bands' magenta patches must not count as markers), on the geometry the decode uses: the image's own
+    width, or with header_geometry the run header keys."""
+    return fiducial_carriers.band_exclusion(width, header, fiducial, header_geometry)
 
 
 def detect_blobs(image, color, tol, exclude, min_area):
@@ -363,18 +359,17 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
     ids, markers, moved = load_markers(play)
     cam_by_frame = {int(row["render_frame"]): cam_from_row(row) for row in frames}
     files = e05_images.FrameFiles(play.dir)
-    geometry = e06_fiducial.geometry_from_header(header, fiducial) if header_geometry else None
+    carrier_list = fiducial_carriers.carriers(header)
 
     verdict = probe_common.Verdict(LABEL, play.dir)
     verdict.info("markers", "%d used, %d excluded as moved" % (len(ids), len(moved)))
 
-    patch = int(float(header.get("fiducial.patch_px", fiducial.PATCH_PX)))
-    fid_margin = int(float(header.get("fiducial.margin_px", fiducial.MARGIN_PX)))
-    gap = int(float(header.get("fiducial.gap_px", fiducial.GAP_PX)))
     observations = []
     by_segment = []
     size = None
     undecodable = 0
+    disagree = 0
+    carrier_ok = {carrier: 0 for carrier in carrier_list}
     issued_used = 0
     not_current = 0
     for row in requests:
@@ -393,16 +388,20 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
             continue
         height, width = image.shape[:2]
         size = size or (width, height)
-        if geometry is not None:
-            left, right, geometry_patch = geometry
-            decoded = fiducial.decode_origins(image, left, right, patch=geometry_patch)
-        else:
-            decoded = fiducial.decode(image, patch=patch, margin=fid_margin, gap=gap)
-        if decoded.status != fiducial.STATUS_OK:
+        decodes = fiducial_carriers.decode_all(fiducial, image, header, carrier_list, int(row["issue_render_frame"]),
+                                               probe_common.to_int(row.get("done_render_frame", "")),
+                                               header_geometry=header_geometry)
+        for carrier, (_, capture) in decodes.items():
+            if capture.status == fiducial.STATUS_OK:
+                carrier_ok[carrier] += 1
+        frame, reason = fiducial_carriers.agreed_frame(fiducial, decodes)
+        if frame is None:
             undecodable += 1
+            if reason == "disagree":
+                disagree += 1
             continue
-        frame = fiducial.unwrap(decoded.code, int(row["issue_render_frame"]))
-        blobs = detect_blobs(image, target, color_tol, band_exclusion(width, header, fiducial), min_area)
+        blobs = detect_blobs(image, target, color_tol, band_exclusion(width, header, fiducial, header_geometry),
+                             min_area)
         observations.append({"condition": condition_key(row["fps_setting"], row["segment"]), "frame": frame,
                              "blobs": blobs})
         by_segment.append({"condition": "%s/%s" % (row["fps_setting"], row["segment"]), "frame": frame,
@@ -418,9 +417,11 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
         verdict.check_footer(play)
         return verdict
     width, height = size
-    verdict.info("images", "%d decoded, %d undecodable or unreadable, %dx%d px, vfov %.3f deg, geometry %s" % (
-        len(observations), undecodable, width, height, vfov,
-        "run header fiducial.*" if header_geometry else "layout() of each image's size"))
+    verdict.info("images", "%d decoded, %d undecodable or unreadable (%d carrier disagreements), %dx%d px, vfov "
+                 "%.3f deg, geometry %s; plausible decodes per carrier: %s" % (
+                     len(observations), undecodable, disagree, width, height, vfov,
+                     "run header fiducial.*" if header_geometry else "layout() of each image's size",
+                     ", ".join("%s %d" % item for item in carrier_ok.items()) or "no carrier"))
 
     model_w = int(float(header.get("fiducial.physical_w", width) or width))
     model_h = int(float(header.get("fiducial.physical_h", height) or height))

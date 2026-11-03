@@ -83,6 +83,17 @@ minimum, it logs an ERROR and starts no session.
 60 s after the session start, the director checks that every car in the session has moved at least 20 m. Each car
 that has not is logged as `ERROR: group k: AI_Car_k is in the collector session but not driving`.
 
+After the boarding window the director also watches the driver seats. The vanilla AI sometimes brakes mid-route, sets
+the handbrake and orders the driver out, then usually walks it back in 10-45 s later. With an obstructed door the
+driver never gets back in. The most likely trigger, still unconfirmed, is a failed group move in the car (for example
+`UNREACHABLE`); a car that cannot move or is on fire is another. The director logs each failed group move, each
+dismount (with the last move failure and the car's movement damage and fire state) and each return. After
+`m_fReseatAfterS` (30 s) with no living driver in the seat, it teleports the driver back in, or seats a new one if the
+old driver is gone or dead. A dead driver is moved out of the seat first, and the group is kept when it becomes empty.
+It does not reseat into a car that cannot move or is on fire, and it stops after 3 reseats in a row that did not get
+the car moving 5 m. While the driver is out, the stuck clock pauses; it restarts when the vanilla AI gets back in by
+itself. The statistics line counts `dismounts=`, `reseats=` and `move_failures=` per group.
+
 Vehicles are registered in group order right before the session starts, so `vehicle_id` is k-1 when all 5 are
 ready. Otherwise the ids are listed in the `starting the collector session with N vehicles: V0=AI_Car_1 ...` line and
 in `session_info.txt`. A car whose driver becomes ready later keeps driving but is not captured in that session.
@@ -103,6 +114,7 @@ Director attributes in the layer (the defaults need no layer change):
 | `m_iBoardingWindowMs` | 60000 | Window after `Spawned N/M groups`. The session starts when all are ready, or when the window ends |
 | `m_iMinSeatedGroups` | 1 | Ready cars needed when the window ends (limited to 1..`m_iMaxAIGroups`, with a WARNING). Set it to `m_iMaxAIGroups` for the old all-or-nothing gate |
 | `m_iDrivingCheckMs` / `m_fDrivingCheckMinDistanceM` | 60000 / 20 | When the "is every car driving" check runs after the session start, and the distance each car must have moved. 0 turns the check off |
+| `m_fReseatAfterS` | 30 | Seat watchdog: seconds without a living driver in the driver seat before the director puts one back, repeated while the seat stays empty. Never into a car that cannot move or is on fire, and at most 3 times in a row without the car moving `m_fStuckDistanceM` (5 m). 0 turns the reseat off; dismounts are still logged |
 
 Collector attribute: `m_sRequiredProfileRoot` (default `E:/DriveDiT`). Sessions are written only when `-profile` lies
 inside it. Empty turns the guard off; use that only deliberately.
@@ -139,7 +151,11 @@ Booleans may print as `1`/`0` or as `true`/`false`.
    - `falling back to walk-in boarding`;
    - `driver=dead` in a group line;
    - `ERROR: group k: AI_Car_k is in the collector session but not driving`;
-   - `ERROR: boarding window of 60 s ended with no ready driver ... - collector session NOT started`.
+   - `ERROR: boarding window of 60 s ended with no ready driver ... - collector session NOT started`;
+   - `WARNING: group k: no living driver in the pilot seat of AI_Car_k (dismount n ...)` with no
+     `Group k: driver back in the pilot seat of AI_Car_k after X s` line within about 30 s;
+   - `reseating the driver ... failed`, `cannot reseat the driver`, `not reseating the driver` or
+     `ERROR: group k: no more reseats into AI_Car_k`.
 
 ### Where the captures are
 
@@ -304,6 +320,28 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e05 | R1 camera, 10 Hz screenshots (E-05, E-06) | 10 min | `e05_images.py <play_dir> --log <console.log>`, `e06_fiducial.py <play_dir>` |
 | e06a | marker reprojection alignment (60 and 30 FPS, backlog) | ~3-5 min | `tools/validator/e06a_reproject.py <play_dir> [--header-geometry]` |
 
+Notes on the driving probes (e01, e02a, e05, e06a; all drive `DC_Ego` through `DC_ProbeActuator`):
+- The S105 has a manual gearbox (`HasAutomaticGearbox` 0, 6 gear indices, 4 forward). Probe run 2 left it in
+  neutral, so the throttle only revved the engine. The actuator now derives the indices once per probe start as
+  vanilla does (`neutral = gears - forward - 1`, `first = gears - forward`, `top = gears - 1`; S105: 0 reverse,
+  1 neutral, 2..5 first..fourth) and writes them to the run header (`vehicle.gearbox`, `vehicle.gear_index_*`).
+- Without an explicit phase gear its shift policy picks the gear: neutral while the handbrake is on, first gear when
+  it is released (before the throttle), then up at >= 4500 rpm and down at <= 1800 rpm, at least 1.5 s apart, first
+  gear below 8 km/h, never neutral or reverse while driving (`DC_ProbeSequences` category Gearbox; e05 and e06a
+  use the same values as defaults). `cmd_gear` in the step CSVs is the gear the policy chose. The move checks hold
+  first gear, `gear_scripted` still calls `SetGear` every step, and `gear_observe` is skipped with the note
+  `manual_gearbox`. The park/drive choice is the probe's own: vanilla `SCR_ToggleHandbrakeAction` releases into
+  neutral and parks in first gear. After an explicit gear the policy continues from that gear, and every probe stop
+  sets neutral on a manual gearbox.
+- Each release of the handbrake also wakes the car's physics as vanilla does (`Physics.SetActive(ActiveState.ACTIVE)`),
+  and every later step with the handbrake released wakes a body it finds asleep (`Physics.IsActive` false), as
+  DD-4-min Mode A does. The phase notes (`wakes`, `asleep_at_wake`, `shifts`, `sleep_wakes`) and the run header lines
+  appended at the stop (`gear_policy.*`, `physics_wake.*`) count these wakes and the gear changes. E-01's
+  ForceEnableSimulation answer holds with both wakes; `e01_actuation.py` prints that condition after the answer.
+- e05 and e06a latch `ForceEnableSimulation` unless e01 of the same Play found it not needed (`drive.force_sim`,
+  `drive.force_sim_e01` in their run headers). If e01 found it not needed and a drive start stays below 3 km/h for
+  10 s, the actuator's stuck guard latches it anyway and logs a WARNING (`drive.stuck_forces` at the stop).
+
 Notes on the image probes:
 - e05 and e06a drive from 2 x `m_fAreaMarginM` along the test area (6 m with the layer's margin), inside the area
   their drive check uses; a start point outside it refuses the probe at its start.
@@ -315,3 +353,24 @@ Notes on the image probes:
   is INCOMPLETE when slalom, backlog or brake has no counted marker or its `e06a_phases.csv` row is not `ok`.
 - The fiducial is laid out on `WorkspaceWidget.GetWidth() x GetHeight()`, which is the window's render target in
   physical pixels; the run header logs `fiducial.dpi_scale`.
+- Fiducial carriers (`m_eFiducialCarrier`, e05 and e06a, default BOTH): WIDGET is the r2 3.4 ImageWidget bands,
+  SHAPE draws the same code as debug Shapes 1 m (`m_fShapeDepthM`) in front of the rig camera at their own margin
+  (`m_iShapeMarginPx`, 64 px: beside the widget bands), BOTH draws both. Probe runs 1 and 2 found no widget patch in
+  any Workbench `MakeScreenshot` file, while debug shapes keep their exact colour there. The shapes are placed in
+  EOnFrame, after the physics step and in EOnPostFrame (the last placement of a frame wins; the camera applies its
+  transform in EOnPostFrame); the residual against the camera the frame was rendered with is logged once per second
+  (`fiducial shapes:` lines) and summed up at the stop (`fiducial.shape.*` in the run header, `clock.postframe_calls`
+  in the footer). The run header records `rig.fiducial.carrier` and `rig.fiducial.depth_m`. A shuttle or reset
+  teleport places the shapes once more at once; teleport frames are counted apart (`fiducial.shape.teleport_*`). A
+  canvas too small for the bands stops the drawing until the next size change (`fiducial.shape.layout_failures`,
+  `drawing_at_stop`). `m_bShapeDepthTest` (default 0) drops `NOZBUFFER`/`NOZWRITE` for a Play that found the shapes
+  absent; use it with `m_fShapeDepthM` just beyond the near plane (e.g. 0.11 m), since at 1 m the car body hides
+  the bands.
+- With the widget carrier, `m_bWidgetDiagnostics` reads the patch widgets back once per second (`fiducial widgets:`
+  lines: workspace size and DPI, `IsVisibleInHierarchy`, `GetScreenPos` / `GetScreenSize`) and adds three orange
+  control widgets at the top centre (a text, a textured and a flat image), so a Play tells "never drawn" from
+  "drawn but not captured".
+- `data/dc2/fiducial.py` gates every decode: a band of scene texture is `absent` (run 1 read dark bark as code 0
+  `ok`), and a code outside [issue, min(issue + 2, done - 1)] is `implausible`. `e06_fiducial.py` and `e05_images.py`
+  report each carrier on its own; E-06 selects the carrier with the highest decode rate and passes when it decodes
+  >= 99.5% with no implausible decode (the other carriers' implausible decodes are listed, not judged).

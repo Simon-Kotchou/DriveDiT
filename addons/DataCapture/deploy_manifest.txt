@@ -34,6 +34,8 @@ script src/enfusion/datacapture/DC_ProbeEngine.c
 script src/enfusion/datacapture/DC_ProbeSequences.c
 script src/enfusion/datacapture/DC_RigR1.c
 script src/enfusion/datacapture/DC_Fiducial.c
+script src/enfusion/datacapture/DC_FiducialShape.c
+script src/enfusion/datacapture/DC_ProbeFiducial.c
 script src/enfusion/datacapture/DC_ProbeImages.c
 script src/enfusion/datacapture/DC_ProbeMarkers.c
 script src/enfusion/datacapture/DC_RoadDump.c

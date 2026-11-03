@@ -25,11 +25,11 @@ hold the Windows user name.
 
 | Probe | r2 4.4 criterion | Analysis | Play dir | Result | Numbers |
 |---|---|---|---|---|---|
-| E-01 | The car moves; `input_pre` vs `input_post` vs command recorded; setter-to-response step delay identified; `steer_sign` measured; auto-gear works or a scripted gearbox is needed; whether it works without `ForceEnableSimulation` | `tools/probes/t0eng/e01_actuation.py e01 <play_dir>` | PENDING | PENDING | delay steps, steer_sign, local axes (`local_axes`: z forward, x right), gearbox, gear indices seen, ForceEnableSimulation: PENDING |
+| E-01 | The car moves; `input_pre` vs `input_post` vs command recorded; setter-to-response step delay identified; `steer_sign` measured; auto-gear works or a scripted gearbox is needed; whether it works without `ForceEnableSimulation` | `tools/probes/t0eng/e01_actuation.py e01 <play_dir>` | PENDING | PENDING | delay steps, steer_sign, local axes (`local_axes`: z forward, x right), gearbox, gear indices seen, ForceEnableSimulation (answer taken with `Physics.SetActive` at each handbrake release and on every driving step that finds the body asleep, as `DC_ProbeActuator` does since the review fix; `e01_actuation.py` prints the condition after the answer; a driver without both wakes cannot use the answer): PENDING |
 | E-02a | First-pass steer to kappa fit usable by `llc_v1` | `tools/probes/t0eng/e01_actuation.py e02a <play_dir>` | PENDING | PENDING | per speed a, b, R2: PENDING |
 | E-04 | S105 component classes and `HasAutomaticGearbox()` read from the prefab | `tools/probes/t0eng/e04_components.py <play_dir>` | PENDING | PENDING | PENDING |
 | E-05 | R1 camera attached, current, vFOV; PNG dims logged; missing <= 1%; `Screenshot saved` count = files; FPS p5 >= 30; request-to-file latency distribution; raw MB/frame; engine-written file name | `tools/probes/t0eng/e05_images.py <play_dir> --log <console.log>` | PENDING | PENDING | image_hz decision, latency p50/p95, suffix: PENDING |
-| E-06 | Fiducial v2 decode >= 99.5% over >= 600 frames; offset p50/p99 | `tools/probes/t0eng/e06_fiducial.py <play_dir>` | PENDING | PENDING | PENDING |
+| E-06 | Fiducial v2 decode >= 99.5% over >= 600 frames on the selected carrier (highest rate of widget, shape; presence and plausibility gates), no decode of that carrier outside [issue, min(issue + 2, done - 1)]; offset p50/p99 per carrier | `tools/probes/t0eng/e06_fiducial.py <play_dir>` | PENDING | PENDING | PENDING |
 | E-06A | RMS <= 2 px at k = 0, unique minimum with margin, at 60 and 30 FPS with backlog (grid and backlog images judged separately; slalom, backlog and brake must each have data) | `tools/validator/e06a_reproject.py <play_dir>` | PENDING | PENDING | RMS(k) at 60 and 30 FPS, grid and backlog: PENDING |
 | E-08a | Count, km and width histogram vs the decoder (~46.4 km); 0 duplicates; footer; no cap; unparented and decal-like widths flagged | `tools/roads/compare_dump_decoder.py <play_dir> --decoder <Arland_road_polylines.tsv>` | PENDING | PENDING | PENDING |
 | E-10 | `GetFixedTimeSlice` logged; `EOnPostSimulate` count per world-second = 1/dt +-1; telemetry every k steps, 0 missed | `tools/probes/t0eng/e10_ticks.py <play_dir>` | PENDING | PENDING | dt, k, step source, WorldTimestamp vs GetWorldTime (`world_timestamp`): PENDING |
@@ -51,6 +51,6 @@ TBD-1 to TBD-5 block the dc-2.0 freeze; TBD-6 to TBD-9 may be settled after it (
 | TBD-4 engine-written screenshot file name | E-05 | PENDING |
 | TBD-5 steer_sign normalisation and vehicle-local axes (`local_axes`) | E-01 | PENDING |
 | TBD-6 launch id visible in Workbench Play | E-11 | PENDING |
-| TBD-7 gearbox and gear index semantics (forward indices only; reverse and neutral are not probed) | E-04, E-01 | PENDING |
+| TBD-7 gearbox and gear index semantics (run header `vehicle.gearbox`, `vehicle.gear_index_*`: derived from the gear counts with the vanilla rule, neutral = gears - forward - 1, first = gears - forward; e01 reads them back; reverse is not driven) | E-04, E-01 | S105 manual gearbox: 0 reverse, 1 neutral, 2..5 first..fourth (probe run 2: e04 counts 6 / 4, vanilla `SCR_ToggleHandbrakeAction`); readback PENDING |
 | TBD-8 render-settings dump keys | E-20 | PENDING |
 | TBD-9 road key of the in-engine road dump | E-08a | PENDING |

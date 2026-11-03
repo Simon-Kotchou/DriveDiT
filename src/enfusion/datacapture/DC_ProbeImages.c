@@ -8,21 +8,34 @@
 //
 // WHAT IT DOES
 //   - OnProbeStart: attaches rig R1 to DC_Ego (DC_RigR1: script camera, AUTO_TRANSFORM, current, vFOV), creates the
-//     fiducial bands (DC_Fiducial, with m_bFiducial), creates <play>/frames/, opens e05_requests.csv and
-//     e05_frames.csv, starts the image slot grid (DC_ImageSlotScheduler) at the current world time, and appends the
-//     rig.*, fiducial.* and area.* lines to the run header (they are only known once the rig and the bands exist);
-//   - every render frame (OnProbeFrame), in this order: DC_Fiducial.Show(render frame); the scheduler (completion
-//     poll, timeouts, the due request: one System.MakeScreenshot in flight, extension-less path
-//     frames/f_<slot:08d>); one e05_frames.csv row (the hf prototype: camera and vehicle transforms, fps);
+//     fiducial carriers of m_eFiducialCarrier (with m_bFiducial; DC_FiducialCarriers, DC_ProbeFiducial.c: the widget
+//     bands of DC_Fiducial, the debug-Shape bands of DC_FiducialShape at m_iShapeMarginPx and m_fShapeDepthM, or
+//     both; with m_bWidgetDiagnostics the widget readback and control widgets), creates <play>/frames/, opens
+//     e05_requests.csv and e05_frames.csv, starts the image slot grid (DC_ImageSlotScheduler) at the current world
+//     time, and appends the rig.*, fiducial.* and area.* lines to the run header (they are only known once the rig
+//     and the bands exist);
+//   - every render frame (OnProbeFrame), in this order: DC_FiducialCarriers.OnFrame(render frame) (the code on every
+//     carrier, the shapes' EOnFrame placement and residual, the once-per-second fiducial lines); the scheduler
+//     (completion poll, timeouts, the due request: one System.MakeScreenshot in flight, extension-less path
+//     frames/f_<slot:08d>); one e05_frames.csv row (the hf prototype: camera and vehicle transforms, fps). The shapes
+//     are placed again after the physics step (OnProbePostSimulate), in EOnPostFrame (OnProbePostFrame) and right
+//     after a shuttle teleport (DC_FiducialCarriers.OnTeleport);
 //   - with m_bDrive, a shuttle along the test area on the physics steps: reset (DC_ProbeActuator.Teleport to the
 //     start point 2 x m_fAreaMarginM along the centre line, as DC_ProbeSequences, so the start lies inside the
 //     margin-inset area), settle (brake and handbrake for m_fSettleS), drive (speed hold m_fDriveKmh, steering 0)
 //     until the far end or the area edge, stop (brake to < 1 km/h), and again. Without m_bDrive the car is not
 //     commanded and the segment is "static". The teleport itself runs in OnProbeFrame, never inside a physics step
-//     (the rule of DC_ProbeSequences): the reset segment waits for it;
+//     (the rule of DC_ProbeSequences): the reset segment waits for it. The gears come from DC_ProbeActuator as in
+//     e01/e02a (manual gearbox: neutral with the handbrake, first gear at its release, then the shift policy with
+//     the actuator's defaults; physics wake at every release and of an asleep body while driving), and
+//     ForceEnableSimulation is latched unless e01 of this Play found it not needed
+//     (DC_ProbeSequences.ApplyPlayForceDecision), or else by the actuator's stuck guard when a drive start stays
+//     below 3 km/h for 10 s (WARNING); run header vehicle.gearbox, vehicle.gear_index_*, gear_policy.*,
+//     drive.force_sim*, and at the stop gear_policy.shifts, physics_wake.* and drive.stuck_*;
 //   - after m_fDurationS of world time no new slot is issued; the requests still in flight are drained with the
 //     camera and the bands kept (DC_ImageSlotScheduler.StopIssuing), then the probe is done. OnProbeStop resolves
-//     what is left (only on a timeout or a Stop), parks the car, removes the bands and gives the camera back.
+//     what is left (only on a timeout or a Stop), parks the car, logs and appends the fiducial summary, removes the
+//     bands and gives the camera back.
 //
 // The E-05 criteria (missing <= 1%, "Screenshot saved" count = files, FPS p5 >= 30, latency, MB/frame, engine-written
 // name) and E-06 (decode >= 99.5% over >= 600 frames, offset) are evaluated offline from these files.
@@ -171,7 +184,7 @@ class DC_ImageSlotScheduler
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Once per EOnFrame after DC_Fiducial.Show: polls completions, times out, then issues the due slot or records
+	//! Once per EOnFrame after the fiducial (DC_FiducialCarriers.OnFrame): polls completions, times out, then issues the due slot or records
 	//! the skipped slots.
 	void OnFrame(float worldMs, int renderFrame, int physicsStep, int tickMs, bool camCurrent, bool camAttached)
 	{
@@ -557,6 +570,21 @@ class DC_ProbeImages : DC_ProbeComponent
 	[Attribute("1", UIWidgets.CheckBox, "Draw fiducial v2 (needed for E-06)", category: "Fiducial")]
 	protected bool m_bFiducial;
 
+	[Attribute("2", UIWidgets.ComboBox, "Fiducial carrier: WIDGET = ImageWidgets in the workspace (r2 3.4), SHAPE = debug Shapes in front of the rig camera, BOTH = both at their own margins (compares them in one Play)", "", ParamEnumArray.FromEnum(DC_EFiducialCarrier), category: "Fiducial")]
+	protected DC_EFiducialCarrier m_eFiducialCarrier;
+
+	[Attribute("64", UIWidgets.Slider, "Shape carrier margin from the left and right image edges [physical px]; 64 = beside the widget bands (16 + 32 + 16), so BOTH can be told apart", "0 512 1", category: "Fiducial")]
+	protected int m_iShapeMarginPx;
+
+	[Attribute("1", UIWidgets.Slider, "Shape carrier depth in front of the camera [m]; must exceed the near plane", "0.05 100 0.01", category: "Fiducial")]
+	protected float m_fShapeDepthM;
+
+	[Attribute("0", UIWidgets.CheckBox, "Shape carrier with the depth test (drops NOZBUFFER and NOZWRITE), for a Play that found the shapes absent; set m_fShapeDepthM just beyond the near plane (e.g. 0.11 m): at 1 m the car body hides the bands", category: "Fiducial")]
+	protected bool m_bShapeDepthTest;
+
+	[Attribute("1", UIWidgets.CheckBox, "Widget carrier diagnostics: once per second readback of the patch widgets, plus three control widgets (text, textured image, flat image)", category: "Fiducial")]
+	protected bool m_bWidgetDiagnostics;
+
 	[Attribute("32", UIWidgets.Slider, "Fiducial patch size [physical px]", "8 128 1", category: "Fiducial")]
 	protected int m_iPatchPx;
 
@@ -583,10 +611,10 @@ class DC_ProbeImages : DC_ProbeComponent
 	protected float m_fBrakeScale;
 
 	// === AREA (same names and defaults as DC_ProbeSequences) ===
-	[Attribute("1495.4 0 2620", UIWidgets.Coords, "Start of the test area centre line (x, z used) [decoder-derived: south part of the Arland main runway, unverified in the engine]", category: "Area")]
+	[Attribute("659.6 0 2572.4", UIWidgets.Coords, "Start of the test area centre line (x, z used) [engine road dump E-08a 2026-10-22: Arland main runway (road 83, 60 m x 1217 m, y 38.9-39.2), 58 m in from its west end]", category: "Area")]
 	protected vector m_vAreaStart;
 
-	[Attribute("0.11", UIWidgets.Slider, "Heading of the test area centre line [deg], 0 = +Z, clockwise seen from above", "-180 180 0.01", category: "Area")]
+	[Attribute("75.11", UIWidgets.Slider, "Heading of the test area centre line [deg], 0 = +Z, clockwise seen from above", "-180 180 0.01", category: "Area")]
 	protected float m_fAreaHeadingDeg;
 
 	[Attribute("1100", UIWidgets.Slider, "Length of the test area [m]", "50 5000 1", category: "Area")]
@@ -611,7 +639,7 @@ class DC_ProbeImages : DC_ProbeComponent
 	protected DC_ProbeRunner m_Runner;
 	protected IEntity m_Ego;
 	protected ref DC_RigR1 m_Rig;
-	protected ref DC_Fiducial m_Fiducial;
+	protected ref DC_FiducialCarriers m_Fiducial;
 	protected ref DC_ImageSlotScheduler m_Scheduler;
 	protected ref DC_ProbeActuator m_Actuator;
 	protected ref DC_ProbeArea m_Area;
@@ -668,6 +696,11 @@ class DC_ProbeImages : DC_ProbeComponent
 		outKeyValues.Insert("duration_s=" + m_fDurationS.ToString(-1, 3));
 		outKeyValues.Insert("inflight_timeout_ms=" + m_iInFlightTimeoutMs.ToString());
 		outKeyValues.Insert("fiducial=" + BoolText(m_bFiducial));
+		outKeyValues.Insert("fiducial_carrier=" + DC_FiducialCarriers.CarrierText(m_eFiducialCarrier));
+		outKeyValues.Insert("shape_margin_px=" + m_iShapeMarginPx.ToString());
+		outKeyValues.Insert("shape_depth_m=" + m_fShapeDepthM.ToString(-1, 3));
+		outKeyValues.Insert("shape_depth_test=" + BoolText(m_bShapeDepthTest));
+		outKeyValues.Insert("widget_diagnostics=" + BoolText(m_bWidgetDiagnostics));
 		outKeyValues.Insert("patch_px=" + m_iPatchPx.ToString());
 		outKeyValues.Insert("margin_px=" + m_iMarginPx.ToString());
 		outKeyValues.Insert("gap_px=" + m_iGapPx.ToString());
@@ -738,8 +771,8 @@ class DC_ProbeImages : DC_ProbeComponent
 
 		if (m_bFiducial)
 		{
-			m_Fiducial = new DC_Fiducial();
-			if (!m_Fiducial.Create(m_iPatchPx, m_iMarginPx, m_iGapPx))
+			m_Fiducial = new DC_FiducialCarriers();
+			if (!m_Fiducial.Create(m_eFiducialCarrier, m_Rig, ctx, m_iPatchPx, m_iMarginPx, m_iGapPx, m_iShapeMarginPx, m_fShapeDepthM, m_bShapeDepthTest, m_bWidgetDiagnostics))
 			{
 				ctx.Error("fiducial: " + m_Fiducial.GetFailure() + " - not started");
 				ReleaseAll();
@@ -777,12 +810,30 @@ class DC_ProbeImages : DC_ProbeComponent
 		array<string> header = {};
 		m_Rig.AppendHeaderLines(header);
 		if (m_Fiducial)
+		{
 			m_Fiducial.AppendHeaderLines(header);
+		}
 		else
+		{
+			header.Insert("rig.fiducial.carrier=none");
 			header.Insert("fiducial.created=0");
+			header.Insert("fiducial.shape.created=0");
+		}
 
 		AppendAreaLines(header, m_Area);
 		header.Insert("area.start_along_m=" + m_fStartAlongM.ToString(-1, 3));
+		if (m_Actuator)
+			m_Actuator.AppendGearboxLines(header);
+
+		string forceE01 = "not_driving";
+		if (m_bDrive)
+		{
+			forceE01 = DC_ProbeSequences.ApplyPlayForceDecision(GetOwner(), m_Actuator);
+			m_Actuator.SetStuckForce(DC_ProbeActuator.STUCK_AFTER_S, DC_ProbeActuator.STUCK_BELOW_KMH);
+			header.Insert("drive.force_sim=" + BoolText(m_Actuator.IsSimulationForced()));
+			header.Insert("drive.force_sim_e01=" + forceE01);
+		}
+
 		header.Insert("capture.frames_dir=" + frameDir);
 		header.Insert("capture.request_name=f_<slot_id:08d> (no extension)");
 		header.Insert("capture.start_world_ms=" + m_fStartWorldMs.ToString(-1, 3));
@@ -793,6 +844,7 @@ class DC_ProbeImages : DC_ProbeComponent
 		{
 			m_Actuator.SetSpeedGains(m_fSpeedKp, m_fSpeedKi, m_fBrakeScale);
 			m_Actuator.StartModeA();
+			ctx.Log(m_Actuator.DescribeGearbox() + "; force_sim " + BoolText(m_Actuator.IsSimulationForced()) + " (e01 decision " + forceE01 + ")");
 			EnterReset();
 		}
 		else
@@ -813,16 +865,32 @@ class DC_ProbeImages : DC_ProbeComponent
 			return;
 
 		m_Actuator.ApplyStep(timeSlice);
+		if (m_Actuator.ConsumeStuckWarning() && m_Ctx)
+			m_Ctx.Warn(m_Actuator.DescribeStuck());
 	}
 
 	//------------------------------------------------------------------------------------------------
 	override void OnProbePostSimulate(string probeId, float timeSlice, int physicsStep)
 	{
-		if (!m_bRunning || !m_bDrive || !m_Actuator)
+		if (!m_bRunning)
+			return;
+
+		// The shapes follow the camera after the step's physics (DC_ProbeFiducial.c, WHEN THE SHAPES MOVE)
+		if (m_Fiducial)
+			m_Fiducial.OnPostStep();
+
+		if (!m_bDrive || !m_Actuator)
 			return;
 
 		m_Actuator.ReadPost();
 		UpdateShuttle();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void OnProbePostFrame(string probeId, float timeSlice, int renderFrame)
+	{
+		if (m_bRunning && m_Fiducial)
+			m_Fiducial.OnPostFrame();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -831,12 +899,12 @@ class DC_ProbeImages : DC_ProbeComponent
 		if (!m_bRunning)
 			return;
 
+		float worldMs = m_Runner.GetWorldTimeMs();
 		if (m_Fiducial)
-			m_Fiducial.Show(renderFrame);
+			m_Fiducial.OnFrame(renderFrame, worldMs);
 
 		bool camCurrent = m_Rig.IsCurrent();
 		bool camAttached = m_Rig.IsAttached();
-		float worldMs = m_Runner.GetWorldTimeMs();
 
 		// No slot at or after the deadline; what is in flight resolves with the camera and the bands still in place
 		if (worldMs - m_fStartWorldMs >= m_fDurationS * 1000)
@@ -894,6 +962,9 @@ class DC_ProbeImages : DC_ProbeComponent
 			m_Ctx.Log(DescribeScheduler(m_Scheduler) + ", frames " + m_iFrames.ToString() + ", shuttles " + m_iShuttles.ToString() + ", reason " + reason);
 
 		ParkVehicle();
+		if (m_Fiducial)
+			m_Fiducial.ReportSummary();
+
 		ReleaseAll();
 	}
 
@@ -975,13 +1046,18 @@ class DC_ProbeImages : DC_ProbeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! Called from OnProbeFrame: teleports the car to the start point m_fStartAlongM along the centre line
-	//! (DC_ProbeActuator.Teleport also commands brake 1 and the handbrake) and lets the reset segment end
+	//! (DC_ProbeActuator.Teleport also commands brake 1 and the handbrake) and lets the reset segment end. The
+	//! fiducial shapes follow the new camera pose at once: this frame may have no physics step and no POSTFRAME.
 	protected void TeleportToStart()
 	{
 		m_bTeleportPending = false;
 		vector start = m_Area.PointAt(m_fStartAlongM, 0);
-		if (!m_Actuator.Teleport(start, m_fAreaHeadingDeg, m_fSpawnLiftM) && m_Ctx)
+		bool moved = m_Actuator.Teleport(start, m_fAreaHeadingDeg, m_fSpawnLiftM);
+		if (!moved && m_Ctx)
 			m_Ctx.Warn("teleport to the area start failed");
+
+		if (moved && m_Fiducial)
+			m_Fiducial.OnTeleport();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -992,14 +1068,23 @@ class DC_ProbeImages : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Brake and handbrake, applied at once (DC_ProbeActuator.Park): no physics step of this probe follows, and a
-	//! driverless car keeps the last setter values
+	//! Brake and handbrake (and neutral on a manual gearbox), applied at once (DC_ProbeActuator.Park): no physics step
+	//! of this probe follows, and a driverless car keeps the last setter values. Then logs the gear policy, physics
+	//! wake and stuck guard counts and appends them to the run header (gear_policy.shifts, physics_wake.*, drive.*)
 	protected void ParkVehicle()
 	{
 		if (!m_bDrive || !m_Actuator)
 			return;
 
 		m_Actuator.Park();
+		if (!m_Ctx)
+			return;
+
+		m_Ctx.Log(m_Actuator.DescribeDrive());
+		array<string> driveLines = {};
+		m_Actuator.AppendDriveSummaryLines(driveLines);
+		if (!m_Ctx.AppendHeaderLines(driveLines))
+			m_Ctx.Warn("could not append the gear policy / physics wake summary to run_header.txt");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1070,8 +1155,9 @@ class DC_ProbeImages : DC_ProbeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! Appends the values of AddFrameColumns for this render frame. fps = 1 / frame time slice (empty when 0),
-	//! fps_avg = System.GetFPS(); fiducial_code empty without bands, veh_speed_kmh empty without a simulation.
-	static void AddFrameValues(notnull DC_ProbeRow row, notnull DC_ProbeRunner runner, float timeSlice, int renderFrame, bool camCurrent, bool camAttached, DC_RigR1 rig, DC_Fiducial fiducial, IEntity ego, VehicleWheeledSimulation simulation, int inFlight, string segment)
+	//! fps_avg = System.GetFPS(); fiducial_code (the code every carrier shows) empty without bands, veh_speed_kmh empty
+	//! without a simulation.
+	static void AddFrameValues(notnull DC_ProbeRow row, notnull DC_ProbeRunner runner, float timeSlice, int renderFrame, bool camCurrent, bool camAttached, DC_RigR1 rig, DC_FiducialCarriers fiducial, IEntity ego, VehicleWheeledSimulation simulation, int inFlight, string segment)
 	{
 		row.AddInt(renderFrame);
 		row.AddFloat(runner.GetWorldTimeMs(), 3);

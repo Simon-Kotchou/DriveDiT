@@ -28,6 +28,11 @@
 //     layout when the workspace size changes (window resize, or a DPI change that only applied a frame later);
 //   - Destroy() removes the widgets and restores the saved user DPI scale. Idempotent.
 //
+// Probe run 1 (2026-10-22, Workbench 1.8.0.13) found none of these patches in any MakeScreenshot file
+// (t0/run1/FIDUCIAL.md). DC_FiducialShape.c draws the same code as debug Shapes; DC_ProbeFiducial.c runs either or
+// both carriers in the probes and reads the patch widgets back once per second (GetPatchWidget and the layout
+// accessors below; they change nothing).
+//
 // Failure handling: Create returns false (GetFailure) when there is no workspace, a widget cannot be created or the
 // canvas is too small for the bands; it then removes what it created and restores the DPI scale.
 // ============================================================================
@@ -268,6 +273,71 @@ class DC_Fiducial
 	int GetRelayouts()
 	{
 		return m_iRelayouts;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Physical y of the top patch on a canvas canvasH px high (the r2 3.4 rule; Enforce int '/' truncates)
+	static int LayoutTopPx(int canvasH, int patchPx, int gapPx)
+	{
+		int columnPx = PATCH_COUNT * patchPx + (PATCH_COUNT - 1) * gapPx;
+		return (canvasH - columnPx) / 2;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return patch widget index (0 = top) of the right band (rightBand) or the left band; null before Create
+	Widget GetPatchWidget(bool rightBand, int index)
+	{
+		if (rightBand)
+		{
+			if (index < 0 || index >= m_aRight.Count())
+				return null;
+
+			return m_aRight[index];
+		}
+
+		if (index < 0 || index >= m_aLeft.Count())
+			return null;
+
+		return m_aLeft[index];
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return layout x of the right band (rightBand) or the left band [physical px, top-left corner]
+	int GetPatchX(bool rightBand)
+	{
+		if (rightBand)
+			return m_iRightX;
+
+		return m_iLeftX;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return layout y of patch index (0 = top) [physical px, top-left corner], -1 out of range
+	int GetPatchY(int index)
+	{
+		if (index < 0 || index >= m_aY.Count())
+			return -1;
+
+		return m_aY[index];
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetPatchPx()
+	{
+		return m_iPatchPx;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return WorkspaceWidget.GetWidth() at the last layout [physical px]
+	int GetWorkspaceW()
+	{
+		return m_iWorkspaceW;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetWorkspaceH()
+	{
+		return m_iWorkspaceH;
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 Run it with the isolated interpreter (stdlib only; it reuses the probe kit's reader and E-01 / E-02a helpers):
 
     python3 -I -B tools/ident/fit_steer_kappa.py --e01 <e01 play_dir> --e02a <e02a play_dir> [--e04 <e04 play_dir>]
-        [--vehicle S105] [--build-key KEY] [--scripted-gears 2,3,4 --upshift-mps 5,10 --downshift-mps 4,8]
+        [--vehicle S105] [--build-key KEY] [[--scripted-gears 2,3,4] --upshift-mps 5,10 --downshift-mps 4,8]
         [--out FILE | --check FILE]
     python3 -I -B tools/ident/fit_steer_kappa.py --placeholder --pin-id 1.8.0.13 [--vehicle S105] [--out | --check]
 
@@ -43,16 +43,26 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
                E-01 throttle and brake steps (after their onset delay: throttle while below 15 km/h, brake while above
                3 km/h); the onset delays in physics steps.
   gearbox      "automatic" when E-01's gear_observe shifts up by itself (the e01_actuation.py rule), else "scripted",
-               which needs --scripted-gears / --upshift-mps / --downshift-mps (forward gears only, TBD-7);
-               gear_indices_forward = the input_post_gear values seen while driving forward (>= 5 km/h, the TBD-7
-               definition); gear_index_neutral and gear_index_reverse come from E-04's gearbox counts by the vanilla
-               rule (vanilla_gear_indices) and stay null without --e04: recorded, never commanded (forward-only);
-               scripted gears must be among gear_indices_forward, increase (llc_v1 starts an episode in the first),
-               lie above the neutral index and must also show propulsion (throttle > 0 with forward acceleration in
-               that gear: a neutral index reported while rolling is not a gear to drive in). clutch_dip_s is the
-               clutch dip of E-01's gear_scripted phase (params.m_fGearClutchDipS, required for a scripted card):
-               llc_v1 dips the clutch the same way after each scripted gear change; 0 with an automatic gearbox.
-               llc_v1 also refuses an automatic card on an ego with a manual gearbox (DC_LLCv1.CheckEgoGearbox).
+               which needs --upshift-mps / --downshift-mps (forward gears only, TBD-7). A manual gearbox needs no
+               gear_observe: the probe kit skips that phase there (699d8e2: result skipped, note manual_gearbox), and
+               the E-01 play says manual in either header style, the probe kit's (vehicle.gearbox=manual with
+               vehicle.gear_index_neutral / _first / _top, DC_ProbeActuator.AppendGearboxLines) or an earlier one
+               (vehicle.has_automatic_gearbox=0 with vehicle.gearbox_gears / _forward_gears, whose indices follow by
+               the vanilla rule), or only by that phase note; every source present must agree, and gear_observe
+               upshifts on a play that says manual are refused. gear_indices_forward = the input_post_gear values
+               seen while driving forward (>= 5 km/h, the TBD-7 definition); gear_index_neutral and gear_index_reverse
+               (reverse = the index below neutral) come from E-01's header or from E-04's gearbox counts by the
+               vanilla rule (vanilla_gear_indices), which must agree when both exist, and stay null without either:
+               recorded, never commanded (forward-only). Scripted gears are --scripted-gears, or by default the forward
+               gears from the header's first gear upward while E-01 shows propulsion in each (at most the top gear);
+               they must be among gear_indices_forward, increase (llc_v1 starts an episode in the first), lie above the
+               neutral index and within the header's first..top (DC_LLCv1.CheckEgoGearbox), and must also show
+               propulsion (throttle > 0 with forward acceleration in that gear: a neutral index reported while rolling
+               is not a gear to drive in). gearbox.detail.speed_per_krpm is the median speed per 1000 rpm of each
+               forward gear (clutch engaged), measured to choose the shift speeds. clutch_dip_s is the clutch dip of
+               E-01's gear_scripted phase (params.m_fGearClutchDipS, required for a scripted card): llc_v1 dips the
+               clutch the same way after each scripted gear change; 0 with an automatic gearbox. llc_v1 also refuses
+               an automatic card on an ego with a manual gearbox (DC_LLCv1.CheckEgoGearbox).
   llc_v1       the controller parameters of DC_LLCv1 (LLC_DEFAULTS) with the fitted throttle and brake gains; the llc
                steering rate limiter is the identity (CC-08: it never stacks with an engine limit).
 
@@ -128,7 +138,16 @@ LONG_MAX_LAG_STEPS = 120
 GEAR_MIN_SHARE = 0.01
 MIN_PROPULSION_STEPS = 10       # steps with throttle and forward acceleration that make a gear one to drive in
 CLUTCH_DIP_MAX_S = 2.0          # the probe kit's m_fGearClutchDipS range and DC_VehicleCard.CLUTCH_DIP_MAX_S
+CLUTCH_ENGAGED = 0.99           # input_post_clutch at or above this: the engine drives the wheels (speed_per_krpm)
 INPUT_SHAPINGS = ("echo", "rate_limit", "lag", "unknown")
+# The E-01 run header's gearbox lines (probe kit 699d8e2: DC_ProbeSequences.AppendVehicleLines and
+# DC_ProbeActuator.AppendGearboxLines; plays before the gearbox fix carry only the first three) and the phase note of a
+# gear_observe the probe skipped on a manual gearbox (DC_ProbeSequences.BeginPhase -> SkipPhase)
+HEADER_AUTOMATIC = "vehicle.has_automatic_gearbox"
+HEADER_GEARS = ("vehicle.gearbox_gears", "vehicle.gearbox_forward_gears")
+HEADER_KIND = "vehicle.gearbox"
+HEADER_INDICES = ("vehicle.gear_index_neutral", "vehicle.gear_index_first", "vehicle.gear_index_top")
+NOTE_MANUAL = "manual_gearbox"
 
 # Controller parameters of llc_v1 that are not identified (versioned with DC_LLCv1.c; tuned on the scratch
 # simulation of DD7_IMPL.md, to be re-checked on the first T0-MIN loop sessions)
@@ -249,13 +268,95 @@ def vanilla_gear_indices(gears, forward):
             "forward": list(range(neutral + 1, gears))}
 
 
-def scripted_gearbox(args, forward, propulsion, neutral=None):
-    """(gears, upshift, downshift) of --scripted-gears / --upshift-mps / --downshift-mps, checked as llc_v1 checks a
-    card (DC_VehicleCard.CheckGearbox): n >= 1 increasing forward gears above the neutral index (when E-04 gives
-    it), n - 1 up and down shift speeds, down < up, up increasing; every gear one the plays drove forward in and one
-    with propulsion (fit_gearbox)."""
+def header_index(play, key):
+    """A gear index of the run header: None when the line is absent or empty, else an integer >= 0 (refused
+    otherwise)."""
+    text = (play.header.get(key) or "").strip()
+    if not text:
+        return None
+    if not text.isdigit():
+        raise Refusal("%s: run header %s=%s is not an integer >= 0" % (play.dir, key, text))
+    return int(text)
+
+
+def e01_gearbox(play, phases_csv):
+    """What the E-01 play says about its gearbox without driving: {"manual": True | False | None, "sources": [...],
+    "indices": {"neutral", "reverse", "first", "top", "source"} | None}.
+    manual   vehicle.gearbox (manual | automatic; the probe kit since 699d8e2), vehicle.has_automatic_gearbox (0 | 1;
+             also earlier plays such as probe run 2) and a gear_observe row skipped with note manual_gearbox; every
+             source present must agree; None when the play says nothing.
+    indices  vehicle.gear_index_neutral / _first / _top (all three; reverse is the index below neutral), checked
+             against the vanilla rule of vehicle.gearbox_gears / _forward_gears when the header has the counts; else
+             the indices the counts give by that rule; None without either."""
+    sources, kinds = [], set()
+    kind = (play.header.get(HEADER_KIND) or "").strip()
+    if kind:
+        if kind not in ("manual", "automatic"):
+            raise Refusal("%s: run header %s=%s is neither manual nor automatic" % (play.dir, HEADER_KIND, kind))
+        kinds.add(kind == "manual")
+        sources.append("%s=%s" % (HEADER_KIND, kind))
+    flag = (play.header.get(HEADER_AUTOMATIC) or "").strip()
+    if flag:
+        if flag not in ("0", "1"):
+            raise Refusal("%s: run header %s=%s is neither 0 nor 1" % (play.dir, HEADER_AUTOMATIC, flag))
+        kinds.add(flag == "0")
+        sources.append("%s=%s" % (HEADER_AUTOMATIC, flag))
+    for row in phases_csv:
+        notes = (row.get("note") or "").split("/")
+        if row.get("phase") == "gear_observe" and row.get("result") == "skipped" and NOTE_MANUAL in notes:
+            kinds.add(True)
+            sources.append("gear_observe skipped (note %s)" % NOTE_MANUAL)
+    if len(kinds) > 1:
+        raise Refusal("the E-01 play disagrees with itself about its gearbox: %s" % "; ".join(sources))
+    manual = kinds.pop() if kinds else None
+    counts = [header_index(play, key) for key in HEADER_GEARS]
+    derived = vanilla_gear_indices(counts[0], counts[1]) if None not in counts else None
+    if None not in counts and derived is None:
+        raise Refusal("%s: run header gear counts %s=%d / %s=%d give no neutral and first gear (vanilla rule)"
+                      % (play.dir, HEADER_GEARS[0], counts[0], HEADER_GEARS[1], counts[1]))
+    named = [header_index(play, key) for key in HEADER_INDICES]
+    indices = None
+    if any(v is not None for v in named):
+        neutral, first, top = named
+        if None in named or not neutral < first <= top:
+            raise Refusal("%s: run header gear indices %s are incomplete or not neutral < first <= top"
+                          % (play.dir, ", ".join("%s=%s" % pair for pair in zip(HEADER_INDICES, named))))
+        if derived and (derived["neutral"], derived["forward"][0], derived["forward"][-1]) != (neutral, first, top):
+            raise Refusal("%s: run header gear indices neutral %d, first %d, top %d disagree with the vanilla rule of "
+                          "its gear counts (%d gears, %d forward: neutral %d, first %d, top %d)"
+                          % (play.dir, neutral, first, top, counts[0], counts[1], derived["neutral"],
+                             derived["forward"][0], derived["forward"][-1]))
+        indices = {"neutral": neutral, "first": first, "top": top,
+                   "source": "E-01 run header vehicle.gear_index_* (the probe kit, vanilla rule)"}
+    elif derived:
+        indices = {"neutral": derived["neutral"], "first": derived["forward"][0], "top": derived["forward"][-1],
+                   "source": "E-01 run header gear counts %d / %d by the vanilla rule" % tuple(counts)}
+    if indices:
+        indices["reverse"] = indices["neutral"] - 1 if indices["neutral"] >= 1 else None
+    return {"manual": manual, "sources": sources, "indices": indices,
+            "gear_counts": counts if None not in counts else None}
+
+
+def default_scripted_gears(indices, forward, propulsion):
+    """The default scripted gears of a manual gearbox: from the header's first gear upward, each one E-01 drove
+    forward in with propulsion, at most the top gear (an empty list when the first gear shows none)."""
+    gears = []
+    gear = indices["first"]
+    while gear <= indices["top"] and gear in forward and gear in propulsion:
+        gears.append(gear)
+        gear += 1
+    return gears
+
+
+def scripted_gearbox(args, forward, propulsion, neutral=None, gears=None, span=None):
+    """(gears, upshift, downshift) of --scripted-gears (or the given gears) / --upshift-mps / --downshift-mps, checked
+    as llc_v1 checks a card (DC_VehicleCard.CheckGearbox, and CheckEgoGearbox's span): n >= 1 increasing forward
+    gears above the neutral index (when E-01 or E-04 gives it) and within span (first, top) when the header gives it,
+    n - 1 up and down shift speeds, down < up, up increasing; every gear one the plays drove forward in and one with
+    propulsion (fit_gearbox)."""
     try:
-        gears = [int(v) for v in args.scripted_gears.split(",")]
+        if gears is None:
+            gears = [int(v) for v in args.scripted_gears.split(",")]
         up = [float(v) for v in args.upshift_mps.split(",") if v.strip()]
         down = [float(v) for v in args.downshift_mps.split(",") if v.strip()]
     except ValueError as e:
@@ -267,8 +368,11 @@ def scripted_gearbox(args, forward, propulsion, neutral=None):
         raise Refusal("scripted gearbox: n >= 1 increasing gears, n - 1 upshift and downshift speeds, downshift < "
                       "upshift, upshifts increasing (got %s / %s / %s)" % (gears, up, down))
     if neutral is not None and any(g <= neutral for g in gears):
-        raise Refusal("scripted gears %s are not all above the neutral index %s (E-04, vanilla rule): forward-only"
-                      % (gears, neutral))
+        raise Refusal("scripted gears %s are not all above the neutral index %s (E-01 / E-04, vanilla rule): "
+                      "forward-only" % (gears, neutral))
+    if span is not None and any(g < span[0] or g > span[1] for g in gears):
+        raise Refusal("scripted gears %s are not all within the E-01 header's first..top gears %d..%d (llc_v1 refuses "
+                      "them on this ego: DC_LLCv1.CheckEgoGearbox)" % (gears, span[0], span[1]))
     unseen = [g for g in gears if g not in forward]
     if unseen:
         raise Refusal("scripted gears %s were not seen while driving forward (gear_indices_forward %s)"
@@ -589,20 +693,38 @@ def fit_longitudinal(steps, phases_csv):
     return out
 
 
-def fit_gearbox(steps):
+def fit_gearbox(steps, manual=None):
     """(automatic works, gear_indices_forward, propulsion gears, detail): the e01_actuation.py gear_observe rule, the
     input_post_gear values while driving forward (TBD-7's definition) and, of those, the gears with at least
-    MIN_PROPULSION_STEPS steps of throttle (input_post_throttle > 0) and forward acceleration (acc_l_z > 0)."""
+    MIN_PROPULSION_STEPS steps of throttle (input_post_throttle > 0) and forward acceleration (acc_l_z > 0).
+    manual (e01_gearbox): True when the play says the gearbox is manual. Then gear_observe is not needed (the probe
+    kit skips it: automatic False), and its upshifts without SetGear would contradict the play (refused); without
+    gear_observe and without that statement nothing decides the gearbox (refused).
+    detail.speed_per_krpm: per forward gear, the median of speed [m/s] / (rpm / 1000) over the forward driving steps in
+    that gear with the clutch engaged (input_post_clutch >= CLUTCH_ENGAGED, rpm > 0), from MIN_PROPULSION_STEPS
+    steps on."""
     observe = [r for r in steps.by_phase.get("gear_observe", []) if r["segment"] == "excite"]
-    if not observe:
-        raise Refusal("E-01 has no gear_observe excite steps")
-    gears = [int(float(r["cur_gear"])) for r in observe]
-    no_setgear = all(int(float(r["cmd_gear"])) < 0 for r in observe)
-    upshifts = sum(1 for a, b in zip(gears, gears[1:]) if b > a)
-    gain = (e01_actuation.num(observe[-1]["speed_kmh"]) or 0.0) - (e01_actuation.num(observe[0]["speed_kmh"]) or 0.0)
-    automatic = no_setgear and upshifts >= 1 and gain >= MOVE_KMH
+    if observe:
+        gears = [int(float(r["cur_gear"])) for r in observe]
+        no_setgear = all(int(float(r["cmd_gear"])) < 0 for r in observe)
+        upshifts = sum(1 for a, b in zip(gears, gears[1:]) if b > a)
+        gain = (e01_actuation.num(observe[-1]["speed_kmh"]) or 0.0) \
+            - (e01_actuation.num(observe[0]["speed_kmh"]) or 0.0)
+        automatic = no_setgear and upshifts >= 1 and gain >= MOVE_KMH
+        if automatic and manual:
+            raise Refusal("E-01 gear_observe shifted up without SetGear, but the play says the gearbox is manual: the "
+                          "play disagrees with itself")
+        observed = {"upshifts": upshifts, "speed_gain_kmh": gain, "no_setgear": no_setgear}
+    elif manual:
+        automatic = False
+        observed = {"gear_observe": "not run: manual gearbox (the probe kit skips it, note %s)" % NOTE_MANUAL}
+    else:
+        raise Refusal("E-01 has no gear_observe excite steps, and the play does not say its gearbox is manual (run "
+                      "header %s or %s, or a gear_observe skipped with note %s)" % (HEADER_KIND, HEADER_AUTOMATIC,
+                                                                                    NOTE_MANUAL))
     counts = {}
     pushed = {}
+    ratios = {}
     moving = 0
     for row in steps.rows:
         speed = e01_actuation.num(row["speed_kmh"])
@@ -614,12 +736,17 @@ def fit_gearbox(steps):
             if (e01_actuation.num(row["input_post_throttle"]) or 0.0) > 0 \
                     and (e01_actuation.num(row["acc_l_z"]) or 0.0) > 0:
                 pushed[int(gear)] = pushed.get(int(gear), 0) + 1
+            rpm = e01_actuation.num(row.get("rpm"))
+            if rpm and rpm > 0 and (e01_actuation.num(row.get("input_post_clutch")) or 0.0) >= CLUTCH_ENGAGED:
+                ratios.setdefault(int(gear), []).append(speed / 3.6 / (rpm / 1000.0))
     forward = sorted(g for g, n in counts.items() if moving and n >= GEAR_MIN_SHARE * moving)
     propulsion = sorted(g for g in forward if pushed.get(g, 0) >= MIN_PROPULSION_STEPS)
-    return automatic, forward, propulsion, {
-        "upshifts": upshifts, "speed_gain_kmh": gain, "no_setgear": no_setgear, "moving_steps": moving,
-        "input_post_gear_counts": {str(k): v for k, v in sorted(counts.items())},
-        "propulsion_steps": {str(k): v for k, v in sorted(pushed.items())}, "propulsion_gears": propulsion}
+    per_krpm = {str(g): e01_actuation.median(ratios[g]) for g in forward
+                if len(ratios.get(g, ())) >= MIN_PROPULSION_STEPS}
+    detail = dict(observed, moving_steps=moving, propulsion_gears=propulsion, speed_per_krpm=per_krpm)
+    detail.update({"input_post_gear_counts": {str(k): v for k, v in sorted(counts.items())},
+                   "propulsion_steps": {str(k): v for k, v in sorted(pushed.items())}})
+    return automatic, forward, propulsion, detail
 
 
 def force_enable_simulation(phases_csv):
@@ -731,44 +858,80 @@ def build_identified(args):
     try:
         steps = e01_actuation.Steps(e01_play.csv("e01_steps", required=e01_actuation.STEP_COLUMNS))
         phases_csv = e01_play.csv("e01_phases", required=("phase", "result", "amplitude"))
+        said = e01_gearbox(e01_play, phases_csv)
         steer_sign, yaw_axis_sign, sign_detail = fit_signs(steps)
         prbs = fit_prbs(steps, steer_sign, dt)
         engine_input = input_path(steps, dt)
         longitudinal = fit_longitudinal(steps, phases_csv)
-        automatic, forward, propulsion, gear_detail = fit_gearbox(steps)
+        automatic, forward, propulsion, gear_detail = fit_gearbox(steps, said["manual"])
         kappa_ss = fit_kappa_ss(e02a_play, steer_sign, dt)
     except probe_common.InputError as e:
         raise Refusal(str(e))
     wrong = [f for f in kappa_ss["fits"] if f.get("slope", 1.0) <= 0]
     if wrong:
         raise Refusal("E-02a slopes are not positive in the contract sign of steer_sign %d: %s" % (steer_sign, wrong))
-    gearbox = {"mode": "automatic" if automatic else "scripted", "basis": "E-01 gear_observe (%s)" % (
-        "upshifts without SetGear" if automatic else "no upshift without SetGear: scripted gearbox needed"),
-        "has_automatic_gearbox": None, "scripted_gears": [], "upshift_mps": [], "downshift_mps": [],
-        "clutch_dip_s": 0.0, "detail": gear_detail}
-    indices = None
+    if "gear_observe" in gear_detail:
+        basis = "E-01 says the gearbox is manual (%s); gear_observe not run: scripted gearbox needed" % (
+            "; ".join(said["sources"]))
+    else:
+        basis = "E-01 gear_observe (%s)" % (
+            "upshifts without SetGear" if automatic else "no upshift without SetGear: scripted gearbox needed")
+    gearbox = {"mode": "automatic" if automatic else "scripted", "basis": basis,
+               "has_automatic_gearbox": None if said["manual"] is None else not said["manual"],
+               "scripted_gears": [], "upshift_mps": [], "downshift_mps": [], "clutch_dip_s": 0.0, "detail": gear_detail}
+    indices = said["indices"]
+    gear_detail["e01_header"] = {"says": said["sources"], "gear_counts": said["gear_counts"], "indices": indices}
     if e04_play:
         e04 = e04_values(e04_play)
         flag = e04.get("has_automatic_gearbox")
-        gearbox["has_automatic_gearbox"] = None if flag in (None, "") else flag in ("1", "true", "True")
+        e04_automatic = None if flag in (None, "") else flag in ("1", "true", "True")
+        if None not in (e04_automatic, gearbox["has_automatic_gearbox"]) \
+                and e04_automatic != gearbox["has_automatic_gearbox"]:
+            raise Refusal("E-04 says has_automatic_gearbox %s, the E-01 play says the gearbox is %s (%s): the plays "
+                          "disagree" % (flag, "manual" if said["manual"] else "automatic", "; ".join(said["sources"])))
+        if e04_automatic is not None:
+            gearbox["has_automatic_gearbox"] = e04_automatic
         counts = tuple(probe_common.to_float(e04.get(k)) for k in ("gearbox_gears", "gearbox_forward_gears"))
-        if None not in counts:
-            indices = vanilla_gear_indices(int(counts[0]), int(counts[1]))
+        e04_indices = vanilla_gear_indices(int(counts[0]), int(counts[1])) if None not in counts else None
+        if e04_indices:
             gear_detail["e04"] = {"gearbox_gears": int(counts[0]), "gearbox_forward_gears": int(counts[1]),
                                   "rule": "vanilla: neutral = gears - forward - 1, reverse next below it"}
+            if indices and (indices["neutral"], indices["reverse"]) != (e04_indices["neutral"], e04_indices["reverse"]):
+                raise Refusal("E-04's gear counts give neutral %s and reverse %s, the E-01 run header neutral %s and "
+                              "reverse %s: the plays disagree" % (e04_indices["neutral"], e04_indices["reverse"],
+                                                                  indices["neutral"], indices["reverse"]))
+            if not indices:
+                indices = {"neutral": e04_indices["neutral"], "reverse": e04_indices["reverse"],
+                           "first": e04_indices["forward"][0], "top": e04_indices["forward"][-1],
+                           "source": "E-04 gear counts by the vanilla rule"}
     neutral = indices["neutral"] if indices else None
     if automatic and gearbox["has_automatic_gearbox"] is False:
         raise Refusal("E-01 saw automatic upshifts without SetGear, but E-04 says the gearbox is manual: the plays "
                       "disagree")
-    if not automatic:
-        if not (args.scripted_gears and args.upshift_mps and args.downshift_mps):
-            raise Refusal("E-01 says a scripted gearbox is needed: pass --scripted-gears, --upshift-mps and "
-                          "--downshift-mps (forward gears only)")
     if not forward:
         raise Refusal("no forward gear index seen while driving (input_post_gear >= 5 km/h)")
     if not automatic:
+        gears = None
+        if not args.scripted_gears:
+            if not indices:
+                raise Refusal("E-01 says a scripted gearbox is needed and no play gives its first gear index (run "
+                              "header vehicle.gear_index_* or gear counts, or --e04): pass --scripted-gears")
+            gears = default_scripted_gears(indices, forward, propulsion)
+            if not gears:
+                raise Refusal("E-01 shows no propulsion in the first gear %d (forward gears %s, with propulsion %s): "
+                              "pass --scripted-gears" % (indices["first"], forward, propulsion))
+            gear_detail["scripted_gears_rule"] = "default: from the first gear %d upward while E-01 shows propulsion " \
+                                                 "in each (top %d)" % (indices["first"], indices["top"])
+        if args.upshift_mps is None or args.downshift_mps is None:
+            raise Refusal("E-01 says a scripted gearbox is needed: pass --upshift-mps and --downshift-mps, n - 1 "
+                          "speeds each for the scripted gears %s (forward gears only; E-01 speed per 1000 rpm and "
+                          "gear: %s)"
+                          % (args.scripted_gears or gears, ", ".join(
+                              "%s: %.3f m/s" % item for item in sorted(gear_detail["speed_per_krpm"].items()))
+                             or "not measured"))
+        span = (indices["first"], indices["top"]) if indices else None
         gearbox["scripted_gears"], gearbox["upshift_mps"], gearbox["downshift_mps"] = scripted_gearbox(
-            args, forward, propulsion, neutral)
+            args, forward, propulsion, neutral, gears, span)
         gearbox["clutch_dip_s"] = clutch_dip(e01_play)
     vehicle = args.vehicle
     sessions = [session_id(p) for p in plays]
@@ -1035,6 +1198,13 @@ def main(argv=None):
     print("  signs steer %+d yaw_axis %+d (measured %s); gearbox %s (clutch dip %s s); forward gears %s" % (
         card["signs"]["steer_sign"], card["signs"]["yaw_axis_sign"], card["signs"]["measured"], card["gearbox"]["mode"],
         card["gearbox"]["clutch_dip_s"], card["gear_indices_forward"]))
+    detail = card["gearbox"].get("detail") or {}
+    print("  gearbox basis: %s; neutral %s, reverse %s; scripted gears %s (up %s, down %s m/s); speed per 1000 rpm "
+          "%s" % (
+        card["gearbox"]["basis"], card["gear_index_neutral"], card["gear_index_reverse"],
+        card["gearbox"]["scripted_gears"], card["gearbox"]["upshift_mps"], card["gearbox"]["downshift_mps"],
+        ", ".join("gear %s %.3f m/s" % item for item in sorted((detail.get("speed_per_krpm") or {}).items()))
+        or "n/a"))
     for v, g, b in zip(card["kappa_ss"]["speeds_mps"], card["kappa_ss"]["kappa_per_steer"], card["kappa_ss"]["kappa_offset"]):
         print("  kappa_ss %.2f m/s: %.5f 1/m per steer, offset %+.6f 1/m" % (v, g, b))
     for fit in (card["kappa_ss"].get("fits") or []):

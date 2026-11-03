@@ -16,6 +16,12 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     lag with its tau and no limit (review F-05); the limiter rule needs a known path (F-04);
   - a scripted gearbox stores E-01's clutch dip and is refused without it (F-02); a neutral index reported while
     rolling stays in gear_indices_forward (TBD-7) but can never be a scripted gear (Codex CX-1);
+  - a manual-gearbox E-01 without gear_observe (probe kit 699d8e2 skips it, note manual_gearbox; the car driven by
+    the probe's shift policy, neutral with the handbrake) gives a scripted card in both run header styles: the probe
+    kit's (vehicle.gearbox=manual, vehicle.gear_index_neutral / _first / _top) and the earlier one
+    (vehicle.has_automatic_gearbox=0 and the gear counts, indices by the vanilla rule); the default scripted gears
+    run from the first gear upward while E-01 shows propulsion, the speed per 1000 rpm of each gear is measured, and
+    a play that disagrees with itself or with E-04 is refused; the phase note alone says manual but gives no index;
   - an identified card needs one pin, one build_key (--build-key fills a dd-launch/1 header), one fixed time slice
     (F-11), complete plays and a usable E-02a fit with gains >= MIN_KAPPA_PER_STEER, and is checked as written
     against llc_v1's load rules (F-12); Everon inputs are refused;
@@ -81,17 +87,33 @@ def gain(v):
     return 0.22 / (1.0 + (v / 10.0) ** 2)
 
 
+# A manual gearbox as the S105's (vanilla indices: reverse 0, neutral 1, forward 2..5) with a speed per 1000 rpm per
+# gear, driven by the probe kit's shift policy where no explicit gear is set (699d8e2: neutral while the handbrake is
+# commanded, then a gear by speed; cmd_gear = the policy gear): 2 below 15 km/h, 3 below 30, 4 above
+MANUAL_SPEED_PER_KRPM = {2: 1.5, 3: 2.7, 4: 4.1, 5: 6.0}
+KIT_GEARBOX_LINES = {"vehicle.has_automatic_gearbox": "0", "vehicle.gearbox_gears": "6",
+                     "vehicle.gearbox_forward_gears": "4", "vehicle.gearbox": "manual",
+                     "vehicle.gear_index_neutral": "1", "vehicle.gear_index_first": "2", "vehicle.gear_index_top": "5",
+                     "vehicle.gear_index_rule": "neutral gears-forward-1, first gears-forward, top gears-1",
+                     "gear_policy.active": "1", "gear_policy.clutch_dip_s": "0.000"}
+EARLIER_GEARBOX_LINES = {"vehicle.has_automatic_gearbox": "0", "vehicle.gearbox_gears": "6",
+                         "vehicle.gearbox_forward_gears": "4"}
+
+
 class Truth:
     """Vehicle with a known actuator: contract steer c = steer_sign x engine steer, curvature kappa follows
     gain_scale x gain(v) x c(t - delay) + offset with a first-order lag tau; a longitudinal dead time; throttle 3 m/s2
     per unit, brake 8 m/s2 per unit; an automatic gearbox that shifts up every 20 km/h (input gear 3, 4, 5, 6), or
-    without one gear 3 unless SetGear sets another; optionally a neutral index reported while braking above 5 km/h."""
+    without one gear 3 unless SetGear sets another, or (manual) the S105-like manual gearbox under the probe's shift
+    policy with the engine speed of MANUAL_SPEED_PER_KRPM; optionally a neutral index reported while braking above
+    5 km/h."""
 
     def __init__(self, steer_sign=-1, delay=4, tau=0.1, offset=0.001, long_delay=6, input_rate=None, input_tau=None,
-                 automatic=True, neutral_when_braking=None, gain_scale=1.0):
+                 automatic=True, neutral_when_braking=None, gain_scale=1.0, manual=False):
         self.input_rate = input_rate      # an engine-side steering rate limit on the input [1/s], None = none
         self.input_alpha = None if input_tau is None else 1.0 - math.exp(-DT / input_tau)   # an engine input lag
-        self.automatic = automatic
+        self.manual = manual
+        self.automatic = automatic and not manual
         self.neutral_when_braking = neutral_when_braking
         self.gain_scale = gain_scale
         self.steer_input = 0.0
@@ -142,25 +164,32 @@ class Truth:
         self.x += self.speed * math.sin(rad) * DT
         self.z += self.speed * math.cos(rad) * DT
         kmh = self.speed * 3.6
+        rpm = 900 + 40 * kmh
         if gear >= 0:
             cur = gear
+        elif self.manual:
+            cur = 1 if handbrake else 2 + min(2, int(kmh / 15.0))
         elif self.neutral_when_braking is not None and brake > 0 and kmh >= 5.0:
             cur = self.neutral_when_braking
         elif self.automatic:
             cur = 3 + min(3, int(kmh / 20.0))
         else:
             cur = 3
+        if self.manual and cur in MANUAL_SPEED_PER_KRPM:
+            rpm = max(800.0, self.speed / MANUAL_SPEED_PER_KRPM[cur] * 1000.0)
+        cmd_gear = gear if gear >= 0 or not self.manual else cur
         self.rows.append({
             "physics_step": self.step, "world_time_ms": "%.3f" % (self.step * DT * 1000), "timeslice_s": "%.6f" % DT,
             "phase": phase, "segment": segment, "phase_step": n, "force_sim": 0, "cmd_steer": "%.4f" % steer,
-            "cmd_throttle": "%.4f" % throttle, "cmd_brake": "%.4f" % brake, "cmd_clutch": "1.0000", "cmd_gear": gear,
+            "cmd_throttle": "%.4f" % throttle, "cmd_brake": "%.4f" % brake, "cmd_clutch": "1.0000",
+            "cmd_gear": cmd_gear,
             "cmd_handbrake": int(handbrake), "speed_hold_kmh": "%.3f" % hold,
             "input_pre_steer": "%.4f" % steer, "input_pre_throttle": "%.4f" % throttle,
             "input_pre_brake": "%.4f" % brake, "input_pre_clutch": "1.0000", "input_pre_gear": cur,
             "input_pre_handbrake": int(handbrake), "input_post_steer": "%.4f" % self.steer_input,
             "input_post_throttle": "%.4f" % throttle, "input_post_brake": "%.4f" % brake,
             "input_post_clutch": "1.0000", "input_post_gear": cur, "input_post_handbrake": int(handbrake),
-            "cur_gear": cur, "fut_gear": cur, "rpm": "%.1f" % (900 + 40 * kmh), "engine_on": 1,
+            "cur_gear": cur, "fut_gear": cur, "rpm": "%.1f" % rpm, "engine_on": 1,
             "speed_kmh": "%.4f" % kmh, "vel_l_x": "0.000", "vel_l_y": "0.000", "vel_l_z": "%.4f" % self.speed,
             "angvel_l_x": "0.000000", "angvel_l_y": "%.7f" % yaw, "angvel_l_z": "0.000000",
             "acc_l_x": "%.4f" % (self.speed * yaw), "acc_l_y": "0.0000", "acc_l_z": "%.4f" % acc,
@@ -170,21 +199,25 @@ class Truth:
         return kmh
 
 
-def header(probe, build_key="bk-test-1", pin="1.8.0.13", map_id="arland", prefab=None, slice_s=DT, clutch_dip=None):
+def header(probe, build_key="bk-test-1", pin="1.8.0.13", map_id="arland", prefab=None, slice_s=DT, clutch_dip=None,
+           lines=None):
     out = {"schema": "dc-probe-run/1", "probe": probe, "launch.id": LAUNCH_ID, "launch.pin_id": pin,
            "launch.build_key": build_key, "engine.fixed_time_slice_s": "%.6f" % slice_s, "world.map_id": map_id,
            "ego.prefab": prefab or fit.PREFABS["S105"], "params.dt_s": "%.6f" % slice_s}
     if clutch_dip is not None:
         out["params.m_fGearClutchDipS"] = "%.3f" % clutch_dip      # DC_ProbeSequences.GetProbeParams
+    out.update(lines or {})                                         # e.g. the gearbox lines of the run header
     return out
 
 
 FOOTER = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
 
 
-def build_e01(play_dir, truth, gear_sequence=(), **head):
+def build_e01(play_dir, truth, gear_sequence=(), observe="run", **head):
     """The E-01 phases the fit reads; gear_sequence adds a gear_scripted phase (SetGear to each gear for 3 s at
-    throttle 0.4, as DC_ProbeSequences' GEAR_SCRIPTED)."""
+    throttle 0.4, as DC_ProbeSequences' GEAR_SCRIPTED). observe: "run" (gear_observe drives 15 s without SetGear),
+    "skipped" (the probe kit's row on a manual gearbox: result skipped, note manual_gearbox, no steps) or "absent"
+    (no gear_observe row at all)."""
     phases = []
 
     def phase(name, target, amplitude, body):
@@ -279,7 +312,11 @@ def build_e01(play_dir, truth, gear_sequence=(), **head):
         phase("throttle_%.2f" % value, "", "%.4f" % value, throttle_step(value))
     for value in (0.3, 0.6, 1.0):
         phase("brake_%.2f" % value, "40.000", "%.4f" % value, brake_step(value))
-    phase("gear_observe", "", "0.7000", gear_observe)
+    if observe == "run":
+        phase("gear_observe", "", "0.7000", gear_observe)
+    elif observe == "skipped":
+        phases.append({"phase_idx": len(phases), "phase": "gear_observe", "target_kmh": "", "amplitude": "0.7000",
+                       "force_sim": 0, "result": "skipped", "note": "manual_gearbox"})
     if gear_sequence:
         phase("gear_scripted", "", "0.4000", gear_scripted)
     probe_common.write_synthetic_play(play_dir, header("e01", **head), {
@@ -916,6 +953,166 @@ class FitTests(unittest.TestCase):
         code, text = run_fit(["--e01", self.e01, "--e02a", self.e02a, "--e04", e04("play_24", 7, 4)])
         self.assertEqual(code, 2, text)                                 # E-01 automatic, E-04 manual: disagree
         self.assertIn("disagree", text)
+
+    def manual_e01(self, name, lines, observe="skipped", **head):
+        """A manual-gearbox E-01 play driven by the probe kit's shift policy, with gear_scripted 2, 3, 4, 3, 2 (the
+        probe's default m_sGearSequence) and no clutch dip."""
+        play = os.path.join(self.tmp, "e01", LAUNCH_ID, name)
+        build_e01(play, Truth(manual=True), gear_sequence=(2, 3, 4, 3, 2), observe=observe, clutch_dip=0.0,
+                  lines=lines, **head)
+        return play
+
+    def fit_card(self, argv):
+        out = os.path.join(self.tmp, "card_%d.json" % len(os.listdir(self.tmp)))
+        code, text = run_fit(argv + ["--out", out])
+        self.assertEqual(code, 0, text)
+        with open(out, "r", encoding="ascii") as f:
+            return json.load(f), text
+
+    def test_manual_gearbox_without_gear_observe_probe_kit_header(self):
+        # probe kit 699d8e2 on the S105: gear_observe skipped (note manual_gearbox), the run header's gearbox lines
+        # (vehicle.gearbox=manual, vehicle.gear_index_neutral 1 / first 2 / top 5); E-01 drives gears 2..4 only
+        e01 = self.manual_e01("play_30", KIT_GEARBOX_LINES)
+        speeds = ["--upshift-mps", "4.5,8.5", "--downshift-mps", "3.5,7.0"]
+        card, text = self.fit_card(["--e01", e01, "--e02a", self.e02a] + speeds)
+        gearbox = card["gearbox"]
+        self.assertEqual((gearbox["mode"], gearbox["has_automatic_gearbox"], gearbox["clutch_dip_s"]),
+                         ("scripted", False, 0.0))
+        self.assertIn("vehicle.gearbox=manual", gearbox["basis"])
+        self.assertIn("gear_observe not run", gearbox["basis"])
+        # default scripted gears: from the first gear (2) upward while E-01 shows propulsion; 5 was never driven
+        self.assertEqual(gearbox["scripted_gears"], [2, 3, 4])
+        self.assertEqual((gearbox["upshift_mps"], gearbox["downshift_mps"]), ([4.5, 8.5], [3.5, 7.0]))
+        self.assertEqual(card["gear_indices_forward"], [2, 3, 4])
+        self.assertEqual((card["gear_index_neutral"], card["gear_index_reverse"]), (1, 0))
+        detail = gearbox["detail"]
+        self.assertEqual(detail["propulsion_gears"], [2, 3, 4])
+        self.assertEqual((detail["e01_header"]["indices"]["first"], detail["e01_header"]["indices"]["top"]), (2, 5))
+        self.assertIn("default", detail["scripted_gears_rule"])
+        for gear in (2, 3, 4):
+            self.assertAlmostEqual(detail["speed_per_krpm"][str(gear)], MANUAL_SPEED_PER_KRPM[gear], delta=0.01)
+        self.assertEqual(fit.enforce_load_check(card), [])
+        self.assertIn("neutral 1, reverse 0; scripted gears [2, 3, 4]", text)
+        # explicit gears: within first..top, above neutral and driven forward with propulsion
+        card, _ = self.fit_card(["--e01", e01, "--e02a", self.e02a, "--scripted-gears", "2,3", "--upshift-mps", "5",
+                                 "--downshift-mps", "4"])
+        self.assertEqual(card["gearbox"]["scripted_gears"], [2, 3])
+        self.assertNotIn("scripted_gears_rule", card["gearbox"]["detail"])
+        for gears, up, down, reason in (("2,3,4,5", "4.5,8.5,13", "3.5,7,11", "not seen while driving forward"),
+                                        ("1,2", "3", "2", "above the neutral index")):
+            code, text = run_fit(["--e01", e01, "--e02a", self.e02a, "--scripted-gears", gears, "--upshift-mps", up,
+                                  "--downshift-mps", down])
+            self.assertEqual(code, 2, text)
+            self.assertIn(reason, text)
+        # without shift speeds: refused, naming the default gears and the measured speed per 1000 rpm
+        code, text = run_fit(["--e01", e01, "--e02a", self.e02a])
+        self.assertEqual(code, 2, text)
+        self.assertIn("--upshift-mps and --downshift-mps", text)
+        self.assertIn("[2, 3, 4]", text)
+        self.assertIn("4: 4.100 m/s", text)
+
+    def test_manual_gearbox_earlier_header_style(self):
+        # a play before the gearbox fix (probe run 2 style): only vehicle.has_automatic_gearbox=0 and the gear counts,
+        # and no gear_observe row: the indices follow by the vanilla rule, the card equals the probe kit style's
+        e01 = self.manual_e01("play_31", EARLIER_GEARBOX_LINES, observe="absent")
+        card, _ = self.fit_card(["--e01", e01, "--e02a", self.e02a, "--upshift-mps", "4.5,8.5", "--downshift-mps",
+                                 "3.5,7.0"])
+        gearbox = card["gearbox"]
+        self.assertEqual((gearbox["mode"], gearbox["has_automatic_gearbox"], gearbox["scripted_gears"]),
+                         ("scripted", False, [2, 3, 4]))
+        self.assertIn("vehicle.has_automatic_gearbox=0", gearbox["basis"])
+        self.assertNotIn("vehicle.gearbox=", gearbox["basis"])
+        self.assertEqual((card["gear_indices_forward"], card["gear_index_neutral"], card["gear_index_reverse"]),
+                         ([2, 3, 4], 1, 0))
+        self.assertIn("gear counts 6 / 4", gearbox["detail"]["e01_header"]["indices"]["source"])
+        self.assertEqual(fit.enforce_load_check(card), [])
+
+    def test_manual_gearbox_from_the_phase_note_alone(self):
+        # no gearbox line in the header: the skipped gear_observe says manual, but nothing gives the indices
+        e01 = self.manual_e01("play_32", {})
+        speeds = ["--upshift-mps", "4.5,8.5", "--downshift-mps", "3.5,7.0"]
+        code, text = run_fit(["--e01", e01, "--e02a", self.e02a] + speeds)
+        self.assertEqual(code, 2, text)
+        self.assertIn("pass --scripted-gears", text)
+        card, _ = self.fit_card(["--e01", e01, "--e02a", self.e02a, "--scripted-gears", "2,3,4"] + speeds)
+        self.assertEqual((card["gearbox"]["mode"], card["gearbox"]["has_automatic_gearbox"]), ("scripted", False))
+        self.assertIn("gear_observe skipped (note manual_gearbox)", card["gearbox"]["basis"])
+        self.assertEqual((card["gear_index_neutral"], card["gear_index_reverse"]), (None, None))
+        # E-04's counts give them (and the default gears)
+        e04 = os.path.join(self.tmp, "e04", LAUNCH_ID, "play_33")
+        probe_common.write_synthetic_play(e04, header("e04"), {}, FOOTER, {"e04_vehicle.txt": (
+            b"has_automatic_gearbox=0\ngearbox_gears=6\ngearbox_forward_gears=4\n")})
+        card, _ = self.fit_card(["--e01", e01, "--e02a", self.e02a, "--e04", e04] + speeds)
+        self.assertEqual((card["gearbox"]["scripted_gears"], card["gear_index_neutral"], card["gear_index_reverse"]),
+                         ([2, 3, 4], 1, 0))
+
+    def test_manual_gearbox_contradictions_are_refused(self):
+        def said(lines, rows=()):
+            play = type("Play", (), {"header": dict(lines), "dir": "e01/x/play_01"})()
+            return fit.e01_gearbox(play, list(rows))
+
+        skipped = [{"phase": "gear_observe", "result": "skipped", "note": "manual_gearbox"}]
+        self.assertEqual(said(KIT_GEARBOX_LINES)["indices"],
+                         {"neutral": 1, "first": 2, "top": 5, "reverse": 0,
+                          "source": "E-01 run header vehicle.gear_index_* (the probe kit, vanilla rule)"})
+        self.assertEqual(said({}, skipped)["manual"], True)
+        self.assertEqual(said({})["manual"], None)
+        self.assertEqual(said({"vehicle.gearbox": "automatic"})["manual"], False)
+        for lines, rows, reason in (
+                ({"vehicle.gearbox": "automatic"}, skipped, "disagrees with itself"),
+                (dict(KIT_GEARBOX_LINES, **{"vehicle.has_automatic_gearbox": "1"}), (), "disagrees with itself"),
+                (dict(KIT_GEARBOX_LINES, **{"vehicle.gear_index_neutral": "2", "vehicle.gear_index_first": "3"}), (),
+                 "vanilla rule"),
+                (dict(KIT_GEARBOX_LINES, **{"vehicle.gear_index_top": ""}), (), "incomplete"),
+                ({"vehicle.gearbox": "sequential"}, (), "neither manual nor automatic"),
+                ({"vehicle.gear_index_neutral": "1.5"}, (), "integer"),
+                ({"vehicle.gearbox_gears": "4", "vehicle.gearbox_forward_gears": "4"}, (), "no neutral")):
+            with self.assertRaises(fit.Refusal, msg=lines) as caught:
+                said(lines, rows)
+            self.assertIn(reason, str(caught.exception))
+        # without gear_observe a play that does not say manual decides nothing
+        e01 = self.manual_e01("play_34", {})
+        steps = fit.e01_actuation.Steps(probe_common.Play(e01).csv("e01_steps"))
+        with self.assertRaises(fit.Refusal) as caught:
+            fit.fit_gearbox(steps)
+        self.assertIn("does not say its gearbox is manual", str(caught.exception))
+        self.assertEqual(fit.fit_gearbox(steps, True)[:3], (False, [2, 3, 4], [2, 3, 4]))
+        # gear_observe upshifts without SetGear on a play that says manual
+        auto = os.path.join(self.tmp, "e01", LAUNCH_ID, "play_35")
+        build_e01(auto, Truth(), lines=KIT_GEARBOX_LINES)
+        steps = fit.e01_actuation.Steps(probe_common.Play(auto).csv("e01_steps"))
+        with self.assertRaises(fit.Refusal) as caught:
+            fit.fit_gearbox(steps, True)
+        self.assertIn("disagrees with itself", str(caught.exception))
+        # E-04 against the E-01 header: the gearbox kind and the indices must agree
+        kit = self.manual_e01("play_36", KIT_GEARBOX_LINES)
+        speeds = ["--upshift-mps", "4.5,8.5", "--downshift-mps", "3.5,7.0"]
+        for name, text, reason in (("play_37", b"has_automatic_gearbox=1\n", "has_automatic_gearbox 1"),
+                                   ("play_38", b"has_automatic_gearbox=0\ngearbox_gears=7\ngearbox_forward_gears=4\n",
+                                    "neutral 2 and reverse 1")):
+            e04 = os.path.join(self.tmp, "e04", LAUNCH_ID, name)
+            probe_common.write_synthetic_play(e04, header("e04"), {}, FOOTER, {"e04_vehicle.txt": text})
+            code, out = run_fit(["--e01", kit, "--e02a", self.e02a, "--e04", e04] + speeds)
+            self.assertEqual(code, 2, out)
+            self.assertIn(reason, out)
+            self.assertIn("disagree", out)
+
+    def test_header_keys_are_the_probe_kits(self):
+        # the run header lines the fit reads are the ones the probe kit writes (DC_ProbeSequences.c of this tree:
+        # AppendVehicleLines; DC_ProbeActuator.AppendGearboxLines of 699d8e2 when that file has it) and the skipped
+        # phase's note token
+        with open(os.path.join(REPO, "src", "enfusion", "datacapture", "DC_ProbeSequences.c"), "r",
+                  encoding="ascii") as f:
+            source = f.read()
+        for key in (fit.HEADER_AUTOMATIC,) + fit.HEADER_GEARS:
+            self.assertIn('lines.Insert("%s=" +' % key, source)
+        if "AppendGearboxLines" in source:
+            for key in (fit.HEADER_KIND,) + fit.HEADER_INDICES:
+                self.assertIn('lines.Insert("%s=" +' % key, source)
+            self.assertIn('SkipPhase(phase, "%s",' % fit.NOTE_MANUAL, source)
+        self.assertEqual(fit.HEADER_INDICES, ("vehicle.gear_index_neutral", "vehicle.gear_index_first",
+                                              "vehicle.gear_index_top"))
+        self.assertEqual((fit.HEADER_KIND, fit.NOTE_MANUAL), ("vehicle.gearbox", "manual_gearbox"))
 
     def test_cards_keep_the_llc_v1_format(self):
         with open(CARD, "r", encoding="ascii", newline="") as f:

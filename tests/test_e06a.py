@@ -66,8 +66,12 @@ def camera(t, moving=True):
     ])
 
 
-def render(cam, code, seed):
-    """Grey noisy background, a disc per marker 3..100 m in front, then the fiducial of code."""
+SHAPE_MARGIN = 64
+
+
+def render(cam, code, seed, widget=True, shape=False):
+    """Grey noisy background, a disc per marker 3..100 m in front, then the fiducial of code on the widget carrier
+    (margin 16) and / or the shape carrier (margin 64)."""
     rng = numpy.random.default_rng(seed)
     image = rng.integers(80, 140, size=(HEIGHT, WIDTH, 3), dtype=numpy.uint8)
     uv, depth = rp.project(MARKERS, cam, VFOV, WIDTH, HEIGHT)
@@ -79,7 +83,10 @@ def render(cam, code, seed):
         radius = max(f * MARKER_RADIUS_M / z, 2.0)
         inside = (xs + 0.5 - u) ** 2 + (ys + 0.5 - v) ** 2 <= radius ** 2
         image[inside] = MAGENTA
-    fiducial.render(image, fiducial.code_for(code))
+    if widget:
+        fiducial.render(image, fiducial.code_for(code))
+    if shape:
+        fiducial.render(image, fiducial.code_for(code), margin=SHAPE_MARGIN)
     return image
 
 
@@ -113,6 +120,18 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(numpy.isnan(uv[3, 0]))        # behind the camera
         self.assertAlmostEqual(depth[0], 20.0)
         self.assertAlmostEqual(rp.focal_px(VFOV, HEIGHT), 180 / math.tan(math.radians(25)))
+
+    def test_band_exclusion_covers_every_carrier(self):
+        self.assertEqual(rp.band_exclusion(WIDTH, {}, fiducial), [(0, 64), (WIDTH - 64, WIDTH)])
+        header = {"rig.fiducial.carrier": "both", "fiducial.shape.margin_px": str(SHAPE_MARGIN)}
+        self.assertEqual(rp.band_exclusion(WIDTH, header, fiducial), [(0, 112), (WIDTH - 112, WIDTH)])
+        image = numpy.full((HEIGHT, WIDTH, 3), 100, dtype=numpy.uint8)
+        image[100:110, 300:310] = MAGENTA
+        fiducial.render(image, 5 * (1 + 8 + 64), margin=SHAPE_MARGIN)      # value 5 (magenta) in the shape bands
+        blobs = rp.detect_blobs(image, MAGENTA, 60, rp.band_exclusion(WIDTH, header, fiducial), 3)
+        self.assertEqual(blobs.shape, (1, 2))
+        blobs = rp.detect_blobs(image, MAGENTA, 60, rp.band_exclusion(WIDTH, {}, fiducial), 3)
+        self.assertEqual(blobs.shape[0], 7)                                 # the old exclusion: 6 patches + marker
 
     def test_detect_blobs_skips_the_bands(self):
         image = numpy.full((HEIGHT, WIDTH, 3), 100, dtype=numpy.uint8)
@@ -186,12 +205,13 @@ SEGMENTS = ("slalom", "backlog", "brake")
 
 
 def build_e06a_play(base, lag=0, measured_fps_30=30.0, segments=SEGMENTS, lag_segments=None, phase_results=None,
-                    phases_file=True, not_current=0, images_per_segment=4):
+                    phases_file=True, not_current=0, images_per_segment=4, carrier=None, widget=True, shape=False):
     """A play with images_per_segment images per segment and FPS setting (60, then 30), as DC_ProbeMarkers writes it.
 
     lag: frames between the rendered and the claimed frame, for the segments in lag_segments (default: all);
     phase_results: {(fps, segment): result} overrides the "ok" of e06a_phases.csv; not_current: that many issued
-    requests (the first ones) say cam_current 0.
+    requests (the first ones) say cam_current 0; carrier: rig.fiducial.carrier (None: no such key, a play from
+    before the shape carrier); widget / shape: the carriers the images show.
     """
     play_dir = os.path.join(base, "DC_Probes", "e06a", LAUNCH_ID, "play_01")
     frames, requests, proj, phases, files = [], [], [], [], {}
@@ -213,7 +233,7 @@ def build_e06a_play(base, lag=0, measured_fps_30=30.0, segments=SEGMENTS, lag_se
             segment_lag = lag if lag_segments is None or segment in lag_segments else 0
             for frame in range(first + 10, first + 10 + 15 * images_per_segment, 15):
                 rel = "frames/f_%08d" % slot
-                image = render(cams[frame - segment_lag], frame, slot)
+                image = render(cams[frame - segment_lag], frame, slot, widget, shape)
                 files[rel + ".png"] = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))[1].tobytes()
                 current = 0 if slot < not_current else 1
                 requests.append([slot, 100.0 * slot, "issued", 100.0 * slot, frame - 1, frame * 2, 5000 + slot, rel,
@@ -237,6 +257,14 @@ def build_e06a_play(base, lag=0, measured_fps_30=30.0, segments=SEGMENTS, lag_se
     }
     for i, (_, y) in enumerate(geometry["left"]):
         header["fiducial.y%d" % i] = str(y)
+    if carrier is not None:
+        header["rig.fiducial.carrier"] = carrier
+        shape_geometry = fiducial.layout(WIDTH, HEIGHT, margin=SHAPE_MARGIN)
+        header.update({"fiducial.shape.patch_px": "32", "fiducial.shape.margin_px": str(SHAPE_MARGIN),
+                       "fiducial.shape.gap_px": "8", "fiducial.shape.left_x": str(shape_geometry["left"][0][0]),
+                       "fiducial.shape.right_x": str(shape_geometry["right"][0][0])})
+        for i, (_, y) in enumerate(shape_geometry["left"]):
+            header["fiducial.shape.y%d" % i] = str(y)
     footer = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
     csvs = {
         "e06a_frames": (FRAME_COLUMNS, frames),
@@ -280,6 +308,24 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("geometry run header fiducial.*", done.stdout)
         self.assertIn("RESULT E-06A: PASS", done.stdout)
+
+    def test_the_shape_carrier_alone_carries_the_join(self):
+        # The expected Workbench outcome: the widget bands are not in the files, the shape bands are
+        verdict = rp.analyse(build_e06a_play(self.base, carrier="both", widget=False, shape=True))
+        details = {name: detail for _, name, detail in verdict.items}
+        self.assertEqual(verdict.result(), "PASS", verdict.items)
+        self.assertIn("24 decoded, 0 undecodable or unreadable (0 carrier disagreements)", details["images"])
+        self.assertIn("plausible decodes per carrier: widget 0, shape 24", details["images"])
+        verdict = rp.analyse(build_e06a_play(os.path.join(self.base, "hg"), carrier="both", widget=False,
+                                             shape=True), header_geometry=True)
+        self.assertEqual(verdict.result(), "PASS", verdict.items)
+
+    def test_no_carrier_in_the_files_is_incomplete(self):
+        # Runs 1 and 2: no carrier was captured; the old decoder still read the bands as code 0
+        verdict = rp.analyse(build_e06a_play(self.base, widget=False))
+        details = {name: detail for _, name, detail in verdict.items}
+        self.assertIn("0 decoded, 24 undecodable", details["images"])
+        self.assertEqual(verdict.result(), "INCOMPLETE")
 
     def test_a_one_frame_lag_fails(self):
         done = self.run_cli(build_e06a_play(self.base, lag=1))

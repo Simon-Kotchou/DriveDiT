@@ -337,3 +337,18 @@ Notes on the image probes:
   is INCOMPLETE when slalom, backlog or brake has no counted marker or its `e06a_phases.csv` row is not `ok`.
 - The fiducial is laid out on `WorkspaceWidget.GetWidth() x GetHeight()`, which is the window's render target in
   physical pixels; the run header logs `fiducial.dpi_scale`.
+- Fiducial carriers (`m_eFiducialCarrier`, e05 and e06a, default BOTH): WIDGET is the r2 3.4 ImageWidget bands,
+  SHAPE draws the same code as debug Shapes 1 m (`m_fShapeDepthM`) in front of the rig camera at their own margin
+  (`m_iShapeMarginPx`, 64 px: beside the widget bands), BOTH draws both. Probe runs 1 and 2 found no widget patch in
+  any Workbench `MakeScreenshot` file, while debug shapes keep their exact colour there. The shapes are placed in
+  EOnFrame, after the physics step and in EOnPostFrame (the last placement of a frame wins; the camera applies its
+  transform in EOnPostFrame); the residual against the camera the frame was rendered with is logged once per second
+  (`fiducial shapes:` lines) and summed up at the stop (`fiducial.shape.*` in the run header, `clock.postframe_calls`
+  in the footer). The run header records `rig.fiducial.carrier` and `rig.fiducial.depth_m`.
+- With the widget carrier, `m_bWidgetDiagnostics` reads the patch widgets back once per second (`fiducial widgets:`
+  lines: workspace size and DPI, `IsVisibleInHierarchy`, `GetScreenPos` / `GetScreenSize`) and adds three orange
+  control widgets at the top centre (a text, a textured and a flat image), so a Play tells "never drawn" from
+  "drawn but not captured".
+- `data/dc2/fiducial.py` gates every decode: a band of scene texture is `absent` (run 1 read dark bark as code 0
+  `ok`), and a code outside [issue, min(issue + 2, done - 1)] is `implausible`. `e06_fiducial.py` and `e05_images.py`
+  report each carrier on its own; E-06 passes when one carrier decodes >= 99.5%.

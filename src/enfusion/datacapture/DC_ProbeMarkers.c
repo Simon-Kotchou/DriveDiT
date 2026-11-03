@@ -11,8 +11,9 @@
 //     area centre line every m_fStraightStepM from m_fStraightFromM to m_fStraightToM, heights alternating through
 //     m_sMarkerHeights; and a ring set of m_iRingCount markers on a circle of m_fRingRadiusM around the centre line at
 //     m_fRingAlongM, m_fRingHeightM up. Heights are above BaseWorld.GetSurfaceY. Writes e06a_markers.csv, attaches
-//     the rig, creates the fiducial bands (always on), opens the CSVs, saves VideoUserSettings.MaxFps and appends the
-//     rig.*, fiducial.*, area.*, markers.* and fps.* lines to the run header;
+//     the rig, creates the fiducial carriers of m_eFiducialCarrier (always on; DC_FiducialCarriers, as e05), opens the
+//     CSVs, saves VideoUserSettings.MaxFps and appends the rig.*, fiducial.*, area.*, markers.* and fps.* lines to the
+//     run header;
 //   - for each value of m_sFpsPhases (one "FPS phase"): sets MaxFps (BaseContainer.Set + UserSettingsChanged, never
 //     SaveUserSettings), then the segments
 //       reset   teleport to 2 x m_fAreaMarginM along the centre line (inside the margin-inset area, as
@@ -34,11 +35,13 @@
 //     3 km/h for 10 s (the actuator's stuck guard, WARNING);
 //   - after the last FPS phase no new slot is issued and the requests in flight are drained with the camera and
 //     the bands kept (DC_ImageSlotScheduler.StopIssuing); then the probe is done;
-//   - every render frame: DC_Fiducial.Show, the scheduler, one e06a_frames.csv row and, on frames that issued a
+//   - every render frame: DC_FiducialCarriers.OnFrame (the shapes are placed again after the physics step and in
+//     EOnPostFrame, as e05), the scheduler, one e06a_frames.csv row and, on frames that issued a
 //     request, e06a_proj.csv rows: WorkspaceWidget.ProjWorldToScreenNative of up to m_iProjMarkersPerFrame markers
 //     within m_fProjMaxDistM in front of the camera (the engine's own projection, to validate the Python camera
 //     model);
-//   - OnProbeStop restores MaxFps, removes the markers and the bands, parks the car and gives the camera back.
+//   - OnProbeStop restores MaxFps, parks the car, logs and appends the fiducial summary, removes the markers and the
+//     bands and gives the camera back.
 //
 // Debug-shape markers (Shape.CreateSphere, the default) have no collision. Prefab markers (the fallback when debug
 // shapes do not show in screenshots) do: the straight set sits beside the slalom line, and a marker that moved is
@@ -137,6 +140,18 @@ class DC_ProbeMarkers : DC_ProbeComponent
 
 	[Attribute("8", UIWidgets.Slider, "Vertical gap between fiducial patches [physical px]", "0 64 1", category: "Fiducial")]
 	protected int m_iGapPx;
+
+	[Attribute("2", UIWidgets.ComboBox, "Fiducial carrier: WIDGET = ImageWidgets in the workspace (r2 3.4), SHAPE = debug Shapes in front of the rig camera, BOTH = both at their own margins (compares them in one Play)", "", ParamEnumArray.FromEnum(DC_EFiducialCarrier), category: "Fiducial")]
+	protected DC_EFiducialCarrier m_eFiducialCarrier;
+
+	[Attribute("64", UIWidgets.Slider, "Shape carrier margin from the left and right image edges [physical px]; 64 = beside the widget bands (16 + 32 + 16), so BOTH can be told apart", "0 512 1", category: "Fiducial")]
+	protected int m_iShapeMarginPx;
+
+	[Attribute("1", UIWidgets.Slider, "Shape carrier depth in front of the camera [m]; must exceed the near plane", "0.2 100 0.1", category: "Fiducial")]
+	protected float m_fShapeDepthM;
+
+	[Attribute("1", UIWidgets.CheckBox, "Widget carrier diagnostics: once per second readback of the patch widgets, plus three control widgets (text, textured image, flat image)", category: "Fiducial")]
+	protected bool m_bWidgetDiagnostics;
 
 	// === AREA (same names and defaults as DC_ProbeSequences) ===
 	[Attribute("659.6 0 2572.4", UIWidgets.Coords, "Start of the test area centre line (x, z used) [engine road dump E-08a 2026-10-22: Arland main runway (road 83, 60 m x 1217 m, y 38.9-39.2), 58 m in from its west end]", category: "Area")]
@@ -260,7 +275,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 	protected DC_ProbeRunner m_Runner;
 	protected IEntity m_Ego;
 	protected ref DC_RigR1 m_Rig;
-	protected ref DC_Fiducial m_Fiducial;
+	protected ref DC_FiducialCarriers m_Fiducial;
 	protected ref DC_ImageSlotScheduler m_Scheduler;
 	protected ref DC_ProbeActuator m_Actuator;
 	protected ref DC_ProbeArea m_Area;
@@ -330,6 +345,10 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		outKeyValues.Insert("patch_px=" + m_iPatchPx.ToString());
 		outKeyValues.Insert("margin_px=" + m_iMarginPx.ToString());
 		outKeyValues.Insert("gap_px=" + m_iGapPx.ToString());
+		outKeyValues.Insert("fiducial_carrier=" + DC_FiducialCarriers.CarrierText(m_eFiducialCarrier));
+		outKeyValues.Insert("shape_margin_px=" + m_iShapeMarginPx.ToString());
+		outKeyValues.Insert("shape_depth_m=" + m_fShapeDepthM.ToString(-1, 3));
+		outKeyValues.Insert("widget_diagnostics=" + BoolText(m_bWidgetDiagnostics));
 		outKeyValues.Insert("area_start=" + DC_RigR1.FormatVector(m_vAreaStart, 3));
 		outKeyValues.Insert("area_heading_deg=" + m_fAreaHeadingDeg.ToString(-1, 3));
 		outKeyValues.Insert("area_length_m=" + m_fAreaLengthM.ToString(-1, 3));
@@ -429,8 +448,8 @@ class DC_ProbeMarkers : DC_ProbeComponent
 			return false;
 		}
 
-		m_Fiducial = new DC_Fiducial();
-		if (!m_Fiducial.Create(m_iPatchPx, m_iMarginPx, m_iGapPx))
+		m_Fiducial = new DC_FiducialCarriers();
+		if (!m_Fiducial.Create(m_eFiducialCarrier, m_Rig, ctx, m_iPatchPx, m_iMarginPx, m_iGapPx, m_iShapeMarginPx, m_fShapeDepthM, m_bWidgetDiagnostics))
 		{
 			ctx.Error("fiducial: " + m_Fiducial.GetFailure() + " - not started");
 			ReleaseAll();
@@ -513,9 +532,18 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		if (!m_bRunning)
 			return;
 
+		// The shapes follow the camera after the step's physics (DC_ProbeFiducial.c, WHEN THE SHAPES MOVE)
+		m_Fiducial.OnPostStep();
 		m_Actuator.ReadPost();
 		if (m_iStage != STAGE_DONE)
 			UpdateStage();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void OnProbePostFrame(string probeId, float timeSlice, int renderFrame)
+	{
+		if (m_bRunning)
+			m_Fiducial.OnPostFrame();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -524,7 +552,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 		if (!m_bRunning)
 			return;
 
-		m_Fiducial.Show(renderFrame);
+		m_Fiducial.OnFrame(renderFrame, m_Runner.GetWorldTimeMs());
 
 		// After the last FPS phase: no new slot; what is in flight resolves with the camera and the bands in place
 		if (m_iStage == STAGE_DONE)
@@ -603,6 +631,7 @@ class DC_ProbeMarkers : DC_ProbeComponent
 				m_Ctx.Warn("could not append the gear policy / physics wake summary to run_header.txt");
 		}
 
+		m_Fiducial.ReportSummary();
 		ReleaseAll();
 	}
 

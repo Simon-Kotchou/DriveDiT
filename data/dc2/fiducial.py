@@ -1,6 +1,7 @@
 """Fiducial v2 (r2 3.4): the frame code drawn into every capture image, its synthetic encoder and its decoder.
 
-The in-engine side is src/enfusion/datacapture/DC_Fiducial.c. Both follow the same rule:
+The in-engine side is src/enfusion/datacapture/DC_Fiducial.c (widget carrier) and DC_FiducialShape.c (debug-Shape
+carrier, at its own margin: fiducial.shape.* in the run header). All follow the same rule:
 
   * code = render_frame mod 2^18 (unique for 73 min at 60 FPS; sessions are at most 30 min);
   * 6 patches x 3 bits; patch 0 is the top patch and carries the 3 least significant bits:
@@ -12,9 +13,22 @@ The in-engine side is src/enfusion/datacapture/DC_Fiducial.c. Both follow the sa
     y_i = (H - (6 P + 5 G)) / 2 + i (P + G), i = 0..5 from the top; (x0, y_i) is the patch's top-left pixel.
     For 1408x720: left x0 = 16, right x0 = 1360, y_0 = 244.
 
-Decode rule (r2 3.4): per patch the per-channel median of the centred 8 x 8 block; a channel is 1 when its median is
->= 255 - channel_margin, 0 when <= channel_margin, otherwise the patch is ambiguous. A band decodes when all 6
-patches decode; the image decodes (status "ok") when both bands decode and agree.
+Decode rule (r2 3.4, hardened after probe run 1): per patch the centred 8 x 8 block.
+  * value: a channel is 1 when its median is >= 255 - channel_margin, 0 when <= channel_margin, else the patch has no
+    value;
+  * presence gate: a patch is present (drawn) when it has a value, its block is flat (per-channel standard deviation
+    <= uniform_std_max) and >= min_corner_fraction of its pixels lie within pixel_tolerance of the value's RGB-cube
+    corner on every channel. A drawn patch is an exact corner (run 1: debug shapes within 2 levels), scene texture is
+    not: run 1 read dark tree bark in both bands as six black patches and reported code 0 "ok" on every e05 frame
+    (t0/run1/FIDUCIAL.md 1.2). With the defaults below no band of the run-1 and run-2 e05 and e06a frames passes;
+  * a band decodes ("ok") when all 6 patches are present, is "absent" when none is, else "ambiguous". The image
+    status is "ok" when both bands decode and agree, "absent" when both bands are absent (no carrier at these
+    origins), else ambiguous_left / ambiguous_right / mirror_mismatch / out_of_bounds;
+  * plausibility gate (capture_window, resolve): a decoded code is unwrapped against the request's
+    issue_render_frame; the captured frame must lie in [issue, issue + max_offset] and, when the request's
+    done_render_frame is known, <= done - 1 (the file of render frame C appears at the EOnFrame of C + 1 at the
+    earliest). Outside: status "implausible". The code domain stays v2 (code 0 and equal bands are valid codewords):
+    a constant dark band can still decode as code 0 in a dark scene, the window then rejects it.
 
 Image input is an H x W x 3 uint8 RGB numpy array (extra channels are ignored). The module needs only the stdlib
 and numpy; cv2 is imported inside load_rgb. It has no import side effects and no relative imports, so callers load
@@ -37,17 +51,43 @@ PATCH_PX = 32
 MARGIN_PX = 16
 GAP_PX = 8
 CENTRE_PX = 8
-CHANNEL_MARGIN = 80
+# Presence gate (module docstring). Run 1 (forest) and run 2 (runway) e05 / e06a frames, ~300 files each, at the
+# widget (x 16) and shape (x 64) origins: 0 bands pass; the old rule (margin 80, no gate) passed 616 of 616 run-1
+# e05 bands. Real patches: exact corners (debug shapes within 2 levels, run 1).
+CHANNEL_MARGIN = 32
+PIXEL_TOLERANCE = 32
+UNIFORM_STD_MAX = 6.0
+MIN_CORNER_FRACTION = 0.9
+# Plausibility gate: frames from the request to the captured frame (single flight, run 1: done - 1 = issue + 0 or + 1)
+MAX_CAPTURE_OFFSET = 2
 
 STATUS_OK = "ok"
+STATUS_ABSENT = "absent"
 STATUS_AMBIGUOUS_LEFT = "ambiguous_left"
 STATUS_AMBIGUOUS_RIGHT = "ambiguous_right"
 STATUS_MIRROR_MISMATCH = "mirror_mismatch"
 STATUS_OUT_OF_BOUNDS = "out_of_bounds"
-STATUSES = (STATUS_OK, STATUS_AMBIGUOUS_LEFT, STATUS_AMBIGUOUS_RIGHT, STATUS_MIRROR_MISMATCH, STATUS_OUT_OF_BOUNDS)
+STATUS_IMPLAUSIBLE = "implausible"
+STATUSES = (STATUS_OK, STATUS_ABSENT, STATUS_AMBIGUOUS_LEFT, STATUS_AMBIGUOUS_RIGHT, STATUS_MIRROR_MISMATCH,
+            STATUS_OUT_OF_BOUNDS, STATUS_IMPLAUSIBLE)
 
-# code: the agreed code or None; left / right: each band's code or None; status: one of STATUSES
-FiducialResult = collections.namedtuple("FiducialResult", "code left right status")
+# Band reasons (decode_band)
+BAND_OK = "ok"
+BAND_ABSENT = "absent"
+BAND_AMBIGUOUS = "ambiguous"
+BAND_OUT_OF_BOUNDS = "out_of_bounds"
+
+# code: the agreed code or None; left / right: each band's code or None; status: one of STATUSES;
+# present_left / present_right: patches that passed the presence gate (0..6); margin: the smallest distance of a
+# decoded patch's channel median from its decision threshold (channel_margin - |median - corner|), None unless "ok"
+# (dc-2.0 img_resolved.fid_margin)
+FiducialResult = collections.namedtuple("FiducialResult", "code left right status present_left present_right margin",
+                                        defaults=(0, 0, None))
+# One band: code or None, reason (BAND_*), present patches, margin (None unless BAND_OK)
+BandResult = collections.namedtuple("BandResult", "code reason present margin")
+# Plausibility gate: frame = unwrapped decoded frame (None without a decode), offset = frame - issue, status = the
+# decode status or STATUS_IMPLAUSIBLE, window = (lo, hi)
+Capture = collections.namedtuple("Capture", "frame offset status window")
 
 
 def _div_trunc(numerator, denominator):
@@ -118,62 +158,103 @@ def render(image, code, patch=PATCH_PX, margin=MARGIN_PX, gap=GAP_PX):
             image[y0:y0 + patch, x0:x0 + patch, 0:3] = patch_color(value)
 
 
-def decode_band(image, origins, patch=PATCH_PX, centre=CENTRE_PX, channel_margin=CHANNEL_MARGIN):
-    """Decodes one band from its 6 patch origins (top-left pixels, index 0 = top).
+def _patch(block, channel_margin, pixel_tolerance, uniform_std_max, min_corner_fraction):
+    """(value or None, present, margin) of one centre block (N x 3 uint8)."""
+    medians = numpy.median(block, axis=0)
+    value = 0
+    for bit in range(3):
+        channel = float(medians[bit])
+        if channel >= 255 - channel_margin:
+            value |= 1 << bit
+        elif channel > channel_margin:
+            return None, False, None
+    corner = numpy.array(patch_color(value), dtype=numpy.int16)
+    pixels = block.astype(numpy.int16)
+    near = (numpy.abs(pixels - corner).max(axis=1) <= pixel_tolerance).mean()
+    flat = float(pixels.std(axis=0).max()) <= uniform_std_max
+    margin = float(channel_margin) - float(numpy.abs(medians - corner).max())
+    return value, bool(flat and near >= min_corner_fraction), margin
 
-    Returns (code, "ok"), (None, "ambiguous") or (None, "out_of_bounds").
-    """
+
+def band_details(image, origins, patch=PATCH_PX, centre=CENTRE_PX, channel_margin=CHANNEL_MARGIN,
+                 pixel_tolerance=PIXEL_TOLERANCE, uniform_std_max=UNIFORM_STD_MAX,
+                 min_corner_fraction=MIN_CORNER_FRACTION):
+    """BandResult of one band from its 6 patch origins (top-left pixels, index 0 = top)."""
     _check_image(image)
     if len(origins) != PATCH_COUNT:
         raise ValueError("expected %d patch origins, got %d" % (PATCH_COUNT, len(origins)))
     height, width = image.shape[:2]
     offset = (int(patch) - int(centre)) // 2
     code = 0
-    for i, (x0, y0) in enumerate(origins):
+    present = 0
+    margins = []
+    for x0, y0 in origins:
         xs = int(x0) + offset
         ys = int(y0) + offset
         if xs < 0 or ys < 0 or xs + centre > width or ys + centre > height:
-            return None, "out_of_bounds"
+            return BandResult(None, BAND_OUT_OF_BOUNDS, 0, None)
+    for i, (x0, y0) in enumerate(origins):
+        xs = int(x0) + offset
+        ys = int(y0) + offset
         block = image[ys:ys + centre, xs:xs + centre, 0:3].reshape(-1, 3)
-        medians = numpy.median(block, axis=0)
-        value = 0
-        for bit in range(3):
-            channel = float(medians[bit])
-            if channel >= 255 - channel_margin:
-                value |= 1 << bit
-            elif channel > channel_margin:
-                return None, "ambiguous"
-        code |= value << (BITS_PER_PATCH * i)
-    return code, "ok"
+        value, is_present, margin = _patch(block, channel_margin, pixel_tolerance, uniform_std_max,
+                                           min_corner_fraction)
+        if is_present:
+            present += 1
+            margins.append(margin)
+            code |= value << (BITS_PER_PATCH * i)
+    if present == PATCH_COUNT:
+        return BandResult(code, BAND_OK, present, min(margins))
+    if present == 0:
+        return BandResult(None, BAND_ABSENT, 0, None)
+    return BandResult(None, BAND_AMBIGUOUS, present, None)
+
+
+def decode_band(image, origins, patch=PATCH_PX, centre=CENTRE_PX, channel_margin=CHANNEL_MARGIN,
+                pixel_tolerance=PIXEL_TOLERANCE, uniform_std_max=UNIFORM_STD_MAX,
+                min_corner_fraction=MIN_CORNER_FRACTION):
+    """Decodes one band: (code, "ok"), (None, "absent"), (None, "ambiguous") or (None, "out_of_bounds")."""
+    band = band_details(image, origins, patch, centre, channel_margin, pixel_tolerance, uniform_std_max,
+                        min_corner_fraction)
+    return band.code, band.reason
 
 
 def decode_origins(image, left_origins, right_origins, patch=PATCH_PX, centre=CENTRE_PX,
-                   channel_margin=CHANNEL_MARGIN):
+                   channel_margin=CHANNEL_MARGIN, pixel_tolerance=PIXEL_TOLERANCE, uniform_std_max=UNIFORM_STD_MAX,
+                   min_corner_fraction=MIN_CORNER_FRACTION):
     """Decodes both bands at the given origins (for example the fiducial.* geometry of a run header)."""
-    left, left_reason = decode_band(image, left_origins, patch, centre, channel_margin)
-    right, right_reason = decode_band(image, right_origins, patch, centre, channel_margin)
-    if left_reason == "out_of_bounds" or right_reason == "out_of_bounds":
+    gates = (channel_margin, pixel_tolerance, uniform_std_max, min_corner_fraction)
+    left = band_details(image, left_origins, patch, centre, *gates)
+    right = band_details(image, right_origins, patch, centre, *gates)
+    if left.reason == BAND_OUT_OF_BOUNDS or right.reason == BAND_OUT_OF_BOUNDS:
         status = STATUS_OUT_OF_BOUNDS
-    elif left is None:
+    elif left.reason == BAND_ABSENT and right.reason == BAND_ABSENT:
+        status = STATUS_ABSENT
+    elif left.code is None:
         status = STATUS_AMBIGUOUS_LEFT
-    elif right is None:
+    elif right.code is None:
         status = STATUS_AMBIGUOUS_RIGHT
-    elif left != right:
+    elif left.code != right.code:
         status = STATUS_MIRROR_MISMATCH
     else:
         status = STATUS_OK
     code = None
+    margin = None
     if status == STATUS_OK:
-        code = left
-    return FiducialResult(code, left, right, status)
+        code = left.code
+        margin = min(left.margin, right.margin)
+    return FiducialResult(code, left.code, right.code, status, left.present, right.present, margin)
 
 
-def decode(image, patch=PATCH_PX, margin=MARGIN_PX, gap=GAP_PX, centre=CENTRE_PX, channel_margin=CHANNEL_MARGIN):
+def decode(image, patch=PATCH_PX, margin=MARGIN_PX, gap=GAP_PX, centre=CENTRE_PX, channel_margin=CHANNEL_MARGIN,
+           pixel_tolerance=PIXEL_TOLERANCE, uniform_std_max=UNIFORM_STD_MAX,
+           min_corner_fraction=MIN_CORNER_FRACTION):
     """Decodes an image with the patch origins computed by layout() from the image's own size."""
     _check_image(image)
     height, width = image.shape[:2]
     geometry = layout(width, height, patch, margin, gap)
-    return decode_origins(image, geometry["left"], geometry["right"], patch, centre, channel_margin)
+    return decode_origins(image, geometry["left"], geometry["right"], patch, centre, channel_margin, pixel_tolerance,
+                          uniform_std_max, min_corner_fraction)
 
 
 def unwrap(code, reference_frame):
@@ -182,6 +263,29 @@ def unwrap(code, reference_frame):
     reference_frame = int(reference_frame)
     delta = (int(code) - reference_frame + half) % CODE_MODULUS - half
     return reference_frame + delta
+
+
+def capture_window(issue_frame, done_frame=None, max_offset=MAX_CAPTURE_OFFSET):
+    """(lo, hi): the render frames an image of a request issued in issue_frame can show. lo = issue_frame; hi =
+    issue_frame + max_offset, and at most done_frame - 1 when the frame that saw the file is known."""
+    lo = int(issue_frame)
+    hi = lo + int(max_offset)
+    if done_frame is not None:
+        hi = min(hi, int(done_frame) - 1)
+    return lo, hi
+
+
+def resolve(result, issue_frame, done_frame=None, max_offset=MAX_CAPTURE_OFFSET):
+    """Plausibility gate of one decode: Capture(frame, offset, status, window). A decode outside capture_window gets
+    status "implausible" (its frame and offset are kept for the report); any other status passes through."""
+    window = capture_window(issue_frame, done_frame, max_offset)
+    if result.status != STATUS_OK:
+        return Capture(None, None, result.status, window)
+    frame = unwrap(result.code, issue_frame)
+    status = STATUS_OK
+    if frame < window[0] or frame > window[1]:
+        status = STATUS_IMPLAUSIBLE
+    return Capture(frame, frame - int(issue_frame), status, window)
 
 
 def load_rgb(path):

@@ -106,6 +106,7 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_eFiducialCarrier 2
    m_iShapeMarginPx 64
    m_fShapeDepthM 1
+   m_bShapeDepthTest 0
    m_bWidgetDiagnostics 1
    m_iPatchPx 32
    m_iMarginPx 16
@@ -135,6 +136,7 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_eFiducialCarrier 2
    m_iShapeMarginPx 64
    m_fShapeDepthM 1
+   m_bShapeDepthTest 0
    m_bWidgetDiagnostics 1
    m_vAreaStart 659.6 0 2572.4
    m_fAreaHeadingDeg 75.11

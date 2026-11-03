@@ -133,6 +133,22 @@ class ModelTests(unittest.TestCase):
         blobs = rp.detect_blobs(image, MAGENTA, 60, rp.band_exclusion(WIDTH, {}, fiducial), 3)
         self.assertEqual(blobs.shape[0], 7)                                 # the old exclusion: 6 patches + marker
 
+    def test_band_exclusion_follows_the_decode_geometry(self):
+        # A play whose header was written on a wider canvas (start of the run), with images of WIDTH px after a resize:
+        # the decode lays the bands out on the image (review R-5), so the exclusion has to as well
+        header = {"rig.fiducial.carrier": "both", "fiducial.shape.margin_px": str(SHAPE_MARGIN),
+                  "fiducial.left_x": "16", "fiducial.right_x": str(WIDTH + 200 - 16 - 32),
+                  "fiducial.shape.left_x": str(SHAPE_MARGIN), "fiducial.shape.right_x": str(WIDTH + 200 - 64 - 32)}
+        self.assertEqual(rp.band_exclusion(WIDTH, header, fiducial), [(0, 112), (WIDTH - 112, WIDTH)])
+        self.assertEqual(rp.band_exclusion(WIDTH, header, fiducial, header_geometry=True), [(0, 112), (WIDTH, WIDTH)])
+        image = numpy.full((HEIGHT, WIDTH, 3), 100, dtype=numpy.uint8)
+        fiducial.render(image, 5 * (1 + 8 + 64), margin=SHAPE_MARGIN)      # value 5 (magenta) in the shape bands
+        blobs = rp.detect_blobs(image, MAGENTA, 60, rp.band_exclusion(WIDTH, header, fiducial), 3)
+        self.assertEqual(blobs.shape[0], 0)
+        # the start-header keys (the behaviour before the fix) let the 3 magenta patches of the right band through
+        blobs = rp.detect_blobs(image, MAGENTA, 60, rp.band_exclusion(WIDTH, header, fiducial, True), 3)
+        self.assertEqual(blobs.shape[0], 3)
+
     def test_detect_blobs_skips_the_bands(self):
         image = numpy.full((HEIGHT, WIDTH, 3), 100, dtype=numpy.uint8)
         image[100:110, 300:310] = MAGENTA

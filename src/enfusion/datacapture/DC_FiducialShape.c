@@ -23,11 +23,16 @@
 //     ProjWorldToScreenNative (run 1: p95 0.046 px) maps pixel column u to X = (u - W / 2) D / f and row v to
 //     Y = (H / 2 - v) D / f, so a patch covers exactly its P x P pixels; D must exceed the near plane;
 //   - flags NOZBUFFER | NOZWRITE | NOOUTLINE | DOUBLESIDE | NOCULL (ShapeFlags.c:16, 18, 24, 28, 32): no depth test
-//     (drawn over the bonnet and anything closer than D), solid faces only, never culled.
+//     (drawn over the bonnet and anything closer than D), solid faces only, never culled. With depthTest (the probes'
+//     m_bShapeDepthTest, for a Play that found the overlay shapes absent) NOZBUFFER and NOZWRITE are dropped: only the
+//     run-1 spheres (NOOUTLINE only) are proven in screenshots. The depth then has to lie just beyond the near plane,
+//     because at 1 m the bands are outside the cabin and the car body hides them.
 //
 // HOW
 //   - Show(renderFrame) sets the 12 colours (Shape.SetColor, Shape.c:112) from 8 cached ARGB values. It re-creates the
-//     shapes on the new layout when the workspace size changed (window resize);
+//     shapes on the new layout when the workspace size changed (window resize). A size too small for the bands (a
+//     collapsed viewport) draws nothing but keeps the carrier: the next size change lays the bands out again, as
+//     DC_Fiducial does (IsDrawing, GetLayoutFailures);
 //   - Place(mat) moves all 12 with one camera world transform (Shape.SetMatrix, Shape.c:110). When to place is the
 //     caller's choice: the camera applies its transform in EOnPostFrame (CameraBase.c:18), so the probes place after
 //     the physics update and measure the result (DC_FiducialCarriers, DC_ProbeFiducial.c);
@@ -57,6 +62,7 @@ class DC_FiducialShape
 	//! ResidualPx when a patch centre lies behind the reference camera [px]
 	static const float BEHIND_PX = 100000;
 	static const string FLAGS_TEXT = "NOZBUFFER|NOZWRITE|NOOUTLINE|DOUBLESIDE|NOCULL";
+	static const string FLAGS_TEXT_DEPTH_TEST = "NOOUTLINE|DOUBLESIDE|NOCULL";
 
 	protected ref array<ref Shape> m_aShapes = {};		//!< left band top to bottom, then the right band
 	protected ref array<int> m_aColors = {};			//!< ARGB, index = patch value 0..7
@@ -66,6 +72,8 @@ class DC_FiducialShape
 	protected ref array<vector> m_aLocalCentre = {};	//!< per shape: patch centre in the camera frame
 
 	protected bool m_bCreated;
+	protected bool m_bLayoutOk;							//!< the bands fit the current canvas and are drawn
+	protected bool m_bDepthTest;
 	protected bool m_bPlaced;
 	protected vector m_vPlaced[4];						//!< camera world transform of the last Place
 	protected int m_iPatchPx;
@@ -82,13 +90,15 @@ class DC_FiducialShape
 	protected int m_iTopY;
 	protected int m_iLastCode = -1;
 	protected int m_iRelayouts;
+	protected int m_iLayoutFailures;
 	protected int m_iPlaceCount;
 	protected string m_sFailure;
 
 	//------------------------------------------------------------------------------------------------
-	//! Creates the 12 patch shapes on the canvasW x canvasH layout for a camera with vertical FOV vFovDeg.
+	//! Creates the 12 patch shapes on the canvasW x canvasH layout for a camera with vertical FOV vFovDeg; depthTest
+	//! drops NOZBUFFER and NOZWRITE (other geometry can then hide the bands).
 	//! \return false (GetFailure) on any failure; nothing is left behind then
-	bool Create(int canvasW, int canvasH, float vFovDeg, float nearM, int patchPx, int marginPx, int gapPx, float depthM)
+	bool Create(int canvasW, int canvasH, float vFovDeg, float nearM, int patchPx, int marginPx, int gapPx, float depthM, bool depthTest)
 	{
 		if (m_bCreated)
 		{
@@ -120,6 +130,7 @@ class DC_FiducialShape
 		m_fDepthM = depthM;
 		m_fVFovDeg = vFovDeg;
 		m_fNearM = nearM;
+		m_bDepthTest = depthTest;
 
 		m_aColors.Clear();
 		for (int value = 0; value < 8; value++)
@@ -134,6 +145,7 @@ class DC_FiducialShape
 		}
 
 		m_bCreated = true;
+		m_bLayoutOk = true;
 		return true;
 	}
 
@@ -161,12 +173,7 @@ class DC_FiducialShape
 	//! \return false (GetFailure) when the canvas is too small or a shape cannot be created
 	protected bool BuildShapes(int canvasW, int canvasH)
 	{
-		m_aShapes.Clear();
-		m_aPatchX.Clear();
-		m_aPatchY.Clear();
-		m_aPatchIndex.Clear();
-		m_aLocalCentre.Clear();
-
+		ClearLayout();
 		m_iCanvasW = canvasW;
 		m_iCanvasH = canvasH;
 		m_fFocalPx = 0.5 * canvasH / Math.Tan(0.5 * m_fVFovDeg * Math.DEG2RAD);
@@ -179,7 +186,11 @@ class DC_FiducialShape
 			return false;
 		}
 
-		ShapeFlags flags = ShapeFlags.NOZBUFFER | ShapeFlags.NOZWRITE | ShapeFlags.NOOUTLINE | ShapeFlags.DOUBLESIDE | ShapeFlags.NOCULL;
+		// int flags with |=, passed as ShapeFlags, as vanilla UnitDisplayComponent.c:104-107 does
+		int flags = ShapeFlags.NOOUTLINE | ShapeFlags.DOUBLESIDE | ShapeFlags.NOCULL;
+		if (!m_bDepthTest)
+			flags |= ShapeFlags.NOZBUFFER | ShapeFlags.NOZWRITE;
+
 		float metresPerPx = m_fDepthM / m_fFocalPx;
 		float halfW = 0.5 * canvasW;
 		float halfH = 0.5 * canvasH;
@@ -202,6 +213,7 @@ class DC_FiducialShape
 				if (!patch)
 				{
 					m_sFailure = "Shape.Create(ShapeType.BBOX) returned null for patch " + i.ToString() + " of band " + band.ToString();
+					ClearLayout();
 					return false;
 				}
 
@@ -222,6 +234,17 @@ class DC_FiducialShape
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Drops the shapes and the per-shape layout (ResidualPx then has nothing to project)
+	protected void ClearLayout()
+	{
+		m_aShapes.Clear();
+		m_aPatchX.Clear();
+		m_aPatchY.Clear();
+		m_aPatchIndex.Clear();
+		m_aLocalCentre.Clear();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Sets the 12 colours to the code of renderFrame; re-creates the shapes first when the workspace size changed
 	void Show(int renderFrame)
 	{
@@ -234,13 +257,11 @@ class DC_FiducialShape
 			int canvasW = workspace.GetWidth();
 			int canvasH = workspace.GetHeight();
 			m_iRelayouts++;
-			if (!BuildShapes(canvasW, canvasH))
-			{
-				// The new size cannot hold the bands: the carrier stops drawing, GetFailure says why
-				m_aShapes.Clear();
-				m_bCreated = false;
-				return;
-			}
+			m_bLayoutOk = BuildShapes(canvasW, canvasH);
+			// A size that cannot hold the bands draws nothing until the next size change (BuildShapes kept that size
+			// as the canvas, GetFailure says why); the carrier stays created, as DC_Fiducial does
+			if (!m_bLayoutOk)
+				m_iLayoutFailures++;
 		}
 
 		int code = DC_Fiducial.CodeFor(renderFrame);
@@ -313,6 +334,29 @@ class DC_FiducialShape
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! \return true while the bands fit the canvas and are drawn (false after a relayout onto a too small canvas)
+	bool IsDrawing()
+	{
+		return m_bCreated && m_bLayoutOk;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return number of relayouts whose canvas was too small for the bands
+	int GetLayoutFailures()
+	{
+		return m_iLayoutFailures;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetFlagsText()
+	{
+		if (m_bDepthTest)
+			return FLAGS_TEXT_DEPTH_TEST;
+
+		return FLAGS_TEXT;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! \return code shown by the last Show, -1 before the first
 	int GetLastCode()
 	{
@@ -342,8 +386,9 @@ class DC_FiducialShape
 	//! Drops the 12 shapes. Idempotent.
 	void Destroy()
 	{
-		m_aShapes.Clear();
+		ClearLayout();
 		m_bCreated = false;
+		m_bLayoutOk = false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -353,7 +398,8 @@ class DC_FiducialShape
 		lines.Insert("fiducial.shape.version=v2");
 		lines.Insert("fiducial.shape.created=" + BoolText(m_bCreated));
 		lines.Insert("fiducial.shape.type=BBOX");
-		lines.Insert("fiducial.shape.flags=" + FLAGS_TEXT);
+		lines.Insert("fiducial.shape.flags=" + GetFlagsText());
+		lines.Insert("fiducial.shape.depth_test=" + BoolText(m_bDepthTest));
 		lines.Insert("fiducial.shape.patch_px=" + m_iPatchPx.ToString());
 		lines.Insert("fiducial.shape.margin_px=" + m_iMarginPx.ToString());
 		lines.Insert("fiducial.shape.gap_px=" + m_iGapPx.ToString());

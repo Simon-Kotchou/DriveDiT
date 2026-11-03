@@ -136,10 +136,11 @@ def parse_color(text):
     return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def band_exclusion(width, header, fiducial):
+def band_exclusion(width, header, fiducial, header_geometry=False):
     """x ranges [x0, x1) covered by the fiducial bands of every carrier (patch plus the widget margin on both sides;
-    the shape bands' magenta patches must not count as markers)."""
-    return fiducial_carriers.band_exclusion(width, header, fiducial)
+    the shape bands' magenta patches must not count as markers), on the geometry the decode uses: the image's own
+    width, or with header_geometry the run header keys."""
+    return fiducial_carriers.band_exclusion(width, header, fiducial, header_geometry)
 
 
 def detect_blobs(image, color, tol, exclude, min_area):
@@ -399,7 +400,8 @@ def analyse(play_dir, kmax=3, rms_px=2.0, margin=0.5, gate_px=20.0, color="FF00F
             if reason == "disagree":
                 disagree += 1
             continue
-        blobs = detect_blobs(image, target, color_tol, band_exclusion(width, header, fiducial), min_area)
+        blobs = detect_blobs(image, target, color_tol, band_exclusion(width, header, fiducial, header_geometry),
+                             min_area)
         observations.append({"condition": condition_key(row["fps_setting"], row["segment"]), "frame": frame,
                              "blobs": blobs})
         by_segment.append({"condition": "%s/%s" % (row["fps_setting"], row["segment"]), "frame": frame,

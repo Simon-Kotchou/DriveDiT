@@ -15,10 +15,13 @@
 //   (OnPostStep, from OnProbePostSimulate: EOnPostFixedFrame in the 1.8 fixedframe fallback) and in EOnPostFrame
 //   (OnPostFrame, from OnProbePostFrame, if the engine delivers POSTFRAME to the game mode entity). Each placement uses
 //   the rig camera's entity transform (IEntity.GetWorldTransform, IEntity.c:203), the transform the camera applies.
+//   A teleport (the probes' reset, run in OnProbeFrame after OnFrame) places them once more at once (OnTeleport): a
+//   frame without a physics step and without POSTFRAME would otherwise show the shapes about 1 km ahead.
 //   RESIDUAL: at the next EOnFrame, before anything moves, the last placement is projected with the camera the frame
 //   was rendered with (BaseWorld.GetCurrentCamera, BaseWorld.c:170) and with the rig camera transform that hf logs
 //   (CameraBase.GetWorldCameraTransform, CameraBase.c:21): the largest patch-centre distance in pixels
-//   (DC_FiducialShape.ResidualPx), split by the event of the last placement.
+//   (DC_FiducialShape.ResidualPx), split by the event of the last placement. Frames with a teleport are counted apart
+//   ("teleport frames", fiducial.shape.teleport_*), so one reset cannot pass for a placement lag in the max and mean.
 //
 // WIDGET DIAGNOSTICS (m_bWidgetDiagnostics, with the widget carrier)
 //   Probe runs 1 and 2 could not tell "never drawn" from "drawn but not captured" (t0/run1/RUN1_SUMMARY.md 2, H1 vs
@@ -62,10 +65,14 @@ class DC_FiducialWidgetControls
 	protected int m_iFlatX;
 	protected int m_iTexturedX;
 	protected int m_iTextX;
+	protected int m_iLayoutW;						//!< canvas width the x positions above are centred on
+	protected bool m_bFits;							//!< the row fits that canvas
+	protected int m_iFontRef;						//!< exact font size of the text control [reference units]
 	protected int m_iPlacedW;
 	protected int m_iPlacedH;
 	protected float m_fPlacedDpi;
 	protected int m_iReplacements;
+	protected int m_iWinReplacements;				//!< re-placements since the last readback
 	protected int m_iFlatVisible;
 	protected int m_iTexturedVisible;
 	protected int m_iTextVisible;
@@ -76,15 +83,10 @@ class DC_FiducialWidgetControls
 	//! \return false (GetFailure) when the canvas is too narrow or a widget cannot be created; nothing is left then
 	bool Create(notnull WorkspaceWidget workspace, int topPx)
 	{
-		int canvasW = workspace.GetWidth();
-		int centreX = canvasW / 2;
 		m_iTopY = topPx;
-		m_iFlatX = centreX - 200;
-		m_iTexturedX = centreX - 120;
-		m_iTextX = centreX - 40;
-		if (m_iFlatX < 0 || m_iTextX + TEXT_W_PX > canvasW)
+		if (!LayoutControls(workspace.GetWidth()))
 		{
-			m_sFailure = "canvas " + canvasW.ToString() + " px is too narrow for the control widgets";
+			m_sFailure = "canvas " + m_iLayoutW.ToString() + " px is too narrow for the control widgets";
 			return false;
 		}
 
@@ -107,17 +109,34 @@ class DC_FiducialWidgetControls
 
 		m_bTextureLoaded = m_wTextured.LoadImageTexture(0, TEXTURE);
 		m_wTextured.GetImageSize(0, m_iTextureW, m_iTextureH);
-		int fontRef = Math.Round(workspace.DPIUnscale(FONT_PX));
-		m_wText.SetExactFontSize(fontRef);
-		m_wText.SetText(TEXT);
 		PlaceControls(workspace);
+		m_wText.SetText(TEXT);
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Exact float positions and sizes in reference units (DPIUnscale of the physical layout), as DC_Fiducial does
+	//! x positions of the row (flat, textured, text) centred on a canvas canvasW px wide
+	//! \return false when the row does not fit that canvas
+	protected bool LayoutControls(int canvasW)
+	{
+		int centreX = canvasW / 2;
+		m_iLayoutW = canvasW;
+		m_iFlatX = centreX - 200;
+		m_iTexturedX = centreX - 120;
+		m_iTextX = centreX - 40;
+		m_bFits = m_iFlatX >= 0 && m_iTextX + TEXT_W_PX <= canvasW;
+		return m_bFits;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Centres the row on the current canvas (LayoutControls: positions and the fit check) and sets the exact float
+	//! positions and sizes in reference units (DPIUnscale of the physical layout, as DC_Fiducial does) and the font
+	//! size of the current DPI scale. A row that does not fit is placed all the same; DescribeLayout says "fits 0".
 	protected void PlaceControls(notnull WorkspaceWidget workspace)
 	{
+		LayoutControls(workspace.GetWidth());
+		m_iFontRef = Math.Round(workspace.DPIUnscale(FONT_PX));
+		m_wText.SetExactFontSize(m_iFontRef);
 		float top = workspace.DPIUnscale(m_iTopY);
 		float block = workspace.DPIUnscale(BLOCK_PX);
 		FrameSlot.SetPos(m_wFlat, workspace.DPIUnscale(m_iFlatX), top);
@@ -132,20 +151,49 @@ class DC_FiducialWidgetControls
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One readback of the three controls (re-placed first when the workspace size or DPI changed since placement)
+	//! "canvas <w> px fits <0|1>, flat <x y w h>, textured <x y w h>, text <x y w h> (physical px), font <n> px
+	//! (<ref> reference units)": the layout of the last placement
+	string DescribeLayout()
+	{
+		string text = "canvas " + m_iLayoutW.ToString() + " px fits " + BoolText(m_bFits);
+		text += ", flat " + m_iFlatX.ToString() + " " + m_iTopY.ToString() + " " + BLOCK_PX.ToString() + " " + BLOCK_PX.ToString();
+		text += ", textured " + m_iTexturedX.ToString() + " " + m_iTopY.ToString() + " " + BLOCK_PX.ToString() + " " + BLOCK_PX.ToString();
+		text += ", text " + m_iTextX.ToString() + " " + m_iTopY.ToString() + " " + TEXT_W_PX.ToString() + " " + BLOCK_PX.ToString();
+		text += ", font " + FONT_PX.ToString() + " px (" + m_iFontRef.ToString() + " reference units)";
+		return text;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every frame (DC_FiducialCarriers.OnFrame), as DC_Fiducial.Show does for the patches: centres the row again when
+	//! the workspace size or DPI changed since the last placement
+	void FollowCanvas(WorkspaceWidget workspace)
+	{
+		if (!workspace || !m_wFlat || !m_wTextured || !m_wText)
+			return;
+
+		float dpi = workspace.DPIScale(1);
+		if (workspace.GetWidth() == m_iPlacedW && workspace.GetHeight() == m_iPlacedH && Math.AbsFloat(dpi - m_fPlacedDpi) <= 0.0001)
+			return;
+
+		PlaceControls(workspace);
+		m_iReplacements++;
+		m_iWinReplacements++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One readback of the three controls. After a re-placement since the last readback the text starts with
+	//! "controls re-placed <n> x: " and the new layout (DescribeLayout).
 	string ReadBack(WorkspaceWidget workspace)
 	{
 		if (!m_wFlat || !m_wTextured || !m_wText)
 			return "controls none";
 
-		if (workspace)
+		FollowCanvas(workspace);
+		string replaced;
+		if (m_iWinReplacements > 0)
 		{
-			float dpi = workspace.DPIScale(1);
-			if (workspace.GetWidth() != m_iPlacedW || workspace.GetHeight() != m_iPlacedH || Math.AbsFloat(dpi - m_fPlacedDpi) > 0.0001)
-			{
-				PlaceControls(workspace);
-				m_iReplacements++;
-			}
+			replaced = "controls re-placed " + m_iWinReplacements.ToString() + " x: " + DescribeLayout() + "; ";
+			m_iWinReplacements = 0;
 		}
 
 		if (m_wFlat.IsVisibleInHierarchy())
@@ -157,7 +205,7 @@ class DC_FiducialWidgetControls
 		if (m_wText.IsVisibleInHierarchy())
 			m_iTextVisible++;
 
-		return "controls text " + DC_FiducialCarriers.DescribeRect(m_wText) + ", image_textured " + DC_FiducialCarriers.DescribeRect(m_wTextured) + " (texture loaded " + BoolText(m_bTextureLoaded) + ", " + m_iTextureW.ToString() + "x" + m_iTextureH.ToString() + "), image_flat " + DC_FiducialCarriers.DescribeRect(m_wFlat);
+		return replaced + "controls text " + DC_FiducialCarriers.DescribeRect(m_wText) + ", image_textured " + DC_FiducialCarriers.DescribeRect(m_wTextured) + " (texture loaded " + BoolText(m_bTextureLoaded) + ", " + m_iTextureW.ToString() + "x" + m_iTextureH.ToString() + "), image_flat " + DC_FiducialCarriers.DescribeRect(m_wFlat);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -167,10 +215,12 @@ class DC_FiducialWidgetControls
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Appends the fiducial.control.* lines: colour, text, texture and the physical rectangles (x y w h)
+	//! Appends the fiducial.control.* lines: colour, text, texture and the physical rectangles (x y w h) of the start
+	//! layout, centred on canvas_w (a later canvas centres them again: the analysis shifts them by its half width)
 	void AppendHeaderLines(notnull array<string> lines)
 	{
 		lines.Insert("fiducial.control.color=" + COLOR_R.ToString() + "," + COLOR_G.ToString() + "," + COLOR_B.ToString());
+		lines.Insert("fiducial.control.canvas_w=" + m_iLayoutW.ToString());
 		lines.Insert("fiducial.control.flat=" + m_iFlatX.ToString() + " " + m_iTopY.ToString() + " " + BLOCK_PX.ToString() + " " + BLOCK_PX.ToString());
 		lines.Insert("fiducial.control.textured=" + m_iTexturedX.ToString() + " " + m_iTopY.ToString() + " " + BLOCK_PX.ToString() + " " + BLOCK_PX.ToString());
 		lines.Insert("fiducial.control.text=" + m_iTextX.ToString() + " " + m_iTopY.ToString() + " " + TEXT_W_PX.ToString() + " " + BLOCK_PX.ToString());
@@ -182,13 +232,15 @@ class DC_FiducialWidgetControls
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Appends the stop totals: readbacks in which each control was visible in the hierarchy, re-placements
+	//! Appends the stop totals: readbacks in which each control was visible in the hierarchy, re-placements and the
+	//! layout of the last placement
 	void AppendSummaryLines(notnull array<string> lines)
 	{
 		lines.Insert("fiducial.diag.control_flat_visible=" + m_iFlatVisible.ToString());
 		lines.Insert("fiducial.diag.control_textured_visible=" + m_iTexturedVisible.ToString());
 		lines.Insert("fiducial.diag.control_text_visible=" + m_iTextVisible.ToString());
 		lines.Insert("fiducial.diag.control_replacements=" + m_iReplacements.ToString());
+		lines.Insert("fiducial.diag.control_layout=" + DescribeLayout());
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -234,7 +286,8 @@ class DC_FiducialCarriers
 	static const int EVENT_FRAME = 1;
 	static const int EVENT_POSTSTEP = 2;
 	static const int EVENT_POSTFRAME = 3;
-	static const int EVENT_COUNT = 4;
+	static const int EVENT_TELEPORT = 4;
+	static const int EVENT_COUNT = 5;
 
 	protected DC_EFiducialCarrier m_eCarrier;
 	protected ref DC_Fiducial m_Widgets;
@@ -265,6 +318,11 @@ class DC_FiducialCarriers
 	protected int m_iTotOff;
 	protected float m_fTotRigMax;
 	protected int m_iNoWorldCamera;
+	protected bool m_bTeleportFrame;					//!< OnTeleport ran since the last residual
+	protected int m_iWinTeleportFrames;					//!< frames with a teleport: counted apart from the residual
+	protected float m_fWinTeleportMax;
+	protected int m_iTotTeleportFrames;
+	protected float m_fTotTeleportMax;
 
 	protected bool m_bDiagStarted;
 	protected float m_fNextDiagMs;
@@ -305,9 +363,10 @@ class DC_FiducialCarriers
 
 	//------------------------------------------------------------------------------------------------
 	//! Creates the carriers of carrier on rig R1 (attached) and, with diagnostics and the widget carrier, the controls.
-	//! The widget bands use marginPx, the shape bands shapeMarginPx; with BOTH they must not overlap.
+	//! The widget bands use marginPx, the shape bands shapeMarginPx; with BOTH they must not overlap. shapeDepthTest
+	//! draws the shapes with the depth test (DC_FiducialShape.Create).
 	//! \return false (GetFailure) on any failure; nothing is left behind then
-	bool Create(DC_EFiducialCarrier carrier, notnull DC_RigR1 rig, DC_ProbeContext ctx, int patchPx, int marginPx, int gapPx, int shapeMarginPx, float shapeDepthM, bool diagnostics)
+	bool Create(DC_EFiducialCarrier carrier, notnull DC_RigR1 rig, DC_ProbeContext ctx, int patchPx, int marginPx, int gapPx, int shapeMarginPx, float shapeDepthM, bool shapeDepthTest, bool diagnostics)
 	{
 		m_eCarrier = carrier;
 		m_Rig = rig;
@@ -347,13 +406,18 @@ class DC_FiducialCarriers
 			}
 
 			m_Shapes = new DC_FiducialShape();
-			if (!m_Shapes.Create(workspace.GetWidth(), workspace.GetHeight(), camera.GetVerticalFOV(), camera.GetNearPlane(), patchPx, shapeMarginPx, gapPx, shapeDepthM))
+			float nearM = camera.GetNearPlane();
+			if (!m_Shapes.Create(workspace.GetWidth(), workspace.GetHeight(), camera.GetVerticalFOV(), nearM, patchPx, shapeMarginPx, gapPx, shapeDepthM, shapeDepthTest))
 			{
 				m_sFailure = "shape carrier: " + m_Shapes.GetFailure();
 				m_Shapes = null;
 				Destroy();
 				return false;
 			}
+
+			// At 1 m the bands lie outside the cabin: with the depth test the car body would hide them
+			if (shapeDepthTest && shapeDepthM > 2 * nearM && m_Ctx)
+				m_Ctx.Warn("fiducial shape carrier: depth test at " + shapeDepthM.ToString(-1, 3) + " m, more than twice the near plane " + nearM.ToString(-1, 3) + " m - the car body can hide the bands; use a depth just beyond the near plane");
 		}
 
 		m_bDiagnostics = diagnostics && m_Widgets != null;
@@ -390,6 +454,9 @@ class DC_FiducialCarriers
 
 		if (m_Widgets)
 			m_Widgets.Show(renderFrame);
+
+		if (m_Controls)
+			m_Controls.FollowCanvas(GetWorkspace());
 
 		m_iLastCode = DC_Fiducial.CodeFor(renderFrame);
 
@@ -428,6 +495,18 @@ class DC_FiducialCarriers
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Right after the probe teleported the car (in OnProbeFrame, after OnFrame): places the shapes with the new camera
+	//! pose and counts the frame apart in the residual statistics
+	void OnTeleport()
+	{
+		if (!m_bCreated || !m_Shapes)
+			return;
+
+		PlaceShapes(EVENT_TELEPORT);
+		m_bTeleportFrame = true;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	protected void PlaceShapes(int eventId)
 	{
 		if (!m_Rig)
@@ -449,6 +528,8 @@ class DC_FiducialCarriers
 	//! The last placement against the camera the previous frame was rendered with (nothing moved since)
 	protected void MeasureResidual()
 	{
+		bool teleportFrame = m_bTeleportFrame;
+		m_bTeleportFrame = false;
 		int lastEvent = m_iLastEvent;
 		if (lastEvent == EVENT_NONE)
 			return;
@@ -474,6 +555,19 @@ class DC_FiducialCarriers
 		float residual = m_Shapes.ResidualPx(applied);
 		if (residual < 0)
 			return;
+
+		if (teleportFrame)
+		{
+			m_iWinTeleportFrames++;
+			m_iTotTeleportFrames++;
+			if (residual > m_fWinTeleportMax)
+				m_fWinTeleportMax = residual;
+
+			if (residual > m_fTotTeleportMax)
+				m_fTotTeleportMax = residual;
+
+			return;
+		}
 
 		vector rigMat[4];
 		m_Rig.GetCameraTransform(rigMat);
@@ -517,12 +611,14 @@ class DC_FiducialCarriers
 		if (m_Shapes)
 		{
 			if (m_Ctx)
-				m_Ctx.Log("fiducial shapes: " + DescribeShapes(m_iWinFrames, m_fWinSum, m_iWinOff, m_fWinRigMax, m_aWinLast, m_aWinMax, m_aWinPlaced));
+				m_Ctx.Log("fiducial shapes: " + DescribeShapes(m_iWinFrames, m_fWinSum, m_iWinOff, m_fWinRigMax, m_aWinLast, m_aWinMax, m_aWinPlaced, m_iWinTeleportFrames, m_fWinTeleportMax));
 
 			m_iWinFrames = 0;
 			m_fWinSum = 0;
 			m_iWinOff = 0;
 			m_fWinRigMax = 0;
+			m_iWinTeleportFrames = 0;
+			m_fWinTeleportMax = 0;
 			for (int i = 0; i < EVENT_COUNT; i++)
 			{
 				m_aWinLast[i] = 0;
@@ -626,8 +722,8 @@ class DC_FiducialCarriers
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Placement and residual text of a window or of the run
-	protected string DescribeShapes(int frames, float sum, int off, float rigMax, notnull array<int> last, notnull array<float> maxima, notnull array<int> placed)
+	//! Placement and residual text of a window or of the run; the frames, maxima and mean leave out the teleport frames
+	protected string DescribeShapes(int frames, float sum, int off, float rigMax, notnull array<int> last, notnull array<float> maxima, notnull array<int> placed, int teleportFrames, float teleportMax)
 	{
 		float worst = 0;
 		for (int i = 1; i < EVENT_COUNT; i++)
@@ -643,9 +739,15 @@ class DC_FiducialCarriers
 		string text = frames.ToString() + " frames, last placed by postframe " + last[EVENT_POSTFRAME].ToString() + ", poststep " + last[EVENT_POSTSTEP].ToString() + ", frame " + last[EVENT_FRAME].ToString();
 		text += "; residual vs the world camera max " + worst.ToString(-1, 3) + " px (postframe " + MaxText(last, maxima, EVENT_POSTFRAME) + ", poststep " + MaxText(last, maxima, EVENT_POSTSTEP) + ", frame " + MaxText(last, maxima, EVENT_FRAME) + "), mean " + mean.ToString(-1, 3) + " px, over " + RESIDUAL_OFF_PX.ToString(-1, 1) + " px " + off.ToString();
 		text += "; vs the rig camera max " + rigMax.ToString(-1, 3) + " px";
-		text += "; placements frame " + placed[EVENT_FRAME].ToString() + ", poststep " + placed[EVENT_POSTSTEP].ToString() + ", postframe " + placed[EVENT_POSTFRAME].ToString();
+		text += "; placements frame " + placed[EVENT_FRAME].ToString() + ", poststep " + placed[EVENT_POSTSTEP].ToString() + ", postframe " + placed[EVENT_POSTFRAME].ToString() + ", teleport " + placed[EVENT_TELEPORT].ToString();
+		if (teleportFrames > 0)
+			text += "; teleport frames " + teleportFrames.ToString() + " (not in the residual above), max " + teleportMax.ToString(-1, 3) + " px";
+
 		if (m_iNoWorldCamera > 0)
 			text += "; no world camera " + m_iNoWorldCamera.ToString();
+
+		if (!m_Shapes.IsDrawing())
+			text += "; not drawing: " + m_Shapes.GetFailure();
 
 		return text;
 	}
@@ -669,7 +771,7 @@ class DC_FiducialCarriers
 
 		string text = "carrier " + CarrierText(m_eCarrier);
 		if (m_Shapes)
-			text += "; shapes " + DescribeShapes(m_iTotFrames, m_fTotSum, m_iTotOff, m_fTotRigMax, m_aTotLast, m_aTotMax, m_aTotPlaced);
+			text += "; shapes " + DescribeShapes(m_iTotFrames, m_fTotSum, m_iTotOff, m_fTotRigMax, m_aTotLast, m_aTotMax, m_aTotPlaced, m_iTotTeleportFrames, m_fTotTeleportMax);
 
 		if (m_bDiagnostics)
 			text += "; widgets " + m_iReadbacks.ToString() + " readbacks, visible " + m_iVisibleMin.ToString() + ".." + m_iVisibleMax.ToString() + ", at layout " + m_iAtLayoutMin.ToString() + ".." + m_iAtLayoutMax.ToString() + ", max offset " + m_fOffsetMaxPx.ToString(-1, 2) + " px";
@@ -702,6 +804,7 @@ class DC_FiducialCarriers
 			lines.Insert("fiducial.shape.place_frame=" + m_aTotPlaced[EVENT_FRAME].ToString());
 			lines.Insert("fiducial.shape.place_poststep=" + m_aTotPlaced[EVENT_POSTSTEP].ToString());
 			lines.Insert("fiducial.shape.place_postframe=" + m_aTotPlaced[EVENT_POSTFRAME].ToString());
+			lines.Insert("fiducial.shape.place_teleport=" + m_aTotPlaced[EVENT_TELEPORT].ToString());
 			lines.Insert("fiducial.shape.last_frame=" + m_aTotLast[EVENT_FRAME].ToString());
 			lines.Insert("fiducial.shape.last_poststep=" + m_aTotLast[EVENT_POSTSTEP].ToString());
 			lines.Insert("fiducial.shape.last_postframe=" + m_aTotLast[EVENT_POSTFRAME].ToString());
@@ -713,11 +816,16 @@ class DC_FiducialCarriers
 			lines.Insert("fiducial.shape.residual_max_px_poststep=" + MaxText(m_aTotLast, m_aTotMax, EVENT_POSTSTEP));
 			lines.Insert("fiducial.shape.residual_max_px_frame=" + MaxText(m_aTotLast, m_aTotMax, EVENT_FRAME));
 			lines.Insert("fiducial.shape.residual_rig_max_px=" + m_fTotRigMax.ToString(-1, 3));
+			lines.Insert("fiducial.shape.teleport_frames=" + m_iTotTeleportFrames.ToString());
+			lines.Insert("fiducial.shape.residual_teleport_max_px=" + m_fTotTeleportMax.ToString(-1, 3));
 			int relayouts = m_Shapes.GetRelayouts();
+			int layoutFailures = m_Shapes.GetLayoutFailures();
 			lines.Insert("fiducial.shape.no_world_camera=" + m_iNoWorldCamera.ToString());
 			lines.Insert("fiducial.shape.relayouts=" + relayouts.ToString());
+			lines.Insert("fiducial.shape.layout_failures=" + layoutFailures.ToString());
 			lines.Insert("fiducial.shape.created_at_stop=" + BoolText(m_Shapes.IsCreated()));
-			if (!m_Shapes.IsCreated())
+			lines.Insert("fiducial.shape.drawing_at_stop=" + BoolText(m_Shapes.IsDrawing()));
+			if (!m_Shapes.IsDrawing())
 				lines.Insert("fiducial.shape.failure=" + m_Shapes.GetFailure());
 		}
 
@@ -770,7 +878,7 @@ class DC_FiducialCarriers
 		if (m_Shapes)
 		{
 			m_Shapes.AppendHeaderLines(lines);
-			lines.Insert("fiducial.shape.update=frame,poststep,postframe (the last placement of a frame wins)");
+			lines.Insert("fiducial.shape.update=frame,poststep,postframe,teleport (the last placement of a frame wins)");
 			lines.Insert("fiducial.shape.residual_reference=BaseWorld.GetCurrentCamera at the next EOnFrame");
 		}
 		else

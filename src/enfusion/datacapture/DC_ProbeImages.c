@@ -18,7 +18,8 @@
 //     carrier, the shapes' EOnFrame placement and residual, the once-per-second fiducial lines); the scheduler
 //     (completion poll, timeouts, the due request: one System.MakeScreenshot in flight, extension-less path
 //     frames/f_<slot:08d>); one e05_frames.csv row (the hf prototype: camera and vehicle transforms, fps). The shapes
-//     are placed again after the physics step (OnProbePostSimulate) and in EOnPostFrame (OnProbePostFrame);
+//     are placed again after the physics step (OnProbePostSimulate), in EOnPostFrame (OnProbePostFrame) and right
+//     after a shuttle teleport (DC_FiducialCarriers.OnTeleport);
 //   - with m_bDrive, a shuttle along the test area on the physics steps: reset (DC_ProbeActuator.Teleport to the
 //     start point 2 x m_fAreaMarginM along the centre line, as DC_ProbeSequences, so the start lies inside the
 //     margin-inset area), settle (brake and handbrake for m_fSettleS), drive (speed hold m_fDriveKmh, steering 0)
@@ -575,8 +576,11 @@ class DC_ProbeImages : DC_ProbeComponent
 	[Attribute("64", UIWidgets.Slider, "Shape carrier margin from the left and right image edges [physical px]; 64 = beside the widget bands (16 + 32 + 16), so BOTH can be told apart", "0 512 1", category: "Fiducial")]
 	protected int m_iShapeMarginPx;
 
-	[Attribute("1", UIWidgets.Slider, "Shape carrier depth in front of the camera [m]; must exceed the near plane", "0.2 100 0.1", category: "Fiducial")]
+	[Attribute("1", UIWidgets.Slider, "Shape carrier depth in front of the camera [m]; must exceed the near plane", "0.05 100 0.01", category: "Fiducial")]
 	protected float m_fShapeDepthM;
+
+	[Attribute("0", UIWidgets.CheckBox, "Shape carrier with the depth test (drops NOZBUFFER and NOZWRITE), for a Play that found the shapes absent; set m_fShapeDepthM just beyond the near plane (e.g. 0.11 m): at 1 m the car body hides the bands", category: "Fiducial")]
+	protected bool m_bShapeDepthTest;
 
 	[Attribute("1", UIWidgets.CheckBox, "Widget carrier diagnostics: once per second readback of the patch widgets, plus three control widgets (text, textured image, flat image)", category: "Fiducial")]
 	protected bool m_bWidgetDiagnostics;
@@ -695,6 +699,7 @@ class DC_ProbeImages : DC_ProbeComponent
 		outKeyValues.Insert("fiducial_carrier=" + DC_FiducialCarriers.CarrierText(m_eFiducialCarrier));
 		outKeyValues.Insert("shape_margin_px=" + m_iShapeMarginPx.ToString());
 		outKeyValues.Insert("shape_depth_m=" + m_fShapeDepthM.ToString(-1, 3));
+		outKeyValues.Insert("shape_depth_test=" + BoolText(m_bShapeDepthTest));
 		outKeyValues.Insert("widget_diagnostics=" + BoolText(m_bWidgetDiagnostics));
 		outKeyValues.Insert("patch_px=" + m_iPatchPx.ToString());
 		outKeyValues.Insert("margin_px=" + m_iMarginPx.ToString());
@@ -767,7 +772,7 @@ class DC_ProbeImages : DC_ProbeComponent
 		if (m_bFiducial)
 		{
 			m_Fiducial = new DC_FiducialCarriers();
-			if (!m_Fiducial.Create(m_eFiducialCarrier, m_Rig, ctx, m_iPatchPx, m_iMarginPx, m_iGapPx, m_iShapeMarginPx, m_fShapeDepthM, m_bWidgetDiagnostics))
+			if (!m_Fiducial.Create(m_eFiducialCarrier, m_Rig, ctx, m_iPatchPx, m_iMarginPx, m_iGapPx, m_iShapeMarginPx, m_fShapeDepthM, m_bShapeDepthTest, m_bWidgetDiagnostics))
 			{
 				ctx.Error("fiducial: " + m_Fiducial.GetFailure() + " - not started");
 				ReleaseAll();
@@ -1041,13 +1046,18 @@ class DC_ProbeImages : DC_ProbeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! Called from OnProbeFrame: teleports the car to the start point m_fStartAlongM along the centre line
-	//! (DC_ProbeActuator.Teleport also commands brake 1 and the handbrake) and lets the reset segment end
+	//! (DC_ProbeActuator.Teleport also commands brake 1 and the handbrake) and lets the reset segment end. The
+	//! fiducial shapes follow the new camera pose at once: this frame may have no physics step and no POSTFRAME.
 	protected void TeleportToStart()
 	{
 		m_bTeleportPending = false;
 		vector start = m_Area.PointAt(m_fStartAlongM, 0);
-		if (!m_Actuator.Teleport(start, m_fAreaHeadingDeg, m_fSpawnLiftM) && m_Ctx)
+		bool moved = m_Actuator.Teleport(start, m_fAreaHeadingDeg, m_fSpawnLiftM);
+		if (!moved && m_Ctx)
 			m_Ctx.Warn("teleport to the area start failed");
+
+		if (moved && m_Fiducial)
+			m_Fiducial.OnTeleport();
 	}
 
 	//------------------------------------------------------------------------------------------------

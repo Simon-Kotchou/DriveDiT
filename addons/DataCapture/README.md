@@ -344,11 +344,17 @@ Notes on the image probes:
   EOnFrame, after the physics step and in EOnPostFrame (the last placement of a frame wins; the camera applies its
   transform in EOnPostFrame); the residual against the camera the frame was rendered with is logged once per second
   (`fiducial shapes:` lines) and summed up at the stop (`fiducial.shape.*` in the run header, `clock.postframe_calls`
-  in the footer). The run header records `rig.fiducial.carrier` and `rig.fiducial.depth_m`.
+  in the footer). The run header records `rig.fiducial.carrier` and `rig.fiducial.depth_m`. A shuttle or reset
+  teleport places the shapes once more at once; teleport frames are counted apart (`fiducial.shape.teleport_*`). A
+  canvas too small for the bands stops the drawing until the next size change (`fiducial.shape.layout_failures`,
+  `drawing_at_stop`). `m_bShapeDepthTest` (default 0) drops `NOZBUFFER`/`NOZWRITE` for a Play that found the shapes
+  absent; use it with `m_fShapeDepthM` just beyond the near plane (e.g. 0.11 m), since at 1 m the car body hides
+  the bands.
 - With the widget carrier, `m_bWidgetDiagnostics` reads the patch widgets back once per second (`fiducial widgets:`
   lines: workspace size and DPI, `IsVisibleInHierarchy`, `GetScreenPos` / `GetScreenSize`) and adds three orange
   control widgets at the top centre (a text, a textured and a flat image), so a Play tells "never drawn" from
   "drawn but not captured".
 - `data/dc2/fiducial.py` gates every decode: a band of scene texture is `absent` (run 1 read dark bark as code 0
   `ok`), and a code outside [issue, min(issue + 2, done - 1)] is `implausible`. `e06_fiducial.py` and `e05_images.py`
-  report each carrier on its own; E-06 passes when one carrier decodes >= 99.5%.
+  report each carrier on its own; E-06 selects the carrier with the highest decode rate and passes when it decodes
+  >= 99.5% with no implausible decode (the other carriers' implausible decodes are listed, not judged).

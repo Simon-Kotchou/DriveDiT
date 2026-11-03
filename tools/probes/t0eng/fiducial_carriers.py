@@ -11,8 +11,10 @@ Carriers (run header, appended by DC_FiducialCarriers in src/enfusion/datacaptur
     y0..y5;
   * shape: DC_FiducialShape debug Shapes, geometry fiducial.shape.* (same keys), margin 64 by default;
   * widget diagnostics: fiducial.control.* (three control widgets, colour 255,128,0, rectangles "x y w h" in
-    physical px) and the stop totals fiducial.diag.*; shape placement totals fiducial.shape.place_* / last_* /
-    residual_*; the runner's footer key clock.postframe_calls.
+    physical px, centred on fiducial.control.canvas_w; the engine centres them again on a new canvas, so ControlStats
+    shifts them by half the width difference of each image) and the stop totals fiducial.diag.*; shape placement
+    totals fiducial.shape.place_* / last_* / residual_* (frames with a teleport apart: teleport_frames,
+    residual_teleport_max_px); the runner's footer key clock.postframe_calls.
 
 Per carrier and file: data/dc2/fiducial.decode_origins (presence gate) then fiducial.resolve (plausibility gate
 against the request's issue_render_frame and done_render_frame). CarrierStats keeps the per-status counts, the
@@ -113,21 +115,22 @@ def origins(header, fiducial, carrier, width, height, header_geometry=False):
     return geometry["left"], geometry["right"], patch
 
 
-def band_exclusion(width, header, fiducial):
+def band_exclusion(width, header, fiducial, header_geometry=False):
     """x ranges [x0, x1) covering the bands of every carrier the play drew, plus one widget margin of clearance on
-    the inner side (the E-06A blob detector skips them: value 5 is the marker magenta)."""
+    the inner side (the E-06A blob detector skips them: value 5 is the marker magenta). The bands sit where
+    decode_all looks for them on a width px wide image: the layout of that width (left x = margin, right x = width -
+    margin - patch), or with header_geometry the carrier's left_x / right_x keys (the layout where a key is
+    missing)."""
     inner_left = 0
     inner_right = width
     clearance = carrier_params(header, fiducial, WIDGET)[1]
     for carrier in carriers(header) or [WIDGET]:
         patch, margin, _ = carrier_params(header, fiducial, carrier)
-        prefix = PREFIX[carrier]
-        left_x = header.get(prefix + "left_x", "")
-        right_x = header.get(prefix + "right_x", "")
-        if left_x != "" and right_x != "":
-            left_x, right_x = int(float(left_x)), int(float(right_x))
-        else:
-            left_x, right_x = margin, width - margin - patch
+        left_x, right_x = margin, width - margin - patch
+        if header_geometry:
+            prefix = PREFIX[carrier]
+            left_x = header_int(header, prefix + "left_x", left_x)
+            right_x = header_int(header, prefix + "right_x", right_x)
         inner_left = max(inner_left, left_x + patch + clearance)
         inner_right = min(inner_right, right_x - clearance)
     return [(0, inner_left), (max(0, inner_right), width)]
@@ -240,7 +243,11 @@ def parse_rect(text):
 
 
 class ControlStats:
-    """Presence of the widget-diagnostics control widgets in the screenshots (fiducial.control.* rectangles)."""
+    """Presence of the widget-diagnostics control widgets in the screenshots (fiducial.control.* rectangles).
+
+    The engine centres the row on the canvas and centres it again when the canvas changes (DC_FiducialWidgetControls):
+    on an image of another width than fiducial.control.canvas_w the rectangles move by width // 2 - canvas_w // 2.
+    A play without canvas_w uses the rectangles as they are."""
 
     def __init__(self, header):
         self.rects = {}
@@ -248,6 +255,7 @@ class ControlStats:
             rect = parse_rect(header.get("fiducial.control." + name, ""))
             if rect:
                 self.rects[name] = rect
+        self.canvas_w = header_int(header, "fiducial.control.canvas_w", 0)
         self.color = CONTROL_COLOR
         color = header.get("fiducial.control.color", "")
         if color:
@@ -261,6 +269,12 @@ class ControlStats:
     def active(self):
         return bool(self.rects)
 
+    def shift(self, width):
+        """x offset of the rectangles on an image width px wide (Enforce int '/' truncates; both are positive)."""
+        if self.canvas_w <= 0:
+            return 0
+        return width // 2 - self.canvas_w // 2
+
     def fractions(self, image):
         """{control: fraction of its rectangle's pixels that match it} for one image."""
         import numpy  # only here: the carrier list and the texts need the stdlib alone
@@ -268,7 +282,9 @@ class ControlStats:
         height, width = image.shape[:2]
         out = {}
         target = numpy.array(self.color, dtype=numpy.int16)
+        dx = self.shift(width)
         for name, (x, y, w, h) in self.rects.items():
+            x += dx
             x0, y0, x1, y1 = max(0, x), max(0, y), min(width, x + w), min(height, y + h)
             if x1 <= x0 or y1 <= y0:
                 out[name] = 0.0
@@ -323,9 +339,9 @@ def placement_text(header, footer=None):
     postframe_calls = "n/a"
     if footer:
         postframe_calls = footer.get("clock.postframe_calls", "n/a")
-    return "%s frames, last placed by postframe %s, poststep %s, frame %s; residual vs the world camera max %s px " \
+    text = "%s frames, last placed by postframe %s, poststep %s, frame %s; residual vs the world camera max %s px " \
            "(postframe %s, poststep %s, frame %s), mean %s px, over 1 px %s; vs the rig camera max %s px; placements " \
-           "frame %s, poststep %s, postframe %s; depth %s m; runner clock.postframe_calls %s" % (
+           "frame %s, poststep %s, postframe %s, teleport %s" % (
                get("fiducial.shape.residual_frames"), get("fiducial.shape.last_postframe", "n/a"),
                get("fiducial.shape.last_poststep", "n/a"), get("fiducial.shape.last_frame", "n/a"),
                get("fiducial.shape.residual_max_px", "n/a"), get("fiducial.shape.residual_max_px_postframe", "n/a"),
@@ -334,7 +350,15 @@ def placement_text(header, footer=None):
                get("fiducial.shape.residual_mean_px", "n/a"), get("fiducial.shape.residual_over_1px", "n/a"),
                get("fiducial.shape.residual_rig_max_px", "n/a"), get("fiducial.shape.place_frame", "n/a"),
                get("fiducial.shape.place_poststep", "n/a"), get("fiducial.shape.place_postframe", "n/a"),
-               get("rig.fiducial.depth_m", "n/a"), postframe_calls)
+               get("fiducial.shape.place_teleport", "n/a"))
+    if "fiducial.shape.teleport_frames" in header:
+        text += "; teleport frames %s (not in the residual above), max %s px" % (
+            get("fiducial.shape.teleport_frames"), get("fiducial.shape.residual_teleport_max_px", "n/a"))
+    if get("fiducial.shape.drawing_at_stop", "1") == "0":
+        text += "; not drawing at the stop (layout failures %s): %s" % (
+            get("fiducial.shape.layout_failures", "n/a"), get("fiducial.shape.failure", "n/a"))
+    return text + "; depth %s m (depth test %s); runner clock.postframe_calls %s" % (
+        get("rig.fiducial.depth_m", "n/a"), get("fiducial.shape.depth_test", "n/a"), postframe_calls)
 
 
 def is_single_flight(row):

@@ -21,10 +21,10 @@ Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, chang
   session.json field. TBD-10 stays PROVISIONAL after the freeze: its values are session.json parameters, so measuring
   them changes a value, never a field.
 - The JSON twins are normative for field names, order, types, units and keys. This document is normative for
-  meaning. `tests/test_contract_dc2.py` checks that the field tables below equal the JSON, so a disagreement is a test
-  failure, not a judgement call.
-- nav_v1 (`drivedit_nav` and `drivedit_nav/route_schema.json`) is part of this DRAFT and freezes with it. After the
-  freeze any change of nav behaviour (progress window, lookahead, maneuver window, stop clearance, route-deviation
+  meaning. `tests/test_contract_dc2.py` checks that the field tables below equal the JSON (name, type, unit, Req,
+  description, Range, Values and the bracketed tags), so a disagreement is a test failure, not a judgement call.
+- nav_v1 (`drivedit_nav` and `drivedit_nav/route_schema.json`) is part of this contract and froze with it. Any
+  change of nav behaviour (progress window, lookahead, maneuver window, stop clearance, route-deviation
   limit) or of the route schema is a new `nav_version` (nav_v2), stamped in `episodes.nav_version` and
   `session.json versions.nav_version`; nav_v1 output never changes in place.
 - Change control. dc-2.0 is FROZEN since 2026-11-04 (section 16 lists every freeze decision with its date and
@@ -52,7 +52,7 @@ Default (r2) column is kept as history.
 | TBD-6 | launch id visible in Workbench Play | System.GetCLIParam("dcLaunchId") returns Workbench's own -dcLaunchId argument in Play mode (launch_guard.launch_mode cli). Answered by DD-4-probe's E-11 console line (-dcLaunchId visible=0 or 1); DD-1's 'Capture output allowed' or 'capture output refused' line tests GetCLIParam("profile") and is only an inference about it. If the id is not visible, Workbench sessions pass through the escape (launch_guard.launch_mode wb_escape, section 5.1); the session.json fields exist either way | Visible: System.GetCLIParam sees Workbench's own -dcLaunchId in a Play (launch_guard.launch_mode cli); wb_escape stays for a Play without a visible command line | E-11 run 3: -dcLaunchId visible=1, uptime_s=35 (counted from the process start), mode cli | E-11 | no |
 | TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that | Manual gearbox (HasAutomaticGearbox() 0); the S105 has 6 gears, 4 forward: index 0 reverse, 1 neutral, 2..5 first to fourth. General rule (vanilla gear computation): neutral = GearboxGearsCount() - GearboxForwardGearsCount() - 1, first = neutral + 1, top = GearboxGearsCount() - 1, reverse below neutral. The S105 card names gear_indices_forward [2, 3, 4, 5], gear_index_neutral 1, gear_index_reverse 0; reverse is not driven yet, so no session commands hl_dir -1 before a probe drives it (DD-7-ident) | E-04 runs 2-3 (HasAutomaticGearbox 0, 6 gears, 4 forward); E-01 run 3 (gears 2-4 driven and honoured, scripted 2-3-4-3-2, ratio steps 3.8 / 2.12 / 1.41); vanilla 1.8.0.13 SCR_ToggleHandbrakeAction.c:100-108, SCR_VehicleGearCondition.c:32-44 | E-04, E-01 | no |
 | TBD-8 | render-settings dump keys | GetGame().GetEngineUserSettings() modules VideoUserSettings and DisplayUserSettings, keys from SCR_SettingsManagerVideoModule.c:12-56 | VideoUserSettings and DisplayUserSettings as E-20 dumps them (33 + 2 engine variables; the capture is the Workbench workspace); the client compare and the PPQuality recursion are checked at the first client session (a value, never a field) | E-20 runs 2-3 | E-20 | no |
-| TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | road_key text unchanged (<n_pts>/<x0>:<z0>/<x1>:<z1>) and valid within a session only; cross-session joins match by the unordered endpoint pair, both endpoints within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break (D-C, adopted 2026-11-03) | E-08a runs 1-3: n_pts changes by +-1 on 10-12 of 181 roads between launches, 3 roads move an endpoint 0.1-0.9 m, 13 of 181 keys differ between runs 2 and 3; the endpoints alone are unique (181/181) (t0d/decoder/E08B.md 7, decision memo D-C) | E-08a | no |
+| TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | road_key text unchanged (<n_pts>/<x0>:<z0>/<x1>:<z1>) and valid within a session only; cross-session joins match by the unordered endpoint pair, both endpoints within 2 m (n_pts excluded), one-to-one: among the candidates the smallest E-08b segment Hausdorff distance wins (a global greedy assignment, so a twin road never takes another's partner) and twins are reported (D-C, adopted 2026-11-03) | E-08a runs 1-3: n_pts changes by +-1 on 10-12 of 181 roads between launches, 3 roads move an endpoint 0.1-0.9 m, 13 of 181 keys differ between runs 2 and 3; the endpoints are unique for exact equality (181/181) but not within 2 m: 4 twin pairs (8 of 181 roads) lie 0.49-1.56 m apart (review round 1), so the join is one-to-one (t0d/decoder/E08B.md 7, decision memo D-C) | E-08a | no |
 | TBD-10 | collision detector and crash-event parameters (session.json events.*) | collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, episode_block_max_ms 60000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override | PROVISIONAL, not decided by the freeze: the defaults stand until the TBD-10 probe measures them (a value, never a field; per build_key) | crash-event design and its two review rounds (t0d/crash_events/IMPL.md) | E-01 extension | no |
 
 Decisions applied at the freeze (what changed where):
@@ -70,10 +70,11 @@ Decisions applied at the freeze (what changed where):
 - TBD-5: `control.steer_sign` +1 (the r2 draft had -1); `steer_sign` and `yaw_axis_sign` stay per session and per
   vehicle card, and export always normalises to the contract sign (section 7).
 - TBD-7: the vehicle card's gear indices of section 7.
-- TBD-9 (D-C): the cross-session road join of 9.8 `road`; no field changes.
+- TBD-9 (D-C): the cross-session road join of 9.8 `road` (one-to-one, twins reported); no field changes.
 - Folded facts (no choice needed): the logged pose follows the frame clock and the image of render frame C shows the
-  state of hf row C + 1 (section 6); the fiducial carrier is the debug-Shape carrier at 0.05 m (`rig.fiducial`
-  `carrier`, `depth_m`), the widget carrier is a diagnostic only; `img.done_render_frame` records the frame the file
+  state of hf row C + 1 (section 6); the fiducial carrier is the debug-Shape carrier (`rig.fiducial` `carrier`,
+  `depth_m`) at 0.05 m with the rig near plane at 0.03 m (`rig.near_plane_m`), awaiting the first capture Play's
+  E-06 check (fallback 1.0 m and 0.1 m, validated by run 4), the widget carrier is a diagnostic only; `img.done_render_frame` records the frame the file
   was first seen in (captured frame = done_render_frame - 1 in Workbench).
 - TBD-10: the values live in `session.json` `events.*`, so a measured threshold never changes a field; the optional
   `dv_max_mps` columns (9.2, 9.7) let a new threshold be re-applied offline without capturing again.
@@ -298,14 +299,15 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
 
 | Counter | Stream | Rule | Checked by |
 |---|---|---|---|
-| `physics_step` | `ctl`, `telemetry` | The engine's fixed-step clock: the 0-based index of the last engine fixed step the row's callback covers, counted from the session open (the first row has `physics_step` = `covered_steps` - 1); each row advances it by its own `covered_steps`; ctl and telemetry hold the same keys | C06, C07, C08 |
+| `physics_step` | `ctl`, `telemetry` | The engine's fixed-step clock: the 0-based index of the last engine fixed step the row's callback covers, counted from the session open (the first row has `physics_step` = `covered_steps` - 1); each row advances it by its own `covered_steps`; ctl and telemetry hold the same keys, and per key the same `render_frame` and `world_time_ms` | C06, C07, C08 |
 | `covered_steps` | `ctl`, `telemetry` | Engine fixed steps the callback covers, >= 1: `BaseWorld.GetFixedSteps()` of its render frame (1 to 3 on 1.8); 1 per call when the engine delivers `EOnSimulate` | C06 |
 | `render_frame` | `ctl`, `telemetry` | `GetFrameNumber()` at the callback; non-decreasing (one fixed-frame callback per render frame at most, so strictly increasing on 1.8) | C07 |
 | `render_frame` | `hf` | `GetFrameNumber()`, one row per render frame, +1 per row | C06, C07 |
 | `slot_id` | `img` | 0-based, +1 per row; advances only while the ego is live and the camera current | C06, C07, C10 |
 | `event_seq` | `events` | 0-based, +1 per row | C06, C19 |
 | `episode_id` | `episodes` | 0-based, +1 per episode; -1 in other streams outside an episode | C06 |
-| `world_time_ms` | all | `WorldTimestamp.DiffMilliseconds` against the session start, integer ms, non-decreasing. It is the frame clock: one value per render frame, shared by the hf row of frame F and the ctl and telemetry row of the callback of frame F (E-10 run 3: 21296 of 21296 rows); equal values in consecutive hf rows only while paused or within one frame's world-time resolution | C07 |
+| `world_time_ms` | all | `WorldTimestamp.DiffMilliseconds` against the session start, integer ms, non-decreasing. It is the frame clock: one value per render frame, shared by the hf row of frame F and the ctl and telemetry row of the callback of frame F (E-10 run 3: 21296 of 21296 rows); equal values in consecutive hf rows only while paused or within one frame's world-time resolution | C06 (ctl = telemetry per key), C07 (ctl = hf of the same frame) |
+| `last_physics_step` | `hf` | `physics_step` of the newest callback of an earlier render frame (the callbacks of frame F run after its `EOnFrame`), -1 before the first: exactly the newest ctl key whose `render_frame` < F | C06, C07 |
 
 - **Callbacks (D-A).** On 1.8 the game mode entity gets no `EOnSimulate` / `EOnPostSimulate`. It gets one
   `EOnFixedFrame` / `EOnPostFixedFrame` pair per render frame that runs at least one engine fixed step, after that
@@ -317,12 +319,18 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   `EOnFixedFrame`), so all covered steps run with the same inputs; the rows are written in `EOnPostFixedFrame`, after
   the covered steps. An engine build that delivers `EOnSimulate` to the game mode gives one callback per step
   (`covered_steps` 1) and every rule below holds unchanged.
-- **Step dt.** The engine fixed step dt is measured during readiness: the `EOnFixedFrame` time slice of a frame with
-  exactly one fixed step when it lies within 5% of the measured fixed step (sum of `EOnFrame` time slices / sum of
-  `GetFixedSteps()`), else the measured value; 1/30 s on 1.8 (`session.json engine.step_dt_s`, `step_dt_source`).
-  `BaseWorld.GetFixedTimeSlice()` reports n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is never
-  the step dt; `engine.fixed_time_slice_s` keeps its raw value at the open for provenance only. A module that needs
-  the physics time of a callback uses `covered_steps` x `step_dt`.
+- **Step dt.** The engine fixed step dt is measured during readiness, per frame with at least one fixed step: the
+  step callback's time slice divided by the steps it covers (`EOnFixedFrame` reports n x the step for a frame of n
+  steps: covered_steps / 30 on 21296 of 21296 rows of run 3 E-10, so the ratio is the step even in merged frames;
+  1 per `EOnSimulate`). The step dt is the median of these ratios once at least 30 frames gave one and 90% of them
+  lie within 0.5% of the median (`step_dt_source` engine). Only when the ratios disagree is it the measured fixed
+  step (`measured`): the world time between the first and the last readiness frame with a step over the steps run
+  after the first, which leaves out the not yet stepped remainder at the start. `session.json engine.step_dt_s`,
+  `step_dt_source`; `observed.readiness_*` keep the median ratio, the measured value, the ratio spread and
+  `GetFixedTimeSlice()` / `GetFixedSteps()` read in `EOnFrame` as a cross-check. `BaseWorld.GetFixedTimeSlice()`
+  alone reports n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is never the step dt;
+  `engine.fixed_time_slice_s` keeps its raw value at the open for provenance only. A module that needs the physics
+  time of a callback uses `covered_steps` x `step_dt`.
 - **Decision grid (D-A, D-B).** `physics_steps_per_decision` N = floor(1000 / `decision_hz` / step_dt_ms + 0.5) (an
   explicit half-up rounding, the same in Python and Enforce): 6 at the 5 Hz default and 3 at the 10 Hz override with
   1/30 s steps. N is the nominal length of a decision interval and of `action_exec`; the real interval varies.
@@ -337,8 +345,11 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   (`EOnPostFixedFrame`) and then, still in that callback, the HL driver decides on the state of that row. The new
   command applies from physics step P_t + 1, the first step of the next callback, and is held through the next
   decision callback C_t+1, so:
-  - `ctl.hl_*` of a row is the command applied in that row's covered steps, and `hl_seq` increments on the first row
-    after a decision callback in which the driver gave a command;
+  - `ctl.hl_*` of a row is the command applied in that row's covered steps. `hl_seq` is -1 until the first command;
+    it advances by 1 exactly on the row after a decision callback in which the driver gave a command (inside an
+    episode a decision callback gives one unless the driver keeps the held command, `Decide` false: then neither
+    `hl_seq` nor the command changes) and stays on every other row; a command changes only together with an
+    `hl_seq` increment, or at an episode boundary (C07);
   - the decision interval of t is the steps (P_t, P_t+1] of n_t = P_t+1 - P_t steps: nominally N, but the fixed-step
     clock lags world time by up to about 250-310 ms while capturing (runs 3-4) and catches up, so n_t varies around N;
   - `ctl.exp_*_now` of a row is the expert re-evaluated after its callback; at C_t it is the label of decision t;
@@ -347,8 +358,10 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
     P_t + 1 .. P_t + N, step q taken from the ctl row that covers it (a row covers `physics_step` - `covered_steps` + 1
     .. `physics_step`), an entry left empty when q lies past P_t+1 (the interval was shorter than N; steps of a longer
     interval past P_t + N are not in the tensor); obs_t+1 at C_t+1 holds exactly the n_t steps of `action_cmd_t`;
-  - the closed-loop bridge (DD-8) pauses after the rows of C_t, sends state_t and obs_t, and applies the returned
-    command from step P_t + 1, so training and test see the same boundary.
+  - the closed-loop bridge (DD-8) holds the next physics step after the rows of C_t, waits until obs_t's file is
+    done (`done_render_frame` >= the render frame of C_t + 1: obs_t is often the image of C_t's own frame, which is
+    rendered after the callback; the frames go on, the physics does not), then sends state_t and obs_t and applies
+    the returned command from step P_t + 1, so training and test see the same boundary.
 - **Clock of the logged state (frame clock).** The logged pose follows world time, not the fixed-step clock: the pose
   in hf row n is the pose at the world time of frame n - 1 (run 3 E-06A: between consecutive hf rows the displacement
   equals speed x world dt of the frame, corr 1.0000 over 15,304 pairs, |difference| p95 0.1 ms; against the fixed
@@ -361,24 +374,34 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   g x 1000 / `image_hz` - `clocks.img_lead_ms` (default 0; at `image_hz` = `decision_hz` grid point g is due
   `img_lead_ms` before decision grid point g). Each grid point reached while the ego is live and the camera current
   becomes the next `slot_id`. The request is issued in `EOnFrame` of the first frame whose world time is at or past the
-  due time (C08: jitter <= 1 render frame at p99). One request is in flight at a time: a slot that arrives while one is
+  due time once the anchor exists: grid point 0 is due at the anchor itself, the world time of the first callback,
+  which runs after its frame's `EOnFrame`, so slot 0 is issued in the next frame; every later grid point in the first
+  frame at or past its due time (C08: jitter <= 1 render frame at p99). One request is in flight at a time: a slot that arrives while one is
   in flight is written `skipped_busy`, a request that `MakeScreenshot` refuses is written `make_failed`, and both count
   as missing (C10). A request whose file is not seen within `clocks.img_inflight_timeout_ms` (real time) stops
   blocking the next slot; it is logged as an `events` row `img_timeout` (payload `img_slot_id=<n>`) and in heartbeat
   `img_fail`. The request path is extension-less (R06). The img row of a slot is written once the slot resolves (its
   file seen, timed out, skipped, refused, or the session sealed), in slot order, with `done_render_frame` the render
-  frame in which the writer first saw the file.
+  frame in which the writer first saw the file. A seal that does not drain (`ego_destroyed`, a Play stop, an error)
+  writes the row of a request still in flight with `done_render_frame` empty (`images.pending_at_end`); the engine may
+  still write its file.
 - **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`, drawn by the debug-Shape carrier) from each
   image and joins `hf` at that `captured_render_frame` C (C13a, exact). In Workbench 1.8 C = `img.done_render_frame`
-  - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth.
+  - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth
+  (C37 uses `done_render_frame` only where the decoded frame confirms it).
   The image of render frame C shows the state logged in hf row C + 1 (run 3 E-06A: argmin k = +1 on 628 of 640 moving
   images, RMS 0.11-1.87 px against 2.6-5.6 px at k = 0): that row is the image's pose row. Its `cam_*` and `veh_*` are
   the pose at capture, its `last_physics_step` joins `ctl` and `telemetry` exactly (both have a row for every
-  callback), and the pose belongs to the world time of hf row C. These joins do not prove the scene's age; E-06A
-  (marker reprojection per rig x exe x build, at k = +1) and C13b do.
+  callback), and the pose belongs to the world time of hf row C. An image captured in the session's last render frame
+  (a request in flight at a seal without drain) has no pose row: it is not joined and its decision masks are 0, like
+  a pending slot, never a join failure. These joins do not prove the scene's age; E-06A (marker reprojection per rig
+  x exe x build, at k = +1) and C13b do: C13b requires the best lag to be +1 whenever the yaw signal suffices.
 - **Sampling at the model boundary.** Decision step t at P_t uses the samples of the decision boundary above; obs_t is
-  the newest image whose pose row (hf row C + 1) has `last_physics_step` <= P_t, dropped (masks 0) when it is older
-  than one image period (`world_time_ms` of C_t minus that of hf row C); nav comes from `drivedit_nav.nav_v1` at the
+  the newest image whose pose row (hf row C + 1) has `last_physics_step` <= P_t and whose captured frame C is at or
+  before the render frame of C_t, so its world time (hf row C) is at or before that of C_t: a frame without a callback
+  keeps `last_physics_step` while world time advances, so the step bound alone would admit an image of a later frame
+  (a future observation). `obs_age_ms` (`world_time_ms` of C_t minus that of hf row C) is therefore never negative;
+  obs_t is dropped (masks 0) when it is older than one image period; nav comes from `drivedit_nav.nav_v1` at the
   pose of P_t. The builder writes the realised image age and the interval length of every decision step
   (`decision_index`, section 9.8).
 - Sessions are at most 30 min (the fiducial code is unique for 73 min at 60 FPS).
@@ -496,7 +519,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `episode_id` | int | - | yes | Current episode; -1 outside an episode (warm-up, settle, between episodes). |
 | `mode` | enum | - | yes | Capture mode of this callback (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle). Values: E, N, R, X, D, H, A, I. |
 | `driver` | enum | - | yes | Who produced the executed HL command of this step (C18, C27). Values: expert, policy, human, ai, none. |
-| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1 before the first decision; it increments on the first row after a decision callback in which the driver gave a command, because the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1 (section 6, TBD-1). [TBD-1] |
+| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1 until the first command; it advances by 1 exactly on the row after a decision callback in which the driver gave a command (the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1) and stays on every other row; a command changes only with an increment or at an episode boundary (section 6, TBD-1). [TBD-1] |
 | `hl_kappa` | float | 1/m | no | Held HL curvature target applied in this callback's covered steps (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision callback), right-positive. Empty in mode I. [right+] |
 | `hl_accel` | float | m/s2 | no | Held HL acceleration target applied in this callback (action_cmd.a_target, desired). |
 | `hl_dir` | int | - | no | Held HL direction command applied in this callback: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
@@ -564,7 +587,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `acc_local_y` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), y component. [vehicle_local] |
 | `acc_local_z` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), z component. [vehicle_local] |
 | `speed_engine_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 as reported by the engine (unsigned; the signed forward speed is telemetry_export.speed_fwd_mps, the registry channel speed_mps). |
-| `dv_max_mps` | float | m/s | no | Largest dv_h of the ego (the collision detector's quantity of section 9.5.1: horizontal world-frame delta-v over events.collision_window_ms of world time, with the same interpolation and gap rule) over the callbacks since the previous telemetry row, which with one row per callback is this callback's dv_h, so the TBD-10 threshold can be re-applied offline per build_key; empty when it was not evaluated (history shorter than the window, a gap, a reset). [eval-only, build-scoped, TBD-10, eval-only, build-scoped, TBD-10] |
+| `dv_max_mps` | float | m/s | no | Largest dv_h of the ego (the collision detector's quantity of section 9.5.1: horizontal world-frame delta-v over events.collision_window_ms of world time, with the same interpolation and gap rule) over the callbacks since the previous telemetry row, which with one row per callback is this callback's dv_h, so the TBD-10 threshold can be re-applied offline per build_key; empty when it was not evaluated (history shorter than the window, a gap, a reset). [eval-only, build-scoped, TBD-10] |
 | `gear` | int | - | yes | GetGear() (engine index, TBD-7). [TBD-7] |
 | `rpm` | float | rpm | yes | EngineGetRPM(). |
 | `engine_on` | bool | - | yes | EngineIsOn(). |
@@ -591,7 +614,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `w3_slip_lat` | float | 1 | no | Wheel 3 lateral slip (WheelGetLateralSlip), raw engine value. [build-scoped] |
 | `w3_material` | str | - | no | Wheel 3 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter. |
 | `w3_temp_c` | float | degC | no | Reserved, null on 1.8: wheel 3 tyre temperature (MIGRATION_1_9 8.3). [reserved] |
-| `road_key` | str | - | no | Key of the closest engine road, <n_pts>/<x0>:<z0>/<x1>:<z1> exactly as the E-08a dump writes it; valid within the session only: a join across sessions matches the unordered endpoint pair within 2 m, never this text (TBD-9, section 9.8 road); empty when no road is found. [TBD-9] |
+| `road_key` | str | - | no | Key of the closest engine road, <n_pts>/<x0>:<z0>/<x1>:<z1> exactly as the E-08a dump writes it; valid within the session only: a join across sessions matches the unordered endpoint pair within 2 m one-to-one, never this text (TBD-9, section 9.8 road); empty when no road is found. [TBD-9] |
 | `road_dist_m` | float | m | no | Distance to the closest road (RoadNetworkManager.GetClosestRoad). |
 | `road_width_m` | float | m | no | BaseRoad.GetWidth() of the closest road. |
 | `lane_lat_err_m` | float | m | no | Lane-relative signed lateral error: ego offset from the active route's driving line, positive = ego right of the line. Computed by the driver interface; empty without an active route. [right+] |
@@ -618,7 +641,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 |---|---|---|---|---|
 | `render_frame` | int (key) | frame | yes | BaseWorld.GetFrameNumber() of this render frame; written every frame in EOnFrame, so +1 per row. |
 | `world_time_ms` | int | ms | yes | As in ctl (the frame clock); equal in consecutive rows only while paused or within one ms. |
-| `last_physics_step` | int | step | yes | physics_step of the most recent fixed-frame callback, always of an earlier render frame (a frame's callback runs after its EOnFrame); -1 before the first. Joins ctl and telemetry exactly; the image of render frame C is paired with hf row C + 1 (section 6). |
+| `last_physics_step` | int | step | yes | physics_step of the newest fixed-frame callback of an earlier render frame (a frame's callbacks run after its EOnFrame), so exactly the newest ctl key with render_frame below this row's; -1 before the first. Joins ctl and telemetry exactly; the image of render frame C is paired with hf row C + 1 (section 6). |
 | `paused` | bool | - | yes | 1 while the game time is paused. |
 | `cam_pos_x` | float | m | yes | Camera position (from the camera entity's world transform), x component. [world, eval-only] |
 | `cam_pos_y` | float | m | yes | Camera position (from the camera entity's world transform), y component. [world, eval-only] |
@@ -966,7 +989,7 @@ Road matching (E-08b) and region (C24), per telemetry row (`road`):
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `physics_step` | int (key) | step | yes | telemetry.physics_step. |
-| `matched_road_id` | str | - | no | Generator polyline matched to road_key by E-08b (per 1 m piece, Hausdorff <= 2 m); across sessions roads are joined by the unordered endpoint pair of road_key within 2 m (n_pts excluded), the per-piece Hausdorff distance breaking ties, never by the key text (TBD-9, D-C); empty when unmatched. [TBD-9] |
+| `matched_road_id` | str | - | no | Generator polyline matched to road_key by E-08b (per 1 m piece, Hausdorff <= 2 m); across sessions roads are joined one-to-one by the unordered endpoint pair of road_key within 2 m (n_pts excluded), the segment Hausdorff distance deciding between candidates (4 twin pairs on Arland lie within 2 m of each other), never by the key text (TBD-9, D-C); empty when unmatched. [TBD-9] |
 | `road_class` | enum | - | yes | Class inherited from the matched generator; unmatched roads are not drivable. Values: asphalt_e01, asphalt_e02, asphalt_e03, dirt, trail, cobblestone, concrete, unmatched. |
 | `region` | enum | - | yes | Region of the ego position per splits_v2 (C24). Values: train, val_l, buffer, k_val, k_rep, everon. [eval-only] |
 
@@ -976,13 +999,13 @@ Dataset builder, per decision step (`decision_index`; the decision boundary and 
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `decision_step` | int (key) | step | yes | P_t: physics_step of decision callback t (the first callback at or past its world-time grid point, section 6). |
-| `hl_seq` | int | - | yes | ctl.hl_seq of the row after C_t: the decision applied over the steps (P_t, P_t+1]. |
+| `hl_seq` | int | - | no | ctl.hl_seq of the row after C_t: the decision applied over the steps (P_t, P_t+1]; empty when C_t is the session's last ctl row. |
 | `interval_steps` | int | step | no | n_t = P_t+1 - P_t, the steps of the decision interval (nominally physics_steps_per_decision; it varies with the frame clock); empty for the session's last decision callback. |
-| `obs_slot_id` | int | slot | no | img.slot_id of obs_t; empty when no image qualifies. |
+| `obs_slot_id` | int | slot | no | img.slot_id of obs_t; empty when no image qualifies (pose row last_physics_step <= P_t and captured frame at or before the render frame of C_t). |
 | `obs_captured_render_frame` | int | frame | no | img_resolved.captured_render_frame of obs_t. |
 | `obs_last_physics_step` | int | step | no | hf.last_physics_step of the image's pose row (captured_render_frame + 1), <= P_t. |
 | `obs_age_steps` | int | step | no | P_t - obs_last_physics_step: the realised image age in physics steps. |
-| `obs_age_ms` | int | ms | no | world_time_ms of C_t minus hf.world_time_ms of the captured frame (the world time of the image's pose). |
+| `obs_age_ms` | int | ms | no | world_time_ms of C_t minus hf.world_time_ms of the captured frame (the world time of the image's pose); never negative (section 6). |
 | `obs_valid` | bool | - | yes | 1 when an image qualifies and is at most one image period old; 0 sets wm_valid and policy_valid to 0. |
 
 ## 10. Session files
@@ -1041,7 +1064,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `addon.manifest_sha256` | str | - | yes | DC_BuildInfo MANIFEST_SHA256. |
 | `addon.deploy_utc` | str | - | yes | DC_BuildInfo DEPLOY_UTC. |
 | `addon.target_pin` | str | - | yes, null ok | Pin the deploy targeted (per-pin deploy, DD-14a); null before. |
-| `control.actuation_mode` | enum | - | yes | A (driverless, setters every step) or B (seated character). Values: A, B. |
+| `control.actuation_mode` | enum | - | yes | A (driverless, the setters in every callback) or B (seated character). Values: A, B. |
 | `control.llc_sha` | str | - | yes, null ok | llc_v1 source hash; null when llc_v1 is not attached. |
 | `control.expert_sha` | str | - | yes, null ok | Expert source hash; null without an expert. |
 | `control.vehicle_card_id` | str | - | yes, null ok | tools/ident/cards/<pin_id>/<vehicle>.json id; null before the card exists (probe sessions). |
@@ -1073,7 +1096,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `events.rollover_hold_ms` | int | ms | yes | How long up_y must stay below rollover_up_y (default 500). [TBD-10] |
 | `events.state_poll_ms` | int | ms | yes | Poll period of the damage, fire, driver and seat state of every slot (default 100). [TBD-10] |
 | `events.contact_source` | enum | - | yes | Where collision rows get other, other_slot, other_prefab and impulse_ns: vanilla_process_collision (DD-4-min's modded SCR_VehicleDamageManagerComponent.ProcessCollision forwarder) or none (the registry match only). Values: vanilla_process_collision, none. |
-| `rig.rig_id` | str | - | yes | vehicle + mount + vFOV + writer + source class + render-settings hash (r2 3.4). |
+| `rig.rig_id` | str | - | yes | vehicle + mount + vFOV + near plane + writer + source class + render-settings hash (r2 3.4). |
 | `rig.rig_name` | str | - | yes | e.g. R1-S105. |
 | `rig.ego_prefab` | str | - | yes | Ego prefab resource name. |
 | `rig.mount.fwd_m` | float | m | yes | Camera mount offset forward of the vehicle origin. |
@@ -1081,6 +1104,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `rig.mount.right_m` | float | m | yes | Camera mount offset right. |
 | `rig.mount.pitch_deg` | float | deg | yes | Camera pitch (negative = down; r2: -3 to -5). |
 | `rig.vfov_deg` | float | deg | yes | Vertical FOV (50). |
+| `rig.near_plane_m` | float | m | yes | Near clip plane of the rig camera (part of rig_id). 0.03 m by default so the Shape fiducial at rig.fiducial.depth_m 0.05 lies beyond it, a setting awaiting the first capture Play's E-06 check; 0.1 m with depth_m 1.0 (validated by probe run 4) is the documented fallback and an allowed recorded setting. |
 | `rig.writer` | str | - | yes | MakeScreenshot. |
 | `rig.source_class` | enum | - | yes | Image source class (r2 3.4). Values: wb_viewport, client_1408x720. |
 | `rig.capture_wh` | array | px | yes | [w, h] of the captured image (client: [1408, 720]). |
@@ -1088,7 +1112,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `rig.band_px` | int | px | yes | Side band width (64). |
 | `rig.derivative_wh` | array | px | yes | [512, 288]. |
 | `rig.derivative_codec` | str | - | yes | jpeg_q95. |
-| `rig.fiducial` | object | - | yes | {version: v2, bits: 18, patches: 6, bits_per_patch: 3, patch_px: 32, margin_px: 16, gap_px: 8, mirrored: true, carrier: shape, depth_m: 0.05}: the debug-Shape carrier (12 flat boxes depth_m in front of the rig camera) is the production carrier; the widget carrier never reaches MakeScreenshot files (run 4: 0 of 5999) and is a diagnostic only (carrier widget, depth_m null). |
+| `rig.fiducial` | object | - | yes | {version: v2, bits: 18, patches: 6, bits_per_patch: 3, patch_px: 32, margin_px: 16, gap_px: 8, mirrored: true, carrier: shape, depth_m: 0.05}: the debug-Shape carrier (12 flat boxes depth_m in front of the rig camera, beyond rig.near_plane_m) is the production carrier. depth_m 0.05 (near plane 0.03) awaits the first capture Play's E-06 check; depth_m 1.0 with near plane 0.1, validated by probe run 4 (5999 of 5999 decoded), is the documented fallback and an allowed recorded setting. The widget carrier never reaches MakeScreenshot files (run 4: 0 of 5999) and is a diagnostic only (carrier widget, depth_m null). |
 | `rig.dpi_scale` | float | 1 | yes | User DPI scale forced by the fiducial (1.0). |
 | `rig.render_settings` | object | - | yes | VideoUserSettings + DisplayUserSettings dump (TBD-8). [TBD-8] |
 | `rig.render_settings_hash` | str | - | yes | Hash of that dump (C30). |
@@ -1124,6 +1148,7 @@ the harvester, never treated as complete.
 | `images` | object | - | yes | {requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3). |
 | `episodes` | int | - | yes | Number of episode rows committed. |
 | `heartbeats` | int | - | yes | Number of heartbeat rows appended. |
+| `observed.decision_grid_points_skipped` | int | - | no | Decision grid points a hitch skipped, as the writer counted them (section 6); C08 compares it with its own rebuild of the grid. The observed object holds further run-time facts that are not contract fields. |
 
 ## 11. Version stamps and the one-build rule
 
@@ -1252,8 +1277,8 @@ Rules (r2 3.3, R35):
   - the decision boundary: decide after the rows of decision callback C_t, apply from physics step P_t + 1 (6);
   - frame-bound rows with `covered_steps`, the measured step dt, the world-time decision grid on the first ctl row's
     world time and the image grid on the same anchor with `img_lead_ms` (6, D-A);
-  - the obs_t rule: newest image whose pose row (hf row C + 1) has `last_physics_step <= P_t`, dropped when older
-    than one image period (6);
+  - the obs_t rule: newest image whose pose row (hf row C + 1) has `last_physics_step <= P_t` and whose captured frame
+    is at or before the render frame of C_t (never a future image), dropped when older than one image period (6);
   - the `skipped_busy`, `make_failed` and `img_timeout` image rules and the end-of-session drain (5.3, 6);
   - 5 Hz images and decisions as the default, 10 Hz only as a trial-conf session setting (TBD-2, D-B);
   - chunk rules: close at `chunk_max_rows` or 10 s of world time, at least one row per chunk; commit.csv and

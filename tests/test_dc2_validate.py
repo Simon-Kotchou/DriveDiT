@@ -377,6 +377,7 @@ class FailLoudTest(unittest.TestCase):
     def test_image_rate_rules(self):                                          # F-3, D-B
         cases = ((10.0, None, "needs clocks.image_hz_setting 'trial_conf'"),
                  (10.0, "trial_conf", "differs from image_hz"),
+                 (5.0, "trial_conf", "needs clocks.image_hz_setting 'default'"),     # review round 1, X6
                  (1.0, None, "is not 5 (the default) or 10"))
         for image_hz, setting, why in cases:
             session = self.golden("hz%d%s" % (image_hz, setting or ""))
@@ -416,6 +417,16 @@ class FailLoudTest(unittest.TestCase):
         self.assertEqual((code, failing(rep)), (2, ["C37"]))                  # a SOFT failure: a warning
         self.assertEqual(by_id(rep)["C37"]["severity"], "SOFT")
         self.assertIn("without its capture utilisation evidence", by_id(rep)["C37"]["detail"])
+        # review round 1, X5: a redirected completion (done_render_frame one frame late) is contradicted by the
+        # decoded frames: the evidence is refused, never a pass
+        session = os.path.join(self.tmp, "g10_late", out["session_id"])
+        shutil.copytree(out["session_dir"], session)
+        set_column(session, "img", "done_render_frame", lambda key, v: str(int(v) + 1) if v else v)
+        code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"), "--vehicle-card",
+                             CARD)
+        c37 = by_id(rep)["C37"]
+        self.assertEqual((c37["status"], c37["value"]["contradicted_slots"]), ("FAIL", c37["value"]["issued"]))
+        self.assertIn("contradicted by the decoded frame", c37["detail"])
 
     def test_frame_bound_rows_are_checked(self):                              # D-A
         session = self.golden("cov")
@@ -434,6 +445,89 @@ class FailLoudTest(unittest.TestCase):
         code, rep = self.check(session)
         self.assertIn("C28", failing(rep))
         self.assertIn("steps 153..154", by_id(rep)["C28"]["detail"])
+
+    def test_frame_clock_cross_stream_rules(self):                            # review round 1, X3 / C-M3
+        """ctl and telemetry share render_frame and world_time_ms per key (C06); ctl world_time_ms is the hf world time
+        of its frame and hf.last_physics_step the newest earlier callback (C07). Codex's and Claude's mutations."""
+        hf = reader.open_session(GOLDEN_DIR, vehicle_card=CARD).streams["hf"]
+        lps = dict(zip(hf.col("render_frame"), hf.col("last_physics_step")))
+        stale_frame = [f for f in sorted(lps) if lps.get(f - 1) is not None and 0 <= lps[f - 1] < lps[f]][5]
+        cases = (("tel_frame", [("telemetry", "render_frame", 154, lambda v: str(int(v) + 10000))], "C06",
+                  "differ in render_frame or world_time_ms"),
+                 ("tel_world", [("telemetry", "world_time_ms", 154, lambda v: str(int(v) + 1000))], "C06",
+                  "differ in render_frame or world_time_ms"),
+                 ("p1", [("telemetry", "world_time_ms", 154, lambda v: str(int(v) + 7))], "C06",
+                  "differ in render_frame or world_time_ms"),
+                 ("p2", [("telemetry", "render_frame", 154, lambda v: str(int(v) - 1))], "C06",
+                  "differ in render_frame or world_time_ms"),
+                 ("p3", [("ctl", "world_time_ms", 154, lambda v: str(int(v) + 5)),
+                         ("telemetry", "world_time_ms", 154, lambda v: str(int(v) + 5))], "C07",
+                  "differs from the hf row of their render frame"),
+                 ("p4", [("hf", "last_physics_step", 262100, lambda v: "207")], "C07",
+                  "not the newest callback of an earlier render frame"),
+                 ("stale", [("hf", "last_physics_step", stale_frame, lambda v: str(lps[stale_frame - 1]))], "C07",
+                  "not the newest callback of an earlier render frame"))
+        for name, edits, check, why in cases:
+            session = self.golden(name)
+            for stream, column, key, fn in edits:
+                set_column(session, stream, column, lambda k, v, key=key, fn=fn: fn(v) if k == key else v)
+            code, rep = self.check(session)
+            self.assertIn(check, failing(rep), name)
+            self.assertIn(why, by_id(rep)[check]["detail"], name)
+            self.assertEqual(by_id(rep)[check]["severity"], "HARD", name)
+
+    def test_unnumbered_commands_fail_c07(self):                              # review round 1, X7
+        session = self.golden()
+        set_column(session, "ctl", "hl_seq", lambda key, v: "-1")
+        code, rep = self.check(session)
+        self.assertIn("C07", failing(rep))
+        self.assertIn("no hl_seq increment", by_id(rep)["C07"]["detail"])
+        session = self.golden("kept")            # from one decision on, hl_seq lags by one: that decision unnumbered
+        seq = dict(zip(*[reader.open_session(GOLDEN_DIR, vehicle_card=CARD).streams["ctl"].col(c)
+                         for c in ("physics_step", "hl_seq")]))
+        bump = [k for k in sorted(seq) if seq[k] >= 5 and seq[k] > seq.get(k - 1, seq[k])][0]
+        set_column(session, "ctl", "hl_seq", lambda key, v: str(int(v) - 1) if key >= bump and int(v) >= 0 else v)
+        code, rep = self.check(session)
+        self.assertIn("C07", failing(rep))
+
+    def test_written_skip_count_is_cross_checked(self):                       # review round 1, C-L4
+        session = self.golden()
+        edit_json(os.path.join(session, "session_end.json"),
+                  lambda o: o["observed"].update({"decision_grid_points_skipped": 3}))
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C08"]))
+        self.assertIn("observed.decision_grid_points_skipped 3, the rebuilt grid skips 0", by_id(rep)["C08"]["detail"])
+
+    def test_lag_zero_fails_c13b(self):                                       # review round 1, C-M2
+        session = self.golden()             # hf row n gets the pose of row n + 1: the image of C now matches row C
+        rows = {}
+        for name in sorted(os.listdir(os.path.join(session, "hf"))):
+            if name.startswith("chunk_"):
+                lines = read_lines(os.path.join(session, "hf", name))
+                cols = lines[0].split(",")
+                rows.update((int(line.split(",")[0]), line.split(",")) for line in lines[1:])
+        for column in [c for c in cols if c.startswith("cam_") or c.startswith("veh_")]:
+            j = cols.index(column)
+            set_column(session, "hf", column, lambda key, v, j=j: rows[key + 1][j] if key + 1 in rows else v)
+        code, rep = self.check(session)
+        c13b = by_id(rep)["C13b"]
+        self.assertEqual((c13b["severity"], c13b["status"], c13b["value"]["lag_frames"]), ("SOFT", "FAIL", 0))
+
+    def test_future_obs_never_passes(self):                                   # review round 1, X1
+        """The reader never picks a future image (test_dc2_reader); should a decision sample hold one anyway, C13a
+        fails."""
+        vreader = dc_validate.base.load_reader()
+        orig = vreader._build_decisions
+
+        def future(s):
+            orig(s)
+            d = [d for d in s.decisions if d["decision_step"] == 93][0]
+            d.update({"obs_captured_render_frame": 261990, "obs_age_ms": -27, "obs_valid": 1})
+
+        with mock.patch.object(vreader, "_build_decisions", future):
+            code, rep = self.check(self.golden())
+        self.assertEqual((code, failing(rep)), (1, ["C13a"]))
+        self.assertIn("future image", by_id(rep)["C13a"]["detail"])
 
     def test_writer_r01_off_by_one_fails_c07(self):                           # F-5
         session = self.golden()
@@ -641,6 +735,10 @@ class CrashTest(unittest.TestCase):
                                         "ego_destroyed": True})
         self.assertTrue(c36["provisional"])                    # TBD-10 while dc-2.0 is a DRAFT
         self.assertEqual(by_id(rep)["C01"]["status"], "PASS")  # ego_destroyed is a normal end
+        # C-H1: the image the seal caught in flight is pending, not a join failure
+        c13a = by_id(rep)["C13a"]
+        self.assertEqual((c13a["status"], c13a["value"]["join_failures"], c13a["value"]["pending_after_seal"]),
+                         ("PASS", 0, 1))
 
     def test_golden_has_no_crash(self):
         code, rep = run_json("--session", GOLDEN_DIR, "--routes-dir", ROUTES, "--checks", "C36")

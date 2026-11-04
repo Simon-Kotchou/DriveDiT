@@ -6,6 +6,8 @@
 // (HandleFailedNavlinkDoor.bt), because an AI agent below max LOD never opens a gate remotely
 // (SCR_AISelectDoorOperatorAgent.c:91-94). A car under direct control (an expert driver) runs into it.
 // DC_Gates.OpenVehicleGates opens them all once; CheckOpen reports, some seconds later, every leaf that is not open.
+// Doors of buildings are never touched (garage doors of Garage_E_02 carry a vehicle link too), and the check only
+// reports: it never commands a door again, so a two-way gate keeps the direction it opened to.
 //
 //   DC_Gates gates = DC_Gates.OpenVehicleGates(GetGame().GetWorld(), "[DataCapture]");	// once, authority only
 //   ...
@@ -31,7 +33,9 @@ class DC_Gates : Managed
 	protected ref array<IEntity> m_aLeaves = {};	//!< door leaves with a vehicle navmesh link (the query)
 	protected ref array<IEntity> m_aDoors = {};		//!< every door leaf to open: the gate leaves and their sibling leaves
 	protected ref array<IEntity> m_aGates = {};		//!< the gates: the leaves' parents (door set or barrier)
-	protected int m_iDoorsSeen;						//!< entities with a DoorComponent the query saw
+	protected int m_iDoorsSeen;						//!< entities with a door component the query saw
+	protected int m_iBuildingLeaves;				//!< vehicle-link door leaves skipped because they belong to a building
+	protected ref array<IEntity> m_aBuildings = {};	//!< those buildings
 
 	//! Counts of OpenVehicleGates
 	protected int m_iWithSmartAction;
@@ -86,8 +90,10 @@ class DC_Gates : Managed
 	//!    vehicle navmesh (AddLeaf). The OpenGate smart action alone would not do: every door leaf inherits it from
 	//!    Door_Base.et, house doors included, while only gate leaves add a BTRlike link
 	//!    (Door_MetalGate_01_Long_LEFT_EXT_ST_B.et, BarGate_01_bar_base.et).
-	//! 2. Each leaf's sibling leaves are added: the doors the vanilla driver opens (SA_OpenGate.bt runs SCR_AIOpenDoor
-	//!    with m_bOpenSiblingDoors 1; SCR_AIOpenDoor.FindDoorActions, Game/AI/ScriptedNodes/Soldier/SCR_AIOpenDoor.c:55).
+	//! 2. A leaf inside a building (an ancestor that is a Building: the garage door sets of Garage_E_02) is skipped
+	//!    with its siblings. Each other leaf's sibling leaves are added: the doors the vanilla driver opens
+	//!    (SA_OpenGate.bt runs SCR_AIOpenDoor with m_bOpenSiblingDoors 1; SCR_AIOpenDoor.FindDoorActions,
+	//!    Game/AI/ScriptedNodes/Soldier/SCR_AIOpenDoor.c:55).
 	//! 3. Each closed leaf is set open with BaseDoorComponent.SetControlValue(1, RplId.Invalid())
 	//!    (Game/generated/Components/BaseDoorComponent.c:27), as vanilla SCR_DoorOpenerEntity opens the doors around it
 	//!    without any character (Game/Campaign/SCR_doorOpener.c:54-71). The user action the AI uses,
@@ -108,6 +114,17 @@ class DC_Gates : Managed
 		array<ScriptedUserAction> actions = {};
 		foreach (IEntity leaf : m_aLeaves)
 		{
+			// A door of a building (the garage doors of Garage_E_02) is not a gate: neither it nor its sibling doors.
+			IEntity building = GetBuildingOf(leaf);
+			if (building)
+			{
+				m_iBuildingLeaves++;
+				if (!m_aBuildings.Contains(building))
+					m_aBuildings.Insert(building);
+
+				continue;
+			}
+
 			// The tag the vanilla gate reaction looks for (SCR_AIGoalReaction.c:474; SCR_AIUtils.c:502)
 			if (SCR_AISmartActionHandling.FindSmartAction(leaf, "OpenGate", false))
 				m_iWithSmartAction++;
@@ -140,7 +157,7 @@ class DC_Gates : Managed
 					continue;
 
 				gateLeaves++;
-				DoorComponent doorComponent = DoorComponent.Cast(door.FindComponent(DoorComponent));
+				BaseDoorComponent doorComponent = GetDoorComponent(door);
 				if (!doorComponent)
 				{
 					m_iNoDoorComponent++;
@@ -159,10 +176,22 @@ class DC_Gates : Managed
 
 			m_iOpening += gateOpening;
 			m_iAlreadyOpen += gateAlreadyOpen;
-			Print(string.Format("%1 Gate %2/%3: %4 at %5 - %6 door leaves, opening %7, already open %8", m_sLogPrefix, gateIndex + 1, m_aGates.Count(), DescribePrefab(gate), gate.GetOrigin(), gateLeaves, gateOpening, gateAlreadyOpen), LogLevel.NORMAL);
+			string kind = "gate set";
+			if (gate.GetParent())
+				kind = "gate set in a composition";
+
+			if (!gate.FindComponent(BaseDoorComponent))
+				Print(string.Format("%1 Gate %2/%3: %4 %5 at %6 - %7 door leaves, opening %8, already open %9", m_sLogPrefix, gateIndex + 1, m_aGates.Count(), kind, DescribePrefab(gate), gate.GetOrigin(), gateLeaves, gateOpening, gateAlreadyOpen), LogLevel.NORMAL);
+			else
+				Print(string.Format("%1 Gate %2/%3: free-standing door %4 at %5 - %6 door leaves, opening %7, already open %8", m_sLogPrefix, gateIndex + 1, m_aGates.Count(), DescribePrefab(gate), gate.GetOrigin(), gateLeaves, gateOpening, gateAlreadyOpen), LogLevel.NORMAL);
 		}
 
-		string counts = string.Format("%1 vehicle gates with %2 door leaves (%3 leaves with a vehicle navmesh link, %4 of them with the OpenGate smart action, among %5 doors of the map)", m_aGates.Count(), m_aDoors.Count(), m_aLeaves.Count(), m_iWithSmartAction, m_iDoorsSeen);
+		foreach (IEntity skipped : m_aBuildings)
+		{
+			Print(string.Format("%1 Gates: skipped the vehicle-link doors of building %2 at %3 (doors of buildings are not gates)", m_sLogPrefix, DescribePrefab(skipped), skipped.GetOrigin()), LogLevel.NORMAL);
+		}
+
+		string counts = string.Format("%1 vehicle gates with %2 door leaves (%3 leaves with a vehicle navmesh link, %4 of them with the OpenGate smart action; %5 leaves of %6 buildings skipped; among %7 doors of the map)", m_aGates.Count(), m_aDoors.Count(), m_aLeaves.Count() - m_iBuildingLeaves, m_iWithSmartAction, m_iBuildingLeaves, m_aBuildings.Count(), m_iDoorsSeen);
 		LogLevel level = LogLevel.NORMAL;
 		if (m_aGates.IsEmpty() || m_iNoDoorComponent > 0)
 			level = LogLevel.WARNING;
@@ -171,9 +200,10 @@ class DC_Gates : Managed
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Counts the door leaves that are open and logs every one that is not (blocked while it opened, or destroyed) with
-	//! its position; a closed one is set open once more. Call it once, some seconds after OpenVehicleGates
-	//! (DoorSet_MetalGate_01_Long opens in 1.5 s).
+	//! Counts the door leaves that are open and logs every one that is not (blocked while it opened, still moving, or
+	//! destroyed) with its position and state. Diagnostic only: it commands no door, so a two-way gate that opened
+	//! towards -1 (OpenBothWays, e.g. NetFence_05 vehicle gates) is never swung back through closed. Call it once, some
+	//! seconds after OpenVehicleGates (DoorSet_MetalGate_01_Long opens in 1.5 s).
 	//! \param[in] afterS seconds since OpenVehicleGates, for the log lines
 	//! \return the number of door leaves that are not open or are gone
 	int CheckOpen(int afterS)
@@ -189,7 +219,7 @@ class DC_Gates : Managed
 				continue;
 			}
 
-			DoorComponent doorComponent = DoorComponent.Cast(door.FindComponent(DoorComponent));
+			BaseDoorComponent doorComponent = GetDoorComponent(door);
 			if (!doorComponent)
 			{
 				gone++;
@@ -206,8 +236,7 @@ class DC_Gates : Managed
 			float doorState = doorComponent.GetNormalizedDoorState(); // Game/generated/Components/BaseDoorComponent.c:17
 			float controlValue = doorComponent.GetControlValue(); // BaseDoorComponent.c:29
 			IEntity gate = GetGateOf(door);
-			Print(string.Format("%1 WARNING: gate door %2 at %3 (gate %4 at %5) is not open %6 s after it was opened: state %7, control value %8, opening %9 - set open again; a car may still stop there", m_sLogPrefix, DescribePrefab(door), door.GetOrigin(), DescribePrefab(gate), gate.GetOrigin(), afterS, doorState.ToString(-1, 2), controlValue.ToString(-1, 2), doorComponent.IsOpening()), LogLevel.WARNING);
-			doorComponent.SetControlValue(OPEN_CONTROL_VALUE, RplId.Invalid());
+			Print(string.Format("%1 WARNING: gate door %2 at %3 (gate %4 at %5) is not open %6 s after it was opened: state %7, control value %8, opening %9 - a car may stop there", m_sLogPrefix, DescribePrefab(door), door.GetOrigin(), DescribePrefab(gate), gate.GetOrigin(), afterS, doorState.ToString(-1, 2), controlValue.ToString(-1, 2), doorComponent.IsOpening()), LogLevel.WARNING);
 		}
 
 		LogLevel level = LogLevel.NORMAL;
@@ -223,7 +252,7 @@ class DC_Gates : Managed
 	//! the vehicle navmesh. \return true: go on with the query
 	protected bool AddLeaf(IEntity entity)
 	{
-		if (!entity || !entity.FindComponent(DoorComponent))
+		if (!entity || !entity.FindComponent(BaseDoorComponent))
 			return true;
 
 		m_iDoorsSeen++;
@@ -263,8 +292,34 @@ class DC_Gates : Managed
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! \return the door component of a leaf: BaseDoorComponent (Game/generated/Components/BaseDoorComponent.c:12), the
+	//! base of DoorComponent and SlidingDoorComponent (SlidingDoorComponent.c:12), as
+	//! SCR_WorldEntityDelegateEditorComponent.c:39 finds it; every method used here is declared there (:17-29)
+	protected BaseDoorComponent GetDoorComponent(IEntity door)
+	{
+		return BaseDoorComponent.Cast(door.FindComponent(BaseDoorComponent));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return the building a door leaf belongs to (an ancestor that is a Building, Game/generated/Building/Building.c:12;
+	//! SCR_DestructibleBuildingEntity derives from it), or null
+	protected IEntity GetBuildingOf(IEntity door)
+	{
+		IEntity ancestor = door.GetParent();
+		for (int level = 0; level < 8 && ancestor; level++)
+		{
+			if (Building.Cast(ancestor))
+				return ancestor;
+
+			ancestor = ancestor.GetParent();
+		}
+
+		return null;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! \return true when the door is fully open, the test of SCR_AIOpenDoor (SCR_AIOpenDoor.c:39)
-	protected bool IsDoorOpen(DoorComponent doorComponent)
+	protected bool IsDoorOpen(BaseDoorComponent doorComponent)
 	{
 		return Math.AbsFloat(doorComponent.GetNormalizedDoorState()) > 1.0 - OPEN_EPSILON;
 	}

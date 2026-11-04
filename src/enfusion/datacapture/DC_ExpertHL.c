@@ -5,7 +5,7 @@
 //
 // DC_ExpertDriver is the DC_DriverInterface of DD-4-min (DC_StreamRecorder.c) for T0-MIN: attach it to
 // GameMode_DataCapture in the DC_Arland layer. It owns the route (DC_Route), the expert (DC_ExpertHL), the vehicle
-// card (DC_VehicleCard) and llc_v1 (DC_LLCv1), and is called by the core on its physics-step counters (no CallLater
+// card (DC_VehicleCard) and llc_v1 (DC_LLCv1), and is called by the core in its fixed-frame callbacks (no CallLater
 // clock):
 //   GetSpawnPose   the route start (point 0) facing along the route; the route (trial conf "route", else
 //                  m_sDefaultRouteId) is loaded here, once: a route id naming the sealed map (Everon) is refused
@@ -15,6 +15,8 @@
 //                  session's pin, accepted by llc_v1's card rules (use_class from the launch record); llc_sha and
 //                  expert_sha = sha256 of DC_LLCv1.c and DC_ExpertHL.c as deployed; stamps and signs to session.json
 //                  control.*;
+//   CanDecide      the admission handshake before BeginEpisode: true only in a decision callback whose PostStep can
+//                  evaluate the expert (CanEvaluate), so an admitted episode's first Decide never returns false;
 //   BeginEpisode   in a decision callback after the warm-up, when the ego stands at the route start (distance,
 //                  heading, speed), at most m_iMaxEpisodes, m_fEpisodeGapS after the previous one: mode E, driver
 //                  expert;
@@ -955,6 +957,19 @@ class DC_ExpertDriver : DC_DriverInterface
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Admission handshake (dc-2.0 section 6), asked in OnStepPre of a decision callback before BeginEpisode: true only
+	//! when PostStep of this callback will evaluate the expert and take the decision (a decision callback and the same
+	//! CanEvaluate test PostStep makes), so the episode's first Decide always gives a command. false defers the episode
+	//! to the next grid point with nothing committed (the core counts it in observed.episode_admissions_deferred)
+	override bool CanDecide(int physicsStep)
+	{
+		if (!m_Context || !m_Context.IsDecisionStep())
+			return false;
+
+		return CanEvaluate();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! A new episode when the ego stands at the route start (see the header)
 	override bool BeginEpisode(int episodeId, int firstPhysicsStep, notnull DC_EpisodeInfo info)
 	{
@@ -1022,15 +1037,11 @@ class DC_ExpertDriver : DC_DriverInterface
 	//! in a decision callback of the world-time grid (ctx.IsDecisionStep) that evaluation is the decision Decide returns
 	override void PostStep(int physicsStep, float timeSlice, notnull DC_DriverPost post)
 	{
-		if (!m_bInEpisode)
+		if (!m_bInEpisode || !CanEvaluate())
 			return;
 
 		IEntity ego = m_Context.GetEgo();
-		DC_Actuator actuator = m_Context.GetActuator();
-		if (!ego || !actuator || !actuator.GetSimulation())
-			return;
-
-		VehicleWheeledSimulation simulation = actuator.GetSimulation();
+		VehicleWheeledSimulation simulation = m_Context.GetActuator().GetSimulation();
 		vector transform[4];
 		ego.GetWorldTransform(transform);
 		vector position = transform[3];
@@ -1109,6 +1120,21 @@ class DC_ExpertDriver : DC_DriverInterface
 		m_bReady = false;
 		m_bInEpisode = false;
 		m_Context = null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true when PostStep can evaluate the expert on the state after this callback: the driver is ready (route, expert,
+	//! llc_v1) and the ego, its actuator and its simulation exist. PostStep and CanDecide make this one test
+	protected bool CanEvaluate()
+	{
+		if (!m_bReady || !m_Context || !m_Expert || !m_Route)
+			return false;
+
+		DC_Actuator actuator = m_Context.GetActuator();
+		if (!m_Context.GetEgo() || !actuator || !actuator.GetSimulation())
+			return false;
+
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------

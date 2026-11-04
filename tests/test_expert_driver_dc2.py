@@ -7,7 +7,9 @@ sources (the statements the Python models mirror) and check, per adaptation of t
   - llc_v1 step time: every integrator advances by the callback's timeSlice (covered_steps x step dt), the clutch dip by
     covered steps; GetFixedTimeSlice() is never a step dt and a callback is never counted as one step;
   - decisions on the grid: the expert's decision is the evaluation of a decision callback's PostStep
-    (ctx.IsDecisionStep), never keyed on physics_step mod N; exp_*_now is evaluated in every callback.
+    (ctx.IsDecisionStep), never keyed on physics_step mod N; exp_*_now is evaluated in every callback;
+  - admission: DC_ExpertDriver.CanDecide is true only when this callback's PostStep will take the decision (the one
+    CanEvaluate test both make), so an admitted episode's first Decide never returns false (which ends the session).
 """
 
 import math
@@ -20,6 +22,8 @@ SOURCES = os.path.join(REPO, "src", "enfusion", "datacapture")
 LLC_SOURCE = os.path.join(SOURCES, "DC_LLCv1.c")
 EXPERT_SOURCE = os.path.join(SOURCES, "DC_ExpertHL.c")
 SESSION_SOURCE = os.path.join(SOURCES, "DC_Session.c")
+EGO_SOURCE = os.path.join(SOURCES, "DC_EgoSession.c")
+RECORDER_SOURCE = os.path.join(SOURCES, "DC_StreamRecorder.c")
 DECISION_PERIOD_MS = 200                # 1000 / decision_hz at the frozen 5 Hz
 STEP_DT = 1.0 / 30.0                    # the measured step dt on 1.8 (dc-2.0 section 6, D-A)
 RUN4_STEPS, RUN4_CALLBACKS = 18113, 10215   # T0-ENG run 4 E-10: steps and fixed-frame callbacks of one Play
@@ -282,6 +286,106 @@ class DecisionGridTest(unittest.TestCase):
         self.assertTrue(len(intervals) > 1 and min(intervals) <= 6 <= max(intervals), intervals)
         by_mod = [p for _, p, _ in callbacks if p % 6 == 0]
         self.assertNotEqual(by_mod, decided)
+
+
+class AdmissionModel:
+    """One decision callback of the core with a driver (DC_EgoSession.TryBeginEpisode, DC_StreamRecorder.OnStepPost
+    and OnStepDecide, asserted in test_the_model_follows_the_core_admission): CanDecide, BeginEpisode, PostStep,
+    Decide; a first Decide that gives nothing after an admission without an initial command fails the session."""
+
+    def __init__(self, driver):
+        self.driver, self.episode, self.failed, self.deferred, self.held = driver, False, False, 0, None
+
+    def decision_callback(self, physics_step, evaluable):
+        self.driver.evaluable = evaluable
+        if not self.episode:
+            if not self.driver.can_decide(physics_step, True):
+                self.deferred += 1
+                return
+            self.episode = self.driver.begin_episode()
+        if self.episode:
+            self.driver.post_step(physics_step, True)
+            command = self.driver.decide(physics_step, True)
+            if command is None and self.held is None:
+                self.failed = True
+            elif command is not None:
+                self.held = command
+
+
+class ExpertDriverMirror:
+    """DC_ExpertDriver's CanDecide / CanEvaluate / PostStep / Decide (asserted in test_can_decide_is_post_steps_test);
+    with_handshake False is the base DC_DriverInterface.CanDecide (always true), as before this adaptation."""
+
+    def __init__(self, with_handshake=True):
+        self.with_handshake, self.evaluable, self.in_episode = with_handshake, True, False
+        self.decisions = ExpertDecisions()
+
+    def can_evaluate(self):
+        return self.evaluable
+
+    def can_decide(self, physics_step, is_decision):
+        if not self.with_handshake:
+            return True
+        return is_decision and self.can_evaluate()
+
+    def begin_episode(self):
+        self.in_episode = True
+        return True
+
+    def post_step(self, physics_step, is_decision):
+        if not self.in_episode or not self.can_evaluate():
+            return
+        self.decisions.post_step(physics_step, ("exp_now", physics_step), is_decision)
+
+    def decide(self, physics_step, is_decision):
+        if not self.in_episode:
+            return None
+        return self.decisions.decide(physics_step, is_decision)
+
+
+class AdmissionTest(unittest.TestCase):
+    """(c) the admission handshake: an admitted episode's first Decide never returns false."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.expert = read(EXPERT_SOURCE)
+
+    def test_the_model_follows_the_core_admission(self):
+        begin = enforce_body(read(EGO_SOURCE), "DC_EgoSession", "TryBeginEpisode")
+        self.assertLess(begin.index("if (!driver.CanDecide(physicsStep)) { m_iAdmissionsDeferred++;"),
+                        begin.index("if (!driver.BeginEpisode(m_iNextEpisodeId, physicsStep, info)) return;"))
+        decide = enforce_body(read(RECORDER_SOURCE), "DC_StreamRecorder", "OnStepDecide")
+        self.assertIn("if (!driver.Decide(physicsStep, m_Pending)) {", decide)
+        self.assertIn("if (m_bHasHeld) m_Pending.CopyFrom(m_Held); else if (m_bHasInitial) "
+                      "m_Pending.CopyFrom(m_Initial); else { m_Session.Fail(DC_Session.END_SCRIPT_ERROR,", decide)
+
+    def test_can_decide_is_post_steps_test(self):
+        can_decide = enforce_body(self.expert, "DC_ExpertDriver", "CanDecide")
+        self.assertIn("override bool CanDecide(int physicsStep) { if (!m_Context || !m_Context.IsDecisionStep()) "
+                      "return false; return CanEvaluate();", can_decide)
+        post_step = enforce_body(self.expert, "DC_ExpertDriver", "PostStep")
+        self.assertIn("if (!m_bInEpisode || !CanEvaluate()) return;", post_step)
+        self.assertEqual(code_only(self.expert).count("CanEvaluate()"), 3)    # the method and its two callers
+        evaluate = enforce_body(self.expert, "DC_ExpertDriver", "CanEvaluate")
+        self.assertIn("if (!m_bReady || !m_Context || !m_Expert || !m_Route) return false;", evaluate)
+        self.assertIn("if (!m_Context.GetEgo() || !actuator || !actuator.GetSimulation()) return false; return true;",
+                      evaluate)
+        # nothing in PostStep between CanEvaluate and the decision can return early
+        tail = post_step.split("if (!m_bInEpisode || !CanEvaluate()) return;", 1)[1]
+        self.assertNotIn("return", tail.split("m_iDecisionStep = physicsStep;", 1)[0])
+
+    def test_an_unevaluable_callback_defers_instead_of_failing(self):
+        # the ego simulation is missing at the first grid point (evaluable False), there at the second
+        core = AdmissionModel(ExpertDriverMirror())
+        core.decision_callback(6, evaluable=False)
+        self.assertEqual((core.deferred, core.episode, core.failed), (1, False, False))
+        core.decision_callback(12, evaluable=True)
+        self.assertEqual((core.deferred, core.episode, core.failed), (1, True, False))
+        self.assertEqual(core.held, ("exp_now", 12))
+        # the base CanDecide (always true) admits the same driver and its first Decide ends the session
+        base = AdmissionModel(ExpertDriverMirror(with_handshake=False))
+        base.decision_callback(6, evaluable=False)
+        self.assertEqual((base.episode, base.failed), (True, True))
 
 
 if __name__ == "__main__":

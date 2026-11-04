@@ -188,6 +188,44 @@ class RoadsCompareTests(unittest.TestCase):
         code, text = run_tool([os.path.join(self.base, "EVERON_play"), "--decoder", self.decoder])
         self.assertEqual(code, 2, text)
 
+    def test_default_expected_km_is_the_engine_network(self):
+        """D-D: Arland's engine-network drivable road is 34.5 km (runway, taxiway and trails not counted)."""
+        self.assertEqual(compare.DEFAULT_EXPECT_KM, 34.5)
+        play = os.path.join(self.base, "default_km")
+        write_dump(play, engine_roads(False))
+        code, text = run_tool([play, "--decoder", self.decoder])
+        self.assertIn("expected 34.50", text)
+
+    def test_cross_session_join_by_endpoints(self):
+        """D-C: road keys join across sessions by the unordered endpoint pair within 2 m, never by the key text."""
+        self.assertTrue(compare.endpoint_match("12/100.00:200.00/150.00:260.00", "13/150.40:259.70/100.30:200.10"))
+        self.assertFalse(compare.endpoint_match("12/100.00:200.00/150.00:260.00", "12/100.00:200.00/150.00:262.50"))
+        self.assertIsNone(compare.parse_road_key("0"))
+        self.assertFalse(compare.endpoint_match("0", "0"))
+        keys_a = ["12/100.00:200.00/150.00:260.00", "8/400.00:400.00/420.00:400.00", "5/900.00:900.00/950.00:900.00"]
+        keys_b = ["13/150.40:259.70/100.30:200.10", "8/400.00:400.00/420.00:400.00", "9/400.50:400.00/419.20:400.30"]
+        joins, ties = compare.join_keys(keys_a, keys_b)
+        self.assertEqual(joins[keys_a[0]], keys_b[0])           # n_pts changed and the pair is reversed
+        self.assertEqual(joins[keys_a[1]], keys_b[1])           # the identical key is the closer candidate
+        self.assertIsNone(joins[keys_a[2]])
+        self.assertEqual(ties, [keys_a[1]])
+        # with shapes, the Hausdorff distance breaks the tie: the other road bends away
+        shapes_a = {keys_a[1]: [(400.0, 400.0), (410.0, 400.0), (420.0, 400.0)]}
+        shapes_b = {keys_b[1]: [(400.0, 400.0), (410.0, 409.0), (420.0, 400.0)],
+                    keys_b[2]: [(400.5, 400.0), (410.0, 400.1), (419.2, 400.3)]}
+        joins, _ = compare.join_keys(keys_a[1:2], keys_b, shapes_a, shapes_b)
+        self.assertEqual(joins[keys_a[1]], keys_b[2])
+        # the CLI reports the join of two dumps whose key texts differ
+        play_a, play_b = os.path.join(self.base, "join_a"), os.path.join(self.base, "join_b")
+        roads = engine_roads(False)
+        write_dump(play_a, roads)
+        write_dump(play_b, [(w, [pts[0]] + [(x + 0.3, z) for x, z in pts[1:-1]] + [pts[-1]] if len(pts) > 2 else pts)
+                            for w, pts in roads])
+        code, text = run_tool([play_a, "--decoder", self.decoder, "--expect-km", str(DRIVABLE_KM),
+                               "--join-play", play_b])
+        self.assertIn("cross_session", text)
+        self.assertIn("%d of %d road keys join" % (len(roads), len(roads)), text)
+
     def test_missing_dump_is_input_error(self):
         play = os.path.join(self.base, "empty")
         probe_common.write_synthetic_play(play, {"world.map_id": "arland"}, {})

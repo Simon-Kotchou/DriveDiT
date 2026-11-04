@@ -633,16 +633,17 @@ class StreamSchemaTest(unittest.TestCase):
         timing = self.schema["timing"]
         self.assertIn("at or before the render frame of C_t", timing["sample"]["obs"]["rule"])
         self.assertIn("obs_age_ms >= 0", timing["sample"]["obs"]["rule"])
-        self.assertIn("done_render_frame >= the render frame of C_t + 1", timing["decision"]["bridge_pause"])
+        self.assertIn("current render frame >= the render frame of C_t + 1", timing["decision"]["bridge_pause"])
+        self.assertIn("done_render_frame set and <= the current frame", timing["decision"]["bridge_pause"])
         self.assertIn("+1 exactly on the row after every decision callback", timing["decision"]["hl_seq"])
         self.assertIn("newest ctl key with a smaller render_frame", timing["joins"]["frame_clock"])
-        self.assertIn("no pose row and is not joined", timing["joins"]["capture_pose"])
+        self.assertIn("only its pose row is missing, it is not joined", timing["joins"]["capture_pose"])
         self.assertIn("median", timing["clock"]["step_dt"])
         section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
         for phrase in ("whose captured frame C is at or before the render frame of C_t", "never negative",
                        "best lag to be +1", "slot 0 is issued in the next frame", "never a join failure",
                        "covered_steps / 30 on 21296 of 21296 rows", "the ratio is the step even in merged frames",
-                       "every decision callback of an episode that goes on"):
+                       "every decision callback of an episode that starts or goes on"):
             self.assertIn(phrase, section6, phrase)
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
         self.assertEqual((session["rig.near_plane_m"]["unit"], session["rig.near_plane_m"]["required"]), ("m", True))
@@ -658,6 +659,30 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertNotIn("DRAFT", self.spec[:self.spec.index("## 1. ")])
         with open(os.path.join(REPO, "drivedit_nav", "route_schema.json"), encoding="ascii") as f:
             self.assertNotIn("DRAFT", json.load(f)["description"])
+
+    def test_review_round2_rules(self):
+        """Review round 2 (Codex N1-N5, the admission decision): the seal exemption is the one pending request at the
+        terminal frame; dropped completions are writer-integrity failures and C37 measures at the decoded frame; the
+        bridge waits on the current frame; the step dt never locks in a guess; hl_seq has a sentinel and increments
+        only when due; episodes are admitted through a handshake."""
+        timing = self.schema["timing"]
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("its image shows the terminal render frame (C = `end.render_frame`, whose hf row exists)",
+                       "any other capture without its hf rows is a join failure",
+                       "a completion the writer dropped", "measures each issued slot's capture stall at its decoded "
+                       "frame C", "assumes the worst case (u = 1)",
+                       "compares the current frame, never the image's fixed completion frame",
+                       "never locking in a guess", "two halves, split at half its steps, agree within 0.5%",
+                       "readiness is refused with the reason", "The span alone is not bounded",
+                       "the no-command sentinel", "on no other row, so no number exists before the first episode",
+                       "admission handshake", "defers the admission to the next grid point"):
+            self.assertIn(phrase, section6, phrase)
+        self.assertNotIn("leaves out the not yet stepped remainder", section6)
+        self.assertIn("at least 90 steps", timing["clock"]["step_dt"])
+        self.assertIn("readiness is refused", timing["clock"]["step_dt"])
+        self.assertIn("defers to the next grid point", timing["decision"]["admission"])
+        self.assertIn("no-command sentinel", timing["decision"]["hl_seq"])
+        self.assertIn("every other capture without its hf rows is a join failure", timing["joins"]["capture_pose"])
 
     def test_description_drift_is_caught(self):
         drifted = self.spec.replace("Joins ctl and telemetry exactly; the image of render frame C", "Joins ctl", 1)

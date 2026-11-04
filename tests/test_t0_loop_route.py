@@ -11,8 +11,12 @@ tools/routes/make_t0_loop.py and the engine road dump it is built from (tools/ro
     names by sha256, the footer says complete, and they equal the play's files when DD_PROBE_PROFILE names the
     Workbench profile folder that holds the play); source.road_graph names that dump, every loop road is an engine
     road of it with its road_key, every maneuver's junction_id names engine roads only (no decoder road id such as the
-    old j452_458), and the turns are the engine junctions' (e165_167_17, e136_133_48, e133_132, e161_176, all right on
-    this clockwise loop);
+    old j452_458), and the turns are the engine junctions' (e165_167_17, e136_133_48, e161_176, all right on this
+    clockwise loop);
+  - the same-side rule (dc-2.0 freeze decision D-E, R-3, 2026-11-03): at e133_132 the route follows 133, which bends
+    right less than side road 132, so it is straight (geometrically right); every recorded type follows the rule from
+    the recorded branch angles; on synthetic forks +31/+63 deg gives straight/right, +40/+63 right/right, a single
+    right turn (a left side road only) stays right, and a branch straighter than the route keeps the route's type;
   - the maneuvers are complete and local: every engine road wider than a connector that is not on the loop and comes
     within ARM_REACH_M of the line is named by the maneuver where it comes closest, and every road a junction_id names
     runs within ID_REACH_M of that maneuver's point;
@@ -216,7 +220,7 @@ class LoopRouteTest(unittest.TestCase):
 
     def test_engine_roads_and_junctions(self):
         source = self.obj["source"]
-        self.assertEqual(source["generator_version"], 3)
+        self.assertEqual(source["generator_version"], 4)
         self.assertNotIn("polylines", source.get("inputs", {}))           # no decoder input
         for leg in source["legs"]:
             key, width, _ = self.roads[leg["road"]]
@@ -230,8 +234,7 @@ class LoopRouteTest(unittest.TestCase):
             ids = [int(v) for v in m["junction_id"][1:].split("_")]
             self.assertTrue(all(i in self.roads and self.roads[i][1] > 1.5 for i in ids), m)
         turns = [(m["junction_id"], m["type"]) for m in maneuvers if m["type"] != "straight"]
-        self.assertEqual(turns, [("e165_167_17", "right"), ("e136_133_48", "right"), ("e133_132", "right"),
-                                 ("e161_176", "right")])
+        self.assertEqual(turns, [("e165_167_17", "right"), ("e136_133_48", "right"), ("e161_176", "right")])
         # each maneuver lies where another engine road ends at the loop (the engine graph), not at a decoder road
         legs = set(leg["road"] for leg in source["legs"])
         for m in maneuvers:
@@ -272,6 +275,69 @@ class LoopRouteTest(unittest.TestCase):
         self.assertEqual(sorted(reach), [17, 48, 94, 132, 134, 135, 139, 162, 176, 180])
         for idx, s_near in reach.items():
             self.assertTrue(any(abs(s_m - s_near) <= ARM_AT_M for s_m in named[idx]), (idx, s_near, named[idx]))
+
+    def test_same_side_rule_on_the_route(self):
+        # D-E (R-3): at e133_132 the route follows 133 at about +22 deg while side road 132 turns about +54 deg (both
+        # right): 133 is the branch closest to straight on and within 35 deg, so the maneuver is straight although the
+        # route's own turn (+42 deg) says right. Every other type is the geometric one, and each recorded type follows
+        # from the recorded branch angles
+        generator = load_generator()
+        source = self.obj["source"]
+        self.assertEqual(generator.SAME_SIDE_STRAIGHT_DEG, 35.0)
+        self.assertEqual(source["maneuver_rule"]["same_side_straight_within_deg"], 35.0)
+        types = {m["junction_id"]: m["type"] for m in self.obj["maneuvers"]}
+        facts = {f["junction_id"]: f for f in source["maneuver_branches"]}
+        self.assertEqual(sorted(facts), sorted(types))
+        changed = sorted(j for j, f in facts.items() if f["geometric_type"] != types[j])
+        self.assertEqual(changed, ["e133_132"])
+        fact = facts["e133_132"]
+        self.assertEqual((fact["geometric_type"], types["e133_132"]), ("right", "straight"))
+        self.assertEqual([idx for idx, _ in fact["branches"]], [132])
+        self.assertTrue(0.0 < fact["route_branch_deg"] <= 35.0 < fact["branches"][0][1], fact)
+        for junction_id, f in facts.items():
+            self.assertEqual(generator.same_side_type(f["geometric_type"], f["route_branch_deg"],
+                                                      [deg for _, deg in f["branches"]]), types[junction_id], f)
+
+    def test_same_side_rule_on_synthetic_forks(self):
+        generator = load_generator()
+
+        def fork(route_deg, other_degs):
+            """(type, fact) of the one maneuver where engine road 1 runs north for 100 m to (0, 100) and the route goes
+            on along road 2 at route_deg (right positive); roads 3, 4, ... leave (0, 100) at other_degs."""
+            def road(idx, z0, deg):
+                a = math.radians(deg)
+                return generator.Road(idx, "k%d" % idx, 8.0, [(10.0 * k * math.sin(a), 0.0, z0 + 10.0 * k * math.cos(a))
+                                                              for k in range(11)])
+            first, second = road(1, 0.0, 0.0), road(2, 100.0, route_deg)
+            roads = {1: first, 2: second}
+            for k, deg in enumerate(other_degs):
+                roads[3 + k] = road(3 + k, 100.0, deg)
+            end = second.line[-1]
+            junctions = [generator.Junction(first, second, first.length, 0.0, 0.0, 100.0, 0.0),
+                         generator.Junction(second, first, second.length, 0.0, end[0], end[2], 0.0)]
+            points = first.line + second.line[1:]
+            events = generator.junction_events(points, [first, second], junctions, roads)
+            maneuvers, facts = generator.maneuvers_of(points, events)
+            self.assertEqual(len(maneuvers), 1, maneuvers)
+            return maneuvers[0]["type"], facts[0]
+
+        kind, fact = fork(31.0, [63.0])                 # e133_132's case: the less sharp of two right branches
+        self.assertEqual((kind, fact["geometric_type"]), ("straight", "right"))
+        self.assertAlmostEqual(fact["route_branch_deg"], 31.0, delta=0.1)
+        self.assertEqual(fact["branches"][0][0], 3)
+        self.assertAlmostEqual(fact["branches"][0][1], 63.0, delta=0.1)
+        self.assertEqual(fork(63.0, [31.0])[0], "right")            # the sharper one stays right
+        self.assertEqual(fork(-31.0, [-63.0])[0], "straight")       # the same on the left
+        self.assertEqual(fork(-63.0, [-31.0])[0], "left")
+        self.assertEqual(fork(40.0, [63.0])[0], "right")            # beyond 35 deg: right / right, d_man tells
+        self.assertEqual(fork(63.0, [40.0])[0], "right")
+        self.assertEqual(fork(31.0, [-60.0])[0], "right")           # a single right turn: unchanged
+        self.assertEqual(fork(31.0, [63.0, -10.0])[0], "right")     # 3 is straighter than the route: unchanged
+        self.assertEqual(fork(20.0, [63.0])[0], "straight")         # geometrically straight already
+        self.assertEqual(generator.same_side_type("right", 31.0, []), "right")
+        self.assertEqual(generator.same_side_type("right", 35.0, [63.0]), "straight")      # within +-35 inclusive
+        self.assertEqual(generator.same_side_type("right", 35.1, [63.0]), "right")
+        self.assertEqual(generator.same_side_type("right", 31.0, [31.0]), "right")         # a tie: not the closest
 
     def test_on_the_engine_road_surface_and_right_lane(self):
         # every engine road at its reported width, connectors 1 m (no width inherited from the roads they join)

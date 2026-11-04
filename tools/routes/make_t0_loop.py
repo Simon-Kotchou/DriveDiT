@@ -82,10 +82,20 @@ Checks before anything is written (exit 2 and nothing written when one fails):
 Maneuvers come from the ENGINE graph only (decoder-only roads such as Type 255 pieces and trails never appear): a
 junction is where another engine road wider than a connector has an end within ARM_TOL_M of a loop road's used
 piece, or where a loop road continues past a junction point with the next loop road; junction events closer than
-MANEUVER_MERGE_M along the route are one junction. Its type is the route's own heading change from TURN_SPAN_M before
-to TURN_SPAN_M after it: left or right from MANEUVER_STRAIGHT_DEG on, else straight. junction_id is "e" and the
-dump's road_idx joined by "_": the loop road arriving, the loop road leaving (when it differs) and the other engine
-roads meeting there, ascending. Stops: the one route_end at the route end (nav_v1).
+MANEUVER_MERGE_M along the route are one junction. Its geometric type is the route's own heading change from
+TURN_SPAN_M before to TURN_SPAN_M after it: left or right from MANEUVER_STRAIGHT_DEG on, else straight. Then the
+same-side rule (dc-2.0 freeze decision D-E, review finding R-3, adopted 2026-11-03): every branch leaving the junction
+gets a turn angle, the heading of its chord over its first TURN_SPAN_M from the junction point (shorter when the road
+is) relative to the arrival, the route's chord over the TURN_SPAN_M before its first junction event. The route's own
+branch is measured on the route from its last junction event; an arm along its engine road centreline from its end
+at the loop; a loop road going on past a junction point from that point, the way the route does not take. When
+another branch turns to the same side as the route's branch, the route's branch is the one closest to straight on
+(strictly, among all the branches of the junction) and it turns by SAME_SIDE_STRAIGHT_DEG or less, the maneuver is
+straight; otherwise the geometric type stays (left / right: d_man disambiguates). The rule only ever changes left or
+right into straight. At e133_132 the route follows 133 (+22 deg by these chords) while side road 132 turns +54 deg:
+straight (it was right). junction_id is "e" and the dump's road_idx joined by "_": the loop road arriving, the loop
+road leaving (when it differs) and the other engine roads meeting there, ascending. Stops: the one route_end at the
+route end (nav_v1).
 
 Output: the route's canonical JSON (drivedit_nav.canonical_json: sorted keys, no whitespace, ASCII) and one LF, so
 the sha256 of the file without its final LF is drivedit_nav's Route.sha256; DC_ExpertHL computes episodes.route_sha256
@@ -112,7 +122,7 @@ if REPO not in sys.path:
 import drivedit_nav  # noqa: E402  (the route schema and its validator, DD-11-min)
 
 GENERATOR = "tools/routes/make_t0_loop.py"
-GENERATOR_VERSION = 3              # 3: the lane corridor per road (source.lane_corridor_*)
+GENERATOR_VERSION = 4              # 3: the lane corridor per road (source.lane_corridor_*); 4: the same-side rule (D-E)
 ROUTE_ID = "arland_t0_loop"
 MAP_ID = "arland"
 SPLIT = "train"
@@ -171,8 +181,15 @@ MIN_TURN_RAD = 0.2              # DD-5-min C17: below this much turning the L/R 
 MIRROR_DEV_MIN = 0.35           # C17 fails a route whose left share differs by more than 0.25; keep a margin
 ARM_TOL_M = 6.0                 # an engine road end this close to a loop road's piece is a junction arm
 MANEUVER_MERGE_M = 15.0
-TURN_SPAN_M = 20.0
+TURN_SPAN_M = 20.0              # the route's turn: over this far each side; a branch's heading: over its first this far
 MANEUVER_STRAIGHT_DEG = 30.0
+# Same-side rule, dc-2.0 freeze decision D-E (R-3 of the DD-7-min review), adopted by the user on 2026-11-03: when
+# another branch of a junction turns to the same side as the route's branch, the route's branch is typed straight if it
+# is the branch closest to straight on and its turn angle is within +-SAME_SIDE_STRAIGHT_DEG (module docstring)
+SAME_SIDE_STRAIGHT_DEG = 35.0
+SAME_SIDE_RULE = ("dc-2.0 freeze D-E (2026-11-03): branch turn angles are chords over turn_span_m from the junction "
+                  "point against the route's arrival chord; when another branch turns to the route's side, the route's "
+                  "branch is straight if it is the closest to straight on and within same_side_straight_within_deg")
 TRAIL_TOUCH_M = 6.0
 TRAIL_END_M = 8.0               # a trail ending within this of the route ends on its road: a touch, not a crossing
 CUT_EPS_M = 1e-6                # segments this close meet; meeting points this close along a trail are one
@@ -480,6 +497,19 @@ def direction_at(line, s_values, s, ahead):
     else:
         a, b = point_at(line, s_values, s - TANGENT_SPAN_M), point_at(line, s_values, s)
     return unit(b[0] - a[0], b[2] - a[2])
+
+
+def chord_heading(line, s_values, s_from, s_to):
+    """Heading of the chord of a polyline from arc length s_from to s_to (each clamped to the line)."""
+    a, b = point_at(line, s_values, s_from), point_at(line, s_values, s_to)
+    return heading(unit(b[0] - a[0], b[2] - a[2]))
+
+
+def branch_heading(road, s_from, forward):
+    """Heading of the branch of an engine road that leaves arc length s_from towards larger arc lengths (forward) or
+    smaller ones: the chord of its centreline over its first TURN_SPAN_M, less where the road ends sooner."""
+    s_to = min(s_from + TURN_SPAN_M, road.length) if forward else max(s_from - TURN_SPAN_M, 0.0)
+    return chord_heading(road.line, road.s, s_from, s_to)
 
 
 def resample_closed(points, step):
@@ -861,26 +891,33 @@ def used_ranges(legs, junctions):
 
 def junction_events(points, legs, junctions, roads):
     """The junction events of the loop in the engine graph, in route order: dicts with s (on the route), x, z, the
-    loop roads in (arriving) and out (leaving), arms (other engine roads meeting there) and leg (True for a junction
-    point between consecutive loop roads). Arms: an engine road wider than a connector, not a loop road, with an end
-    within ARM_TOL_M of a loop road's used piece; at a junction point, a loop road that continues past it (the point
-    farther than ARM_TOL_M from both of its ends)."""
+    loop roads in (arriving) and out (leaving), arms (other engine roads meeting there), branches ([(road_idx,
+    heading)] of the branches the route does not take, branch_heading) and leg (True for a junction point between
+    consecutive loop roads). Arms: an engine road wider than a connector, not a loop road, with an end within ARM_TOL_M
+    of a loop road's used piece (its branch leaves from that end); at a junction point, a loop road that continues past
+    it (the point farther than ARM_TOL_M from both of its ends; its branch is the part the route does not drive: the
+    arriving road on beyond the point, the leaving road back from it)."""
     s = arc_lengths(points)
     used = used_ranges(legs, junctions)
     events = []
-    for junction in junctions:
+    for i, junction in enumerate(junctions):
         arms = set()
-        for road, s_j in ((junction.road_a, junction.s_a), (junction.road_b, junction.s_b)):
+        branches = []
+        before, after = junctions[i - 1], junctions[(i + 1) % len(junctions)]
+        # road a is driven from before.s_b to s_a and goes on the same way; road b is driven from s_b to after.s_a
+        for road, s_j, forward in ((junction.road_a, junction.s_a, junction.s_a > before.s_b),
+                                   (junction.road_b, junction.s_b, junction.s_b > after.s_a)):
             if not road.connector and ARM_TOL_M < s_j < road.length - ARM_TOL_M:
                 arms.add(road.idx)
+                branches.append((road.idx, branch_heading(road, s_j, forward)))
         s_r, _, _ = project(points, s, junction.x, junction.z)
         events.append({"s": s_r, "x": junction.x, "z": junction.z, "in": junction.road_a, "out": junction.road_b,
-                       "arms": arms, "leg": True})
+                       "arms": arms, "branches": branches, "leg": True})
     grid = SegmentGrid([(idx, roads[idx].line) for idx in sorted(used)])
     for road in sorted(roads.values(), key=lambda r: r.idx):
         if road.connector or road.idx in used:
             continue
-        for end in (road.line[0], road.line[-1]):
+        for end, s_end in ((road.line[0], 0.0), (road.line[-1], road.length)):
             near = []
             for li, (d, si, t) in grid.near(end[0], end[2], ARM_TOL_M).items():
                 leg = roads[grid.lines[li][0]]
@@ -891,16 +928,32 @@ def junction_events(points, legs, junctions, roads):
                 leg = roads[min(near)[1]]
                 s_r, _, _ = project(points, s, end[0], end[2])
                 events.append({"s": s_r, "x": end[0], "z": end[2], "in": leg, "out": leg, "arms": {road.idx},
-                               "leg": False})
+                               "branches": [(road.idx, branch_heading(road, s_end, s_end == 0.0))], "leg": False})
     events.sort(key=lambda e: (e["s"], not e["leg"]))
     return events
+
+
+def same_side_type(kind, route_deg, branch_degs):
+    """The maneuver type after the same-side rule (D-E, SAME_SIDE_STRAIGHT_DEG): kind is the geometric type, route_deg
+    the turn angle of the route's branch and branch_degs those of the junction's other branches (right positive).
+    A left or right maneuver becomes straight when another branch turns to the same side as the route's branch, the
+    route's branch is strictly the closest to straight on of all of them and it turns by SAME_SIDE_STRAIGHT_DEG or
+    less; every other maneuver keeps its geometric type."""
+    if kind == "straight" or abs(route_deg) > SAME_SIDE_STRAIGHT_DEG:
+        return kind
+    if not any(deg * route_deg > 0 for deg in branch_degs):
+        return kind                                 # alone on its side
+    if all(abs(route_deg) < abs(deg) for deg in branch_degs):
+        return "straight"
+    return kind
 
 
 def maneuvers_of(points, events):
     """(maneuvers, junction facts): events closer than MANEUVER_MERGE_M along the route are one junction; a junction
     with at least one arm is a maneuver at the middle of its events, typed by the route's heading change from
-    TURN_SPAN_M before its first event to TURN_SPAN_M after its last one; its roads in and out are those of its
-    junction points between loop roads (connectors skipped), else the loop road its arm meets."""
+    TURN_SPAN_M before its first event to TURN_SPAN_M after its last one, then by same_side_type on the turn angles of
+    its branches (module docstring); its roads in and out are those of its junction points between loop roads
+    (connectors skipped), else the loop road its arm meets."""
     s = arc_lengths(points)
     clusters = []
     for event in events:
@@ -917,11 +970,16 @@ def maneuvers_of(points, events):
         before = direction_at(points, s, max(s_first - TURN_SPAN_M + TANGENT_SPAN_M, TANGENT_SPAN_M), False)
         after = direction_at(points, s, min(s_last + TURN_SPAN_M - TANGENT_SPAN_M, s[-1] - TANGENT_SPAN_M), True)
         turn = math.degrees(wrap(heading(after) - heading(before)))
-        kind = "straight"
+        geometric = "straight"
         if turn >= MANEUVER_STRAIGHT_DEG:
-            kind = "right"
+            geometric = "right"
         elif turn <= -MANEUVER_STRAIGHT_DEG:
-            kind = "left"
+            geometric = "left"
+        # the turn angles of the branches: chords over TURN_SPAN_M from the junction against the arrival chord
+        arrival = chord_heading(points, s, max(s_first - TURN_SPAN_M, 0.0), s_first)
+        route_deg = math.degrees(wrap(chord_heading(points, s, s_last, min(s_last + TURN_SPAN_M, s[-1])) - arrival))
+        branches = [(idx, math.degrees(wrap(h - arrival))) for e in cluster for idx, h in e["branches"]]
+        kind = same_side_type(geometric, route_deg, [deg for _, deg in branches])
         joins = [e for e in cluster if e["leg"]] or cluster       # the loop roads the junction joins, else the arm's
         road_in = next((e["in"] for e in joins if not e["in"].connector), joins[0]["in"]).idx
         road_out = next((e["out"] for e in reversed(joins) if not e["out"].connector), joins[-1]["out"]).idx
@@ -932,6 +990,8 @@ def maneuvers_of(points, events):
         junction_id = "e" + "_".join(str(i) for i in ids)
         maneuvers.append({"s_m": round(s_m, 3), "type": kind, "junction_id": junction_id})
         facts.append({"junction_id": junction_id, "s_m": round(s_m, 1), "turn_deg": round(turn, 1),
+                      "geometric_type": geometric, "route_branch_deg": round(route_deg, 1),
+                      "branches": [[idx, round(deg, 1)] for idx, deg in branches],
                       "x": round(cluster[0]["x"], 1), "z": round(cluster[0]["z"], 1)})
     return maneuvers, facts
 
@@ -1121,7 +1181,12 @@ def build_route(dump_path, splits_path, layer_path):
             "start_along_m": START_ALONG_M,
             "smoothing": {"step_m": SMOOTH_STEP_M, "max_shift_m": SMOOTH_MAX_SHIFT_M},
             "maneuver_rule": {"arm_tol_m": ARM_TOL_M, "merge_m": MANEUVER_MERGE_M, "turn_span_m": TURN_SPAN_M,
-                              "straight_below_deg": MANEUVER_STRAIGHT_DEG},
+                              "straight_below_deg": MANEUVER_STRAIGHT_DEG,
+                              "same_side_straight_within_deg": SAME_SIDE_STRAIGHT_DEG,
+                              "same_side_rule": SAME_SIDE_RULE},
+            "maneuver_branches": [{"junction_id": f["junction_id"], "turn_deg": f["turn_deg"],
+                                   "geometric_type": f["geometric_type"], "route_branch_deg": f["route_branch_deg"],
+                                   "branches": f["branches"]} for f in junction_facts],
             "inputs": {
                 "splits": {"name": os.path.basename(splits_path), "sha256": sha256_file(splits_path),
                            "status": (train_rule[2].split() or ["unknown"])[0]},
@@ -1193,8 +1258,11 @@ def main(argv=None):
     print("  TRAIN of %s (status %s)" % (os.path.basename(args.splits), route["source"]["inputs"]["splits"]["status"]))
     for fact in facts["junctions"]:
         kind = next(m["type"] for m in route["maneuvers"] if m["junction_id"] == fact["junction_id"])
-        print("  maneuver s %.1f m %s %s (route turn %+.1f deg)" % (fact["s_m"], kind, fact["junction_id"],
-                                                                    fact["turn_deg"]))
+        print("  maneuver s %.1f m %s %s (route turn %+.1f deg%s; branches: route %+.1f, %s)" % (
+            fact["s_m"], kind, fact["junction_id"], fact["turn_deg"],
+            "" if kind == fact["geometric_type"] else ": geometric %s, %s by the same-side rule" % (
+                fact["geometric_type"], kind),
+            fact["route_branch_deg"], ", ".join("%d %+.1f" % (idx, deg) for idx, deg in fact["branches"])))
     if trail_facts is not None:
         print("  decoder trails: none crosses the loop; trails ending on its roads or within %.0f m: %s" % (
             TRAIL_TOUCH_M, ", ".join("%d at %.2f m" % t for t in trail_facts) or "none"))

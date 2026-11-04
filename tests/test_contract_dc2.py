@@ -42,8 +42,8 @@ SPEC_MD = os.path.join(CONTRACT_DIR, "dc-2.0.md")
 STREAMS_JSON = os.path.join(CONTRACT_DIR, "dc-2.0.streams.json")
 FEATURES_JSON = os.path.join(CONTRACT_DIR, "features_v1.json")
 
-STATUS_LINE = ("Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision "
-               "D15 adopted 2026-10-22")
+STATUS_LINE = ("Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section "
+               "16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22")
 T0ENG = "docs/trials/T0-ENG.md"
 
 FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -328,7 +328,8 @@ def md_tables(text):
     tables = {}
     lines = text.split("\n")
     for i, line in enumerate(lines):
-        m = re.match(r"^<!-- dc2:(fields (stream|derived|file)=(\S+)|tbd|tensors|payloads) -->$", line.strip())
+        m = re.match(r"^<!-- dc2:(fields (stream|derived|file)=(\S+)|tbd|tensors|payloads|changelog) -->$",
+                     line.strip())
         if not m:
             continue
         key = (m.group(2), m.group(3)) if m.group(2) else (m.group(1), "")
@@ -706,6 +707,23 @@ class StreamSchemaTest(unittest.TestCase):
     def test_status_line(self):
         self.assertEqual(self.spec.split("\n")[2], STATUS_LINE)
         self.assertEqual("Status: " + self.schema["status"], STATUS_LINE)
+        self.assertTrue(self.schema["status"].startswith("FROZEN"))         # data/dc2/reader.py Schema.frozen
+
+    def test_changelog(self):
+        """The freeze changelog (section 16): every decision with its date and evidence; the JSON twin carries it."""
+        log = self.spec[self.spec.index("## 16. Changelog"):]
+        rows = md_tables(self.spec).get(("changelog", ""))
+        self.assertIsNotNone(rows)
+        self.assertEqual([r[0] for r in rows], [c["id"] for c in self.schema["changelog"]])
+        for r, c in zip(rows, self.schema["changelog"]):
+            self.assertEqual(r[1:4], [c["date"], c["decision"], c["evidence"]], c["id"])
+            self.assertTrue(c["evidence"].strip() and c["date"].startswith("2026-"), c["id"])
+        ids = [c["id"] for c in self.schema["changelog"]]
+        for want in ("D-A", "D-B", "D-C", "D-D", "D-E", "TBD-3", "TBD-4", "TBD-5", "TBD-6", "TBD-7", "FIDUCIAL",
+                     "CAPTURE-PHASE", "FREEZE"):
+            self.assertIn(want, ids)
+        self.assertIn("2026-11-04", log)
+        self.assertIn("dc-2.x", self.spec[self.spec.index("## 0. How to read this"):self.spec.index("## 1. ")])
 
     def test_session_id_rule(self):
         rx = re.compile(self.schema["session"]["id_regex"])

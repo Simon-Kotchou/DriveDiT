@@ -1522,7 +1522,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	{
 		m_bReadinessDone = true;
 		GetGame().GetCallqueue().Remove(CheckReadiness);
-		Print(errorMessage, LogLevel.ERROR);
+		PrintText(errorMessage, LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Prints a line held in a string variable as plain text at the given level. Print of a variable logs the
+	//! declaration with it ("string message = '...'", Print(void var), Core/proto/EnDebug.c:7); a string.Format result
+	//! is a value, which Print logs as the text alone, like every other director line.
+	protected void PrintText(string message, LogLevel level)
+	{
+		Print(string.Format("%1", message), level);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1846,7 +1855,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 
 		state.m_sWatchdogNote = key;
-		Print(message, level);
+		PrintText(message, level);
 	}
 
 	//------------------------------------------------------------------------------------------------

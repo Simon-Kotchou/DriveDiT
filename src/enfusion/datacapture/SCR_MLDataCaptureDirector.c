@@ -170,6 +170,7 @@ class SCR_MLDataCaptureGroupState : Managed
 	bool m_bReadyLogged;			//!< the "driver ready" line was logged (during the boarding window)
 	bool m_bLateWarned;				//!< the "ready after the boarding window, not in the session" warning was logged
 	bool m_bRegistered;				//!< registered with SCR_MLDataCollector
+	int m_iCollectorSlot = -1;		//!< its collector vehicle id (registration index), kept for when the entity is gone
 	float m_fDistanceAtRegistration;	//!< m_fDistance when the vehicle was registered (for the driving check)
 	float m_fNextAssignAtMs = -1;	//!< world time at which the next waypoint is due, -1 = none pending
 	bool m_bNoTargetWarned;			//!< the "no drive target qualifies" warning was logged since the last assignment
@@ -1776,6 +1777,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		{
 			m_Collector.RegisterVehicle(readyState.m_Vehicle);
 			readyState.m_bRegistered = true;
+			readyState.m_iCollectorSlot = m_Collector.GetVehicleSlot(readyState.m_Vehicle);
 			readyState.m_fDistanceAtRegistration = readyState.m_fDistance;
 
 			int targetId = readyState.GetCurrentTargetId();
@@ -2306,12 +2308,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		// No more telemetry rows for a retired car, without renumbering the other vehicle ids (and the camera moves on
 		// if it followed this car).
+		// By the kept vehicle id, so it works when the vehicle entity is already gone (finding 2).
 		string captureText = "not in the collector session";
-		if (state.m_bRegistered && m_Collector && state.m_Vehicle)
+		if (state.m_bRegistered && m_Collector)
 		{
-			captureText = "collector slot kept but no longer captured";
-			if (!m_Collector.DeactivateVehicle(state.m_Vehicle, string.Format("group %1 retired: %2", state.m_iGroupId, reason)))
-				captureText = "collector does not know the car";
+			captureText = string.Format("collector slot V%1 kept but no longer captured", state.m_iCollectorSlot);
+			if (!m_Collector.DeactivateVehicleSlot(state.m_iCollectorSlot, string.Format("group %1 retired: %2", state.m_iGroupId, reason)))
+				captureText = string.Format("collector has no vehicle id %1", state.m_iCollectorSlot);
 		}
 
 		string groupText = "AI group already gone";

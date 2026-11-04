@@ -227,6 +227,7 @@ class SCR_AnchorFrameSelector: ScriptComponent
     protected int m_iCurrentFrameId;
     protected int m_iLastAnchorFrame;
     protected int m_iFramesSinceLastAnchor;
+    protected int m_iSegmentStartFrame;     // first frame of the current trajectory segment (StartNewSegment)
 
     // Vehicle state tracking
     protected float m_fCurrentSpeed;
@@ -276,6 +277,7 @@ class SCR_AnchorFrameSelector: ScriptComponent
         m_iCurrentFrameId = 0;
         m_iLastAnchorFrame = -m_iMinAnchorSpacing; // Allow immediate first anchor
         m_iFramesSinceLastAnchor = m_iMinAnchorSpacing;
+        m_iSegmentStartFrame = 0;
 
         m_fCurrentSpeed = 0;
         m_fPreviousSpeed = 0;
@@ -349,6 +351,7 @@ class SCR_AnchorFrameSelector: ScriptComponent
         // Reset state
         m_iCurrentFrameId = 0;
         m_iLastAnchorFrame = -m_iMinAnchorSpacing;
+        m_iSegmentStartFrame = 0;
         m_aAnchorFrames.Clear();
         m_AnchorCounts.Clear();
 
@@ -844,9 +847,12 @@ class SCR_AnchorFrameSelector: ScriptComponent
                 break;
         }
 
-        // Ensure context window doesn't exceed available frames
-        if (anchor.m_iContextWindow > anchor.m_iFrameId)
-            anchor.m_iContextWindow = anchor.m_iFrameId;
+        // Ensure context window doesn't exceed available frames: those of the current segment (StartNewSegment)
+        int availableFrames = anchor.m_iFrameId - m_iSegmentStartFrame;
+        if (availableFrames < 0)
+            availableFrames = 0;
+        if (anchor.m_iContextWindow > availableFrames)
+            anchor.m_iContextWindow = availableFrames;
     }
 
     //------------------------------------------------------------------------
@@ -937,6 +943,74 @@ class SCR_AnchorFrameSelector: ScriptComponent
         {
             file.WriteLine(anchor.ToCSVRow());
             file.Close();
+        }
+    }
+
+    //------------------------------------------------------------------------
+    // Start a new trajectory segment at cutFrame (MLDataCollector: the vehicle the frames follow changed, or no
+    // vehicle is left). The temporal state is reset as at OnPostInit, so the next vehicle is never compared with the
+    // previous one (speed, steering, stopped state, quality history), and no anchor follows within the minimum
+    // spacing. No anchor window crosses the cut: earlier anchors' rollout horizons end before cutFrame (anchors.csv is
+    // rewritten with them) and later anchors' context windows start at cutFrame (SetAnchorHorizons).
+    void StartNewSegment(int cutFrame, string reason)
+    {
+        if (!m_bSessionInitialized)
+            return;
+
+        m_iSegmentStartFrame = cutFrame;
+        m_iFramesSinceLastAnchor = 0;
+        m_eCurrentState = SCR_DrivingContextState.UNKNOWN;
+        m_ePreviousState = SCR_DrivingContextState.UNKNOWN;
+        m_fStateEntryTime = 0;
+        m_fCurrentSpeed = 0;
+        m_fPreviousSpeed = 0;
+        m_fCurrentSteering = 0;
+        m_fPreviousSteering = 0;
+        m_vCurrentPosition = vector.Zero;
+        m_vPreviousPosition = vector.Zero;
+        m_fStopStartTime = 0;
+        m_bWasStopped = false;
+        m_iCurrentRoadType = -1;
+        m_iPreviousRoadType = -1;
+        m_bNearJunction = false;
+        m_bWasNearJunction = false;
+        m_fJunctionEntryTime = 0;
+        m_fCurrentQualityScore = 1.0;
+        m_aRecentSpeeds.Clear();
+        m_aRecentSteerings.Clear();
+
+        int clipped = 0;
+        foreach (SCR_AnchorFrameMetadata earlierAnchor : m_aAnchorFrames)
+        {
+            int room = cutFrame - 1 - earlierAnchor.m_iFrameId;
+            if (room < 0)
+                room = 0;
+            if (earlierAnchor.m_iRolloutHorizon > room)
+            {
+                earlierAnchor.m_iRolloutHorizon = room;
+                clipped++;
+            }
+        }
+
+        if (clipped > 0)
+            RewriteAnchorFile();
+
+        Print("[AnchorFrameSelector] WARNING: new segment from frame " + cutFrame.ToString() + " (" + reason + "): temporal state reset, " + clipped.ToString() + " earlier anchors' rollout horizons clipped to end before frame " + cutFrame.ToString() + ", later context windows start there", LogLevel.WARNING);
+    }
+
+    //------------------------------------------------------------------------
+    // Write anchors.csv again from the anchors held in memory (StartNewSegment changed some of them)
+    protected void RewriteAnchorFile()
+    {
+        if (!WriteAnchorHeader())
+        {
+            Print("[AnchorFrameSelector] ERROR: cannot rewrite " + m_sAnchorsFilePath, LogLevel.ERROR);
+            return;
+        }
+
+        foreach (SCR_AnchorFrameMetadata storedAnchor : m_aAnchorFrames)
+        {
+            WriteAnchorToFile(storedAnchor);
         }
     }
 

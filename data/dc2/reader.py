@@ -40,11 +40,19 @@ held unchanged over the window (same hl_seq and hl_*), a valid image of the same
 between the image's last physics step and P_t + N. Segments are the maximal runs of wm-valid, non-warm-up decision
 steps of one episode, so they split at gaps, episode boundaries and masks.
 
+Crash events (section 9.5.1): the rows of the kinds that event_payloads defines are parsed into Session.crash_events
+(payload values typed by their key spec, with the problems C36 reports). The first terminal ego event of an episode
+(a collision with src dv or dv_contact, a veh_damage with a state other than undamaged or movement_damage >= 1, a
+veh_fire_start, a rollover; ordered by onset_step for a collision, else physics_step) is Session.terminal_ego[e]; a
+decision step whose window (P_t, P_t + N] contains or follows its step is not policy-valid (wm_valid unchanged:
+crash dynamics are world-model data).
+
 Files: every file the reader opens (stream directories, chunks, session files, images) must resolve inside the
 session directory (symlinks followed), and img.path must be exactly frames/f_<slot_id:08d> (TBD-4); anything else
 is a C01 (outside) or C11 (path) problem and is not read.
 
-The seal (session_end.json, sections 5.3, 8 and 10.2): status ok with a non-error end_reason (C01), contract_version
+The seal (session_end.json, sections 5.3, 8 and 10.2): status ok with a non-error end_reason (C01; ego_destroyed is
+a normal end), contract_version
 dc-2.0 and episodes equal to the committed episodes rows (C01); the committed ctl, telemetry and hf rows reach the
 session end (end.physics_step, end.render_frame: C34), so a lost or truncated tail is seen.
 
@@ -85,9 +93,10 @@ CHUNK_RE = re.compile(r"^chunk_([0-9]{5})\.csv$")
 INT_RE = re.compile(r"-?[0-9]+")
 FLOAT_RE = re.compile(r"-?[0-9]+(\.[0-9]+)?")     # '.' decimal point, no exponent; nan and inf never match
 EDEN_ROOT_RE = re.compile(r"^(\{[0-9A-Fa-f]+\})?worlds/eden/", re.IGNORECASE)   # every Eden-rooted world is Everon
-# session_end.json end_reason values that end a session in error (section 5.3); duration, stop and dc_stop are
-# the normal endings.
+# session_end.json end_reason values that end a session in error (section 5.3); duration, stop, dc_stop and
+# ego_destroyed (the ego was destroyed after the first row: a crash is valid data, status ok) are the normal endings.
 ERROR_END_REASONS = ("script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost")
+TERMINAL_COLLISION_SRC = ("dv", "dv_contact")     # src contact is a hit below the detector: never terminal (9.5.1)
 STRICT_FATAL = ("C01", "C02", "C05", "C07", "C34")
 HL_COLUMNS = ("hl_seq", "hl_kappa", "hl_accel", "hl_dir")
 
@@ -97,12 +106,12 @@ DERIVED_SOURCES = {
     "ctl": ("physics_step", "world_time_ms", "episode_id", "mode", "driver", "hl_seq", "hl_kappa", "hl_accel",
             "hl_dir", "exp_kappa_now", "exp_accel_now", "exp_dir_now", "llc_steer_lim", "llc_throttle", "llc_brake",
             "input_post_steer", "react_visible"),
-    "telemetry": ("physics_step", "world_time_ms", "episode_id", "fwd_x", "fwd_z", "vel_local_x", "vel_local_z",
-                  "angvel_local_y", "acc_local_x", "acc_local_z", "gear"),
+    "telemetry": ("physics_step", "world_time_ms", "episode_id", "ego_slot_id", "fwd_x", "fwd_z", "vel_local_x",
+                  "vel_local_z", "angvel_local_y", "acc_local_x", "acc_local_z", "gear"),
     "hf": ("render_frame", "world_time_ms", "last_physics_step", "paused"),
     "img": ("slot_id", "issue_status", "issue_render_frame", "path"),
-    "events": ("event_seq", "physics_step", "world_time_ms", "kind"),
-    "episodes": ("episode_id",),
+    "events": ("event_seq", "episode_id", "physics_step", "world_time_ms", "kind", "veh_slot_id", "payload"),
+    "episodes": ("episode_id", "ego_slot_id"),
 }
 
 Problem = collections.namedtuple("Problem", "check where message")
@@ -158,6 +167,7 @@ class Schema:
         self.commit_name = self.raw["session"]["commit_name"]
         self.frames_dir = self.raw["session"]["frames_dir"]
         self.tbd = {t["id"]: t for t in self.raw["tbd_by_probe"]}
+        self.payloads = self.raw.get("event_payloads", {}).get("kinds", {})
         self.check_columns()
 
     def fields(self, stream):
@@ -594,6 +604,7 @@ class Session:
     images                   img_resolved rows (one per img row, in img order)
     ctl_export, telemetry_export   per-row derived views (dicts of numpy arrays)
     decisions                decision samples (list of dicts; see _build_decisions)
+    crash_events, terminal_ego   parsed crash-event rows and each episode's first terminal ego event (9.5.1)
     segments                 list of {episode_id, first_decision_step, last_decision_step, n_steps}
     problems                 list of Problem (check, where, message)
     salvageable              the problems that salvage=True excuses (an unsealed or failed seal and its tail)
@@ -612,6 +623,8 @@ class Session:
         self.streams = {}
         self.images = []
         self.vehicle_card = None
+        self.crash_events = []
+        self.terminal_ego = {}
 
     # -- small helpers --------------------------------------------------------------------------
     def meta_get(self, dotted, default=None):
@@ -767,6 +780,7 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
     _build_exports(s)
     _build_hf_joins(s)
     _resolve_images(s, decode_images, image_visitor)
+    _read_crash_events(s)
     _build_decisions(s)
     return s
 
@@ -1084,6 +1098,123 @@ def _event_times(s, kinds):
             for i in range(len(ev)) if ev.data["kind"][i] in kinds]
 
 
+# ------------------------------------------------------------------------------------------------
+# Crash events (section 9.5.1)
+# ------------------------------------------------------------------------------------------------
+def parse_payload(text):
+    """[(key, value text)] of an events.payload: 'key=value' pairs joined by ';' (section 9.5); None or '' is [].
+    Raises ValueError for a pair without '=', an empty key or value (a key without a value is left out, 9.5.1)."""
+    if not text:
+        return []
+    pairs = []
+    for part in text.split(";"):
+        if "=" not in part:
+            raise ValueError("pair %r has no '='" % part)
+        key, value = part.split("=", 1)
+        if not key or value == "":
+            raise ValueError("pair %r has an empty key or value" % part)
+        pairs.append((key, value))
+    return pairs
+
+
+def payload_value(spec, text):
+    """Typed value of one payload key (event_payloads key spec); ValueError when it does not parse."""
+    t = spec["type"]
+    if t == "int":
+        return _conv_int(text)
+    if t == "float":
+        return _conv_float(text)
+    if t == "bool":
+        return _conv_bool(text)
+    if "=" in text or ";" in text or "," in text or '"' in text:
+        raise ValueError("%r holds a separator" % text)
+    if t == "enum" and text not in spec["enum"]:
+        raise ValueError("%r is not one of %s" % (text, ", ".join(spec["enum"])))
+    return text
+
+
+def check_payload(kind, text, payloads):
+    """(values, problems) of one events row of a kind in event_payloads: values {key: typed value} of the keys that
+    parse; problems name a payload that does not split, a repeated or unknown key, a missing required key and a
+    value that does not parse as its type or enum (C36)."""
+    keys = {k["key"]: k for k in payloads[kind]}
+    try:
+        pairs = parse_payload(text)
+    except ValueError as e:
+        return {}, ["payload %r: %s" % (text, e)]
+    values, problems, seen = {}, [], set()
+    for key, value in pairs:
+        if key in seen:
+            problems.append("key %s repeated" % key)
+            continue
+        seen.add(key)
+        if key not in keys:
+            problems.append("key %s is not a %s key" % (key, kind))
+            continue
+        try:
+            values[key] = payload_value(keys[key], value)
+        except ValueError as e:
+            problems.append("key %s: %s" % (key, e))
+    for key, spec in keys.items():
+        if spec["required"] and key not in seen:
+            problems.append("required key %s missing" % key)
+    return values, problems
+
+
+def terminal_reason(kind, values):
+    """The episodes.termination_reason an ego crash event makes ('collision', 'rollover'), or None (9.5.1)."""
+    if kind == "collision":
+        return "collision" if values.get("src") in TERMINAL_COLLISION_SRC else None
+    if kind == "veh_damage":
+        immobile = values.get("movement_damage") is not None and values["movement_damage"] >= 1.0
+        state = values.get("state")
+        return "collision" if (state is not None and state != "undamaged") or immobile else None
+    if kind == "veh_fire_start":
+        return "collision"
+    if kind == "rollover":
+        return "rollover"
+    return None
+
+
+def ego_slots(s):
+    """The ego slot ids of the session (telemetry and episodes; one per session in dc-2.0)."""
+    slots = set(v for v in s.streams["telemetry"].col("ego_slot_id") if v is not None)
+    slots |= set(v for v in s.streams["episodes"].col("ego_slot_id") if v is not None)
+    return slots
+
+
+def _read_crash_events(s):
+    """Session.crash_events: one dict per events row of a kind in event_payloads, in row order: event_seq, episode_id,
+    physics_step, world_time_ms, kind, veh_slot_id, values, problems, step (onset_step of a collision when it parses,
+    else physics_step), ego (the row names an ego slot) and terminal (terminal_reason of an ego row). terminal_ego:
+    {episode_id: the episode's first terminal ego event by step}."""
+    ev = s.streams["events"]
+    payloads = s.schema.payloads
+    egos = ego_slots(s)
+    s.crash_events = []
+    for i in range(len(ev)):
+        kind = ev.data["kind"][i]
+        if kind not in payloads:
+            continue
+        values, problems = check_payload(kind, ev.data["payload"][i], payloads)
+        step = ev.data["physics_step"][i]
+        if kind == "collision" and isinstance(values.get("onset_step"), int):
+            step = values["onset_step"]
+        ego = ev.data["veh_slot_id"][i] in egos
+        s.crash_events.append({"event_seq": ev.data["event_seq"][i], "episode_id": ev.data["episode_id"][i],
+                               "physics_step": ev.data["physics_step"][i],
+                               "world_time_ms": ev.data["world_time_ms"][i], "kind": kind,
+                               "veh_slot_id": ev.data["veh_slot_id"][i], "values": values, "problems": problems,
+                               "step": step, "ego": ego, "terminal": terminal_reason(kind, values) if ego else None})
+    s.terminal_ego = {}
+    for c in s.crash_events:
+        e = c["episode_id"]
+        if c["terminal"] is None or e is None or e < 0:
+            continue
+        if e not in s.terminal_ego or c["step"] < s.terminal_ego[e]["step"]:
+            s.terminal_ego[e] = c
+
+
 def _build_decisions(s):
     ctl, tel, hf = s.streams["ctl"], s.streams["telemetry"], s.streams["hf"]
     n = s.clocks["N"]
@@ -1106,6 +1237,7 @@ def _build_decisions(s):
     warmup_end_ms = warm[0][1] if warm else float(s.meta_get("trial.warmup_s", 0.0) or 0.0) * 1000.0
     env_ms = [w for _, w in _event_times(s, ("env_change",))]
     tele_steps = [p for p, _ in _event_times(s, ("teleport", "respawn"))]
+    crash_step = {e: c["step"] for e, c in s.terminal_ego.items()}
     s.decisions = []
     steps = ctl.data["physics_step"]
     if not steps:
@@ -1173,9 +1305,12 @@ def _build_decisions(s):
         has_label = label is not None and all(v is not None for v in label)
         wm_valid = int(complete and one_episode and held and exec_ok and obs_valid == 1 and same_episode
                        and not teleport)
+        # a crash: no decision whose action window (p, p + n] contains or follows the episode's first terminal ego
+        # event is a policy label (section 9.5.1); wm_valid keeps the crash dynamics
+        crashed = episode in crash_step and crash_step[episode] <= p + n
         policy_valid = int(c0 is not None and t0 is not None and episode is not None and episode >= 0 and has_label
                            and mode not in ("X", "A", "I", None) and obs_valid == 1 and same_episode
-                           and not react_hidden and not teleport)
+                           and not react_hidden and not teleport and not crashed)
         d = {"decision_step": p, "episode_id": episode, "hl_seq": hl_seq, "mode": mode, "world_time_ms": world,
              "state": state, "action_cmd": cmd, "action_label": label, "action_exec": exec_rows,
              "obs_valid": obs_valid,

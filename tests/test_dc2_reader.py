@@ -17,7 +17,9 @@ join ctl and telemetry; segments at gaps, episode boundaries and masks (the obs 
 between the obs and the window, react_visible at the label step); the seal (a failed status, its fields, a lost
 tail) and salvage; duplicated keys, empty chunks, img paths and files outside the session; the vehicle card hash
 and gear mapping; dc-1.0 sessions raise; Everon (incl. an Eden root world), heldout/ and SEALED paths need
-sealed_eval; C: paths are refused; enfusion_preprocessing names a missing column. Temporary sessions live under
+sealed_eval; C: paths are refused; enfusion_preprocessing names a missing column; the crash events of contract
+9.5.1 (payload parsing, the first terminal ego event, policy_valid 0 from the crash on, ego_destroyed as a normal
+seal). Temporary sessions live under
 $TMPDIR when that is on /dev/shm/ or /mnt/e/, else /dev/shm/, and are removed.
 """
 
@@ -724,6 +726,98 @@ class DefectTest(unittest.TestCase):
     def test_c_drive_paths_are_refused(self):
         with self.assertRaisesRegex(reader.ReaderError, "C: drive"):
             reader.open_session("/mnt/c/__dd5_no_such_dir__/" + GOLDEN_ID)
+
+
+class CrashTest(unittest.TestCase):
+    """Contract 9.5.1 on the crash variant of make_synthetic (episode 1 ends in a collision; the ego is destroyed in
+    the tail and the session ends with ego_destroyed, status ok)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_reader_crash_")
+        cls.out = synth.generate(os.path.join(cls.tmp, "crash"), variant="crash")
+        cls.session = reader.open_session(cls.out["session_dir"], vehicle_card=CARD)
+        cls.golden = reader.open_session(GOLDEN_DIR, vehicle_card=CARD)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_ego_destroyed_is_a_normal_seal(self):
+        s = self.session                    # strict=True raised nothing
+        self.assertEqual((s.end_get("status"), s.end_get("end_reason")), ("ok", "ego_destroyed"))
+        self.assertEqual(s.problems_for("C01"), [])
+
+    def test_crash_events_are_parsed(self):
+        s = self.session
+        self.assertEqual([c["kind"] for c in s.crash_events],
+                         ["teleport", "veh_damage", "collision", "veh_damage", "veh_fire_start"])
+        self.assertTrue(all(c["problems"] == [] for c in s.crash_events), s.crash_events)
+        collision = [c for c in s.crash_events if c["kind"] == "collision"][0]
+        ep1 = {e: i for i, e in enumerate(s.streams["episodes"].col("episode_id"))}[1]
+        end = s.streams["episodes"].col("end_physics_step")[ep1]
+        self.assertEqual(collision["values"]["onset_step"], end - 18)
+        self.assertEqual(collision["step"], end - 18)
+        self.assertEqual(collision["physics_step"], end - 6)
+        self.assertEqual((collision["values"]["src"], collision["values"]["other"]), ("dv_contact", "rock"))
+        self.assertAlmostEqual(collision["values"]["dv_mps"], 7.42)
+        self.assertEqual(collision["terminal"], "collision")
+        damage = [c for c in s.crash_events if c["kind"] == "veh_damage"]
+        self.assertEqual([c["values"]["state"] for c in damage], ["intermediary", "destroyed"])
+        self.assertEqual([c["episode_id"] for c in damage], [1, -1])
+        self.assertEqual(s.streams["episodes"].col("termination_reason")[ep1], "collision")
+
+    def test_first_terminal_ego_event(self):
+        s = self.session
+        self.assertEqual(sorted(s.terminal_ego), [1])
+        self.assertEqual(s.terminal_ego[1]["kind"], "collision")       # onset_step before the veh_damage row
+
+    def test_policy_valid_is_0_from_the_crash_on(self):
+        n = self.session.clocks["N"]
+        onset = self.session.terminal_ego[1]["step"]
+        golden = {d["decision_step"]: d["masks"] for d in self.golden.decisions}
+        checked = 0
+        for d in self.session.decisions:
+            want = dict(golden[d["decision_step"]])
+            if d["episode_id"] == 1 and onset <= d["decision_step"] + n:
+                want["policy_valid"] = 0
+                checked += want != golden[d["decision_step"]]
+            self.assertEqual(d["masks"], want, d["decision_step"])      # wm_valid and the rest unchanged
+        self.assertGreater(checked, 0)
+
+    def test_payload_parsing(self):
+        payloads = self.session.schema.payloads
+        self.assertEqual(reader.parse_payload(""), [])
+        self.assertEqual(reader.parse_payload(None), [])
+        self.assertEqual(reader.parse_payload("a=1;b=x"), [("a", "1"), ("b", "x")])
+        for bad in ("a", "a=", "=1", "a=1;;b=2"):
+            with self.assertRaises(ValueError, msg=bad):
+                reader.parse_payload(bad)
+        values, problems = reader.check_payload("driver_state", "state=dead;in_seat=0", payloads)
+        self.assertEqual((values, problems), ({"state": "dead", "in_seat": 0}, []))
+        for text, word in (("state=asleep;in_seat=0", "not one of"), ("state=dead", "required key in_seat"),
+                           ("state=dead;in_seat=0;mood=bad", "not a driver_state key"),
+                           ("state=dead;in_seat=0;state=alive", "repeated"), ("state=dead;in_seat=2", "0 or 1")):
+            _, problems = reader.check_payload("driver_state", text, payloads)
+            self.assertTrue(any(word in p for p in problems), (text, problems))
+        _, problems = reader.check_payload("rollover", "up_y=1e-3", payloads)
+        self.assertTrue(problems)                                        # no exponent (section 8)
+        self.assertEqual(reader.check_payload("veh_fire_end", "", payloads), ({}, []))
+        self.assertTrue(reader.check_payload("veh_fire_end", "fire_state=burning", payloads)[1])
+        _, problems = reader.check_payload("collision", "onset_step=4;dv_mps=5.00;v_mps=3.00;other=rock;src=dv;"
+                                           "other_prefab=a=b", payloads)
+        self.assertTrue(problems)
+
+    def test_terminal_rules(self):
+        self.assertEqual(reader.terminal_reason("collision", {"src": "dv"}), "collision")
+        self.assertIsNone(reader.terminal_reason("collision", {"src": "contact"}))
+        self.assertIsNone(reader.terminal_reason("veh_damage", {"state": "undamaged", "movement_damage": 0.3}))
+        self.assertEqual(reader.terminal_reason("veh_damage", {"state": "undamaged", "movement_damage": 1.0}),
+                         "collision")
+        self.assertEqual(reader.terminal_reason("veh_fire_start", {}), "collision")
+        self.assertEqual(reader.terminal_reason("rollover", {"up_y": 0.2}), "rollover")
+        for kind in ("driver_state", "dismount", "remount", "veh_fire_end", "stuck", "teleport"):
+            self.assertIsNone(reader.terminal_reason(kind, {}), kind)
 
 
 class LegacyGuardTest(unittest.TestCase):

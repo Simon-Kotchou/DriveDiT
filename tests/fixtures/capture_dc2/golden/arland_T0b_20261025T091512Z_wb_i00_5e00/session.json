@@ -95,6 +95,17 @@
     "img_lead_ms": 0,
     "chunk_max_s": 10.0
   },
+  "events": {
+    "collision_dv_mps": 4.0,
+    "collision_window_ms": 100,
+    "collision_peak_ms": 200,
+    "collision_refractory_ms": 1000,
+    "episode_end_wait_ms": 250,
+    "rollover_up_y": 0.5,
+    "rollover_hold_ms": 500,
+    "state_poll_ms": 100,
+    "contact_source": "vanilla_process_collision"
+  },
   "rig": {
     "rig_id": "R1-S105-synthetic-256x240",
     "rig_name": "R1-S105",

@@ -2,7 +2,8 @@
 """Synthetic dc-2.0 sessions for DD-5-min: the golden fixture, the negative fixtures and the C17 loop sessions.
 
     python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR [--kind golden|t0_loop|golden_5hz]
-        [--variant gap|missing_commit|reused_slot] [--golden-json FILE] [--routes-dir DIR]
+        [--variant gap|missing_commit|reused_slot|crash|crash_unexplained|destroyed_unexplained]
+        [--golden-json FILE] [--routes-dir DIR]
 
 writes DIR/<session_id>/ and, with --golden-json, the expected reader output (golden.json). The committed golden
 fixture was written by
@@ -43,6 +44,18 @@ Variants (negative fixtures; each breaks one check):
   gap             ctl rows of physics steps 304 and 305 are missing (C06); commit lines and counts stay consistent
   missing_commit  the commit line of the last ctl chunk is missing while session_end still counts it (C34)
   reused_slot     from step 450 (episode 1) the ego entity id changes while ego_slot_id stays (C35)
+  crash_unexplained      the crash session below without the ego collision and veh_damage rows of episode 1: its
+                         termination collision has no terminal ego event (C36)
+  destroyed_unexplained  the crash session below without its veh_damage state=destroyed row: ego_destroyed is
+                         unexplained (C36)
+and one positive variant, crash (contract section 9.5.1), which every check passes: episode 1 ends with termination
+collision after an ego collision row (onset 300 ms before the episode end, src dv_contact against a rock) and a
+veh_damage intermediary row; in the tail the ego is destroyed and burns (veh_damage state=destroyed and veh_fire_start
+at the last physics step) and the session ends with ego_destroyed, status ok. The kinematics are those of the golden
+session: the crash rows are injected events, so only the event and termination rules see them.
+
+telemetry.dv_max_mps is the simulation's largest 100 ms (W = 6 steps) horizontal world-frame delta-v over the k steps
+up to each row, empty while fewer than W + 1 steps exist.
 
 Writes only under /mnt/e/ or /dev/shm/ (never /mnt/c or /tmp). Stdlib, numpy and drivedit_nav; PNGs are written by
 a small zlib PNG writer, so no cv2 is needed here.
@@ -73,7 +86,13 @@ STREAMS_JSON = os.path.join(REPO, "docs", "capture_contract", "dc-2.0.streams.js
 CARD_FILE = os.path.join(HERE, "cards", "S105_synthetic.json")
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
 FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
-VARIANTS = ("gap", "missing_commit", "reused_slot")
+VARIANTS = ("gap", "missing_commit", "reused_slot", "crash", "crash_unexplained", "destroyed_unexplained")
+CRASH_VARIANTS = ("crash", "crash_unexplained", "destroyed_unexplained")
+DV_WINDOW_STEPS = 6             # events.collision_window_ms 100 at 60 Hz (contract 9.5.1)
+# session.json events.* (contract 10.1, TBD-10 defaults)
+EVENT_PARAMS = {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_peak_ms": 200,
+                "collision_refractory_ms": 1000, "episode_end_wait_ms": 250, "rollover_up_y": 0.5,
+                "rollover_hold_ms": 500, "state_poll_ms": 100, "contact_source": "vanilla_process_collision"}
 KINDS = ("golden", "t0_loop", "golden_5hz")
 
 SLICE_S = 1.0 / 60.0
@@ -379,6 +398,36 @@ def simulate(spec, route):
     return sim
 
 
+def inject_crash(sim, variant):
+    """The crash variants (module docstring): crash rows of episode 1 and of the tail, inserted into sim.events in
+    step order after the rows already there. Returns the session end_reason."""
+    if variant not in CRASH_VARIANTS:
+        return "duration"
+    ep = sim.episodes[1]
+    end = ep["end"]
+    onset = end - 18                    # 300 ms before the decision step that ends the episode
+    last = sim.steps[-1]["p"]
+    rows = []
+    if variant != "crash_unexplained":
+        rows.append((onset + 6, "veh_damage", "state=intermediary;health=0.62;movement_damage=0.40"))
+        rows.append((onset + 12, "collision", "onset_step=%d;dv_mps=7.42;dv_lon_mps=-7.05;dv_lat_mps=2.31;v_mps=7.91;"
+                     "other=rock;other_prefab=Prefabs/Rocks/Granite/GraniteStone_03.et;impulse_ns=15210.40;"
+                     "src=dv_contact" % onset))
+    if variant != "destroyed_unexplained":
+        rows.append((last, "veh_damage", "state=destroyed;health=0.00;movement_damage=1.00"))
+    rows.append((last, "veh_fire_start", "fire_state=burning"))
+    ep["termination"] = "collision"
+    for i, (pstep, kind, payload) in enumerate(sim.events):
+        if pstep == end and kind == "episode_end" and payload.startswith("termination_reason="):
+            sim.events[i] = (pstep, kind, "termination_reason=collision")
+    for row in rows:
+        at = len(sim.events)
+        while at > 0 and sim.events[at - 1][0] > row[0]:
+            at -= 1
+        sim.events.insert(at, row)
+    return "ego_destroyed"
+
+
 def _end_episode(sim, spec, route, episode, start, end, term):
     sim.events.append((end, "episode_end", "termination_reason=%s" % term))
     sim.episodes.append({"episode_id": episode, "start": start, "end": end, "termination": term})
@@ -501,7 +550,7 @@ def build_rows(spec, sim, route, frames, slots, schema, variant):
         if st["p"] % 3 == 0:
             rows["telemetry"].append(_telemetry_row(st, route, ego_slot,
                                                     entity_b if (variant == "reused_slot" and st["p"] >= 450)
-                                                    else entity))
+                                                    else entity, _dv_max(steps, st["p"], 3)))
     for fr in frames:
         st = steps[fr["lps"]] if fr["lps"] >= 0 else None
         rows["hf"].append(_hf_row(fr, st, steps[0]))
@@ -546,7 +595,24 @@ def build_rows(spec, sim, route, frames, slots, schema, variant):
     return rows
 
 
-def _telemetry_row(st, route, ego_slot, entity):
+def _horizontal_velocity(st):
+    return st["v"] * math.sin(st["psi"]), st["v"] * math.cos(st["psi"])
+
+
+def _dv_max(steps, p, k):
+    """Largest |v_h(q) - v_h(q - W)| over the steps q in (p - k, p] that have a step W before them; None without."""
+    best = None
+    for q in range(p - k + 1, p + 1):
+        if q - DV_WINDOW_STEPS < 0:
+            continue
+        ax, az = _horizontal_velocity(steps[q])
+        bx, bz = _horizontal_velocity(steps[q - DV_WINDOW_STEPS])
+        dv = math.hypot(ax - bx, az - bz)
+        best = dv if best is None else max(best, dv)
+    return best
+
+
+def _telemetry_row(st, route, ego_slot, entity, dv_max):
     psi = st["psi"]
     fwd = (math.sin(psi), 0.0, math.cos(psi))
     right = (math.cos(psi), 0.0, -math.sin(psi))
@@ -566,7 +632,8 @@ def _telemetry_row(st, route, ego_slot, entity):
            "fwd_x": fwd[0], "fwd_y": fwd[1], "fwd_z": fwd[2], "vel_local_x": 0.0, "vel_local_y": 0.0,
            "vel_local_z": st["v"], "angvel_local_x": 0.0, "angvel_local_y": YAW_AXIS_SIGN * st["yaw"],
            "angvel_local_z": 0.0, "acc_local_x": st["v"] * st["yaw"], "acc_local_y": 0.0, "acc_local_z": st["acc"],
-           "speed_engine_mps": st["v"], "gear": st["gear"], "rpm": 800.0 + 120.0 * st["v"], "engine_on": 1,
+           "speed_engine_mps": st["v"], "dv_max_mps": dv_max, "gear": st["gear"], "rpm": 800.0 + 120.0 * st["v"],
+           "engine_on": 1,
            "handbrake": st["handbrake"], "ground_contact": 1, "wheel_count": 4,
            "road_key": "12/1000.00:3000.00/1003.40:3068.10", "road_dist_m": 0.4, "road_width_m": 7.0,
            "lane_lat_err_m": lane_lat, "lane_head_err_rad": lane_head, "route_progress_m": st["progress"],
@@ -687,6 +754,7 @@ def session_json(spec, start_unix, card_sha):
         "clocks": {"telemetry_every_k": 3, "physics_steps_per_decision": n_per_decision(spec),
                    "decision_hz": spec.get("decision_hz", 10.0), "image_hz": spec.get("decision_hz", 10.0),
                    "img_inflight_timeout_ms": 2000, "img_lead_ms": 0, "chunk_max_s": 10.0},
+        "events": dict(EVENT_PARAMS),
         "rig": {"rig_id": "R1-S105-synthetic-%dx%d" % (w, h), "rig_name": "R1-S105", "ego_prefab": "synthetic/S105.et",
                 "mount": {"fwd_m": 1.8, "up_m": 1.5, "right_m": 0.0, "pitch_deg": -4.0}, "vfov_deg": 50.0,
                 "writer": "MakeScreenshot", "source_class": "wb_viewport", "capture_wh": [w, h],
@@ -748,6 +816,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
         raise ValueError("refusing to overwrite %s" % session_dir)
     os.makedirs(session_dir)
     sim = simulate(spec, route)
+    end_reason = inject_crash(sim, variant)
     frames = frames_of(spec, sim)
     slots = image_slots(spec, sim, frames)
     rows = build_rows(spec, sim, route, frames, slots, schema, variant)
@@ -791,7 +860,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
     meta["trial"]["duration_s"] = round((sim.steps[-1]["p"] + 1 - spec["warmup_steps"]) / 60.0, 3)
     last = sim.steps[-1]
     end_unix = start_unix + last["world"] // 1000 + 1
-    end = {"contract_version": "dc-2.0", "session_id": spec["session_id"], "status": "ok", "end_reason": "duration",
+    end = {"contract_version": "dc-2.0", "session_id": spec["session_id"], "status": "ok", "end_reason": end_reason,
            "end": {"unix_s": end_unix, "utc": _iso(end_unix), "world_ms": last["world"], "physics_step": last["p"],
                    "render_frame": frames[-1]["render_frame"]},
            "pin": {"pin_id": "1.8.0.13", "build_key": None}, "engine": {"build_version": "1.8.0.13"},

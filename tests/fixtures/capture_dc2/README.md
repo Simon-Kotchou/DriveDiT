@@ -23,6 +23,15 @@ python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out tests/fixtures/
 with the regenerated fixture. `--kind golden_5hz` writes the same session at the TBD-2 fallback (image_hz =
 decision_hz = 5, N = 12); the tests generate it, it is not committed.
 
+Crash events (contract 9.5.1): `session.json` carries the `events.*` detector parameters (the TBD-10 defaults) and
+telemetry the optional `dv_max_mps` (the simulation's largest 100 ms horizontal delta-v over the k steps of each
+row). `--variant crash` is the golden session with injected crash rows (generated in the tests, not committed):
+episode 1 ends with termination `collision` after an ego `collision` row (onset 300 ms before the episode end,
+`src=dv_contact`, `other=rock`) and a `veh_damage` `intermediary` row; at the last physics step the ego is destroyed
+and burns (`veh_damage` `destroyed`, `veh_fire_start`) and the session ends with `ego_destroyed`, status ok.
+`--variant crash_unexplained` drops that episode's crash rows and `--variant destroyed_unexplained` the destroyed
+row; both must fail C36 only.
+
 The synthetic session uses the TBD defaults of contract dc-2.0: 60 Hz physics, k = 3, N = 6, image_hz 10,
 img_lead_ms 0, `frames/f_<slot:08d>.png`, steer_sign -1, yaw_axis_sign +1. Its images are 256x240 `wb_viewport`
 captures (64 px bands, 128x240 core), far smaller than the client's 1408x720. The fiducial bands are real fiducial

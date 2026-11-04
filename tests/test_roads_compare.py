@@ -226,6 +226,44 @@ class RoadsCompareTests(unittest.TestCase):
         self.assertIn("cross_session", text)
         self.assertIn("%d of %d road keys join" % (len(roads), len(roads)), text)
 
+    def test_join_is_one_to_one_by_segment_hausdorff(self):
+        """Review round 1 (X4, C-L7): the tie-break measures samples against segments, the join is one-to-one and
+        ambiguous keys are reported; the 2 m boundary is inclusive."""
+        # Codex's case: the same road with one more vertex beats a parallel road 0.1 m away (sample-to-sample
+        # distances at 1 m picked the parallel road)
+        a_key, b1, b2 = "2/0.00:0.00/10.00:0.00", "3/0.00:0.00/10.00:0.00", "2/0.00:0.10/10.00:0.10"
+        shapes_a = {a_key: [(0.0, 0.0), (10.0, 0.0)]}
+        shapes_b = {b1: [(0.0, 0.0), (0.5, 0.0), (10.0, 0.0)], b2: [(0.0, 0.1), (10.0, 0.1)]}
+        self.assertEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b1]), 0.0)
+        self.assertAlmostEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b2]), 0.1)
+        joins, ties = compare.join_keys([a_key], [b1, b2], shapes_a, shapes_b)
+        self.assertEqual((joins[a_key], ties), (b1, [a_key]))
+        # resampling: the distance does not depend on the sample step when only the vertices differ
+        for step in (0.3, 1.0, 7.0):
+            self.assertAlmostEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b1], step), 0.0)
+            self.assertAlmostEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b2], step), 0.1)
+        # a real Arland twin pair (E-08a: endpoints 0.49 m apart) present in both sessions: kept apart one-to-one
+        x_key, y_key = "3/3149.50:1221.33/3150.99:1216.22", "3/3149.58:1221.81/3150.76:1215.95"
+        self.assertTrue(compare.endpoint_match(x_key, y_key))
+        x_pts = [(3149.50, 1221.33), (3150.60, 1218.70), (3150.99, 1216.22)]
+        y_pts = [(3149.58, 1221.81), (3149.70, 1218.90), (3150.76, 1215.95)]
+        x_b, y_b = "4/3149.56:1221.52/3150.90:1216.10", "3/3149.60:1221.70/3150.80:1216.05"
+        shapes_a = {x_key: x_pts, y_key: y_pts}
+        shapes_b = {x_b: [(px + 0.05, pz) for px, pz in x_pts], y_b: [(px - 0.05, pz) for px, pz in y_pts]}
+        joins, ties = compare.join_keys([x_key, y_key], [x_b, y_b], shapes_a, shapes_b)
+        self.assertEqual((joins[x_key], joins[y_key]), (x_b, y_b))
+        self.assertEqual(ties, sorted([x_key, y_key]))
+        joins, ties = compare.join_keys([x_key, y_key], [x_b], shapes_a, shapes_b)      # one partner for two twins
+        self.assertEqual((joins[x_key], joins[y_key]), (x_b, None))
+        self.assertEqual(ties, [y_key])                                     # its only candidate went to x
+        joins, _ = compare.join_keys([x_key, y_key], [x_b, y_b])            # without shapes: still one-to-one
+        self.assertEqual(len(set(v for v in joins.values() if v is not None)), 2)
+        # the 2 m boundary: 2.000 m joins, 2.008 m does not
+        self.assertTrue(compare.endpoint_match("2/0.00:0.00/100.00:0.00", "2/1.20:1.60/100.00:0.00"))
+        self.assertFalse(compare.endpoint_match("2/0.00:0.00/100.00:0.00", "2/1.20:1.61/100.00:0.00"))
+        joins, _ = compare.join_keys(["2/0.00:0.00/100.00:0.00"], ["2/1.20:1.61/100.00:0.00"])
+        self.assertEqual(joins, {"2/0.00:0.00/100.00:0.00": None})
+
     def test_missing_dump_is_input_error(self):
         play = os.path.join(self.base, "empty")
         probe_common.write_synthetic_play(play, {"world.map_id": "arland"}, {})

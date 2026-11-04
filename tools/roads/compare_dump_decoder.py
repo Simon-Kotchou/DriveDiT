@@ -4,7 +4,7 @@
 Run it with the isolated interpreter (stdlib only):
 
     python3 -I -B tools/roads/compare_dump_decoder.py <e08a play_dir> \\
-        --decoder /mnt/e/drivedit_realign/program/evidence/maps/Arland_road_polylines.tsv \\
+        --decoder /mnt/e/drivedit_realign/program/evidence/maps/Arland_road_polylines_v2.tsv \\
         [--match-m 2.0] [--expect-km 34.5] [--tol 0.05] [--sample-m 1.0] [--list 20] [--join-play <other play_dir>]
 
 Inputs (read only): <play_dir>/run_header.txt, run_footer.txt, <map_id>_roads.csv, <map_id>_road_points.csv,
@@ -39,9 +39,10 @@ Prints the r2 4.4 E-08a criterion ("count, km and width histogram vs decoder; un
   cross_session   with --join-play: the roads of this dump joined to those of another session's dump by the rule of
                   contract dc-2.0 TBD-9 (freeze decision D-C): the road_key text holds only within a session (n_pts
                   changes by +-1 and endpoints move up to 0.9 m between launches), so two keys join when their
-                  unordered endpoint pairs lie within ENDPOINT_JOIN_M (2 m; n_pts excluded), the smallest symmetric
-                  Hausdorff distance of the two polylines breaking ties (INFO: counts, keys whose text differs,
-                  ties, unmatched). join_keys() is the function a harvester or builder reuses.
+                  unordered endpoint pairs lie within ENDPOINT_JOIN_M (2 m; n_pts excluded), one-to-one, the
+                  smallest segment Hausdorff distance of the two polylines deciding between candidates (Arland has 4
+                  twin pairs of roads within 2 m of each other; INFO: counts, keys whose text differs, ambiguous
+                  keys, unmatched). join_keys() is the function a harvester or builder reuses.
 
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error (and every sealed-map path).
 """
@@ -235,11 +236,30 @@ def endpoint_match(key_a, key_b, tol_m=ENDPOINT_JOIN_M):
     return dist is not None and dist <= tol_m
 
 
+def segment_hausdorff(points_a, points_b, sample_m=1.0):
+    """Symmetric Hausdorff distance [m] of two polylines, measured from the samples of each (resample, every <= sample_m
+    metres, vertices kept) to the segments of the other (point_segment_distance, as directed_hausdorff does through a
+    SegmentGrid), so a vertex the other polyline lacks costs nothing: sample-to-sample distances would prefer a parallel
+    road 0.1 m away to the same road with one more vertex (review round 1). inf when either polyline is empty."""
+    def directed(samples, points):
+        if len(points) == 1:
+            return max(math.hypot(p[0] - points[0][0], p[1] - points[0][1]) for p in samples)
+        return max(min(point_segment_distance(p, a, b) for a, b in zip(points, points[1:])) for p in samples)
+
+    if not points_a or not points_b:
+        return float("inf")
+    return max(directed(resample(points_a, sample_m)[0], points_b), directed(resample(points_b, sample_m)[0], points_a))
+
+
 def join_keys(keys_a, keys_b, shapes_a=None, shapes_b=None, tol_m=ENDPOINT_JOIN_M, sample_m=1.0):
-    """{key of A: key of B or None}: every road key of one session joined to the other session's (D-C). Candidates
-    are the keys of B whose unordered endpoint pair lies within tol_m; with several, the smallest symmetric Hausdorff
-    distance of the polylines (shapes_a / shapes_b: key -> [(x, z)]) wins, else the smallest endpoint distance.
-    Returns (joins, ties): ties = the keys of A that had more than one candidate."""
+    """{key of A: key of B or None}: every road key of one session joined one-to-one to the other session's (D-C).
+    Candidates are the keys of B whose unordered endpoint pair lies within tol_m. All candidate pairs are ranked by
+    the segment Hausdorff distance of their polylines (shapes_a / shapes_b: key -> [(x, z)]; a pair without both
+    shapes ranks after every pair with them), then the endpoint distance, then the key texts, and assigned greedily
+    in that order, each key of A and of B at most once: a twin road (Arland has 4 pairs of roads within 2 m of each
+    other) never takes another's partner.
+    Returns (joins, ties): ties = the keys of A that are ambiguous, with more than one candidate or with their only
+    candidate taken by a better pair (reported, never silently joined twice)."""
     buckets = {}
     for kb in keys_b:
         parsed = parse_road_key(kb)
@@ -247,35 +267,31 @@ def join_keys(keys_a, keys_b, shapes_a=None, shapes_b=None, tol_m=ENDPOINT_JOIN_
             continue
         for _, (x, z) in ((0, parsed[1]), (1, parsed[2])):
             buckets.setdefault((int(x // tol_m), int(z // tol_m)), set()).add(kb)
-    joins, ties = {}, []
+    joins, cands = {}, {}
     for ka in keys_a:
+        joins[ka] = None
         parsed = parse_road_key(ka)
         if parsed is None:
-            joins[ka] = None
             continue
         x, z = parsed[1]
         near = set()
         for dx in (-1, 0, 1):
             for dz in (-1, 0, 1):
                 near |= buckets.get((int(x // tol_m) + dx, int(z // tol_m) + dz), set())
-        cands = sorted(kb for kb in near if endpoint_match(ka, kb, tol_m))
-        if len(cands) > 1:
-            ties.append(ka)
-        if not cands:
-            joins[ka] = None
-        elif len(cands) == 1 or not (shapes_a and shapes_b and ka in shapes_a):
-            joins[ka] = min(cands, key=lambda kb: (endpoint_distance(ka, kb), kb))
-        else:
-            sa = resample(shapes_a[ka], sample_m)[0]
-
-            def hausdorff(kb):
-                sb = resample(shapes_b.get(kb, []), sample_m)[0]
-                if not sa or not sb:
-                    return float("inf")
-                return max(max(min(math.hypot(p[0] - q[0], p[1] - q[1]) for q in sb) for p in sa),
-                           max(min(math.hypot(p[0] - q[0], p[1] - q[1]) for q in sa) for p in sb))
-
-            joins[ka] = min(cands, key=lambda kb: (hausdorff(kb), endpoint_distance(ka, kb), kb))
+        cands[ka] = sorted(kb for kb in near if endpoint_match(ka, kb, tol_m))
+    pairs = []
+    for ka, kbs in cands.items():
+        for kb in kbs:
+            shape_a = (shapes_a or {}).get(ka)
+            shape_b = (shapes_b or {}).get(kb)
+            h = segment_hausdorff(shape_a, shape_b, sample_m) if shape_a and shape_b else float("inf")
+            pairs.append((h, endpoint_distance(ka, kb), ka, kb))
+    taken = set()
+    for _, _, ka, kb in sorted(pairs):
+        if joins[ka] is None and kb not in taken:
+            joins[ka] = kb
+            taken.add(kb)
+    ties = sorted(ka for ka, kbs in cands.items() if len(kbs) > 1 or (kbs and joins[ka] is None))
     return joins, ties
 
 
@@ -462,9 +478,11 @@ def analyse(play_dir, decoder_path, match_m, expect_km, tol, sample_m, list_max,
         lost = [k for k, v in joins.items() if v is None]
         verdict.info("cross_session", "%d of %d road keys join %s by the unordered endpoint pair within %.1f m "
                      "(contract dc-2.0 TBD-9, D-C); %d of them by a different key text (n_pts or a moved endpoint), "
-                     "%d with several candidates (Hausdorff tie-break), %d unmatched%s" % (
-                         len(matched), len(keys_a), other.dir, ENDPOINT_JOIN_M, len(retexted), len(ties), len(lost),
-                         (": " + "; ".join(lost[:list_max])) if lost else ""))
+                     "%d ambiguous (twins within the tolerance, decided one-to-one by the segment Hausdorff "
+                     "distance%s), %d unmatched%s" % (
+                         len(matched), len(keys_a), other.dir, ENDPOINT_JOIN_M, len(retexted), len(ties),
+                         (": " + "; ".join("%s -> %s" % (k, joins[k]) for k in ties[:list_max])) if ties else "",
+                         len(lost), (": " + "; ".join(lost[:list_max])) if lost else ""))
     return verdict
 
 

@@ -2,9 +2,49 @@
   "schema": "drivedit.features/1",
   "features_version": "features_v1",
   "contract_version": "dc-2.0",
-  "status": "DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22",
+  "status": "FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 to 3 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22",
   "spec": "docs/capture_contract/dc-2.0.md",
   "streams": "docs/capture_contract/dc-2.0.streams.json",
+  "changelog": [
+    {"id": "D-A", "date": "2026-11-03", "decision": "TBD-1: frame-bound rows. One ctl and one telemetry row per fixed-frame callback with physics_step (the engine fixed-step clock, + covered_steps per row), covered_steps and render_frame; the step dt is measured, never GetFixedTimeSlice; physics_steps_per_decision from the measured step; decisions on a world-time grid, taken at the first callback at or past the grid point and applied from the next physics step; clocks.telemetry_every_k withdrawn, engine.step_dt_s and step_dt_source added (sections 6, 9.1, 9.2, 10.1)", "evidence": "probe run 4 E-10 (18113 steps in 10215 callbacks, 44% merged); run 3 E-10 (t0/run3/RUN3_SUMMARY.md 8); decision memo t0/freeze/DECISIONS_dc2_freeze.md"},
+    {"id": "D-B", "date": "2026-11-03", "decision": "TBD-2: image_hz = decision_hz = 5 as the production default (N = 6); 10 Hz only as the trial-conf session setting clocks.image_hz_setting trial_conf (N = 3), with the validator's SOFT C37 unless the session's capture utilisation u95 <= 0.85 (sections 6, 10.1, 12)", "evidence": "E-05 runs 1, 3 and 4 (p95 latency 101 / 99 ms at 10 Hz on the runway, 7.85% missing in the forest); decision memo"},
+    {"id": "D-C", "date": "2026-11-03", "decision": "TBD-9: road_key text unchanged and session-local; cross-session joins by the unordered endpoint pair within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break; no field change (9.2 road_key, 9.8 road)", "evidence": "E-08a runs 1-3: 13 of 181 keys differ between runs 2 and 3; endpoints unique for exact equality only, 4 twin pairs lie within 2 m (corrected in review round 1) (t0d/decoder/E08B.md 7)"},
+    {"id": "D-D", "date": "2026-11-03", "decision": "Trails (Type Path, 11.1 km on Arland) dropped from routes and road-km: no field change here; the validator thresholds lose the C32 trail key (CAPTURE_PROGRAM 5.2) and the E-08a tool expects the 34.5 km engine network", "evidence": "E-08b (t0d/decoder/E08B.md); t0/freeze/DD_DE_APPLIED.md"},
+    {"id": "D-E", "date": "2026-11-03", "decision": "R-3 maneuver typing (the straighter of two same-side branches within 35 deg is straight): a nav_v1 route-generator rule, no field change here", "evidence": "t0/freeze/DD_DE_APPLIED.md (DD-7-min c7024d2)"},
+    {"id": "TBD-3", "date": "2026-11-04", "decision": "Writer semantics confirmed as the r2 default (append per line, exact Write counts, null open on read-only targets, WRITE truncates); commit logs consistent after a process kill", "evidence": "E-19 run 3 with the e19kill play: PASS, 212 of 212 commit lines (t0/freeze/e19_kill_2026-11-04.txt)"},
+    {"id": "TBD-4", "date": "2026-11-03", "decision": "The engine appends .png: frames/f_<slot_id:08d>.png", "evidence": "E-05 runs 3-4 (5992/5992, 5999/5999)"},
+    {"id": "TBD-5", "date": "2026-11-03", "decision": "steer_sign +1 (a positive SetSteering turns right; the draft -1 is refuted), yaw_axis_sign +1, local axes x right, y up, z forward", "evidence": "E-01 run 3 (corr 0.954; 15/15 E-02a cells)"},
+    {"id": "TBD-6", "date": "2026-11-03", "decision": "The launch id is visible to a Workbench Play (launch_mode cli)", "evidence": "E-11 run 3 (-dcLaunchId visible=1)"},
+    {"id": "TBD-7", "date": "2026-11-03", "decision": "Manual gearbox; S105 6 gears, 4 forward: 0 reverse, 1 neutral, 2..5 forward; general rule from the vanilla gear computation", "evidence": "E-04 runs 2-3, E-01 run 3; SCR_ToggleHandbrakeAction.c:100-108, SCR_VehicleGearCondition.c:32-44 (1.8.0.13)"},
+    {"id": "TBD-8", "date": "2026-11-03", "decision": "Render-settings dump keys of E-20 (VideoUserSettings, DisplayUserSettings); the client compare follows at the first client session", "evidence": "E-20 runs 2-3"},
+    {"id": "FIDUCIAL", "date": "2026-11-03", "decision": "rig.fiducial carrier = the debug-Shape carrier at depth_m 0.05 (the widget carrier is a diagnostic only, it never reaches screenshots); rig.fiducial gains carrier and depth_m", "evidence": "probe run 4 E-06 at depth 1.0 m with near plane 0.1 m (t0/run4/e06.txt): shape 5999 of 5999 decoded, widget 0 of 5999 (t0/run4/RUN4_SUMMARY.md); depth 0.05 m with near plane 0.03 m is not yet measured and awaits the first capture Play's E-06 check, 1.0 m / 0.1 m being the recorded fallback (corrected in review round 1)"},
+    {"id": "CAPTURE-PHASE", "date": "2026-11-03", "decision": "The logged pose follows the frame clock and the image of render frame C shows the state of hf row C + 1; img.done_render_frame added (captured = done_render_frame - 1 in Workbench); hf joins ctl and telemetry exactly (section 6, 9.4)", "evidence": "run 3 E-06A (argmin k = +1 on 628 of 640 moving images, pose corr 1.0000); run 4 E-06 (5999 of 5999)"},
+    {"id": "TBD-10", "date": "2026-11-04", "decision": "Stays PROVISIONAL: the crash-detector values are session.json parameters measured by the TBD-10 probe (a value, never a field)", "evidence": "t0d/crash_events/IMPL.md"},
+    {"id": "FREEZE", "date": "2026-11-04", "decision": "Status FROZEN: every field, unit, sign, key, cadence or registry rule change from now on is a new version dc-2.x and re-runs the L-gate; per-build values stay in session.json and in files keyed by build_key", "evidence": "this changelog; t0/freeze/FREEZE_IMPL.md"},
+    {"id": "R1-OBS", "date": "2026-11-04", "decision": "obs_t also needs its captured frame at or before the render frame of C_t, so obs_age_ms is never negative (a frame without a callback keeps last_physics_step, so the step bound alone admitted a future image); C13a fails a decision sample with a future obs_t (sections 6, 9.8; features_v1 image rule)", "evidence": "Codex review round 1 X1: golden slot 15 re-posed to frame 261990 (3166 ms) against decision 93 in frame 261989 (3139 ms) became obs_t with obs_age_ms -27 (t0/freeze/review/CODEX.md); reader and validator mutation tests"},
+    {"id": "R1-SEAL", "date": "2026-11-04", "decision": "An image captured in the session's last render frame (a seal without drain caught its request in flight) has no pose row: pending, not joined, masks 0, never a C13a join failure; a world-teardown seal writes the held img rows too (section 6)", "evidence": "Claude review round 1 H1 and L2 (t0/freeze/review/CLAUDE_REVIEW.md); the crash fixture now ends with an image in flight"},
+    {"id": "R1-STEPDT", "date": "2026-11-04", "decision": "Step dt = the median of the readiness step callbacks' time slice / covered steps when 90% of at least 30 ratios lie within 0.5% of it (engine), else the measured span without the start remainder (measured); both kept in session.json observed (section 6)", "evidence": "Codex X2, Claude L1: 15 frames of 68 ms with 2 steps each measured 1.020/30 under the former rule; run 3 E-10: the EOnFixedFrame slice is covered / 30 on 21296 of 21296 rows"},
+    {"id": "R1-HZ", "date": "2026-11-04", "decision": "clocks.image_hz_setting names the rate: 5 Hz is default also when a trial conf sets it, only 10 Hz is trial_conf (sections 6, 10.1)", "evidence": "Codex X6 = Claude M1; C08 and writer tests"},
+    {"id": "R1-CLOCK", "date": "2026-11-04", "decision": "Frame-clock joins are HARD checks: ctl and telemetry share render_frame and world_time_ms per key (C06); ctl world_time_ms is the hf world time of its frame and hf.last_physics_step the newest callback of an earlier frame (C07) (section 6)", "evidence": "Codex X3 = Claude M3: the mutations render_frame +10000, world time +1000, a stale last_physics_step and P1-P4 passed before; validator tests"},
+    {"id": "R1-HLSEQ", "date": "2026-11-04", "decision": "hl_seq advances by 1 on the row after every decision callback of an episode that goes on (a kept command is numbered again) and on no other row; a command changes only with it (section 6, ctl.hl_seq; C07)", "evidence": "Codex X7: a session with every hl_seq -1 passed C07; validator test"},
+    {"id": "R1-C37", "date": "2026-11-04", "decision": "C37 takes done_render_frame as utilisation evidence only where the decoded fiducial confirms it (captured = done_render_frame - 1); a contradiction refuses the evidence (section 6)", "evidence": "Codex X5: a redirected completion passed C37; validator test"},
+    {"id": "R1-LAG", "date": "2026-11-04", "decision": "C13b requires the best lag +1 whenever the yaw signal suffices; lags 0 and -1 fail (a code rule, the thresholds file is unchanged) (section 6)", "evidence": "Claude M2; validator test with the hf poses shifted by one row"},
+    {"id": "R1-ROAD", "date": "2026-11-04", "decision": "The D-C road join is one-to-one: candidate pairs within 2 m are ranked by the segment Hausdorff distance and assigned greedily, ambiguous twins reported; the endpoints are unique for exact equality only (section 1 TBD-9, 9.8 road)", "evidence": "Codex X4, Claude L7: A [(0,0),(10,0)] picked the parallel B2 [(0,0.1),(10,0.1)] over B1 [(0,0),(0.5,0),(10,0)]; E-08a: 4 twin pairs 0.49-1.56 m apart; tools tests"},
+    {"id": "R1-NEAR", "date": "2026-11-04", "decision": "rig.near_plane_m added to session.json and to rig_id; the Shape fiducial at 0.05 m with near plane 0.03 m awaits the first capture Play's E-06 check, 1.0 m with 0.1 m being the allowed recorded fallback (10.1 rig.near_plane_m, rig.fiducial)", "evidence": "Claude M4: probe run 4 E-06 ran at depth 1.0 m with near plane 0.1 m (t0/run4/e06.txt)"},
+    {"id": "R1-BRIDGE", "date": "2026-11-04", "decision": "The closed-loop bridge holds the next physics step until the current render frame is at least C_t's frame + 1 and obs_t's file has completed (done_render_frame set and at or before the current frame) before it sends state_t and obs_t (section 6; the predicate was corrected in review round 2, R2-BRIDGE)", "evidence": "Claude M5: obs_t is the image of C_t's own render frame in 35 of 52 policy-valid golden decisions"},
+    {"id": "R1-TEXT", "date": "2026-11-04", "decision": "decision_index.hl_seq may be empty for a decision at the last ctl row; slot 0 is issued in the frame after the anchor's; session_end.json observed.decision_grid_points_skipped declared (int, cross-checked by C08); the contract test compares descriptions, Range, Values and tags; nav_v1 and the route schema no longer say DRAFT; actuation mode A applies the setters in every callback", "evidence": "Claude L4, L5, L6, L8 (t0/freeze/review/CLAUDE_REVIEW.md)"},
+    {"id": "R1-REFREEZE", "date": "2026-11-04", "decision": "Review round 1 corrections folded into dc-2.0 itself: no dc-2.0 session was captured and nothing was pushed, so no dc-2.x; the FROZEN date stays 2026-11-04", "evidence": "coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 1 fixes)"},
+    {"id": "R2-SEAL", "date": "2026-11-04", "decision": "The seal exemption from the exact image joins is only the request a seal without drain caught in flight (issued, done_render_frame empty, no img_timeout event, counted in images.pending_at_end, the newest issued slot) whose image is of end.render_frame with that hf row present; any other capture without its hf rows is a join failure (section 6; C13a)", "evidence": "Codex review round 2 N1 (t0/freeze/review/CODEX2.md): golden slot 67 re-encoded to frame 262296, past the seal at 262291, passed the validator; reader and validator mutation tests"},
+    {"id": "R2-C37", "date": "2026-11-04", "decision": "C37 measures every issued slot's capture stall at its decoded frame C, uses done_render_frame only as a cross-check and assumes u = 1 for an issued slot it cannot measure; issued rows with done_render_frame empty and no img_timeout beyond images.pending_at_end are completions the writer dropped (C13a) (section 6)", "evidence": "Codex N2: clearing done_render_frame on the 33 slow captures of a mixed 80/90 ms 10 Hz session turned C37's FAIL (u95 0.9) into a PASS; validator tests"},
+    {"id": "R2-BRIDGE", "date": "2026-11-04", "decision": "The bridge waits until the current render frame >= C_t's frame + 1 and obs_t's file has completed (done_render_frame set and <= the current frame); the round-1 predicate done_render_frame >= C_t + 1 never held for an older obs_t (section 6, timing.decision.bridge_pause; R1-BRIDGE corrected)", "evidence": "Codex N3: 17 of 52 policy-valid golden decisions and 22 of 100 at 10 Hz (decision 75: frame 261972, obs slot 12 done at 261972); reader test against the golden"},
+    {"id": "R2-STEPDT", "date": "2026-11-04", "decision": "The step dt is decided afresh every readiness frame and never locked in: the ratio median when 90% of the ratios agree within 0.5%; else the measured span only when it covers >= 90 steps, its halves agree within 0.5% and it lies within 0.5% of the median (half of C28's 1%); else readiness is refused at its timeout. The claim that dropping the first frame removes the span's remainder bias is withdrawn (section 6)", "evidence": "Codex N4: 34 ms frames with one step and 4 of the first 30 ratios 2% off locked in 0.034 s and failed C28; 87 of 1056 recorded windows had a span more than 1% off; writer model tests"},
+    {"id": "R2-HLSEQ", "date": "2026-11-04", "decision": "hl_seq -1 is the no-command sentinel (hl_* empty) and may advance only on the row after a decision callback of a starting or continuing episode (section 6, ctl.hl_seq; C07)", "evidence": "Codex N5: adding 1 to every golden hl_seq after step 0 (0 during the warm-up) passed C07; validator test"},
+    {"id": "R2-ADMIT", "date": "2026-11-04", "decision": "Episode admission handshake: an episode starts at a decision callback only when the driver confirms it will decide in that callback or supplies an initial command; a driver that cannot decide yet defers to the next grid point and nothing is committed; a kept command is numbered again; only a first Decide without a command after an admission without an initial command fails the session (section 6)", "evidence": "coordinator decision on Codex round 2 recommendation 3(a): renumbered holds give 68 distinct samples for 68 decisions; DD-7's DC_ExpertHL.Decide returns false when its PostStep skipped the step, which must defer, not end the session; writer model tests"},
+    {"id": "R2-REFREEZE", "date": "2026-11-04", "decision": "Review round 2 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04", "evidence": "coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 2 fixes)"},
+    {"id": "R3-PENDING", "date": "2026-11-04", "decision": "images.pending_at_end is 0 or 1 (one request in flight at a time; more fails C13a, HARD); the seal exemption, and the only slot C37 may leave out, is the unique newest issued slot when it is 1, with skipped_busy or make_failed rows after it still allowed; any other issued row without done_render_frame and img_timeout is a dropped completion (section 6, session_end.json images, timing.joins.capture_pose)", "evidence": "Codex review round 3 N6 (t0/freeze/review/CODEX3.md): 20 slow captures with cleared completions, pending_at_end 20 and fiducials re-encoded to the terminal frame passed the full validator (u95 0.8 without them); the last 3 golden completions cleared with pending_at_end 3 passed without an image edit; reader and validator tests"},
+    {"id": "R3-STEPDT-LOG", "date": "2026-11-04", "decision": "The readiness log names the step dt's own reason once when its estimators first disagree, and the readiness timeout's refusal leads with it even while a module waits for the step dt too (section 6 Step dt: refused with the reason)", "evidence": "Codex round 3 LOW: UpdateReadiness let the recorder's generic wait mask the reason (DC_Session.c UpdateReadiness); writer test"},
+    {"id": "R3-REFREEZE", "date": "2026-11-04", "decision": "Review round 3 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04", "evidence": "coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 3 fixes)"}
+  ],
   "classes": {
     "student_input": "may reach a deployed model (world model or policy) as an input, within its role's offsets; available at test time on every map through the bridge; never absolute",
     "teacher_input": "privileged; may reach a teacher model only, never a deployed student",
@@ -12,23 +52,24 @@
     "eval_only": "evaluation, stratification and bookkeeping; never an input and never a target"
   },
   "roles": {
-    "world_model": "the DriveDiT world model: a transition is (obs_t, action_cmd applied over physics steps (P_t, P_t + N], obs_t+1)",
+    "world_model": "the DriveDiT world model: a transition is (obs_t, action_cmd applied over the decision interval (P_t, P_t+1], obs_t+1)",
     "policy": "the driving policy: predicts action_label at t from inputs at <= t, with action history <= t-1",
     "teacher": "a privileged or bidirectional teacher used only for training (never deployed)"
   },
   "offsets": {
     "unit": "decision step",
-    "decision_hz": 10,
+    "decision_hz": 5,
     "physics_steps_per_decision": 6,
+    "step_dt_s": 0.03333333333333333,
     "tbd": "TBD-1",
-    "decision_step_rule": "decision step t is the physics step P_t with P_t mod physics_steps_per_decision == 0; the HL decides in EOnPostSimulate of P_t from the state after step P_t, and the command applies in steps P_t + 1 .. P_t + N (N = physics_steps_per_decision; streams JSON timing)",
-    "zero": "offset 0 = the value at t: for state, nav and image the state after step P_t; for action_cmd and action_exec the command applied over steps (P_t, P_t + N]",
+    "decision_step_rule": "decision step t is the decision callback C_t, the first fixed-frame callback at or past world-time grid point t (every 1000 / decision_hz ms from the first ctl row), P_t its physics_step; the HL decides after the rows of C_t from that row's state, and the command applies from physics step P_t + 1 through the next decision callback (the decision interval (P_t, P_t+1], nominally N = physics_steps_per_decision steps; streams JSON timing)",
+    "zero": "offset 0 = the value at t: for state, nav and image the state of decision callback C_t; for action_cmd the command applied over (P_t, P_t+1]; for action_exec the executed values of steps P_t + 1 .. P_t + N",
     "max_offset": "an input may use offsets <= max_offset; null with input true = unbounded within the clip (teacher only)",
-    "fallback_5hz": {
-      "rule": "at image_hz 5 (TBD-2 fallback) the HL decision rate drops to 5 Hz, because the decision interval is the training interval (r2 3.5); tensor names stay, action_cmd stays [T,3]",
-      "decision_hz": 5,
-      "physics_steps_per_decision": 12,
-      "shapes": {"action_exec": ["T", 12, 4]}
+    "override_10hz": {
+      "rule": "the non-default 10 Hz session setting (clocks.image_hz_setting trial_conf, TBD-2): image and decision rate 10 Hz, because the decision interval is the image interval (r2 3.5); tensor names stay, action_cmd stays [T,3]",
+      "decision_hz": 10,
+      "physics_steps_per_decision": 3,
+      "shapes": {"action_exec": ["T", 3, 4]}
     }
   },
   "rules": [
@@ -83,7 +124,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose captured frame has last_physics_step <= P_t; t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period. The builder records the realised age per decision step (derived decision_index).",
+      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose pose row (hf row captured_render_frame + 1) has last_physics_step <= P_t and whose captured frame is at or before the render frame of C_t (never a future image); t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period. The builder records the realised age per decision step (derived decision_index).",
       "channels": [
         {"name": "image_r", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Red."},
         {"name": "image_g", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Green."},
@@ -100,7 +141,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "Values at <= t only: telemetry_export at P_t, the state after step P_t, which holds no step of action_cmd_t. The world model is never conditioned on realised future state.",
+      "rule": "Values at <= t only: telemetry_export of decision callback C_t (P_t), the state after its steps, which holds no step of action_cmd_t. The world model is never conditioned on realised future state.",
       "channels": [
         {"name": "speed_mps", "unit": "m/s", "source": "telemetry_export.speed_fwd_mps", "absolute": false, "build_scoped": false, "desc": "Signed forward speed."},
         {"name": "yaw_rate_rps", "unit": "rad/s", "source": "telemetry_export.yaw_rate_rps", "absolute": false, "build_scoped": false, "sign": "right+", "tbd": "TBD-5", "desc": "Yaw rate, right-positive."},
@@ -118,7 +159,7 @@
         "policy": {"input": true, "max_offset": -1, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "What was executed through llc_v1 over steps (P_t, P_t + N]: ctl.hl_* at P_t + 1, the command decided in EOnPostSimulate of P_t. World model: conditioning at offset 0. Policy: history only (offset <= -1).",
+      "rule": "What was executed through llc_v1 over the decision interval (P_t, P_t+1]: ctl.hl_* of the row after C_t, the command decided after the rows of C_t. World model: conditioning at offset 0. Policy: history only (offset <= -1).",
       "channels": [
         {"name": "kappa_target", "unit": "1/m", "source": "ctl.hl_kappa", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Curvature target, right-positive."},
         {"name": "a_target", "unit": "m/s2", "source": "ctl.hl_accel", "absolute": false, "build_scoped": false, "desc": "Desired acceleration."},
@@ -135,7 +176,7 @@
         "policy": {"input": false, "max_offset": null, "target": true},
         "teacher": {"input": false, "max_offset": null, "target": false}
       },
-      "rule": "The expert's HL command at t: ctl.exp_*_now at P_t, evaluated on the state after step P_t (the state the policy sees). Equals action_cmd in mode E; differs in N/D. The policy's prediction target; never an input.",
+      "rule": "The expert's HL command at t: ctl.exp_*_now of C_t, evaluated on the state of that row (the state the policy sees). Equals action_cmd in mode E; differs in N/D. The policy's prediction target; never an input.",
       "channels": [
         {"name": "label_kappa_target", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Expert curvature target."},
         {"name": "label_a_target", "unit": "m/s2", "source": "ctl.exp_accel_now", "absolute": false, "build_scoped": false, "desc": "Expert acceleration target."},
@@ -153,7 +194,7 @@
         "policy": {"input": true, "max_offset": -1, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "Optional diagnostic / world-model ablation: the 60 Hz llc output and input_post of the ctl rows P_t + 1 .. P_t + N (physics_steps_per_decision rows, TBD-1; 12 at the 5 Hz fallback). Raw engine inputs: build-scoped, never pooled across builds. Policy: history only.",
+      "rule": "Optional diagnostic / world-model ablation: the llc output and input_post of the physics steps P_t + 1 .. P_t + N, each from the ctl row that covers it (frame-bound rows: a row covers covered_steps steps); entries past P_t+1 empty (N = physics_steps_per_decision, TBD-1: 6 at 5 Hz, 3 at the 10 Hz override). Raw engine inputs: build-scoped, never pooled across builds. Policy: history only.",
       "channels": [
         {"name": "exec_steer_cmd", "unit": "1", "source": "ctl_export.steer_cmd", "absolute": false, "build_scoped": true, "sign": "right+", "tbd": "TBD-5", "desc": "Commanded steering, contract sign."},
         {"name": "exec_throttle", "unit": "1", "source": "ctl.llc_throttle", "absolute": false, "build_scoped": true, "desc": "Throttle."},
@@ -171,7 +212,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "drivedit_nav.nav_v1(route, pose) at the pose of P_t (one function for the harvester, the builder and the bridge; C22). Distance-based route points, never time-based or hindsight goals (RT-C03). nav_valid 0 (more than 30 m off the route) sets policy_valid and wm_valid to 0.",
+      "rule": "drivedit_nav.nav_v1(route, pose) at the pose of C_t (P_t) (one function for the harvester, the builder and the bridge; C22). Distance-based route points, never time-based or hindsight goals (RT-C03). nav_valid 0 (more than 30 m off the route) sets policy_valid and wm_valid to 0.",
       "channels": [
         {"name": "p20_x", "unit": "m", "source": "nav.p20_x", "absolute": false, "build_scoped": false, "desc": "Route point 20 m ahead, ego forward."},
         {"name": "p20_y", "unit": "m", "source": "nav.p20_y", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Route point 20 m ahead, ego right."},
@@ -214,11 +255,11 @@
       },
       "rule": "Loss and sampling masks; never a model input and never a prediction target.",
       "channels": [
-        {"name": "policy_valid", "unit": "-", "source": "ctl.react_visible", "absolute": false, "build_scoped": false, "desc": "Built by the builder: 0 for X/A rows, while a reaction to an actor with ctl.react_visible 0 lasts (the in-engine visibility test of r2 3.1; reserved until DD-4/DD-7), for nav_valid 0 and for decision steps without a valid image (decision_index.obs_valid 0, C29)."},
+        {"name": "policy_valid", "unit": "-", "source": "ctl.react_visible", "absolute": false, "build_scoped": false, "desc": "Built by the builder: 0 for X/A rows, while a reaction to an actor with ctl.react_visible 0 lasts (the in-engine visibility test of r2 3.1; reserved until DD-4/DD-7), for nav_valid 0, for decision steps without a valid image (decision_index.obs_valid 0, C29) and for every decision step whose decision interval (P_t, P_t+1] contains or follows the earliest onset of the episode's terminal ego crash events (dc-2.0 9.5.1; wm_valid stays 1 there)."},
         {"name": "wm_valid", "unit": "-", "source": "builder", "absolute": false, "build_scoped": false, "desc": "0 across gaps, fiducial failures, teleports, nav_valid 0 and decision_index.obs_valid 0."},
         {"name": "warmup", "unit": "-", "source": "events.kind=warmup_end", "absolute": false, "build_scoped": false, "desc": "1 during the session warm-up."},
         {"name": "env_transition", "unit": "-", "source": "events.kind=env_change", "absolute": false, "build_scoped": false, "desc": "1 for 15 s after an environment change."},
-        {"name": "teleport", "unit": "-", "source": "events.kind=teleport", "absolute": false, "build_scoped": false, "desc": "1 at a teleport or respawn."}
+        {"name": "teleport", "unit": "-", "source": "events.kind=teleport", "absolute": false, "build_scoped": false, "desc": "1 at a teleport or respawn of the ego (or of no vehicle, veh_slot_id -1); a traffic reset never masks ego samples (dc-2.0 9.5.1)."}
       ]
     },
     {
@@ -288,8 +329,8 @@
       },
       "rule": "Contact events in [t, t+dt); aux target only. Depth targets are disabled (r2 8 R31).",
       "channels": [
-        {"name": "contact_event", "unit": "-", "source": "events.kind=collision", "absolute": false, "build_scoped": false, "desc": "1 when a contact event falls in the interval."},
-        {"name": "contact_class", "unit": "-", "source": "events.kind=collision", "absolute": false, "build_scoped": false, "desc": "vehicle/static/character/terrain (categorical)."}
+        {"name": "contact_event", "unit": "-", "source": "events.kind=collision", "absolute": false, "build_scoped": false, "desc": "1 when an ego collision row (its payload onset_step, dc-2.0 9.5.1) falls in the interval."},
+        {"name": "contact_class", "unit": "-", "source": "events.kind=collision", "absolute": false, "build_scoped": false, "desc": "The collision payload other (vehicle, character, tree, building, rock, terrain, static, dynamic, unknown; categorical)."}
       ]
     },
     {
@@ -339,7 +380,7 @@
         {"name": "session_id", "unit": "-", "source": "session.json session_id", "absolute": true, "build_scoped": false, "desc": "Session id."},
         {"name": "pin_id", "unit": "-", "source": "session.json pin.pin_id", "absolute": true, "build_scoped": false, "desc": "Pin id; never a model-visible build token."},
         {"name": "build_key", "unit": "-", "source": "session.json pin.build_key, else the harvester's harvest.json", "absolute": true, "build_scoped": false, "desc": "Build identity; never a model-visible build token."},
-        {"name": "exp_now_60hz", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "60 Hz expert re-evaluation, diagnostics only."}
+        {"name": "exp_now_60hz", "unit": "1/m", "source": "ctl.exp_kappa_now", "absolute": false, "build_scoped": false, "sign": "right+", "desc": "Per-callback expert re-evaluation (ctl.exp_*_now of every row; named for the r2 60 Hz step), diagnostics only."}
       ]
     }
   ]

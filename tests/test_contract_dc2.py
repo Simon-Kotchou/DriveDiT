@@ -10,11 +10,18 @@ Checks, without touching any session data:
     asks of DD-11-min, appears in the JSON files;
   * the features_v1 registry rules: no student_input channel is absolute, the policy sees action_cmd and action_exec
     only as history (offset <= -1), aux_target and eval_only channels are never inputs, C24's forbidden list;
-  * the field tables in docs/capture_contract/dc-2.0.md equal the JSON, row by row;
-  * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md, and the spec's TBD and tensor tables
-    equal the JSON in every column;
-  * the timing rules: the decision boundary on a synthetic timeline whose command changes, the as-of telemetry join,
-    the TBD-1 resolution order and the image grid phase lock;
+  * the field tables in docs/capture_contract/dc-2.0.md equal the JSON, row by row, including every "Values:" list;
+  * the crash-event payload table of section 9.5.1 equals the JSON event_payloads, and the crash events, the
+    ego_destroyed end reason, the session.json events.* parameters (TBD-10) and dv_max_mps are where the contract
+    puts them;
+  * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md and carry the value decided at the
+    freeze with its status and evidence, and the spec's TBD and tensor tables equal the JSON in every column;
+  * the freeze decisions: frame-bound ctl and telemetry rows (D-A: covered_steps, render_frame, no telemetry_every_k,
+    the measured step dt), 5 Hz images and decisions with the 10 Hz trial-conf override (D-B), the endpoint road
+    join (D-C) and the folded facts (steer_sign +1, the S105 gear map, the Shape fiducial carrier at 0.05 m,
+    img.done_render_frame, the .png name);
+  * the timing rules: the decision boundary on a synthetic frame-bound timeline whose command changes, the exact hf
+    joins, the decision-rate rule and the shared world-time anchor of the decision and image grids;
   * the session id rule and the canonical map ids;
   * the committed contract files are ASCII with LF line ends.
 The checks are plain functions that return a list of violations, so the tests can also show that a broken copy of a
@@ -35,8 +42,9 @@ SPEC_MD = os.path.join(CONTRACT_DIR, "dc-2.0.md")
 STREAMS_JSON = os.path.join(CONTRACT_DIR, "dc-2.0.streams.json")
 FEATURES_JSON = os.path.join(CONTRACT_DIR, "features_v1.json")
 
-STATUS_LINE = ("Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision "
-               "D15 adopted 2026-10-22")
+STATUS_LINE = ("Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 to 3 "
+               "corrections folded in on 2026-11-04 before any capture, changelog in section "
+               "16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22")
 T0ENG = "docs/trials/T0-ENG.md"
 
 FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -49,6 +57,9 @@ TERRAINS = ["Arland", "Cain", "Eden"]
 
 # The probe-dependent values the ticket names, with the probe that decides each (TICKETS_UNIFIED DD-11-min).
 BLOCKING_TBD = {"TBD-1": "E-10", "TBD-2": "E-05", "TBD-3": "E-19", "TBD-4": "E-05", "TBD-5": "E-01"}
+TBD_STATUS = ("decided", "provisional")
+# The only TBD still open after the freeze (a value, never a field)
+PROVISIONAL_TBD = ("TBD-10",)
 
 # CAPTURE_PROGRAM r2 3.3, stream table, item by item -> where dc-2.0 carries it ("<group>.<field>", or
 # "<group>.<field>=<enum value>" for an event kind). Groups are streams, derived groups or session files.
@@ -235,9 +246,16 @@ def stream_schema_violations(schema):
     if len(set(tbd_ids)) != len(tbd_ids):
         errors.append("tbd_by_probe: duplicate ids")
     for t in schema["tbd_by_probe"]:
-        for k in ("id", "item", "default_r2", "default", "decided_by", "blocks_freeze", "results", "affects"):
+        for k in ("id", "item", "default_r2", "default", "decided_by", "blocks_freeze", "results", "status",
+                  "decided", "decided_text", "evidence", "affects"):
             if k not in t:
                 errors.append("tbd_by_probe %s: missing %r" % (t.get("id"), k))
+        if t.get("status") not in TBD_STATUS:
+            errors.append("tbd_by_probe %s: status %r" % (t.get("id"), t.get("status")))
+        elif (t["status"] == "provisional") != (t.get("id") in PROVISIONAL_TBD):
+            errors.append("tbd_by_probe %s: only %s may stay provisional" % (t.get("id"), ", ".join(PROVISIONAL_TBD)))
+        if not str(t.get("evidence", "")).strip() or not str(t.get("decided_text", "")).strip():
+            errors.append("tbd_by_probe %s: empty decided_text or evidence" % t.get("id"))
         if t.get("results") != T0ENG:
             errors.append("tbd_by_probe %s: results must cite %s" % (t.get("id"), T0ENG))
     for tid, probe in BLOCKING_TBD.items():
@@ -311,7 +329,8 @@ def md_tables(text):
     tables = {}
     lines = text.split("\n")
     for i, line in enumerate(lines):
-        m = re.match(r"^<!-- dc2:(fields (stream|derived|file)=(\S+)|tbd|tensors) -->$", line.strip())
+        m = re.match(r"^<!-- dc2:(fields (stream|derived|file)=(\S+)|tbd|tensors|payloads|changelog) -->$",
+                     line.strip())
         if not m:
             continue
         key = (m.group(2), m.group(3)) if m.group(2) else (m.group(1), "")
@@ -348,6 +367,9 @@ def md_agreement_violations(schema, text):
                     want_req = "yes, null ok"
                 if (r[1], r[2], r[3]) != (want_type, f["unit"], want_req):
                     errors.append("spec: %s %s.%s type/unit/req differ from the JSON" % (kind, name, f["name"]))
+                if r[4] != desc_cell(f):
+                    errors.append("spec: %s %s.%s description, Range, Values or tags differ from the JSON"
+                                  % (kind, name, f["name"]))
     known = {(k, n) for k, entries in groups for n in entries}
     for key in tables:
         if key[0] in ("stream", "derived", "file") and key not in known:
@@ -357,9 +379,134 @@ def md_agreement_violations(schema, text):
         errors.append("spec: the TBD table differs from tbd_by_probe")
     else:
         for r, t in zip(tbd_rows, schema["tbd_by_probe"]):
-            want = [t["id"], t["item"], t["default_r2"], t["decided_by"], "yes" if t["blocks_freeze"] else "no"]
+            want = [t["id"], t["item"], t["default_r2"], t["decided_text"], t["evidence"], t["decided_by"],
+                    "yes" if t["blocks_freeze"] else "no"]
             if r != want:
                 errors.append("spec: TBD row %s differs from tbd_by_probe (item, default, probe or blocking)" % t["id"])
+    return errors
+
+
+def field_tags(f):
+    """The bracketed tags of a field row, in the spec's order: sign, frame, eval-only, build-scoped, reserved, tbd."""
+    tags = [f[k] for k in ("sign", "frame") if f.get(k)]
+    tags += [name for key, name in (("eval_only", "eval-only"), ("build_scoped", "build-scoped"),
+                                    ("reserved", "reserved")) if f.get(key)]
+    return tags + ([f["tbd"]] if f.get("tbd") else [])
+
+
+def desc_cell(f):
+    """The spec's description cell of a JSON field: desc, then Range, Values and the tags."""
+    text = f["desc"]
+    if "range" in f:
+        text += " Range [%s, %s]." % (f["range"][0], f["range"][1])
+    if "enum" in f:
+        text += " Values: " + ", ".join(str(v) for v in f["enum"]) + "."
+    tags = field_tags(f)
+    return text + (" [" + ", ".join(tags) + "]" if tags else "")
+
+
+VALUES_RE = re.compile(r"Values: (.*?)\.(?: \[[^\]]*\])?$")
+PAYLOAD_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# Crash events of section 9.5.1 (t0d crash-events design, coordinator decisions of 2026-11-03)
+CRASH_KINDS = ["veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover"]
+PAYLOAD_KINDS = ["collision"] + CRASH_KINDS + ["stuck", "teleport"]
+SESSION_EVENT_PARAMS = {"events.collision_dv_mps": 4.0, "events.collision_window_ms": 100,
+                        "events.collision_window_tol_ms": 50, "events.collision_peak_ms": 200,
+                        "events.collision_refractory_ms": 1000, "events.episode_end_wait_ms": 250,
+                        "events.crash_cooldown_ms": 3000, "events.episode_block_max_ms": 60000,
+                        "events.rollover_up_y": 0.5,
+                        "events.rollover_hold_ms": 500, "events.state_poll_ms": 100}
+
+
+def md_values_violations(schema, text):
+    """Every enum field's description in the spec ends its text with 'Values: a, b, c.' equal to the JSON enum, and
+    no field without an enum has such a list."""
+    errors = []
+    tables = md_tables(text)
+    for kind, entries in (("stream", schema["streams"]), ("derived", schema["derived"]), ("file", schema["files"])):
+        for name, entry in entries.items():
+            for r, f in zip(tables.get((kind, name), []), entry["fields"]):
+                m = VALUES_RE.search(r[4])
+                listed = [v.strip() for v in m.group(1).split(",")] if m else None
+                if "enum" in f and listed != [str(v) for v in f["enum"]]:
+                    errors.append("spec: %s %s.%s Values %r differ from the JSON enum %r" % (
+                        kind, name, f["name"], listed, f["enum"]))
+                if "enum" not in f and listed is not None:
+                    errors.append("spec: %s %s.%s lists Values but the JSON has no enum" % (kind, name, f["name"]))
+    return errors
+
+
+def payload_violations(schema):
+    """Structure of event_payloads: known kinds, key names, CSV types, declared units, enums, bool required."""
+    errors = []
+    ep = schema.get("event_payloads")
+    if not isinstance(ep, dict) or not isinstance(ep.get("kinds"), dict):
+        return ["event_payloads: missing or without kinds"]
+    kinds = schema["enums"]["event_kind"]
+    for kind, keys in ep["kinds"].items():
+        if kind not in kinds:
+            errors.append("event_payloads.%s: not an event kind" % kind)
+        names = [k.get("key") for k in keys]
+        if len(set(names)) != len(names):
+            errors.append("event_payloads.%s: duplicate keys" % kind)
+        for k in keys:
+            for field in ("key", "type", "unit", "required", "desc"):
+                if field not in k:
+                    errors.append("event_payloads.%s: key without %r: %r" % (kind, field, k))
+            if any(field not in k for field in ("key", "type", "unit", "required", "desc")):
+                continue
+            where = "event_payloads.%s.%s" % (kind, k["key"])
+            if not PAYLOAD_KEY_RE.match(k["key"]):
+                errors.append("%s: bad key name" % where)
+            if k["type"] not in TYPES:
+                errors.append("%s: unknown type %r" % (where, k["type"]))
+            if k["unit"] not in schema["units"]:
+                errors.append("%s: unit %r not declared" % (where, k["unit"]))
+            if not isinstance(k["required"], bool):
+                errors.append("%s: required is not a bool" % where)
+            if k["type"] == "enum" and not k.get("enum"):
+                errors.append("%s: enum without values" % where)
+            if "enum" in k and k["type"] != "enum":
+                errors.append("%s: values on a %s key" % (where, k["type"]))
+            if ("range" in k or "min" in k) and k["type"] not in ("int", "float"):
+                errors.append("%s: a range or min on a %s key" % (where, k["type"]))
+            if "range" in k and not (isinstance(k["range"], list) and len(k["range"]) == 2
+                                     and k["range"][0] < k["range"][1]):
+                errors.append("%s: bad range %r" % (where, k["range"]))
+            if "min" in k and not isinstance(k["min"], (int, float)):
+                errors.append("%s: min is not a number" % where)
+            if not k["desc"].strip() or "|" in k["desc"]:
+                errors.append("%s: empty description or '|' in it" % where)
+    return errors
+
+
+def payload_row(kind, k):
+    """The spec's payload-table cells (kind, key, type, unit, req) of one JSON payload key."""
+    return ["`%s`" % kind, "`%s`" % k["key"], k["type"], k["unit"], "yes" if k["required"] else "no"]
+
+
+def md_payload_violations(schema, text):
+    """The section 9.5.1 table equals event_payloads row by row (a kind without keys is one row with key '-'), and
+    every enum key lists its JSON values."""
+    rows = md_tables(text).get(("payloads", ""))
+    if rows is None:
+        return ["spec: no payload table (<!-- dc2:payloads -->)"]
+    want = []
+    for kind, keys in schema["event_payloads"]["kinds"].items():
+        if not keys:
+            want.append((["`%s`" % kind, "-", "-", "-", "-"], None))
+        for k in keys:
+            want.append((payload_row(kind, k), k))
+    errors = []
+    if [r[:5] for r in rows] != [w for w, _ in want]:
+        errors.append("spec: payload table differs from event_payloads: md %r json %r" % (
+            [r[:2] for r in rows], [w[:2] for w, _ in want]))
+        return errors
+    for r, (_, k) in zip(rows, want):
+        m = VALUES_RE.search(r[5])
+        listed = [v.strip() for v in m.group(1).split(",")] if m else None
+        if k is not None and "enum" in k and listed != [str(v) for v in k["enum"]]:
+            errors.append("spec: payload %s Values %r differ from %r" % (r[1], listed, k["enum"]))
     return errors
 
 
@@ -415,8 +562,8 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertEqual(keys["hf"], ["render_frame"])
         self.assertEqual(keys["img"], ["slot_id"])
         self.assertEqual(keys["episodes"], ["episode_id"])
-        self.assertEqual(self.schema["streams"]["ctl"]["key_step"], 1)
-        self.assertEqual(self.schema["streams"]["telemetry"]["key_step"], "k")
+        self.assertEqual(self.schema["streams"]["ctl"]["key_step"], "covered_steps")
+        self.assertEqual(self.schema["streams"]["telemetry"]["key_step"], "covered_steps")
 
     def test_migration_items_present(self):
         missing = []
@@ -455,9 +602,16 @@ class StreamSchemaTest(unittest.TestCase):
             self.assertEqual(f.get("sign"), "engine-native", ref)
             self.assertEqual(f.get("tbd"), "TBD-5", ref)
         steer = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-5"][0]
-        self.assertEqual(steer["default"]["steer_sign"], -1)
+        self.assertEqual(steer["default"]["steer_sign"], -1)         # the r2 default, refuted by E-01 run 3
+        self.assertEqual(steer["decided"]["steer_sign"], 1)
+        self.assertEqual(steer["decided"]["yaw_axis_sign"], 1)
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertIn("+1", session["control.steer_sign"]["desc"])
+        self.assertIn("positive `SetSteering` turns right", self.spec)
+        self.assertNotIn("default -1)", self.spec)
 
     def test_probe_dependent_defaults(self):
+        """The r2 defaults stay as history; the decided values are tested in test_freeze_decisions."""
         tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}
         self.assertEqual(tbd["TBD-1"]["default"]["telemetry_every_k"], 3)
         self.assertEqual(tbd["TBD-1"]["default"]["physics_steps_per_decision"], 6)
@@ -473,6 +627,83 @@ class StreamSchemaTest(unittest.TestCase):
     def test_spec_tables_equal_json(self):
         self.assertEqual(md_agreement_violations(self.schema, self.spec), [])
 
+    def test_review_round1_rules(self):
+        """Pre-capture review corrections (2026-11-04): no future obs_t, the frame-clock joins, the hl_seq rule, the
+        step-dt ratio, the bridge wait, the seal-pending image, the near plane, the one-to-one road join."""
+        timing = self.schema["timing"]
+        self.assertIn("at or before the render frame of C_t", timing["sample"]["obs"]["rule"])
+        self.assertIn("obs_age_ms >= 0", timing["sample"]["obs"]["rule"])
+        self.assertIn("current render frame >= the render frame of C_t + 1", timing["decision"]["bridge_pause"])
+        self.assertIn("done_render_frame set and <= the current frame", timing["decision"]["bridge_pause"])
+        self.assertIn("+1 exactly on the row after every decision callback", timing["decision"]["hl_seq"])
+        self.assertIn("newest ctl key with a smaller render_frame", timing["joins"]["frame_clock"])
+        self.assertIn("only its pose row is missing, it is not joined", timing["joins"]["capture_pose"])
+        self.assertIn("median", timing["clock"]["step_dt"])
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("whose captured frame C is at or before the render frame of C_t", "never negative",
+                       "best lag to be +1", "slot 0 is issued in the next frame", "never a join failure",
+                       "covered_steps / 30 on 21296 of 21296 rows", "the ratio is the step even in merged frames",
+                       "every decision callback of an episode that starts or goes on"):
+            self.assertIn(phrase, section6, phrase)
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertEqual((session["rig.near_plane_m"]["unit"], session["rig.near_plane_m"]["required"]), ("m", True))
+        self.assertIn("near plane", session["rig.rig_id"]["desc"])
+        self.assertIn("awaits the first capture Play's E-06 check", session["rig.fiducial"]["desc"])
+        end = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}
+        self.assertFalse(end["observed.decision_grid_points_skipped"]["required"])
+        index = {f["name"]: f for f in self.schema["derived"]["decision_index"]["fields"]}
+        self.assertFalse(index["hl_seq"]["required"])
+        tbd9 = [x for x in self.schema["tbd_by_probe"] if x["id"] == "TBD-9"][0]
+        self.assertIn("one-to-one", tbd9["decided_text"])
+        self.assertIn("4 twin pairs", tbd9["evidence"])
+        self.assertNotIn("DRAFT", self.spec[:self.spec.index("## 1. ")])
+        with open(os.path.join(REPO, "drivedit_nav", "route_schema.json"), encoding="ascii") as f:
+            self.assertNotIn("DRAFT", json.load(f)["description"])
+
+    def test_review_round2_rules(self):
+        """Review round 2 (Codex N1-N5, the admission decision): the seal exemption is the one pending request at the
+        terminal frame; dropped completions are writer-integrity failures and C37 measures at the decoded frame; the
+        bridge waits on the current frame; the step dt never locks in a guess; hl_seq has a sentinel and increments
+        only when due; episodes are admitted through a handshake."""
+        timing = self.schema["timing"]
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("its image shows the terminal render frame (C = `end.render_frame`, whose hf row exists)",
+                       "any other capture without its hf rows is a join failure",
+                       "a completion the writer dropped", "measures each issued slot's capture stall at its decoded "
+                       "frame C", "assumes the worst case (u = 1)",
+                       "compares the current frame, never the image's fixed completion frame",
+                       "never locking in a guess", "two halves, split at half its steps, agree within 0.5%",
+                       "readiness is refused with the reason", "The span alone is not bounded",
+                       "the no-command sentinel", "on no other row, so no number exists before the first episode",
+                       "admission handshake", "defers the admission to the next grid point"):
+            self.assertIn(phrase, section6, phrase)
+        self.assertNotIn("leaves out the not yet stepped remainder", section6)
+        self.assertIn("at least 90 steps", timing["clock"]["step_dt"])
+        self.assertIn("readiness is refused", timing["clock"]["step_dt"])
+        self.assertIn("defers to the next grid point", timing["decision"]["admission"])
+        self.assertIn("no-command sentinel", timing["decision"]["hl_seq"])
+        self.assertIn("every other capture without its hf rows is a join failure", timing["joins"]["capture_pose"])
+
+    def test_review_round3_rules(self):
+        """Review round 3 (Codex N6): images.pending_at_end is 0 or 1 and the seal exemption belongs to the unique
+        newest issued request; the step-dt reason is the readiness refusal's reason."""
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("`images.pending_at_end` is 0 or 1; more fails C13a (HARD)",
+                       "the unique newest issued slot", "only the one request the seal caught in flight (below) is "
+                       "left out", "rows after it may be `skipped_busy` or `make_failed`"):
+            self.assertIn(phrase, section6, phrase)
+        self.assertIn("images.pending_at_end 1, never more", self.schema["timing"]["joins"]["capture_pose"])
+        end = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}
+        self.assertIn("0 or 1, as one request is in flight at a time", end["images"]["desc"])
+
+    def test_description_drift_is_caught(self):
+        drifted = self.spec.replace("Joins ctl and telemetry exactly; the image of render frame C", "Joins ctl", 1)
+        self.assertNotEqual(drifted, self.spec)
+        self.assertTrue(md_agreement_violations(self.schema, drifted))
+        drifted = self.spec.replace("Empty in mode I. [right+]", "Empty in mode I.", 1)
+        self.assertNotEqual(drifted, self.spec)
+        self.assertTrue(md_agreement_violations(self.schema, drifted))
+
     def test_spec_table_drift_is_caught(self):
         drifted = self.spec.replace("| `hl_accel` | float | m/s2 |", "| `hl_accel` | float | m/s |", 1)
         self.assertNotEqual(drifted, self.spec)
@@ -482,9 +713,129 @@ class StreamSchemaTest(unittest.TestCase):
             {"name": "extra", "type": "int", "unit": "-", "required": False, "desc": "x"})
         self.assertTrue(md_agreement_violations(bad, self.spec))
 
+    def test_spec_values_lists_equal_json(self):
+        self.assertEqual(md_values_violations(self.schema, self.spec), [])
+        drifted = self.spec.replace("ego_destroyed, ego_disabled, script_error:write_fail",
+                                    "script_error:write_fail", 1)
+        self.assertNotEqual(drifted, self.spec)
+        self.assertTrue(md_values_violations(self.schema, drifted))
+
+    def test_event_payloads_structure(self):
+        self.assertEqual(payload_violations(self.schema), [])
+        self.assertEqual(list(self.schema["event_payloads"]["kinds"]), PAYLOAD_KINDS)
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["collision"][0]["unit"] = "furlong"
+        self.assertTrue(payload_violations(bad))
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["crash"] = []
+        self.assertTrue(payload_violations(bad))
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["veh_damage"][1]["range"] = [1, 0]
+        self.assertTrue(payload_violations(bad))
+
+    def test_spec_payload_table_equals_json(self):
+        self.assertEqual(md_payload_violations(self.schema, self.spec), [])
+        drifted = self.spec.replace("| `collision` | `src` | enum | - | yes |",
+                                    "| `collision` | `src` | enum | - | no |", 1)
+        self.assertNotEqual(drifted, self.spec)
+        self.assertTrue(md_payload_violations(self.schema, drifted))
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["rollover"][0]["enum"] = ["x"]
+        bad["event_payloads"]["kinds"]["rollover"][0]["type"] = "enum"
+        self.assertTrue(md_payload_violations(bad, self.spec))
+
+    def test_crash_events(self):
+        kinds = {f["name"]: f for f in self.schema["streams"]["events"]["fields"]}["kind"]["enum"]
+        self.assertEqual(kinds, self.schema["enums"]["event_kind"])
+        for kind in CRASH_KINDS + ["collision", "stuck", "teleport"]:
+            self.assertIn(kind, kinds)
+        collision = {k["key"]: k for k in self.schema["event_payloads"]["kinds"]["collision"]}
+        self.assertEqual(collision["src"]["enum"], ["dv", "dv_contact", "contact"])
+        self.assertEqual(collision["other"]["enum"], ["vehicle", "character", "tree", "building", "rock", "terrain",
+                                                      "static", "dynamic", "unknown"])
+        for key in ("onset_step", "dv_mps", "v_mps", "other", "src"):
+            self.assertTrue(collision[key]["required"], key)
+        self.assertEqual(self.schema["event_payloads"]["kinds"]["veh_fire_end"], [])
+        rollover = {k["key"]: k for k in self.schema["event_payloads"]["kinds"]["rollover"]}
+        self.assertTrue(rollover["onset_step"]["required"])
+        self.assertEqual(list(rollover), ["onset_step", "up_y"])
+        damage = {k["key"]: k for k in self.schema["event_payloads"]["kinds"]["veh_damage"]}
+        self.assertEqual((damage["health"]["range"], damage["movement_damage"]["range"]), ([0, 1], [0, 1]))
+        for key in ("dv_mps", "v_mps", "impulse_ns"):
+            self.assertEqual(collision[key]["min"], 0, key)
+        # frame-bound rows (D-A): the window is world time, never a step count
+        crash = self.spec[self.spec.index("### 9.5.1 Crash events"):self.spec.index("### 9.6 Stream")]
+        for phrase in ("world time, never a count of steps or callbacks", "collision_window_tol_ms",
+                       "Episode ownership", "PrepareReposition", "crash_cooldown_ms",
+                       "first terminal ego\n  event by confirmation", "the only source of the terminations",
+                       "the episode that owns that step", "episode_block_max_ms", "of the ego slot and of no vehicle"):
+            self.assertIn(phrase, crash, phrase)
+        self.assertNotIn("6 at 60 Hz", crash)
+        self.assertIn("### 9.5.1 Crash events", self.spec)
+        terminations = {f["name"]: f for f in self.schema["streams"]["episodes"]["fields"]}["termination_reason"]
+        self.assertIn("collision", terminations["enum"])
+        self.assertIn("rollover", terminations["enum"])
+
+    def test_ego_destroyed_is_a_normal_end(self):
+        end = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}
+        self.assertIn("ego_destroyed", end["end_reason"]["enum"])
+        self.assertIn("ego_disabled", end["end_reason"]["enum"])
+        self.assertEqual(end["end_reason"]["enum"], self.schema["enums"]["end_reason"])
+        self.assertIn("ego_destroyed and ego_disabled are not errors", end["status"]["desc"])
+        self.assertIn("ego_disabled", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
+        self.assertIn("ego_destroyed", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
+        self.assertIn("ego_destroyed", self.spec[self.spec.index("## 15. Freeze items"):])
+
+    def test_crash_parameters_are_session_values(self):
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}["TBD-10"]
+        self.assertFalse(tbd["blocks_freeze"])
+        self.assertTrue(tbd["default"]["provisional"])
+        for name, default in SESSION_EVENT_PARAMS.items():
+            self.assertTrue(session[name]["required"], name)
+            self.assertEqual(session[name].get("tbd"), "TBD-10", name)
+            self.assertEqual(tbd["default"][name.split(".", 1)[1]], default, name)
+        self.assertEqual(session["events.contact_source"]["enum"], ["vanilla_process_collision", "none"])
+        self.assertEqual(self.schema["enums"]["contact_source"], session["events.contact_source"]["enum"])
+        for stream in ("telemetry", "traffic"):
+            dv = {f["name"]: f for f in self.schema["streams"][stream]["fields"]}["dv_max_mps"]
+            self.assertFalse(dv["required"], stream)
+            self.assertEqual((dv["unit"], dv.get("tbd")), ("m/s", "TBD-10"), stream)
+        self.assertIn("PROVISIONAL", tbd["default_r2"])
+        self.assertIn("1.9", tbd["default_r2"])
+
     def test_status_line(self):
         self.assertEqual(self.spec.split("\n")[2], STATUS_LINE)
         self.assertEqual("Status: " + self.schema["status"], STATUS_LINE)
+        self.assertTrue(self.schema["status"].startswith("FROZEN"))         # data/dc2/reader.py Schema.frozen
+
+    def test_changelog(self):
+        """The freeze changelog (section 16): every decision with its date and evidence; the JSON twin carries it."""
+        log = self.spec[self.spec.index("## 16. Changelog"):]
+        rows = md_tables(self.spec).get(("changelog", ""))
+        self.assertIsNotNone(rows)
+        self.assertEqual([r[0] for r in rows], [c["id"] for c in self.schema["changelog"]])
+        for r, c in zip(rows, self.schema["changelog"]):
+            self.assertEqual(r[1:4], [c["date"], c["decision"], c["evidence"]], c["id"])
+            self.assertTrue(c["evidence"].strip() and c["date"].startswith("2026-"), c["id"])
+        ids = [c["id"] for c in self.schema["changelog"]]
+        for want in ("D-A", "D-B", "D-C", "D-D", "D-E", "TBD-3", "TBD-4", "TBD-5", "TBD-6", "TBD-7", "FIDUCIAL",
+                     "CAPTURE-PHASE", "FREEZE"):
+            self.assertIn(want, ids)
+        # review rounds 1 to 3: the pre-capture corrections, in the md and in both JSON twins, after the freeze row
+        review = [i for i in ids if i[:3] in ("R1-", "R2-", "R3-")]
+        self.assertEqual(review, ["R1-OBS", "R1-SEAL", "R1-STEPDT", "R1-HZ", "R1-CLOCK", "R1-HLSEQ", "R1-C37", "R1-LAG",
+                                  "R1-ROAD", "R1-NEAR", "R1-BRIDGE", "R1-TEXT", "R1-REFREEZE", "R2-SEAL", "R2-C37",
+                                  "R2-BRIDGE", "R2-STEPDT", "R2-HLSEQ", "R2-ADMIT", "R2-REFREEZE", "R3-PENDING",
+                                  "R3-STEPDT-LOG", "R3-REFREEZE"])
+        self.assertEqual(ids[ids.index("FREEZE") + 1:], review)
+        self.assertTrue(all(c["date"] == "2026-11-04" for c in self.schema["changelog"] if c["id"] in review))
+        with open(FEATURES_JSON, encoding="ascii") as f:
+            features = json.load(f)
+        self.assertEqual(features["changelog"], self.schema["changelog"])
+        self.assertEqual(features["status"], self.schema["status"])
+        self.assertIn("2026-11-04", log)
+        self.assertIn("dc-2.x", self.spec[self.spec.index("## 0. How to read this"):self.spec.index("## 1. ")])
 
     def test_session_id_rule(self):
         rx = re.compile(self.schema["session"]["id_regex"])
@@ -522,113 +873,198 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertEqual(commit, ["chunk_id", "first_key", "last_key", "n_rows", "n_bytes"])
         self.assertEqual(self.schema["session"]["chunk_name"] % 3, "chunk_00003.csv")
 
-    def test_tbd1_resolution_order(self):
-        def resolve(slice_s):
-            n = int(math.floor(0.1 / slice_s + 0.5))
-            k = max([d for d in range(1, n + 1) if n % d == 0 and d * slice_s <= 0.05 + 1e-6] or [1])
-            return n, k
-        expect = {1 / 60.0: (6, 3), 1 / 50.0: (5, 1), 1 / 30.0: (3, 1), 1 / 120.0: (12, 6), 1 / 100.0: (10, 5)}
-        for slice_s, want in expect.items():
-            n, k = resolve(slice_s)
-            self.assertEqual((n, k), want, slice_s)
-            self.assertEqual(n % k, 0, slice_s)
-        tbd1 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-1"][0]
-        self.assertEqual(resolve(tbd1["default"]["fixed_time_slice_s"]),
-                         (tbd1["default"]["physics_steps_per_decision"], tbd1["default"]["telemetry_every_k"]))
-        self.assertIn("decided first", tbd1["default_r2"])
-        self.assertIn("WorldTimestamp", tbd1["default_r2"])
+    def test_steps_per_decision_rule(self):
+        """D-A: N = floor(1000 / decision_hz / step_dt_ms + 0.5) from the measured step dt, never GetFixedTimeSlice."""
+        def steps_per_decision(decision_hz, step_dt_s):
+            return int(math.floor(1000.0 / decision_hz / (step_dt_s * 1000.0) + 0.5))
+        expect = {(5, 1 / 30.0): 6, (10, 1 / 30.0): 3, (5, 1 / 60.0): 12, (10, 1 / 60.0): 6}
+        for (hz, dt), want in expect.items():
+            self.assertEqual(steps_per_decision(hz, dt), want, (hz, dt))
+        tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}
+        d1, d2 = tbd["TBD-1"]["decided"], tbd["TBD-2"]["decided"]
+        self.assertEqual(steps_per_decision(d2["decision_hz"], d1["step_dt_s"]), d1["physics_steps_per_decision"])
+        self.assertEqual(steps_per_decision(d2["override_image_hz"], d1["step_dt_s"]),
+                         d2["override_physics_steps_per_decision"])
+        self.assertIn("never GetFixedTimeSlice", d1["step_dt_rule"])
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertIn("never the step dt", session["engine.fixed_time_slice_s"]["desc"])
+        self.assertIn("step_dt_ms", session["clocks.physics_steps_per_decision"]["desc"])
 
     def test_decision_boundary_on_a_changing_command(self):
-        """Synthetic timeline: the HL decides in EOnPostSimulate of P_t, the command applies from P_t + 1. A builder
-        that follows the JSON timing offsets must give action_cmd_t = decision t, label_t = decision t (mode E),
-        state_t free of decision t, and state_t+1 - state_t = N steps of decision t."""
+        """Synthetic frame-bound timeline (D-A): render frames of varying world time, each with 0 to 3 fixed steps of
+        1/30 s and one callback when it has a step; decisions on the world-time grid of decision_hz, taken after the
+        rows of the first callback at or past the grid point, applied from the next physics step. A builder that
+        follows the JSON timing (row offsets, the covering row of a step) must give action_cmd_t = decision t,
+        label_t = decision t (mode E), state_t free of decision t, the command held over the decision interval
+        (P_t, P_t+1], and the per-step action_exec of decision t."""
         timing = self.schema["timing"]
         sample = timing["sample"]
-        n_dec, k, dt = 6, 3, 1.0 / 60.0
-        self.assertEqual(timing["decision"]["hl_seq_increments_at_step_offset"], 1)
+        self.assertEqual(timing["decision"]["hl_seq_increments_at_row_offset"], 1)
+        self.assertEqual(sample["action_cmd"]["row_offset"], 1)
+        self.assertEqual(sample["state"]["row_offset"], 0)
+        self.assertEqual(sample["action_label"]["row_offset"], 0)
+        self.assertEqual(sample["action_exec"]["last_step_offset"], "physics_steps_per_decision")
+        decision_hz, step_ms = 5, 100.0 / 3.0
+        n_dec = int(math.floor(1000.0 / decision_hz / step_ms + 0.5))
+        self.assertEqual(n_dec, 6)
+        frame_ms = [13, 13, 14, 80, 13, 40, 95, 13, 13, 27, 100, 13, 14, 13, 66, 13] * 12
 
-        def simulate(decision_of, steps=61):
+        def simulate(decision_of):
+            """Rows by callback: physics_step, covered_steps, world_time_ms, hl_*, exp_*; the speed integrates the
+            held acceleration over each covered step."""
+            world, clock3, step = 0, 0, -1
             speed, held, seq, pending = 0.0, None, -1, None
-            ctl, telemetry = {}, {}
-            for step in range(steps):
-                if pending is not None:          # EOnSimulate: a decision taken after the previous step applies
+            anchor, grid = None, 0
+            rows = []
+            for dt in frame_ms:
+                world += dt
+                covered = min(3, (3 * world - clock3) // 100)
+                if covered < 1:
+                    continue
+                clock3 += 100 * covered
+                if pending is not None:          # EOnFixedFrame: a decision of the previous callback applies
                     held, seq = pending
                     pending = None
                 accel = held if held is not None else 0.0
-                speed += accel * dt
+                speed += accel * covered * step_ms / 1000.0
+                step += covered
+                if anchor is None:
+                    anchor = world
                 label = None
-                if step % n_dec == 0:            # EOnPostSimulate: rows first, then the decision on the state after
-                    label = decision_of(step // n_dec, speed)
-                ctl[step] = {"hl_accel": held, "hl_seq": seq, "exp_accel_now": label, "input_post_throttle": accel}
-                if step % k == 0:
-                    telemetry[step] = {"speed": speed}
+                if world >= anchor + grid * 1000 // decision_hz:      # rows first, then the decision
+                    label = decision_of(grid, speed)
+                    while anchor + grid * 1000 // decision_hz <= world:
+                        grid += 1
+                rows.append({"physics_step": step, "covered_steps": covered, "world_time_ms": world,
+                             "hl_accel": held, "hl_seq": seq, "exp_accel_now": label, "speed": speed,
+                             "llc_throttle": accel})
                 if label is not None:
-                    pending = (label, step // n_dec)
-            return ctl, telemetry
-
-        def build(ctl, telemetry):
-            rows = []
-            last = sample["action_exec"]["last_step_offset"]
-            self.assertEqual(last, "physics_steps_per_decision")
-            for p in sorted(s for s in ctl if s % n_dec == 0):
-                end = p + n_dec
-                if end not in ctl:
-                    break
-                rows.append({
-                    "state": telemetry[p + sample["state"]["step_offset"]]["speed"],
-                    "action_cmd": ctl[p + sample["action_cmd"]["step_offset"]]["hl_accel"],
-                    "label": ctl[p + sample["action_label"]["step_offset"]]["exp_accel_now"],
-                    "exec_seq": [ctl[s]["hl_seq"] for s in range(p + sample["action_exec"]["first_step_offset"],
-                                                                  end + 1)],
-                })
+                    pending = (label, len([r for r in rows if r["exp_accel_now"] is not None]) - 1)
             return rows
 
-        plan = [0.5, -1.0, 2.0, 0.0, 1.5, -0.5, 3.0, -2.0, 1.0, 0.25, 0.75]
-        rows = build(*simulate(lambda t, speed: plan[t]))
-        self.assertEqual(len(rows), 10)
-        for t, r in enumerate(rows):
-            self.assertEqual(r["action_cmd"], plan[t], t)
-            self.assertEqual(r["label"], plan[t], t)
-            self.assertEqual(r["exec_seq"], [t] * n_dec, t)
-            if t + 1 < len(rows):
-                self.assertAlmostEqual(rows[t + 1]["state"] - r["state"], n_dec * plan[t] * dt, places=9)
+        def covering(rows, q):
+            for r in rows:
+                if r["physics_step"] - r["covered_steps"] + 1 <= q <= r["physics_step"]:
+                    return r
+            return None
+
+        def build(rows):
+            out = []
+            deciders = [i for i, r in enumerate(rows) if r["exp_accel_now"] is not None]
+            for t, i in enumerate(deciders[:-1]):
+                p, p_next = rows[i]["physics_step"], rows[deciders[t + 1]]["physics_step"]
+                exec_rows = []
+                for q in range(p + sample["action_exec"]["first_step_offset"], p + n_dec + 1):
+                    r = covering(rows, q)
+                    exec_rows.append(None if q > p_next or r is None else r["llc_throttle"])
+                out.append({"state": rows[i + sample["state"]["row_offset"]]["speed"],
+                            "action_cmd": rows[i + sample["action_cmd"]["row_offset"]]["hl_accel"],
+                            "label": rows[i + sample["action_label"]["row_offset"]]["exp_accel_now"],
+                            "interval": [r["hl_seq"] for r in rows if p < r["physics_step"] <= p_next],
+                            "n_t": p_next - p, "exec": exec_rows})
+            return out
+
+        plan = [0.5, -1.0, 2.0, 0.0, 1.5, -0.5, 3.0, -2.0, 1.0, 0.25, 0.75, -0.25, 1.25, 0.6, -0.6]
+        rows = simulate(lambda t, speed: plan[t % len(plan)])
+        self.assertTrue(any(r["covered_steps"] > 1 for r in rows))       # merged steps are exercised
+        self.assertTrue(all(b["physics_step"] - a["physics_step"] == b["covered_steps"]
+                            for a, b in zip(rows, rows[1:])))
+        self.assertEqual(rows[0]["physics_step"], rows[0]["covered_steps"] - 1)
+        built = build(rows)
+        self.assertGreater(len(built), 10)
+        lengths = set()
+        for t, r in enumerate(built):
+            want = plan[t % len(plan)]
+            self.assertEqual(r["action_cmd"], want, t)
+            self.assertEqual(r["label"], want, t)
+            self.assertEqual(r["interval"], [t] * len(r["interval"]), t)    # held over (P_t, P_t+1]
+            inside = [e for e in r["exec"] if e is not None]
+            self.assertEqual(inside, [want] * len(inside), t)
+            self.assertEqual(len(inside), min(n_dec, r["n_t"]), t)
+            lengths.add(r["n_t"])
+        self.assertGreater(len(lengths), 1)            # the interval varies around N with the frame clock
         # state_t never contains a step of decision t: changing decision 4 alone leaves state_4 unchanged
-        changed = list(plan)
+        changed = [plan[t % len(plan)] for t in range(len(built) + 2)]
         changed[4] = -3.0
-        rows2 = build(*simulate(lambda t, speed: changed[t]))
-        self.assertEqual(rows2[4]["state"], rows[4]["state"])
-        self.assertNotEqual(rows2[5]["state"], rows[5]["state"])
-        # the old reading (action_cmd at P_t itself) would label decision t with the command of t - 1
-        ctl, _ = simulate(lambda t, speed: plan[t])
-        self.assertEqual(ctl[4 * n_dec]["hl_accel"], plan[3])
+        built2 = build(simulate(lambda t, speed: changed[t]))
+        self.assertEqual(built2[4]["state"], built[4]["state"])
+        self.assertNotEqual(built2[5]["state"], built[5]["state"])
 
-    def test_telemetry_join_is_as_of(self):
+    def test_hf_joins_are_exact(self):
         joins = self.schema["timing"]["joins"]
-        self.assertTrue(joins["img_to_hf"].startswith("exact"))
-        self.assertTrue(joins["hf_to_ctl"].startswith("exact"))
-        self.assertTrue(joins["hf_to_telemetry"].startswith("as-of"))
-        k = 3
-        telemetry_steps = list(range(0, 60, k))
-        for last_physics_step in range(0, 58):           # frames on steps not divisible by k have no exact match
-            as_of = max(s for s in telemetry_steps if s <= last_physics_step)
-            self.assertLess(last_physics_step - as_of, k)
-        self.assertNotIn(7, telemetry_steps)
+        for key in ("img_to_hf", "hf_to_ctl", "hf_to_telemetry"):
+            self.assertTrue(joins[key].startswith("exact"), key)
+        self.assertIn("captured_render_frame + 1", joins["capture_pose"])
+        self.assertIn("done_render_frame - 1", joins["img_to_hf"])
+        self.assertIn("pose row (hf row captured_render_frame + 1)", self.schema["timing"]["sample"]["obs"]["rule"])
+        self.assertIn("the frame clock", self.schema["timing"]["clock"]["world_time"])
 
-    def test_image_grid_is_phase_locked(self):
+    def test_decision_and_image_grids_share_the_anchor(self):
         grid = self.schema["timing"]["image_grid"]
-        self.assertIn("physics_step 0", grid["anchor"])
+        self.assertIn("first ctl row", grid["anchor"])
+        self.assertIn("first ctl row", self.schema["timing"]["decision"]["grid"])
         self.assertIn("img_lead_ms", grid["due_ms"])
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
-        for name in ("clocks.img_lead_ms", "clocks.img_inflight_timeout_ms"):
+        for name in ("clocks.img_lead_ms", "clocks.img_inflight_timeout_ms", "clocks.image_hz_setting"):
             self.assertTrue(session[name]["required"], name)
             self.assertEqual(session[name]["tbd"], "TBD-2", name)
-        # 60 Hz steps, 10 Hz grid and decisions, lead 0: grid point g is due at decision step g's world time
-        slice_ms, n_dec, image_hz, lead = 1000.0 / 60.0, 6, 10.0, 0.0
+        # 5 Hz images and decisions, lead 0: image grid point g is due at decision grid point g
+        anchor, image_hz, decision_hz, lead = 3111, 5, 5, 0
         for g in range(20):
-            due = 0.0 + g * 1000.0 / image_hz - lead
-            self.assertAlmostEqual(due, g * n_dec * slice_ms, places=6)
+            self.assertEqual(anchor + g * 1000 // image_hz - lead, anchor + g * 1000 // decision_hz)
         derived = {f["name"] for f in self.schema["derived"]["decision_index"]["fields"]}
-        self.assertTrue({"obs_age_steps", "obs_age_ms", "obs_valid"} <= derived)
+        self.assertTrue({"obs_age_steps", "obs_age_ms", "obs_valid", "interval_steps"} <= derived)
+
+    def test_freeze_decisions(self):
+        """D-A, D-B, D-C and the folded facts, where the contract puts them."""
+        tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}
+        self.assertEqual([t for t, v in tbd.items() if v["status"] != "decided"], list(PROVISIONAL_TBD))
+        # D-A
+        for stream in ("ctl", "telemetry"):
+            names = [f["name"] for f in self.schema["streams"][stream]["fields"]]
+            self.assertEqual(names[:4], ["physics_step", "covered_steps", "render_frame", "world_time_ms"], stream)
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertNotIn("clocks.telemetry_every_k", session)
+        for name in ("engine.step_dt_s", "engine.step_dt_source", "engine.fixed_time_slice_s",
+                     "clocks.physics_steps_per_decision", "clocks.decision_hz"):
+            self.assertTrue(session[name]["required"], name)
+        self.assertEqual(session["engine.step_dt_source"]["enum"], ["engine", "measured"])
+        features = json.loads(read_text(FEATURES_JSON))
+        features.pop("changelog")                         # the changelog records the withdrawal
+        self.assertNotIn("telemetry_every_k", json.dumps(features))
+        self.assertAlmostEqual(tbd["TBD-1"]["decided"]["step_dt_s"], 1 / 30.0)
+        self.assertEqual(tbd["TBD-1"]["decided"]["rows"], "frame_bound")
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("covered_steps", "EOnFixedFrame", "GetFixedSteps()", "is never the step dt", "world-time grid",
+                       "frame clock", "hf row C + 1", "done_render_frame"):
+            self.assertIn(phrase, section6, phrase)
+        self.assertNotIn("mod physics_steps_per_decision", self.spec)
+        # D-B
+        d2 = tbd["TBD-2"]["decided"]
+        self.assertEqual((d2["image_hz"], d2["decision_hz"], d2["physics_steps_per_decision"]), (5, 5, 6))
+        self.assertEqual((d2["override_image_hz"], d2["override_setting"]), (10, "trial_conf"))
+        self.assertEqual(d2["override_utilisation_u95_max"], 0.85)
+        self.assertEqual(session["clocks.image_hz_setting"]["enum"], ["default", "trial_conf"])
+        self.assertEqual(self.schema["enums"]["image_hz_setting"], ["default", "trial_conf"])
+        # D-C
+        d9 = tbd["TBD-9"]["decided"]
+        self.assertEqual((d9["endpoint_tol_m"], d9["n_pts_in_join"]), (2.0, False))
+        self.assertEqual(d9["road_key_format"], tbd["TBD-9"]["default"]["road_key_format"])
+        tel = {f["name"]: f for f in self.schema["streams"]["telemetry"]["fields"]}
+        self.assertIn("unordered endpoint pair within 2 m", tel["road_key"]["desc"])
+        road = {f["name"]: f for f in self.schema["derived"]["road"]["fields"]}
+        self.assertIn("unordered endpoint pair", road["matched_road_id"]["desc"])
+        # folded facts
+        self.assertEqual(tbd["TBD-4"]["decided"]["engine_file"] % 7, "frames/f_00000007.png")
+        d7 = tbd["TBD-7"]["decided"]
+        self.assertEqual((d7["gear_index_reverse"], d7["gear_index_neutral"], d7["gear_indices_forward"]),
+                         (0, 1, [2, 3, 4, 5]))
+        self.assertEqual(d7["gears"] - d7["forward_gears"] - 1, d7["gear_index_neutral"])
+        self.assertTrue(tbd["TBD-6"]["decided"]["launch_id_visible"])
+        img = {f["name"]: f for f in self.schema["streams"]["img"]["fields"]}
+        self.assertEqual((img["done_render_frame"]["type"], img["done_render_frame"]["required"]), ("int", False))
+        self.assertIn("carrier: shape, depth_m: 0.05", session["rig.fiducial"]["desc"])
+        self.assertIn("diagnostic only", session["rig.fiducial"]["desc"])
 
     def test_launch_guard_modes(self):
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
@@ -697,10 +1133,10 @@ class StreamSchemaTest(unittest.TestCase):
             self.assertTrue(f.get("reserved"), name)
 
     def test_open_items_list_every_proposal(self):
-        section15 = self.spec[self.spec.index("## 15. Open items"):]
-        for phrase in ("decision boundary", "decision phase lock", "obs_t rule", "ego frame", "`end_reason` values",
+        section15 = self.spec[self.spec.index("## 15. Freeze items"):]
+        for phrase in ("decision boundary", "world-time decision grid", "obs_t rule", "ego frame", "`end_reason` values",
                        "chunk rules", "nav_v1 rules", "route schema", "`wb_escape`", "DC_Sessions/",
-                       "forward-only"):
+                       "forward-only", "crash events", "modded class"):
             self.assertIn(phrase, section15, phrase)
         self.assertIn("nav_v2", self.spec[:self.spec.index("## 1. ")])
 
@@ -962,8 +1398,9 @@ class FeaturesRegistryTest(unittest.TestCase):
 
     def test_offsets_block(self):
         off = self.reg["offsets"]
-        self.assertEqual(off["decision_hz"], 10)
+        self.assertEqual(off["decision_hz"], 5)
         self.assertEqual(off["physics_steps_per_decision"], 6)
+        self.assertAlmostEqual(off["step_dt_s"], 1 / 30.0)
         self.assertEqual(off["tbd"], "TBD-1")
         self.assertEqual(self.reg["contract_version"], self.schema["contract_version"])
         self.assertEqual(self.reg["status"], self.schema["status"])
@@ -985,21 +1422,24 @@ class FeaturesRegistryTest(unittest.TestCase):
         drifted = self.spec.replace("| TBD-7 | gearbox and gear index semantics |", "| TBD-7 | gear map |", 1)
         self.assertTrue(md_agreement_violations(self.schema, drifted))
 
-    def test_5hz_fallback_shapes(self):
-        fallback = self.reg["offsets"]["fallback_5hz"]
-        self.assertEqual(fallback["decision_hz"], 5)
-        self.assertEqual(fallback["shapes"]["action_exec"], ["T", fallback["physics_steps_per_decision"], 4])
+    def test_10hz_override_shapes(self):
+        override = self.reg["offsets"]["override_10hz"]
+        self.assertNotIn("fallback_5hz", self.reg["offsets"])
+        self.assertEqual(override["decision_hz"], 10)
+        self.assertEqual(override["shapes"]["action_exec"], ["T", override["physics_steps_per_decision"], 4])
         self.assertEqual(self.tensors["action_exec"]["shape"][1], self.reg["offsets"]["physics_steps_per_decision"])
         tbd2 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-2"][0]
-        self.assertEqual(tbd2["default"]["fallback_physics_steps_per_decision"], fallback["physics_steps_per_decision"])
+        self.assertEqual(tbd2["decided"]["override_physics_steps_per_decision"], override["physics_steps_per_decision"])
+        self.assertEqual(tbd2["decided"]["physics_steps_per_decision"],
+                         self.reg["offsets"]["physics_steps_per_decision"])
         self.assertEqual(self.tensors["action_cmd"]["shape"], ["T", 3])
 
     def test_policy_valid_has_a_recorded_source(self):
         pv = self.channels["policy_valid"][1]
         self.assertEqual(pv["source"], "ctl.react_visible")
         self.assertTrue(resolve_ref(self.schema, pv["source"]).get("reserved"))
-        self.assertIn("P_t + 1", self.tensors["action_cmd"]["rule"])
-        self.assertIn("exp_*_now at P_t", self.tensors["action_label"]["rule"])
+        self.assertIn("(P_t, P_t+1]", self.tensors["action_cmd"]["rule"])
+        self.assertIn("exp_*_now of C_t", self.tensors["action_label"]["rule"])
 
 
 if __name__ == "__main__":

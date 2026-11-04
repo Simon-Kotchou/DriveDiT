@@ -43,8 +43,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_sRequiredProfileRoot "E:/DriveDiT"
    m_bAllowWorkbenchWithoutLaunchId 0
    m_bEscapeBindToProcessStart 1
-   m_fTelemetryMaxPeriodS 0.05
-   m_fImageHz 10
+   m_fImageHz 5
    m_iImgInflightTimeoutMs 2000
    m_iImgLeadMs 0
    m_fChunkMaxS 10
@@ -65,18 +64,32 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_bForceEnableSimulation 0
   }
   DC_StreamRecorder "{DC4A50B400000003}" {
-   m_iSteerSign -1
+   m_iSteerSign 1
    m_iYawAxisSign 1
    m_sSteeringGeometry "unknown_on_1.8"
    m_iSunElevationSign -1
    m_bRoadContext 1
    m_bForwardOnly 1
   }
+  DC_CrashWatch "{DC4A50B4000000C1}" {
+   m_fCollisionDvMps 4
+   m_iCollisionWindowMs 100
+   m_iCollisionWindowTolMs 50
+   m_iCollisionPeakMs 200
+   m_iCollisionRefractoryMs 1000
+   m_iEpisodeEndWaitMs 250
+   m_iCrashCooldownMs 3000
+   m_iEpisodeBlockMaxMs 60000
+   m_fRolloverUpY 0.5
+   m_iRolloverHoldMs 500
+   m_iStatePollMs 100
+   m_bUseContactHook 1
+  }
   DC_HfRecorder "{DC4A50B400000004}" {
    m_vMountPos 0 1.25 0.3
    m_fMountPitchDeg -4
    m_fVerticalFovDeg 50
-   m_fNearPlaneM 0.1
+   m_fNearPlaneM 0.03
    m_fFarPlaneM 3000
   }
   DC_ImageScheduler "{DC4A50B400000005}" {
@@ -85,6 +98,8 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_iGapPx 8
    m_iBandPx 64
    m_sScreenshotSuffixes ".png,.bmp.png,.bmp,.jpg,noext"
+   m_eFiducialCarrier 1
+   m_fShapeDepthM 0.05
   }
   DC_ExpertDriver "{DC4A50B400000006}" {
    m_sCardId "S105"
@@ -219,7 +234,7 @@ $grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Compon
   coords 620.086 39 2566.323
  }
  AI_Drive_Target_11 {
-  coords 1403.365 36.25 2314.117
+  coords 1459.607 36.34 2341.833
  }
  AI_Drive_Target_12 {
   coords 2209.135 57.973 2091.847
@@ -243,9 +258,9 @@ $grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Compon
   coords 1829.025 15.109 3444.452
  }
  AI_Drive_Target_19 {
-  coords 2555.162 19.076 3086.956
+  coords 2651.838 19.708 3100.644
  }
  AI_Drive_Target_20 {
-  coords 2635.36 98.781 2653.366
+  coords 2563.558 77.714 2750.052
  }
 }

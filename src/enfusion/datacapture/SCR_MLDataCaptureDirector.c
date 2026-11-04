@@ -8,6 +8,11 @@
 //
 // WHAT IT DOES (authority only, play mode only)
 //   - sets the initial time of day and weather;
+//   - opens every vehicle gate of the map once, before the first group spawns (m_bOpenGatesAtStart, OpenGates with
+//     DC_Gates.c): every door leaf with a navmesh link of the vehicle navmesh (bar gates, wide metal gates) and its
+//     sibling leaves, set open without a performer as SCR_DoorOpenerEntity does. A closed gate on a car's route makes
+//     the vanilla driver stop, get out, open it and get back in (HandleFailedNavlinkDoor.bt), because a driver below
+//     max LOD never opens it remotely. It logs every gate with its position, and 10 s later every leaf that is not open;
 //   - for every configured group id k = 1..m_iMaxAIGroups: spawns the empty group m_sGroupPrefab at
 //     <m_sSpawnPointPrefix>k, hands it the placed vehicle <m_sVehiclePrefix>k and gives it its own forced-move
 //     waypoints on every <m_sDriveTargetPrefix>N marker; each waypoint keeps its original marker id N;
@@ -55,9 +60,26 @@
 //     driver in the pilot seat the director teleports the driver back into it, or seats a new one through direct
 //     seating when the old one is gone or dead (a dead one is moved out of the seat first; the group is kept when it
 //     becomes empty; this also covers a group whose members an eviction deleted, C-9). It does not reseat into a car
-//     that cannot move or is on fire, and gives up after MAX_RESEATS_WITHOUT_PROGRESS reseats in a row that did not
-//     get the car moving. While the driver is out the stuck clock pauses; it restarts when the vanilla AI gets back in
-//     by itself, so stuck time adds up only across dismounts that a reseat ended;
+//     that cannot move or is on fire (it retires that group, see below). After MAX_RESEATS_WITHOUT_PROGRESS reseats
+//     in a row that did not get the car moving, the next reseat comes with a stuck reset: the car with its driver is
+//     teleported to the last place it drove through at speed (else its spawn point) and the group gets another target,
+//     avoiding the failed one from now on; once MAX_LIMIT_RESETS of these did not help, the group is retired. While
+//     the driver is out the stuck clock pauses; it restarts when the vanilla AI gets back in by itself, so stuck time
+//     adds up only across dismounts that a reseat ended;
+//   - never lets a group without an AI leader hold a waypoint: vanilla dereferences the missing group leader when a
+//     group move fails (SCR_AIProcessFailedMovementResult.c:59), a VM exception that halts Workbench, and such a
+//     group exists only because delete-when-empty is off (see the seat watchdog). The group's own events (leader
+//     changed, agent removed, driver dead) take its waypoint away at once (TakeWaypointAway); on the next monitor tick
+//     a leaderless group whose new driver the seat watchdog will still seat also gets its group AI deactivated until
+//     the driver is in (CheckGroupMembers), and a group that cannot drive any more is retired (RetireGroup): no AI
+//     leader and a car that cannot move or is on fire, or no seat watchdog to seat a new driver; a car that cannot move
+//     or is on fire once the seat watchdog's time is up; the deleted group or vehicle. Retiring removes its waypoints,
+//     deletes a leaderless group 1 ms later (as vanilla's OnEmpty), ends its seat watchdog, move-failure counting and
+//     statistics, and logs one "group N retired: <reason>" line;
+//   - releases the waypoint of a group move that failed with UNKNOWN (OnMoveFailed -> ReleaseFailedWaypoint): vanilla
+//     would raise a node error (a VM-exception dialog in Workbench) and park the group for good
+//     (SCR_AIProcessFailedMovementResult.c:99-101). Its activities are cancelled as when a waypoint is deselected, the
+//     waypoint is removed, the group avoids that target from now on and gets the next one;
 //   - stops the collector session (SCR_MLDataCollector.StopSession) when the game mode or the game ends.
 //
 // LIFECYCLE (vanilla 1.8.0.13 Game/GameMode/SCR_BaseGameMode.c:428-458 and :499-521): the authority's first
@@ -70,7 +92,8 @@
 // Call queue: at most one entry per director function is ever pending (one repeating spawn tick, one repeating
 // monitor tick that also runs the per-group seating retries, the waypoint assignments and the driving check, one
 // readiness poll, one fallback timer), so a single ScriptCallQueue.Remove per function in StopDirector() clears
-// everything the director queued.
+// everything the director queued. The only other entry is vanilla's SCR_EntityHelper.DeleteEntityAndChildren for a
+// retired group, 1 ms after RetireGroup (as SCR_AIGroup.OnEmpty queues it); it needs no removal.
 //
 // Failure handling: a group whose spawn point, vehicle, vehicle simulation, pilot seat, group prefab, driver prefab
 // or waypoint prefab is missing or invalid is skipped with an ERROR before anything is spawned for it (no shared-car
@@ -147,6 +170,7 @@ class SCR_MLDataCaptureGroupState : Managed
 	bool m_bReadyLogged;			//!< the "driver ready" line was logged (during the boarding window)
 	bool m_bLateWarned;				//!< the "ready after the boarding window, not in the session" warning was logged
 	bool m_bRegistered;				//!< registered with SCR_MLDataCollector
+	int m_iCollectorSlot = -1;		//!< its collector vehicle id (registration index), kept for when the entity is gone
 	float m_fDistanceAtRegistration;	//!< m_fDistance when the vehicle was registered (for the driving check)
 	float m_fNextAssignAtMs = -1;	//!< world time at which the next waypoint is due, -1 = none pending
 	bool m_bNoTargetWarned;			//!< the "no drive target qualifies" warning was logged since the last assignment
@@ -173,9 +197,37 @@ class SCR_MLDataCaptureGroupState : Managed
 	string m_sWatchdogNote;			//!< key of the latest once-per-dismount seat watchdog line, empty = none since the last return
 	int m_iMoveFailures;			//!< failed vanilla group moves (OnMoveFailed)
 	string m_sLastMoveFailure;		//!< "<EMoveError> (vehicle <name>)" of the latest failed group move
+	int m_iFailedReseats;			//!< seat watchdog attempts in a row that seated nobody (FailReseat)
+	string m_sLastReseatFailure;	//!< key of the latest of them
 	float m_fLastMoveFailureMs = -1;	//!< world time of the latest failed group move, -1 = none
 
+	bool m_bRetired;				//!< RetireGroup ran: no waypoint, never a new one, no seat watchdog, no move-failure counting
+	string m_sRetireReason;			//!< why RetireGroup took the group out
+	float m_fRetiredAtS = -1;		//!< director time [s] of the retirement, -1 = active
+	int m_iSuspendedWaypoint = -1;	//!< index into m_aWaypoints taken away while the group had no AI agent, -1 = none
+
+	int m_iLimitResets;				//!< stuck resets after the reseat limit (ResetAfterReseatLimit), at most MAX_LIMIT_RESETS
+	ref array<int> m_aAvoidTargetIds = {};		//!< marker ids of the targets this group got stuck on or failed to plan to: never assigned again
+	ref array<vector> m_aGoodPoses = {};		//!< vehicle transforms while it drove (RecordGoodPose): 4 vectors each, newest last
+	ref array<float> m_aGoodPoseTimesS = {};	//!< director time [s] of each good pose
+	int m_iReleasedWaypoints;		//!< waypoints taken away after an UNKNOWN failure of their move (ReleaseFailedWaypoint)
+	int m_iWaypointDelayMs = 3000;	//!< the director's m_iWaypointDelay, for assignments the record arms itself
+	bool m_bGroupAIDeactivated;		//!< SuspendWaypoint deactivated the group's AI while it had no leader
+
 	static const int MOVE_FAILURE_LOG_LIMIT = 50;
+	//! UNKNOWN waypoint-move releases per group; one more retires the group (the group cannot plan its moves)
+	static const int MAX_RELEASED_WAYPOINTS = 3;
+	//! Targets one group may avoid (m_aAvoidTargetIds)
+	static const int MAX_AVOIDED_TARGETS = 5;
+
+	string m_sRetireDue;			//!< why the record asks for retirement on the next monitor tick (CheckGroupMembers), empty = no
+	bool m_bAvoidListCleared;		//!< AssignNextWaypoint cleared the avoid list once, after moving the car to its spawn point
+	float m_fNoTargetSinceMs = -1;	//!< world time since which no drive target qualifies, -1 = one does
+	int m_iResetsSinceWaypoint;		//!< stuck resets and relocations since the last verified progress (CountReset, RestoreResetBudget)
+	vector m_vLastResetTo;			//!< where the latest reset put the car (TeleportVehicle)
+	float m_fUnseatedSinceS = -1;	//!< director time [s] since which no living driver sits in the pilot seat, -1 = one does
+	int m_iEpisodeWaypoint = -1;	//!< index into m_aWaypoints current when the dismount episode began, -1 = none
+	ref array<vector> m_aStuckPlaces = {};	//!< where the car stood at each reset: FindResetPose keeps away from them
 
 	//------------------------------------------------------------------------------------------------
 	void SCR_MLDataCaptureGroupState(int groupId, SCR_AIGroup group, Vehicle vehicle, VehicleWheeledSimulation simulation, IEntity spawnPoint)
@@ -217,11 +269,92 @@ class SCR_MLDataCaptureGroupState : Managed
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! \return true when the group has no AI agent or no leader entity (AIGroup.GetAgentsCount / GetLeaderEntity,
+	//! Game/generated/AI/AIGroup.c:24, :41): the state in which vanilla group nodes dereference null when a move fails
+	//! (Game/AI/ScriptedNodes/Groups/SCR_AIProcessFailedMovementResult.c:59, SCR_AIDecoDistanceHysteresis.c:41)
+	bool IsLeaderless()
+	{
+		return !m_Group || m_Group.GetAgentsCount() == 0 || !m_Group.GetLeaderEntity();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Removes every waypoint the group holds, at once, and keeps the director's current one for ResumeWaypoint. It
+	//! runs inside the group's and the driver's events (OnLeaderChanged, OnAgentRemoved, OnAgentLifeStateChanged), so a
+	//! leaderless group never holds a waypoint between two monitor ticks. It only removes waypoints
+	//! (AIGroup.RemoveWaypoint, AIGroup.c:33), as vanilla does inside its own group nodes
+	//! (SCR_AIProcessFailedMovementResult.c:118-119); retiring and deleting the group are left to the call queue
+	//! (CheckGroupMembers, RetireGroup).
+	//! \return true when a waypoint was removed
+	bool TakeWaypointAway(string why)
+	{
+		if (m_bRetired || !m_Group)
+			return false;
+
+		int currentIndex = FindWaypoint(m_Group.GetCurrentWaypoint()); // AIGroup.c:38
+		array<AIWaypoint> held = {};
+		m_Group.GetWaypoints(held); // AIGroup.c:39
+		int removed;
+		foreach (AIWaypoint heldWaypoint : held)
+		{
+			if (!heldWaypoint)
+				continue;
+
+			m_Group.RemoveWaypoint(heldWaypoint);
+			removed++;
+		}
+
+		if (currentIndex >= 0 && m_iSuspendedWaypoint < 0)
+			m_iSuspendedWaypoint = currentIndex;
+
+		if (removed == 0)
+			return false;
+
+		string target = "none";
+		if (currentIndex >= 0)
+			target = m_aWaypoints[currentIndex].m_iTargetId.ToString();
+
+		Print(string.Format("[DataCapture] WARNING: group %1 %2: waypoint %3 taken away at once (%4 removed) until the group has an AI leader again - vanilla dereferences a missing group leader when a group move fails", m_iGroupId, why, target, removed), LogLevel.WARNING);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroup.GetOnLeaderChanged() handler (Game/Entities/SCR_AIGroup.c:2342; invoked at :2486-2487 from the native
+	//! AIGroup.OnLeaderChanged event, Game/generated/AI/AIGroup.c:60): the moment the group loses its leader.
+	void OnLeaderChanged(AIAgent currentLeader, AIAgent prevLeader)
+	{
+		if (!currentLeader || !currentLeader.GetControlledEntity())
+			TakeWaypointAway("lost its leader");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroup.GetOnAgentRemoved() handler (SCR_AIGroup.c:2327; invoked at :2479-2480 from the native
+	//! AIGroup.OnAgentRemoved event, AIGroup.c:59), with the parameters of SCR_AIGroupUtilityComponent.OnAgentRemoved (:472)
+	void OnAgentRemoved(SCR_AIGroup group, AIAgent agent)
+	{
+		if (IsLeaderless())
+			TakeWaypointAway("lost its last AI agent");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroupUtilityComponent.m_OnAgentLifeStateChanged handler (:30, invoked at :664-667 from
+	//! SCR_AIInfoComponent.OnLifeStateChanged, Game/AI/Components/SCR_AIInfoComponent.c:372-398, itself called from
+	//! SCR_CharacterControllerComponent.OnLifeStateChanged, Game/Character/SCR_CharacterControllerComponent.c:339-341):
+	//! the moment the driver dies, before its agent leaves the group. Groups of one agent only.
+	void OnAgentLifeStateChanged(AIAgent agent, SCR_AIInfoComponent info, IEntity vehicle, ECharacterLifeState lifeState)
+	{
+		if (lifeState != ECharacterLifeState.DEAD || !m_Group || m_Group.GetAgentsCount() > 1)
+			return;
+
+		TakeWaypointAway("lost its driver (dead)");
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! SCR_AIGroupUtilityComponent.GetOnMoveFailed() handler (Game/AI/Components/SCR_AIGroupUtilityComponent.c:819),
 	//! invoked by SCR_AIProcessFailedMovementResult (Game/AI/ScriptedNodes/Groups/SCR_AIProcessFailedMovementResult.c:78).
 	//! When the failed move used a vehicle and the result is STUCK, UNREACHABLE or ENTITY_NOT_MOVABLE, that node then
 	//! orders everybody out of the vehicle and retries the move (:136, SCR_AIGetOutActivity). STOPPED, UNKNOWN,
 	//! ENTITY_CANT_MOVE and a move without a vehicle order no get-out (:81-137); they are logged and counted all the same.
+	//! An UNKNOWN failure of a waypoint move releases that waypoint first (ReleaseFailedWaypoint), for every such failure.
 	void OnMoveFailed(int moveResult, IEntity vehicleUsed, bool isWaypointRelated, vector moveLocation)
 	{
 		string vehicleName = "none";
@@ -235,12 +368,103 @@ class SCR_MLDataCaptureGroupState : Managed
 		m_sLastMoveFailure = string.Format("%1 (vehicle %2)", result, vehicleName);
 		m_fLastMoveFailureMs = GetGame().GetWorld().GetWorldTime();
 
+		// Synchronously, before the node goes on at :81, and before the logging limit below.
+		string release;
+		if (moveResult == EMoveError.UNKNOWN && isWaypointRelated)
+			release = " - " + ReleaseFailedWaypoint();
+
 		// Logged for the first MOVE_FAILURE_LOG_LIMIT failures of the group, then every MOVE_FAILURE_LOG_LIMIT-th (the
 		// node retries the move at once, so a move that keeps failing could flood the log); the statistics count all.
 		if (m_iMoveFailures > MOVE_FAILURE_LOG_LIMIT && m_iMoveFailures % MOVE_FAILURE_LOG_LIMIT != 0)
 			return;
 
-		Print(string.Format("[DataCapture] WARNING: group %1: vanilla group move failed: %2, vehicle %3, waypoint move %4, move target %5 (move failure %6)", m_iGroupId, result, vehicleName, isWaypointRelated, moveLocation, m_iMoveFailures), LogLevel.WARNING);
+		Print(string.Format("[DataCapture] WARNING: group %1: vanilla group move failed: %2, vehicle %3, waypoint move %4, move target %5 (move failure %6)%7", m_iGroupId, result, vehicleName, isWaypointRelated, moveLocation, m_iMoveFailures, release), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Adds a target to the group's avoid list, which holds at most MAX_AVOIDED_TARGETS.
+	//! \return true when the target is avoided now
+	bool AvoidTarget(int targetId)
+	{
+		if (m_aAvoidTargetIds.Contains(targetId))
+			return true;
+
+		if (m_aAvoidTargetIds.Count() >= MAX_AVOIDED_TARGETS)
+			return false;
+
+		m_aAvoidTargetIds.Insert(targetId);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! OnMoveFailed of an UNKNOWN failure of a waypoint move, i.e. at SCR_AIProcessFailedMovementResult.c:78, before that
+	//! node decides (:81-101). If the current group activity (GetCurrentAction, :85) still has its related waypoint, the
+	//! node raises NodeErrorOnce (:99; a VM-exception dialog in Workbench, error.log 2026-11-03 17:53:01) and parks the
+	//! group by returning RUNNING for good (:100-101, "to allow us to debug it"); without one it only fails the action
+	//! (:87-94). So the activities of that waypoint are cancelled as vanilla cancels them when a group deselects a waypoint
+	//! (SCR_AIWaypointState.OnDeselected, Game/AI/Group/SCR_AIWaypointState.c:24-27):
+	//! SCR_AIGroupUtilityComponent.CancelActivitiesRelatedToWaypoint with doNotCompleteWaypoint
+	//! (Game/AI/Components/SCR_AIGroupUtilityComponent.c:761-781) calls SCR_AIActivityBase.Fail(true), which nulls
+	//! m_RelatedWaypoint on purpose (Game/AI/Behavior/SCR_AIActivity.c:75-83). A failed action stays the current one
+	//! until the group's next evaluation removes it (RemoveObsoleteActions, then SetCurrentAction,
+	//! SCR_AIGroupUtilityComponent.c:228-243), so :85-87 find it without its waypoint and fail it once more, the
+	//! sequence vanilla runs for a removed waypoint. Nothing in :79-101 reads the waypoint itself. The waypoint is then
+	//! removed from the group (AIGroup.RemoveWaypoint, not CompleteWaypoint, so no completion is counted), as the node
+	//! itself removes the current waypoint before it fails the action at :118-122, which the 2026-11-03 Play ran for G3
+	//! at 17:24:45. The target is avoided by this group from now on; the next one follows on the next monitor tick.
+	//! The waypoint entity is not deleted here. m_RelatedWaypoint is a weak AIWaypoint (SCR_AIActivity.c:15) that a
+	//! delete would null, but SCR_EntityHelper.DeleteEntityAndChildren goes through the native
+	//! RplComponent.DeleteRplEntity, whose timing script cannot see, and destroying the group's current waypoint inside
+	//! its own behaviour tree would leave the waypoint list and SCR_AIWaypointState to native clean-up.
+	//! \return what was done, for the move-failure line
+	protected string ReleaseFailedWaypoint()
+	{
+		if (!m_Group)
+			return "no AI group";
+
+		SCR_AIGroupUtilityComponent groupUtility = m_Group.GetGroupUtilityComponent(); // Game/Entities/SCR_AIGroup.c:258
+		if (!groupUtility)
+			return "no group utility component, the vanilla node error follows";
+
+		SCR_AIActivityBase activity = SCR_AIActivityBase.Cast(groupUtility.GetCurrentAction()); // Game/generated/AI/AIBaseUtilityComponent.c:38
+		if (!activity)
+			return "no current group activity, the vanilla node error follows";
+
+		AIWaypoint waypoint = activity.m_RelatedWaypoint;
+		if (!waypoint)
+			return "its activity has no waypoint any more, vanilla only fails it";
+
+		// CancelActivitiesRelatedToWaypoint skips activities that already completed or failed (:772-776), which would
+		// keep the reference that :87 tests; so the current activity's reference is broken here in any case, as
+		// SCR_AIActivityBase.Fail(true) does (SCR_AIActivity.c:79-80).
+		EAIActionState actionState = activity.GetActionState(); // Game/generated/AI/AIActionBase.c:21
+		string cancelText = "activity cancelled";
+		if (actionState == EAIActionState.COMPLETED || actionState == EAIActionState.FAILED)
+			cancelText = "activity already " + typename.EnumToString(EAIActionState, actionState) + ", its waypoint reference cleared";
+
+		groupUtility.CancelActivitiesRelatedToWaypoint(waypoint, doNotCompleteWaypoint: true);
+		activity.m_RelatedWaypoint = null;
+		int index = FindWaypoint(waypoint);
+		if (index < 0)
+			return cancelText + "; not a director waypoint, the group keeps it";
+
+		m_Group.RemoveWaypoint(waypoint);
+		int targetId = m_aWaypoints[index].m_iTargetId;
+		string avoidText = "avoided by this group from now on";
+		if (!AvoidTarget(targetId))
+			avoidText = string.Format("not avoided (this group already avoids %1 targets, the most)", MAX_AVOIDED_TARGETS);
+
+		if (m_iSuspendedWaypoint == index)
+			m_iSuspendedWaypoint = -1;
+
+		// The next target after the usual delay; past MAX_RELEASED_WAYPOINTS the director retires the group on its next
+		// tick (from the call queue, not inside this node).
+		m_iReleasedWaypoints++;
+		m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + m_iWaypointDelayMs;
+		if (m_iReleasedWaypoints > MAX_RELEASED_WAYPOINTS && m_sRetireDue.IsEmpty())
+			m_sRetireDue = string.Format("%1 UNKNOWN waypoint-move failures (more than %2): the group cannot plan its moves", m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS);
+
+		return string.Format("waypoint of target %1 released (%2 without completing it, waypoint removed; release %3/%4): target %5, the next one follows in %6 ms", targetId, cancelText, m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS, avoidText, m_iWaypointDelayMs);
 	}
 }
 
@@ -313,11 +537,46 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	[Attribute("5", UIWidgets.Slider, "Stuck distance [m]", "1 50 0.5", category: "Driving")]
 	protected float m_fStuckDistanceM;
 
-	[Attribute("30", UIWidgets.Slider, "Seat watchdog: once the boarding window is over, put the driver back into the pilot seat after this long without a living driver there, and again every this long while the seat stays empty (only groups whose driver was seated before; never into a car that cannot move or is on fire; at most 3 reseats in a row without the car moving; the vanilla AI usually gets back in within 10-45 s) [s], 0 = off (dismounts are still logged)", "0 300 1", category: "Driving")]
+	[Attribute("30", UIWidgets.Slider, "Seat watchdog: once the boarding window is over, put the driver back into the pilot seat after this long without a living driver there, and again every this long while the seat stays empty (only groups whose driver was seated before; never into a car that cannot move or is on fire, whose group is retired; after 3 reseats in a row without the car moving the next one comes with a stuck reset to the last place the car drove through and another target, at most 3 per group, then the group is retired; the vanilla AI usually gets back in within 10-45 s) [s], 0 = off (dismounts are still logged)", "0 300 1", category: "Driving")]
 	protected float m_fReseatAfterS;
 
-	//! Seat watchdog: reseats in a row without the car moving m_fStuckDistanceM before it stops reseating that car
+	//! Seat watchdog: reseats in a row without the car moving m_fStuckDistanceM before the next reseat comes with a stuck
+	//! reset (ResetAfterReseatLimit)
 	static const int MAX_RESEATS_WITHOUT_PROGRESS = 3;
+	//! Stuck resets after the reseat limit per group; the next time the limit is reached the group is retired
+	static const int MAX_LIMIT_RESETS = 3;
+	//! Seat watchdog attempts in a row that seat nobody (spawn refused, corpse stuck in the seat, boarding refused, ...)
+	//! before the group is retired
+	static const int MAX_FAILED_RESEATS = 5;
+	//! A pilot seat without a living driver this long retires the group, seat watchdog on or off [s]
+	static const float MAX_UNSEATED_S = 300;
+	//! Stuck resets of any kind (CheckStuck, reseat limit, avoid-list relocation) without a completed waypoint in between;
+	//! one more retires the group (CountReset), so no reset loop is endless
+	static const int MAX_RESETS_WITHOUT_WAYPOINT = 4;
+	//! The reseat-limit reset avoids the target only when the car got stuck this close to it [m]
+	static const float AVOID_NEAR_TARGET_M = 500;
+	//! Verified progress that restores the reset budget: the car got this far from where its latest reset put it [m]
+	static const float RESET_PROGRESS_M = 200;
+	//! A group for which no drive target qualifies this long, without avoided targets to blame, is retired [ms]
+	static const int NO_TARGET_RETIRE_MS = 60000;
+	//! Good poses (RecordGoodPose), the places ResetAfterReseatLimit puts a car back to: one every GOOD_POSE_INTERVAL_S
+	//! while a ready driver drives it at GOOD_POSE_MIN_KMH or more, tilted by less than about 20 degrees (up vector y),
+	//! the newest GOOD_POSE_COUNT kept (2 minutes of driving)
+	static const float GOOD_POSE_INTERVAL_S = 5;
+	static const float GOOD_POSE_MIN_KMH = 15;
+	static const float GOOD_POSE_MIN_UP_Y = 0.94;
+	static const int GOOD_POSE_COUNT = 24;
+	//! A reset pose lies at least this far from where the car got stuck [m] (and twice the completion radius from the
+	//! target it failed on)
+	static const float RESET_MIN_DISTANCE_M = 50;
+	//! A car put back to a good pose is dropped from this height above it [m]
+	static const float RESET_LIFT_M = 0.5;
+
+	[Attribute("1", UIWidgets.CheckBox, "Open every vehicle gate of the map once at the director start, before the groups spawn: every door leaf with a navmesh link of the vehicle navmesh, and its sibling leaves. At a closed gate on its route the vanilla driver stops, gets out, opens it and gets back in, because an agent below max LOD (m_bPinDriverLOD) never opens a gate remotely (SCR_AISelectDoorOperatorAgent.c:91-94)", category: "Driving")]
+	protected bool m_bOpenGatesAtStart;
+
+	//! CheckGatesOpen runs this long after OpenGates [ms] (DoorSet_MetalGate_01_Long opens in 1.5 s)
+	static const int GATE_CHECK_DELAY_MS = 10000;
 
 	[Attribute("200", UIWidgets.Slider, "Vehicle monitor interval (statistics, stuck detection) [ms]", "50 2000 50", category: "Driving")]
 	protected int m_iMonitorIntervalMs;
@@ -368,6 +627,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	protected SCR_MLDataCollector m_Collector;
 	protected ref array<ref SCR_MLDataCaptureWaypoint> m_aDriveTargets = {};	//!< marker records, m_Waypoint = null
 	protected ref array<ref SCR_MLDataCaptureGroupState> m_aGroups = {};		//!< successfully started groups, ascending group id
+	protected ref DC_Gates m_Gates;						//!< the gates OpenGates opened (DC_Gates.c), null = none
+	protected float m_fGateCheckAtMs = -1;				//!< world time of CheckGatesOpen, -1 = none pending
 
 	//------------------------------------------------------------------------------------------------
 	override void OnPostInit(IEntity owner)
@@ -474,6 +735,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 		}
 
+		// Once, before the first group spawns m_iSpawnStaggerMs later.
+		OpenGates();
+
 		// One repeating spawn tick: group k is attempted k * m_iSpawnStaggerMs after the start. The readiness poll is
 		// queued by ReportSpawnProgress once every group has been attempted.
 		ScriptCallQueue queue = GetGame().GetCallqueue();
@@ -521,6 +785,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	{
 		m_bActive = false;
 		m_fDrivingCheckAtMs = -1;
+		m_fGateCheckAtMs = -1;
 
 		ArmaReforgerScripted game = GetGame();
 		if (game)
@@ -551,10 +816,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			state.m_fNextSeatAttemptAtMs = -1;
 			if (state.m_Group)
 			{
-				state.m_Group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
-				SCR_AIGroupUtilityComponent groupUtility = state.m_Group.GetGroupUtilityComponent();
-				if (groupUtility)
-					groupUtility.GetOnMoveFailed().Remove(state.OnMoveFailed);
+				UnsubscribeGroup(state);
 			}
 
 			ReleaseGroup(state, observers, stopCollector);
@@ -630,6 +892,33 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		Print(string.Format("[DataCapture] Found %1/%2 drive targets %3<id>", m_aDriveTargets.Count(), m_iMaxDriveTargets, m_sDriveTargetPrefix), LogLevel.NORMAL);
 		if (!missing.IsEmpty())
 			Print("[DataCapture] WARNING: missing drive-target ids:" + missing, LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Opens every vehicle gate of the map once (m_bOpenGatesAtStart) with DC_Gates.OpenVehicleGates (DC_Gates.c: one
+	//! map-wide query for door leaves with a vehicle navmesh link and their sibling leaves, each set open without a
+	//! performer as vanilla SCR_DoorOpenerEntity does); CheckGatesOpen checks them GATE_CHECK_DELAY_MS later.
+	protected void OpenGates()
+	{
+		if (!m_bOpenGatesAtStart)
+		{
+			Print("[DataCapture] Gates: not opened (m_bOpenGatesAtStart 0) - a car stops at every closed gate on its route and its driver gets out to open it", LogLevel.NORMAL);
+			return;
+		}
+
+		BaseWorld world = GetGame().GetWorld();
+		m_Gates = DC_Gates.OpenVehicleGates(world, "[DataCapture]");
+		m_fGateCheckAtMs = world.GetWorldTime() + GATE_CHECK_DELAY_MS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Run once by MonitorVehicles GATE_CHECK_DELAY_MS after OpenGates: DC_Gates.CheckOpen logs every gate leaf that is
+	//! not open, with its position, and sets it open once more.
+	protected void CheckGatesOpen()
+	{
+		m_fGateCheckAtMs = -1;
+		if (m_Gates)
+			m_Gates.CheckOpen(GATE_CHECK_DELAY_MS / 1000);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -760,7 +1049,15 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		// Seat watchdog diagnostics: a failed group move in the car is what makes the vanilla AI leave it.
 		SCR_AIGroupUtilityComponent groupUtility = group.GetGroupUtilityComponent(); // Game/Entities/SCR_AIGroup.c:258
 		if (groupUtility)
+		{
 			groupUtility.GetOnMoveFailed().Insert(state.OnMoveFailed);
+			groupUtility.m_OnAgentLifeStateChanged.Insert(state.OnAgentLifeStateChanged); // SCR_AIGroupUtilityComponent.c:30
+		}
+
+		// The moment the group loses its leader, its waypoint goes (SCR_MLDataCaptureGroupState.TakeWaypointAway).
+		group.GetOnLeaderChanged().Insert(state.OnLeaderChanged); // Game/Entities/SCR_AIGroup.c:2342
+		group.GetOnAgentRemoved().Insert(state.OnAgentRemoved); // SCR_AIGroup.c:2327
+		state.m_iWaypointDelayMs = m_iWaypointDelay;
 
 		Print(string.Format("[DataCapture] Group %1 spawned at %2 for vehicle %3 with %4 waypoints", groupId, spawnName, vehicleName, state.m_aWaypoints.Count()), LogLevel.NORMAL);
 
@@ -953,7 +1250,14 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (state.m_Vehicle)
 			pilot = state.m_Vehicle.GetPilot() != null;
 
-		return text + string.Format(" driver=%1 pilot=%2 lod_pin=%3 observer=%4", DescribeDriver(state.m_Driver), pilot, state.m_bLODPinned, state.m_bObserverAdded);
+		text += string.Format(" driver=%1 pilot=%2 lod_pin=%3 observer=%4", DescribeDriver(state.m_Driver), pilot, state.m_bLODPinned, state.m_bObserverAdded);
+		if (state.m_iSuspendedWaypoint >= 0)
+			text += " waypoint_suspended=1";
+
+		if (state.m_bRetired)
+			text += " retired=1";
+
+		return text;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1040,6 +1344,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 			state.m_eBoarding = SCR_EMLDataCaptureBoarding.FAILED;
 			Print(string.Format("[DataCapture] ERROR: group %1: walk-in fallback failed: could not spawn '%2' at its spawn point or add it to the group - no driver", state.m_iGroupId, m_sDriverPrefab), LogLevel.ERROR);
+			RetireGroup(state, "no driver: direct seating and the walk-in fallback both failed");
 			return;
 		}
 
@@ -1092,15 +1397,22 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	protected void DeleteGroupEntities(SCR_MLDataCaptureGroupState state)
 	{
+		DeleteWaypointEntities(state);
+		if (state.m_Group)
+			SCR_EntityHelper.DeleteEntityAndChildren(state.m_Group);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Deletes the group's own waypoint entities (DC_G<k>_WP<n>); the group must not hold them any more.
+	protected void DeleteWaypointEntities(SCR_MLDataCaptureGroupState state)
+	{
 		foreach (SCR_MLDataCaptureWaypoint record : state.m_aWaypoints)
 		{
 			if (record.m_Waypoint)
 				SCR_EntityHelper.DeleteEntityAndChildren(record.m_Waypoint);
 		}
 		state.m_aWaypoints.Clear();
-
-		if (state.m_Group)
-			SCR_EntityHelper.DeleteEntityAndChildren(state.m_Group);
+		state.m_iCurrentWaypoint = -1;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1150,13 +1462,24 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	//! Gives the group a new waypoint: never the current one and never one within 2x the completion radius of the
 	//! vehicle or of the current target. If no target qualifies, the group gets none and MonitorVehicles retries
-	//! (an excluded target would be completed without the vehicle moving).
+	//! (an excluded target would be completed without the vehicle moving). A retired group gets none; a group without
+	//! an AI agent gets none until the seat watchdog seated a new driver (CheckGroupMembers), retried the same way.
 	protected void AssignNextWaypoint(SCR_MLDataCaptureGroupState state)
 	{
-		if (!m_bActive || !state || !state.m_Group)
+		if (!m_bActive || !state || !state.m_Group || state.m_bRetired)
 			return;
 
 		state.m_fNextAssignAtMs = -1;
+		int retryMs = m_iWaypointDelay;
+		if (retryMs < 1000)
+			retryMs = 1000;
+
+		if (state.IsLeaderless())
+		{
+			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+			return;
+		}
+
 		int groupId = state.m_iGroupId;
 		int count = state.m_aWaypoints.Count();
 		int current = state.m_iCurrentWaypoint;
@@ -1167,6 +1490,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			here = state.m_Vehicle.GetOrigin();
 
 		array<int> candidates = {};
+		int avoidedOut;	// targets that only the avoid list excluded
 		for (int i = 0; i < count; i++)
 		{
 			if (i == current)
@@ -1179,26 +1503,53 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (current >= 0 && vector.DistanceXZ(position, state.m_aWaypoints[current].m_vPosition) < exclusion)
 				continue;
 
+			// A target this group got stuck on or failed to plan to (ResetAfterReseatLimit, ReleaseFailedWaypoint)
+			if (state.m_aAvoidTargetIds.Contains(state.m_aWaypoints[i].m_iTargetId))
+			{
+				avoidedOut++;
+				continue;
+			}
+
 			candidates.Insert(i);
 		}
 
+		float nowMs = GetGame().GetWorld().GetWorldTime();
 		if (candidates.IsEmpty())
 		{
-			int retryMs = m_iWaypointDelay;
-			if (retryMs < 1000)
-				retryMs = 1000;
+			// Never a ready driver without a target: once, move the car and clear the avoid list; the next time, retire.
+			if (avoidedOut > 0)
+			{
+				if (state.m_bAvoidListCleared)
+				{
+					RetireGroup(state, string.Format("no drive target left again: this group avoids%1, after its avoid list was cleared once", DescribeTargetIds(state.m_aAvoidTargetIds)));
+					return;
+				}
 
-			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+				ClearAvoidList(state, retryMs);
+				return;
+			}
+
+			if (state.m_fNoTargetSinceMs < 0)
+				state.m_fNoTargetSinceMs = nowMs;
+
+			if (nowMs - state.m_fNoTargetSinceMs >= NO_TARGET_RETIRE_MS)
+			{
+				RetireGroup(state, string.Format("no drive target was %1 m or more away from the vehicle and the current target for %2 s", exclusion, NO_TARGET_RETIRE_MS / 1000));
+				return;
+			}
+
+			state.m_fNextAssignAtMs = nowMs + retryMs;
 			if (!state.m_bNoTargetWarned)
 			{
 				state.m_bNoTargetWarned = true;
-				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target - no new waypoint, retrying every %3 ms", groupId, exclusion, retryMs), LogLevel.WARNING);
+				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target - no new waypoint, retrying every %3 ms, retired after %4 s", groupId, exclusion, retryMs, NO_TARGET_RETIRE_MS / 1000), LogLevel.WARNING);
 			}
 
 			return;
 		}
 
 		state.m_bNoTargetWarned = false;
+		state.m_fNoTargetSinceMs = -1;
 		int next = candidates[Math.RandomIntInclusive(0, candidates.Count() - 1)];
 		int previousTargetId = state.GetCurrentTargetId();
 		SCR_MLDataCaptureWaypoint record = state.m_aWaypoints[next];
@@ -1231,6 +1582,11 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 			m_iTotalWaypointsCompleted++;
 			state.m_iWaypointsCompleted++;
+
+			// Only a real arrival restores the reset budget: vanilla also completes the waypoint of a move that failed
+			// (STOPPED, or without a vehicle: SCR_AIProcessFailedMovementResult.c:113-119), wherever the car stands.
+			if (state.m_Vehicle && vector.DistanceXZ(state.m_Vehicle.GetOrigin(), state.m_aWaypoints[index].m_vPosition) <= m_fWaypointRadius)
+				RestoreResetBudget(state, string.Format("arrived at target %1", state.m_aWaypoints[index].m_iTargetId));
 
 			if (state.m_Group)
 				state.m_Group.RemoveWaypoint(completedWaypoint);
@@ -1313,8 +1669,15 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		int ready;
 		int canSeat;	// ready, or still able to become ready: seated, or a driver pending / walking in (boarding not FAILED)
 		int boardingFailed;
+		int retiredGroups;	// retired during the boarding window: they never become ready
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			if (state.m_bRetired)
+			{
+				retiredGroups++;
+				continue;
+			}
+
 			UpdateOccupancy(state, elapsedS);
 			if (!state.m_bDriverReady)
 			{
@@ -1345,7 +1708,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		int minReady = GetMinSeatedGroups();
 		if (canSeat < minReady)
 		{
-			FinishReadiness(string.Format("[DataCapture] ERROR: only %1 of %2 groups can still get a ready driver (%3 failed to start, %4 got no driver), fewer than the minimum of %5 - collector session NOT started", canSeat, m_iMaxAIGroups, m_iGroupsFailed, boardingFailed, minReady));
+			FinishReadiness(string.Format("[DataCapture] ERROR: only %1 of %2 groups can still get a ready driver (%3 failed to start, %4 got no driver, %5 retired), fewer than the minimum of %6 - collector session NOT started", canSeat, m_iMaxAIGroups, m_iGroupsFailed, boardingFailed, retiredGroups, minReady));
 			LogMissingGroups(LogLevel.ERROR);
 			return;
 		}
@@ -1355,7 +1718,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (ready == canSeat)
 		{
 			missing = MissingGroupIds();
-			Print(string.Format("[DataCapture] ERROR: TKT-01 acceptance NOT met: %1/%2 drivers ready after %3 s and no other group can get one (%4 failed to start, %5 got no driver) - starting a partial session without groups:%6", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1), m_iGroupsFailed, boardingFailed, missing), LogLevel.ERROR);
+			Print(string.Format("[DataCapture] ERROR: TKT-01 acceptance NOT met: %1/%2 drivers ready after %3 s and no other group can get one (%4 failed to start, %5 got no driver, %6 retired) - starting a partial session without groups:%7", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1), m_iGroupsFailed, boardingFailed, retiredGroups, missing), LogLevel.ERROR);
 			LogMissingGroups(LogLevel.WARNING);
 			StartCaptureSession(string.Format("%1/%2 drivers ready after %3 s", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1)));
 			return;
@@ -1402,7 +1765,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		string vehicles;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			if (!state.m_bDriverReady || state.m_bRegistered)
+			if (state.m_bRetired || !state.m_bDriverReady || state.m_bRegistered)
 				continue;
 
 			vehicles += string.Format(" V%1=%2", readyGroups.Count(), state.m_Vehicle.GetName());
@@ -1414,6 +1777,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		{
 			m_Collector.RegisterVehicle(readyState.m_Vehicle);
 			readyState.m_bRegistered = true;
+			readyState.m_iCollectorSlot = m_Collector.GetVehicleSlot(readyState.m_Vehicle);
 			readyState.m_fDistanceAtRegistration = readyState.m_fDistance;
 
 			int targetId = readyState.GetCurrentTargetId();
@@ -1522,7 +1886,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	{
 		m_bReadinessDone = true;
 		GetGame().GetCallqueue().Remove(CheckReadiness);
-		Print(errorMessage, LogLevel.ERROR);
+		PrintText(errorMessage, LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Prints a line held in a string variable as plain text at the given level. Print of a variable logs the
+	//! declaration with it ("string message = '...'", Print(void var), Core/proto/EnDebug.c:7); a string.Format result
+	//! is a value, which Print logs as the text alone, like every other director line.
+	protected void PrintText(string message, LogLevel level)
+	{
+		Print(string.Format("%1", message), level);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1537,9 +1910,23 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		float elapsedS = (nowMs - m_fStartTimeMs) / 1000.0;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			// A retired group gets no waypoint, no seat watchdog and no statistics updates any more.
+			if (state.m_bRetired)
+				continue;
+
 			// Occupancy for stuck recovery is re-read here, so it does not depend on the readiness poll having run
 			// or still running, and it drops when the driver leaves or dies.
 			UpdateOccupancy(state, elapsedS);
+
+			// Before the seating retries and the waypoint assignment: a group without an AI agent must hold no waypoint.
+			CheckGroupMembers(state);
+			if (state.m_bRetired)
+				continue;
+
+			// Whether or not a driver ever sat in the pilot seat (direct seating and walk-in can both fail).
+			CheckSeatDeadline(state, elapsedS);
+			if (state.m_bRetired)
+				continue;
 
 			// A driver that is ready only after the boarding window ended (late, or seated earlier and then lost before
 			// the start) is not added to a running session: the collector's vehicle ids and session_info.txt are fixed
@@ -1558,10 +1945,11 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (state.m_fNextSeatAttemptAtMs >= 0 && nowMs >= state.m_fNextSeatAttemptAtMs)
 				TrySeatDriver(state);
 
-			if (state.m_fNextAssignAtMs >= 0 && nowMs >= state.m_fNextAssignAtMs)
+			// Both can retire the group (walk-in failure, no drive target left): nothing else runs for it then.
+			if (state.m_fNextAssignAtMs >= 0 && nowMs >= state.m_fNextAssignAtMs && !state.m_bRetired)
 				AssignNextWaypoint(state);
 
-			if (!state.m_Vehicle || !state.m_Simulation)
+			if (state.m_bRetired || !state.m_Vehicle || !state.m_Simulation)
 				continue;
 
 			float dtS = 0;
@@ -1572,6 +1960,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			vector position = state.m_Vehicle.GetOrigin();
 			state.m_fDistance += vector.Distance(position, state.m_vLastPosition);
 			state.m_vLastPosition = position;
+			if (state.m_iResetsSinceWaypoint > 0 && vector.DistanceXZ(position, state.m_vLastResetTo) >= RESET_PROGRESS_M)
+				RestoreResetBudget(state, string.Format("%1 m driven from its latest reset place", RESET_PROGRESS_M));
 
 			float speed = state.m_Simulation.GetSpeedKmh(); // VehicleBaseSimulation.GetSpeedKmh in 1.8
 			if (dtS > 0)
@@ -1585,14 +1975,22 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (rpm > state.m_fMaxRPM)
 				state.m_fMaxRPM = rpm;
 
+			RecordGoodPose(state, elapsedS, speed);
+
 			// Before CheckStuck, which pauses its clock while the seat watchdog has the driver out.
 			WatchDriverSeat(state, elapsedS, speed);
+			if (state.m_bRetired)
+				continue;
+
 			CheckStuck(state, position, dtS);
 		}
 
 		// After the per-group loop, so the distances are current.
 		if (m_fDrivingCheckAtMs >= 0 && nowMs >= m_fDrivingCheckAtMs)
 			CheckRegisteredVehiclesDriving();
+
+		if (m_fGateCheckAtMs >= 0 && nowMs >= m_fGateCheckAtMs)
+			CheckGatesOpen();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1633,18 +2031,345 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (!state.m_Vehicle || !state.m_SpawnPoint)
 			return;
 
+		if (!CountReset(state, "stuck for 30 s with a ready driver"))
+			return;
+
 		state.m_iStuckResets++;
 		Print(string.Format("[DataCapture] Group %1: vehicle %2 stuck for %3 s - resetting to %4 (reset %5)", state.m_iGroupId, state.m_Vehicle.GetName(), m_fStuckTimeS, state.m_SpawnPoint.GetName(), state.m_iStuckResets), LogLevel.WARNING);
 
 		vector transform[4];
+		GetSpawnResetTransform(state, transform);
+		TeleportVehicle(state, transform, "stuck reset to the spawn point after 30 s standing with a ready driver");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Books one stuck reset or relocation of the car, before it happens, and remembers where the car stands (L6:
+	//! FindResetPose keeps away from these places). The resets since the last verified progress are bounded: past
+	//! MAX_RESETS_WITHOUT_WAYPOINT the group is retired instead, so no reset loop is endless. Only verified progress
+	//! starts the count again (RestoreResetBudget): RESET_PROGRESS_M from the latest reset place, or an arrival within
+	//! the completion radius; a completion that vanilla makes after a failed move does not.
+	//! \return false when the group was retired instead
+	protected bool CountReset(SCR_MLDataCaptureGroupState state, string kind)
+	{
+		if (state.m_iResetsSinceWaypoint >= MAX_RESETS_WITHOUT_WAYPOINT)
+		{
+			RetireGroup(state, string.Format("stuck: %1 resets without verified progress did not help (next: %2)", state.m_iResetsSinceWaypoint, kind));
+			return false;
+		}
+
+		state.m_iResetsSinceWaypoint++;
+		if (state.m_Vehicle)
+			state.m_aStuckPlaces.Insert(state.m_Vehicle.GetOrigin());
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Verified progress (OnWaypointCompleted: an arrival; MonitorVehicles: RESET_PROGRESS_M from the latest reset
+	//! place): the reset budget of CountReset starts again.
+	protected void RestoreResetBudget(SCR_MLDataCaptureGroupState state, string why)
+	{
+		if (state.m_iResetsSinceWaypoint <= 0)
+			return;
+
+		Print(string.Format("[DataCapture] Group %1: reset budget restored after %2 resets: %3", state.m_iGroupId, state.m_iResetsSinceWaypoint, why), LogLevel.NORMAL);
+		state.m_iResetsSinceWaypoint = 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every drive target the group could take is on its avoid list (AssignNextWaypoint): once per group, the car goes
+	//! to its spawn point (a known road point, as CheckStuck's reset) and the avoid list is cleared, so the excluded
+	//! targets are tried again from there; the next target follows retryMs later.
+	protected void ClearAvoidList(SCR_MLDataCaptureGroupState state, int retryMs)
+	{
+		string cleared = DescribeTargetIds(state.m_aAvoidTargetIds);
+		if (state.m_Vehicle && state.m_SpawnPoint)
+		{
+			if (!CountReset(state, "avoid list exhausted"))
+				return;
+
+			vector transform[4];
+			GetSpawnResetTransform(state, transform);
+			TeleportVehicle(state, transform, "moved to the spawn point, every drive target it could take was avoided");
+		}
+
+		state.m_bAvoidListCleared = true;
+		state.m_aAvoidTargetIds.Clear();
+		state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+		Print(string.Format("[DataCapture] WARNING: group %1: every drive target it could take was avoided (%2): car moved to its spawn point, avoid list cleared (once per group), the next target follows in %3 ms", state.m_iGroupId, cleared, retryMs), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \param[out] transform the group's spawn point 2 m up, where the stuck resets put a car without a better place
+	protected void GetSpawnResetTransform(SCR_MLDataCaptureGroupState state, out vector transform[4])
+	{
 		state.m_SpawnPoint.GetWorldTransform(transform);
 		vector position = transform[3];
 		position[1] = position[1] + 2.0;
 		transform[3] = position;
-		state.m_Vehicle.SetWorldTransform(transform);
+	}
 
+	//------------------------------------------------------------------------------------------------
+	//! Teleports the vehicle, and whoever sits in it, to transform (IEntity.SetWorldTransform,
+	//! Core/generated/Entities/IEntity.c:290); the stuck clock and the distance accounting restart there. A registered
+	//! car's jump is logged by the collector with its vehicle id, world time, frame and both poses
+	//! (SCR_MLDataCollector.NoteVehicleTeleport), which also keeps distance_total from counting it.
+	protected void TeleportVehicle(SCR_MLDataCaptureGroupState state, vector transform[4], string reason)
+	{
+		vector fromTransform[4];
+		state.m_Vehicle.GetWorldTransform(fromTransform);
+		state.m_Vehicle.SetWorldTransform(transform);
+		if (state.m_bRegistered && m_Collector)
+			m_Collector.NoteVehicleTeleport(state.m_Vehicle, fromTransform[3], fromTransform[2], transform[3], transform[2], string.Format("group %1: %2", state.m_iGroupId, reason));
+
+		vector position = transform[3];
+		state.m_fStuckTimeS = 0;
 		state.m_vStuckCheckPosition = position;
 		state.m_vLastPosition = position;
+		state.m_vLastResetTo = position;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Run by MonitorVehicles for every active group that started driving, before its waypoint assignment. Vanilla
+	//! dereferences the group leader without a null check when a group move fails
+	//! (Game/AI/ScriptedNodes/Groups/SCR_AIProcessFailedMovementResult.c:58-59; also
+	//! Game/AI/ScriptedNodes/Logical/SCR_AIDecoDistanceHysteresis.c:41), so a group without an AI agent
+	//! (AIGroup.GetAgentsCount, Game/generated/AI/AIGroup.c:24) must never hold a waypoint:
+	//! - group or vehicle deleted: retired;
+	//! - no AI agent, and the car cannot move or is on fire, or no seat watchdog will seat a new driver (it is off, or
+	//!   the group's driver never sat in the pilot seat, WatchDriverSeat) and the group's driver is not alive: retired,
+	//!   which deletes the empty group;
+	//! - no AI agent otherwise: its current waypoint is taken away until an agent is back (the seat watchdog's new
+	//!   driver, or the living driver whose join is still in progress);
+	//! - with the seat watchdog off: a car that cannot move or is on fire without a living driver in its pilot seat is
+	//!   retired (with the watchdog on, ReseatDriver retires it when its time is up).
+	protected void CheckGroupMembers(SCR_MLDataCaptureGroupState state)
+	{
+		if (state.m_bRetired || !state.m_bDrivingStarted)
+			return;
+
+		// Asked for by the record inside a vanilla node (ReleaseFailedWaypoint), done here from the call queue.
+		if (!state.m_sRetireDue.IsEmpty())
+		{
+			RetireGroup(state, state.m_sRetireDue);
+			return;
+		}
+
+		if (!state.m_Group)
+		{
+			RetireGroup(state, "its AI group was deleted");
+			return;
+		}
+
+		if (!state.m_Vehicle)
+		{
+			RetireGroup(state, "its vehicle was deleted");
+			return;
+		}
+
+		bool watchdogReseats = m_fReseatAfterS > 0 && state.m_fFirstSeatedS >= 0;
+		if (!state.IsLeaderless())
+		{
+			if (state.m_iSuspendedWaypoint >= 0 || state.m_bGroupAIDeactivated)
+				ResumeWaypoint(state);
+
+			if (!watchdogReseats && !state.m_bDriverSeated && !IsVehicleUsable(state.m_Vehicle))
+				RetireGroup(state, string.Format("%1 cannot move or is on fire (%2), its driver is out and no seat watchdog reseats it", state.m_Vehicle.GetName(), DescribeVehicleDamage(state.m_Vehicle)));
+
+			return;
+		}
+
+		if (!IsVehicleUsable(state.m_Vehicle))
+		{
+			RetireGroup(state, string.Format("no AI leader left and %1 cannot move or is on fire (%2)", state.m_Vehicle.GetName(), DescribeVehicleDamage(state.m_Vehicle)));
+			return;
+		}
+
+		// A living driver of this group without an agent in it is taken for a join still in progress: wait for it.
+		if (!watchdogReseats && DescribeDriver(state.m_Driver) != "alive")
+		{
+			RetireGroup(state, string.Format("no AI leader left (driver %1) and no seat watchdog seats a new driver (it is off, or this group's driver never sat in the pilot seat)", DescribeDriver(state.m_Driver)));
+			return;
+		}
+
+		SuspendWaypoint(state);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A leaderless group that the seat watchdog can still give a new driver (CheckGroupMembers, from the call queue):
+	//! no waypoint (TakeWaypointAway, which the group's events normally ran already) and no group AI. Vanilla
+	//! deactivates the AI of the groups it keeps without AI members (SCR_GroupsManagerComponent.c:1271, :1295;
+	//! AIAgent.DeactivateAI, Game/generated/AI/AIAgent.c:54), so no group behaviour tree runs without a leader.
+	//! ResumeWaypoint undoes both. With no current waypoint (between a completion and the next assignment) there is
+	//! nothing to take: AssignNextWaypoint waits while the group is leaderless.
+	protected void SuspendWaypoint(SCR_MLDataCaptureGroupState state)
+	{
+		state.TakeWaypointAway("has no AI leader");
+		if (state.m_bGroupAIDeactivated || !state.m_Group.IsAIActivated()) // AIAgent.c:55
+			return;
+
+		state.m_Group.DeactivateAI();
+		state.m_bGroupAIDeactivated = true;
+		Print(string.Format("[DataCapture] WARNING: group %1 has no AI leader: group AI deactivated until it has one again %2", state.m_iGroupId, DescribeGroup(state)), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Undoes SuspendWaypoint once the group has an AI leader again: the group AI (AIAgent.ActivateAI, AIAgent.c:53)
+	//! and the suspended waypoint (AIGroup.AddWaypoint, AIGroup.c:32).
+	protected void ResumeWaypoint(SCR_MLDataCaptureGroupState state)
+	{
+		if (state.m_bGroupAIDeactivated)
+		{
+			state.m_bGroupAIDeactivated = false;
+			state.m_Group.ActivateAI();
+		}
+
+		int index = state.m_iSuspendedWaypoint;
+		state.m_iSuspendedWaypoint = -1;
+		string target = "none (the next one follows)";
+		if (index >= 0 && index < state.m_aWaypoints.Count())
+		{
+			state.m_Group.AddWaypoint(state.m_aWaypoints[index].m_Waypoint);
+			target = state.m_aWaypoints[index].m_iTargetId.ToString();
+		}
+
+		Print(string.Format("[DataCapture] Group %1 has an AI leader again: group AI active, waypoint %2 given back %3", state.m_iGroupId, target, DescribeGroup(state)), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Removes every director handler from the group (RetireGroup, StopDirector)
+	protected void UnsubscribeGroup(SCR_MLDataCaptureGroupState state)
+	{
+		SCR_AIGroup group = state.m_Group;
+		if (!group)
+			return;
+
+		group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
+		group.GetOnLeaderChanged().Remove(state.OnLeaderChanged);
+		group.GetOnAgentRemoved().Remove(state.OnAgentRemoved);
+		SCR_AIGroupUtilityComponent groupUtility = group.GetGroupUtilityComponent();
+		if (!groupUtility)
+			return;
+
+		groupUtility.GetOnMoveFailed().Remove(state.OnMoveFailed);
+		groupUtility.m_OnAgentLifeStateChanged.Remove(state.OnAgentLifeStateChanged);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Takes a group that cannot drive any more out of the capture for good: removes its waypoints from it and deletes
+	//! them, never assigns it a new one, ends its seat watchdog, move-failure counting (OnMoveFailed is unsubscribed),
+	//! stuck resets and statistics updates, releases its LOD pin and vehicle observer, and logs one line
+	//! "[DataCapture] WARNING: group N retired: <reason>".
+	//! An empty group is deleted. That is the vanilla fate of every empty group: SCR_AIGroup.OnEmpty deletes it with
+	//! SCR_EntityHelper.DeleteEntityAndChildren unless delete-when-empty is off (Game/Entities/SCR_AIGroup.c:2448-2460,
+	//! off since SpawnAIGroup), deferred by 1 ms only because deleting inside that event is unsafe (:2458). RetireGroup
+	//! runs from the call queue (MonitorVehicles), the context that deferred delete runs in. Only removing the
+	//! waypoints would keep an agent-less group running its behaviour tree, a state vanilla never produces, in which
+	//! every group node that reads the leader dereferences null (SCR_AIProcessFailedMovementResult.c:59,
+	//! SCR_AIDecoDistanceHysteresis.c:41 in MoveToWPWithTransport.bt), whatever its trigger.
+	//! A group with members left (a living driver next to a burning car) keeps them: its waypoints go, and
+	//! delete-when-empty is turned back on (SCR_AIGroup.c:3373), so vanilla deletes it once the last one is gone.
+	protected void RetireGroup(SCR_MLDataCaptureGroupState state, string reason)
+	{
+		if (state.m_bRetired)
+			return;
+
+		string before = DescribeGroup(state);
+		int lastTargetId = state.GetCurrentTargetId();
+		state.m_bRetired = true;
+		state.m_sRetireReason = reason;
+		state.m_fRetiredAtS = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 1000.0;
+		state.m_fNextAssignAtMs = -1;
+		state.m_fNextSeatAttemptAtMs = -1;
+		state.m_iSuspendedWaypoint = -1;
+		state.m_fStuckTimeS = 0;
+		state.m_bDriverSeated = false;
+		state.m_bDriverReady = false;
+
+		int removed;
+		SCR_AIGroup group = state.m_Group;
+		if (group)
+		{
+			UnsubscribeGroup(state);
+			array<AIWaypoint> waypoints = {};
+			group.GetWaypoints(waypoints); // Game/generated/AI/AIGroup.c:39
+			foreach (AIWaypoint waypoint : waypoints)
+			{
+				if (!waypoint)
+					continue;
+
+				group.RemoveWaypoint(waypoint);
+				removed++;
+			}
+		}
+
+		ReleaseGroup(state, GetObserversSystem(), true);
+		DeleteWaypointEntities(state);
+
+		// No more telemetry rows for a retired car, without renumbering the other vehicle ids (and the camera moves on
+		// if it followed this car).
+		// By the kept vehicle id, so it works when the vehicle entity is already gone (finding 2).
+		string captureText = "not in the collector session";
+		if (state.m_bRegistered && m_Collector)
+		{
+			captureText = string.Format("collector slot V%1 kept but no longer captured", state.m_iCollectorSlot);
+			if (!m_Collector.DeactivateVehicleSlot(state.m_iCollectorSlot, string.Format("group %1 retired: %2", state.m_iGroupId, reason)))
+				captureText = string.Format("collector has no vehicle id %1", state.m_iCollectorSlot);
+		}
+
+		string groupText = "AI group already gone";
+		if (group)
+		{
+			int agents = group.GetAgentsCount();
+			if (agents == 0 || !group.GetLeaderEntity())
+			{
+				// Exactly vanilla's deferred delete of an empty group (SCR_AIGroup.c:2460; SCR_EntityHelper.c:177).
+				GetGame().GetCallqueue().CallLater(SCR_EntityHelper.DeleteEntityAndChildren, 1, false, group);
+				state.m_Group = null;
+				groupText = string.Format("AI group without a leader (%1 agents) deleted 1 ms later", agents);
+			}
+			else
+			{
+				group.SetDeleteWhenEmpty(true);
+				groupText = string.Format("AI group kept with %1 agents, vanilla deletes it once empty", agents);
+			}
+		}
+
+		string lastTarget = "none";
+		if (lastTargetId > 0)
+			lastTarget = lastTargetId.ToString();
+
+		Print(string.Format("[DataCapture] WARNING: group %1 retired: %2 (%3 waypoints removed, last target %4, %5, %6; no new waypoint, seat watchdog or move-failure counting from now on) %7", state.m_iGroupId, reason, removed, lastTarget, groupText, captureText, before), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Run by MonitorVehicles for every active group: a car whose pilot seat has had no living driver for
+	//! MAX_UNSEATED_S is lost for the capture, whatever kept it so (direct seating and walk-in both failed, a walk-in
+	//! driver that never got in, a seat watchdog that cannot seat one, an unconscious driver), and the group is retired.
+	//! It applies whether or not a driver ever sat there and whether or not the group started driving.
+	protected void CheckSeatDeadline(SCR_MLDataCaptureGroupState state, float elapsedS)
+	{
+		if (state.m_bDriverSeated)
+		{
+			state.m_fUnseatedSinceS = -1;
+			return;
+		}
+
+		if (state.m_fUnseatedSinceS < 0)
+		{
+			state.m_fUnseatedSinceS = elapsedS;
+			return;
+		}
+
+		float unseatedS = elapsedS - state.m_fUnseatedSinceS;
+		if (unseatedS < MAX_UNSEATED_S)
+			return;
+
+		string vehicleName = "its deleted vehicle";
+		if (state.m_Vehicle)
+			vehicleName = state.m_Vehicle.GetName();
+
+		RetireGroup(state, string.Format("no living driver in the pilot seat of %1 for %2 s (boarding %3, seated before: %4; seat watchdog attempts that failed in a row: %5, last: %6)", vehicleName, unseatedS.ToString(-1, 0), typename.EnumToString(SCR_EMLDataCaptureBoarding, state.m_eBoarding), state.m_fFirstSeatedS >= 0, state.m_iFailedReseats, state.m_sLastReseatFailure));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1655,7 +2380,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//! every m_fReseatAfterS while the seat stays empty.
 	protected void WatchDriverSeat(SCR_MLDataCaptureGroupState state, float elapsedS, float speed)
 	{
-		if (!m_bReadinessDone || state.m_fFirstSeatedS < 0)
+		if (state.m_bRetired || !m_bReadinessDone || state.m_fFirstSeatedS < 0)
 			return;
 
 		string vehicleName = state.m_Vehicle.GetName();
@@ -1678,6 +2403,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 				}
 
 				state.m_bReseatedThisDismount = false;
+				state.m_iFailedReseats = 0;
 				Print(string.Format("[DataCapture] Group %1: driver back in the pilot seat of %2 after %3 s: %4 (dismount %5, reseats %6)", state.m_iGroupId, vehicleName, outS.ToString(-1, 1), how, state.m_iDismounts, state.m_iReseats), LogLevel.NORMAL);
 			}
 
@@ -1690,25 +2416,34 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			state.m_fReseatDueS = elapsedS + m_fReseatAfterS;
 			state.m_iDismounts++;
 
+			// The waypoint this dismount episode is about (kept while reseats do not get the car moving)
+			if (state.m_iReseatsWithoutProgress == 0)
+				state.m_iEpisodeWaypoint = GetHeldWaypointIndex(state);
+
 			// The last move failure and the car's damage tell the likely triggers apart: a failed group move in the car
 			// (SCR_AIProcessFailedMovementResult) or a car that cannot move or is on fire (SCR_AILeaveStaticVehicles).
 			Print(string.Format("[DataCapture] WARNING: group %1: no living driver in the pilot seat of %2 (dismount %3 at %4 km/h, handbrake %5, %6, %7) %8", state.m_iGroupId, vehicleName, state.m_iDismounts, speed.ToString(-1, 1), state.m_Simulation.IsHandbrakeOn(), DescribeMoveFailures(state), DescribeVehicleDamage(state.m_Vehicle), DescribeGroup(state)), LogLevel.WARNING);
 		}
 
+		float unseatedS = elapsedS - state.m_fDismountedAtS;
 		if (m_fReseatAfterS <= 0 || elapsedS < state.m_fReseatDueS)
 			return;
 
 		state.m_fReseatDueS = elapsedS + m_fReseatAfterS;
-		ReseatDriver(state, elapsedS - state.m_fDismountedAtS);
+		ReseatDriver(state, unseatedS);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One seat watchdog attempt on a pilot seat without a living driver. It seats nobody, and says why once per dismount
-	//! (LogOncePerDismount), when:
+	//! One seat watchdog attempt on a pilot seat without a living driver. It retires the group (RetireGroup) when:
 	//! - the group or the pilot seat no longer exists;
-	//! - the car cannot move or is on fire (IsVehicleUsable): the vanilla AI would order the driver straight out again;
+	//! - the car cannot move or is on fire (IsVehicleUsable): the vanilla AI would order the driver straight out again.
 	//! - the last MAX_RESEATS_WITHOUT_PROGRESS reseats left the car within m_fStuckDistanceM of where the previous one put
-	//!   the driver in: the vanilla AI keeps ordering it out, so the watchdog waits until the car has moved;
+	//!   the driver in, after MAX_LIMIT_RESETS stuck resets: those did not help either.
+	//! - MAX_FAILED_RESEATS attempts in a row seated nobody (FailReseat below); CheckSeatDeadline also retires the
+	//!   group after MAX_UNSEATED_S without a living driver in the pilot seat.
+	//! After MAX_RESEATS_WITHOUT_PROGRESS such reseats (the vanilla AI keeps ordering the driver out where the car
+	//! stands) the reseat below is followed by a stuck reset (ResetAfterReseatLimit).
+	//! It seats nobody, and says why once per dismount (LogOncePerDismount), when:
 	//! - the pilot seat holds a character that is not dead (a living one would be the seated driver, so an unconscious
 	//!   one), or the group's own driver is unconscious outside the seat.
 	//! Otherwise:
@@ -1727,27 +2462,43 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//!   The group outlives its last member because SpawnAIGroup turned its delete-when-empty off.
 	protected void ReseatDriver(SCR_MLDataCaptureGroupState state, float unseatedS)
 	{
+		if (state.m_bRetired)
+			return;
+
 		string vehicleName = state.m_Vehicle.GetName();
 		PilotCompartmentSlot pilotSlot = state.m_Vehicle.GetPilotCompartmentSlot();
 		if (!pilotSlot || !state.m_Group)
 		{
-			LogOncePerDismount(state, "gone", string.Format("[DataCapture] ERROR: group %1: cannot reseat the driver of %2: its group or pilot seat no longer exists", state.m_iGroupId, vehicleName), LogLevel.ERROR);
+			RetireGroup(state, string.Format("cannot reseat the driver of %1: its AI group or pilot seat no longer exists", vehicleName));
 			return;
 		}
 
+		// The vanilla AI would order a new driver straight out again (SCR_AILeaveStaticVehicles), so the group is done.
 		if (!IsVehicleUsable(state.m_Vehicle))
 		{
-			LogOncePerDismount(state, "unusable", string.Format("[DataCapture] WARNING: group %1: not reseating the driver of %2 after %3 s: the car cannot move or is on fire (%4), so the vanilla AI would order it straight out again %5", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), DescribeVehicleDamage(state.m_Vehicle), DescribeGroup(state)), LogLevel.WARNING);
+			RetireGroup(state, string.Format("%1 cannot move or is on fire (%2) %3 s after its pilot seat lost the living driver, so the seat watchdog does not reseat it", vehicleName, DescribeVehicleDamage(state.m_Vehicle), unseatedS.ToString(-1, 0)));
+			return;
+		}
+
+		// Recovery that keeps failing (the seat stays inaccessible, the corpse will not come out, boarding is refused)
+		if (state.m_iFailedReseats >= MAX_FAILED_RESEATS)
+		{
+			RetireGroup(state, string.Format("the seat watchdog failed %1 times in a row to seat a driver into %2 (last: %3) after %4 s", state.m_iFailedReseats, vehicleName, state.m_sLastReseatFailure, unseatedS.ToString(-1, 0)));
 			return;
 		}
 
 		vector position = state.m_Vehicle.GetOrigin();
-		if (vector.Distance(position, state.m_vLastReseatPosition) >= m_fStuckDistanceM)
-			state.m_iReseatsWithoutProgress = 0;
-
-		if (state.m_iReseatsWithoutProgress >= MAX_RESEATS_WITHOUT_PROGRESS)
+		if (state.m_iReseatsWithoutProgress > 0 && vector.Distance(position, state.m_vLastReseatPosition) >= m_fStuckDistanceM)
 		{
-			LogOncePerDismount(state, "limit", string.Format("[DataCapture] ERROR: group %1: no more reseats into %2: %3 reseats in a row and the car has not moved %4 m since the last one - the vanilla AI keeps ordering the driver out (%5, %6) %7", state.m_iGroupId, vehicleName, state.m_iReseatsWithoutProgress, m_fStuckDistanceM, DescribeMoveFailures(state), DescribeVehicleDamage(state.m_Vehicle), DescribeGroup(state)), LogLevel.ERROR);
+			// The car moved since the last reseat: a new episode begins with this dismount.
+			state.m_iReseatsWithoutProgress = 0;
+			state.m_iEpisodeWaypoint = GetHeldWaypointIndex(state);
+		}
+
+		bool resetDue = state.m_iReseatsWithoutProgress >= MAX_RESEATS_WITHOUT_PROGRESS;
+		if (resetDue && state.m_iLimitResets >= MAX_LIMIT_RESETS)
+		{
+			RetireGroup(state, string.Format("stuck: %1 reseats in a row without %2 moving %3 m, and %4 stuck resets did not help (%5)", state.m_iReseatsWithoutProgress, vehicleName, m_fStuckDistanceM, state.m_iLimitResets, DescribeMoveFailures(state)));
 			return;
 		}
 
@@ -1757,7 +2508,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			string occupantState = DescribeDriver(occupant);
 			if (occupantState != "dead")
 			{
-				LogOncePerDismount(state, "occupied", string.Format("[DataCapture] WARNING: group %1: cannot reseat the driver of %2 after %3 s: the pilot seat is taken by %4 (%5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), occupant, occupantState, DescribeGroup(state)), LogLevel.WARNING);
+				FailReseat(state, "occupied", string.Format("[DataCapture] WARNING: group %1: cannot reseat the driver of %2 after %3 s: the pilot seat is taken by %4 (%5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), occupant, occupantState, DescribeGroup(state)), LogLevel.WARNING);
 				return;
 			}
 
@@ -1769,7 +2520,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (corpseAccess && corpseAccess.FindSuitableTeleportLocation(exitTransform))
 				movedOut = corpseAccess.GetOutVehicle_NoDoor(exitTransform, false, false);
 
-			LogOncePerDismount(state, "corpse", string.Format("[DataCapture] WARNING: group %1: a dead character sits in the pilot seat of %2 after %3 s - moving it out first, the next attempt seats a new driver (accepted %4)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), movedOut), LogLevel.WARNING);
+			FailReseat(state, "corpse", string.Format("[DataCapture] WARNING: group %1: a dead character sits in the pilot seat of %2 after %3 s - moving it out first, the next attempt seats a new driver (accepted %4)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), movedOut), LogLevel.WARNING);
 			return;
 		}
 
@@ -1780,7 +2531,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			CompartmentAccessComponent access = driver.GetCompartmentAccessComponent();
 			if (!access)
 			{
-				LogOncePerDismount(state, "no_access", string.Format("[DataCapture] ERROR: group %1: cannot reseat the driver of %2: it has no CompartmentAccessComponent", state.m_iGroupId, vehicleName), LogLevel.ERROR);
+				FailReseat(state, "no_access", string.Format("[DataCapture] ERROR: group %1: cannot reseat the driver of %2: it has no CompartmentAccessComponent", state.m_iGroupId, vehicleName), LogLevel.ERROR);
 				return;
 			}
 
@@ -1788,24 +2539,27 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (access.IsInCompartment() && !access.IsGettingIn())
 			{
 				bool leftSeat = access.GetOutVehicle(EGetOutType.TELEPORT, -1, ECloseDoorAfterActions.INVALID, false);
-				LogOncePerDismount(state, "other_seat", string.Format("[DataCapture] WARNING: group %1: the driver of %2 sits in another seat after %3 s - teleporting it out first (accepted %4, %5)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), leftSeat, transition), LogLevel.WARNING);
+				FailReseat(state, "other_seat", string.Format("[DataCapture] WARNING: group %1: the driver of %2 sits in another seat after %3 s - teleporting it out first (accepted %4, %5)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), leftSeat, transition), LogLevel.WARNING);
 				return;
 			}
 
 			if (!access.GetInVehicle(state.m_Vehicle, pilotSlot, true, -1, ECloseDoorAfterActions.INVALID, false))
 			{
-				LogOncePerDismount(state, "refused", string.Format("[DataCapture] WARNING: group %1: reseating the driver of %2 after %3 s failed: GetInVehicle refused (pilot seat accessible=%4, %5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), pilotSlot.IsCompartmentAccessible(), transition, DescribeGroup(state)), LogLevel.WARNING);
+				FailReseat(state, "refused", string.Format("[DataCapture] WARNING: group %1: reseating the driver of %2 after %3 s failed: GetInVehicle refused (pilot seat accessible=%4, %5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), pilotSlot.IsCompartmentAccessible(), transition, DescribeGroup(state)), LogLevel.WARNING);
 				return;
 			}
 
 			CountReseat(state, position);
 			Print(string.Format("[DataCapture] WARNING: group %1: driver teleported back into the pilot seat of %2 after %3 s without a living driver there (reseat %4, %5 in a row without the car moving, %6) %7", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), state.m_iReseats, state.m_iReseatsWithoutProgress, transition, DescribeGroup(state)), LogLevel.WARNING);
+			if (resetDue)
+				ResetAfterReseatLimit(state);
+
 			return;
 		}
 
 		if (driverState != "none" && driverState != "dead")
 		{
-			LogOncePerDismount(state, "not_replaced", string.Format("[DataCapture] WARNING: group %1: the driver of %2 is %3 after %4 s out of the pilot seat - not replaced %5", state.m_iGroupId, vehicleName, driverState, unseatedS.ToString(-1, 0), DescribeGroup(state)), LogLevel.WARNING);
+			FailReseat(state, "not_replaced", string.Format("[DataCapture] WARNING: group %1: the driver of %2 is %3 after %4 s out of the pilot seat - not replaced %5", state.m_iGroupId, vehicleName, driverState, unseatedS.ToString(-1, 0), DescribeGroup(state)), LogLevel.WARNING);
 			return;
 		}
 
@@ -1814,7 +2568,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		IEntity newDriver = pilotSlot.SpawnCharacterInCompartment(m_sDriverPrefab, aiGroup);
 		if (!newDriver)
 		{
-			LogOncePerDismount(state, "spawn_failed", string.Format("[DataCapture] WARNING: group %1: replacing the %2 driver of %3 failed (pilot seat accessible=%4) %5", state.m_iGroupId, driverState, vehicleName, pilotSlot.IsCompartmentAccessible(), DescribeGroup(state)), LogLevel.WARNING);
+			FailReseat(state, "spawn_failed", string.Format("[DataCapture] WARNING: group %1: replacing the %2 driver of %3 failed (pilot seat accessible=%4) %5", state.m_iGroupId, driverState, vehicleName, pilotSlot.IsCompartmentAccessible(), DescribeGroup(state)), LogLevel.WARNING);
 			return;
 		}
 
@@ -1824,6 +2578,204 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		CountReseat(state, position);
 		Print(string.Format("[DataCapture] WARNING: group %1: driver of %2 was %3 - new driver spawned in the pilot seat after %4 s (direct seating, reseat %5, %6 in a row without the car moving) %7", state.m_iGroupId, vehicleName, driverState, unseatedS.ToString(-1, 0), state.m_iReseats, state.m_iReseatsWithoutProgress, DescribeGroup(state)), LogLevel.WARNING);
+		if (resetDue)
+			ResetAfterReseatLimit(state);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Stuck reset after the reseat limit, right after the reseat that put a driver back into the pilot seat:
+	//! MAX_RESEATS_WITHOUT_PROGRESS reseats in a row did not get the car moving, because the vanilla AI orders the driver
+	//! out again where the car stands (a failed group move in the car, SCR_AIProcessFailedMovementResult.c:129-149;
+	//! AI_Car_2 on target 11 on 2026-11-03). The car, with the driver just seated, is teleported away
+	//! (TeleportVehicle, as CheckStuck's reset) to the newest good pose RESET_MIN_DISTANCE_M or more from it and twice the
+	//! completion radius or more from the target it failed on (the last place it drove through at speed, upright), else
+	//! to its group's spawn point; never back near an earlier stuck place. The failed target is taken from the group,
+	//! and avoided by it from now on only when the car got stuck within AVOID_NEAR_TARGET_M of it; the next target
+	//! follows m_iWaypointDelay later, when the driver sits in the car at its new place. ReseatDriver retires the group
+	//! when the limit is reached again after MAX_LIMIT_RESETS of these; CountReset bounds all resets together.
+	protected void ResetAfterReseatLimit(SCR_MLDataCaptureGroupState state)
+	{
+		vector from = state.m_Vehicle.GetOrigin();
+		// The waypoint of this dismount episode (finding 6): a waypoint that completed meanwhile, with the driver on
+		// foot, and the next one assigned since, must not be blamed.
+		int heldIndex = GetHeldWaypointIndex(state);
+		int failedIndex = state.m_iEpisodeWaypoint;
+		if (failedIndex < 0 || failedIndex >= state.m_aWaypoints.Count())
+			failedIndex = heldIndex;
+
+		int failedTargetId = -1;
+		vector failedTarget = from;
+		if (failedIndex >= 0)
+		{
+			failedTargetId = state.m_aWaypoints[failedIndex].m_iTargetId;
+			failedTarget = state.m_aWaypoints[failedIndex].m_vPosition;
+		}
+
+		// Bounded with every other reset; also remembers this stuck place, which FindResetPose keeps away from.
+		if (!CountReset(state, "reseat limit"))
+			return;
+
+		float nowS = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 1000.0;
+		vector transform[4];
+		string where;
+		int pose = FindResetPose(state, from, failedTarget);
+		if (pose >= 0)
+		{
+			for (int i = 0; i < 4; i++)
+			{
+				transform[i] = state.m_aGoodPoses[4 * pose + i];
+			}
+
+			vector lifted = transform[3];
+			lifted[1] = lifted[1] + RESET_LIFT_M;
+			transform[3] = lifted;
+			float agoS = nowS - state.m_aGoodPoseTimesS[pose];
+			where = string.Format("where it drove %1 s earlier", agoS.ToString(-1, 0));
+		}
+		else if (state.m_SpawnPoint)
+		{
+			GetSpawnResetTransform(state, transform);
+			where = state.m_SpawnPoint.GetName() + ", no recent place far enough away";
+		}
+		else
+		{
+			RetireGroup(state, "stuck: no place to reset it to (no recent place far enough away, no spawn point)");
+			return;
+		}
+
+		state.m_iLimitResets++;
+		state.m_iStuckResets++;
+		TeleportVehicle(state, transform, string.Format("stuck reset %1/%2 after the reseat limit", state.m_iLimitResets, MAX_LIMIT_RESETS));
+		state.m_iReseatsWithoutProgress = 0;
+		state.m_vLastReseatPosition = transform[3];
+
+		// The next target in any case. The episode's target is avoided only when it is still the group's current
+		// waypoint and the car got stuck near it: stuck far away (AI_Car_4 on 2026-11-03, 1.7 km from target 11) blames
+		// the route, not the target.
+		string target = "none";
+		if (failedTargetId > 0)
+		{
+			float targetDistance = vector.DistanceXZ(from, failedTarget);
+			target = string.Format("%1 not avoided (stuck %2 m from it)", failedTargetId, targetDistance.ToString(-1, 0));
+			if (failedIndex != heldIndex)
+				target = string.Format("%1 not avoided (no longer the current waypoint)", failedTargetId);
+			else if (targetDistance <= AVOID_NEAR_TARGET_M)
+			{
+				target = string.Format("%1 avoided by this group from now on (stuck %2 m from it)", failedTargetId, targetDistance.ToString(-1, 0));
+				if (!state.AvoidTarget(failedTargetId))
+					target = string.Format("%1 not avoided (this group already avoids %2 targets, the most)", failedTargetId, SCR_MLDataCaptureGroupState.MAX_AVOIDED_TARGETS);
+			}
+		}
+
+		if (state.m_Group && heldIndex >= 0)
+			state.m_Group.RemoveWaypoint(state.m_aWaypoints[heldIndex].m_Waypoint);
+
+		state.m_iEpisodeWaypoint = -1;
+
+		state.m_iSuspendedWaypoint = -1;
+		state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + m_iWaypointDelay;
+
+		string what = string.Format("stuck reset %1/%2 after %3 reseats in a row without %4 moving %5 m", state.m_iLimitResets, MAX_LIMIT_RESETS, MAX_RESEATS_WITHOUT_PROGRESS, state.m_Vehicle.GetName(), m_fStuckDistanceM);
+		float distance = vector.Distance(from, transform[3]);
+		Print(string.Format("[DataCapture] WARNING: group %1: %2: car and driver teleported %3 m from %4 to %5 (%6); target %7, the next target follows in %8 ms %9", state.m_iGroupId, what, distance.ToString(-1, 0), from, transform[3], where, target, m_iWaypointDelay, DescribeGroup(state)), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return index into m_aWaypoints of the waypoint the group currently holds (AIGroup.GetCurrentWaypoint,
+	//! Game/generated/AI/AIGroup.c:38), or -1
+	protected int GetHeldWaypointIndex(SCR_MLDataCaptureGroupState state)
+	{
+		if (!state.m_Group)
+			return -1;
+
+		return state.FindWaypoint(state.m_Group.GetCurrentWaypoint());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return " 11 19" for the marker ids 11 and 19, " none" for none
+	protected string DescribeTargetIds(array<int> targetIds)
+	{
+		if (targetIds.IsEmpty())
+			return " none";
+
+		string text;
+		foreach (int targetId : targetIds)
+		{
+			text += " " + targetId.ToString();
+		}
+
+		return text;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return the newest good pose (index into m_aGoodPoseTimesS) at least RESET_MIN_DISTANCE_M from the stuck car and
+	//! from every earlier stuck place of the group, and twice the completion radius from the failed target, or -1
+	protected int FindResetPose(SCR_MLDataCaptureGroupState state, vector from, vector failedTarget)
+	{
+		float targetClearance = 2 * m_fWaypointRadius;
+		for (int pose = state.m_aGoodPoseTimesS.Count() - 1; pose >= 0; pose--)
+		{
+			vector position = state.m_aGoodPoses[4 * pose + 3];
+			if (vector.DistanceXZ(position, from) < RESET_MIN_DISTANCE_M)
+				continue;
+
+			if (vector.DistanceXZ(position, failedTarget) < targetClearance)
+				continue;
+
+			if (IsNearStuckPlace(state, position))
+				continue;
+
+			return pose;
+		}
+
+		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return true when position lies within RESET_MIN_DISTANCE_M of a place where this group's car stood at a reset
+	protected bool IsNearStuckPlace(SCR_MLDataCaptureGroupState state, vector position)
+	{
+		foreach (vector stuckPlace : state.m_aStuckPlaces)
+		{
+			if (vector.DistanceXZ(position, stuckPlace) < RESET_MIN_DISTANCE_M)
+				return true;
+		}
+
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Remembers where the car drives well (MonitorVehicles): every GOOD_POSE_INTERVAL_S while a ready driver drives it at
+	//! GOOD_POSE_MIN_KMH or more and it is upright; the newest GOOD_POSE_COUNT poses are kept for ResetAfterReseatLimit.
+	protected void RecordGoodPose(SCR_MLDataCaptureGroupState state, float elapsedS, float speed)
+	{
+		if (!state.m_bDriverReady || speed < GOOD_POSE_MIN_KMH)
+			return;
+
+		int count = state.m_aGoodPoseTimesS.Count();
+		if (count > 0 && elapsedS - state.m_aGoodPoseTimesS[count - 1] < GOOD_POSE_INTERVAL_S)
+			return;
+
+		vector transform[4];
+		state.m_Vehicle.GetWorldTransform(transform); // Core/generated/Entities/IEntity.c:203
+		vector up = transform[1];
+		if (up[1] < GOOD_POSE_MIN_UP_Y)
+			return;
+
+		for (int i = 0; i < 4; i++)
+		{
+			state.m_aGoodPoses.Insert(transform[i]);
+		}
+		state.m_aGoodPoseTimesS.Insert(elapsedS);
+
+		if (state.m_aGoodPoseTimesS.Count() <= GOOD_POSE_COUNT)
+			return;
+
+		for (int j = 0; j < 4; j++)
+		{
+			state.m_aGoodPoses.RemoveOrdered(0);
+		}
+		state.m_aGoodPoseTimesS.RemoveOrdered(0);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1835,6 +2787,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		state.m_iReseatsWithoutProgress++;
 		state.m_vLastReseatPosition = position;
 		state.m_bReseatedThisDismount = true;
+		state.m_iFailedReseats = 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One seat watchdog attempt that seated nobody: counted for MAX_FAILED_RESEATS and logged once per dismount.
+	protected void FailReseat(SCR_MLDataCaptureGroupState state, string key, string message, LogLevel level)
+	{
+		state.m_iFailedReseats++;
+		state.m_sLastReseatFailure = key;
+		LogOncePerDismount(state, key, message, level);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1846,7 +2808,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 
 		state.m_sWatchdogNote = key;
-		Print(message, level);
+		PrintText(message, level);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1890,13 +2852,30 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		float minutes = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 60000.0;
 
+		int retired;
+		foreach (SCR_MLDataCaptureGroupState retiredState : m_aGroups)
+		{
+			if (retiredState.m_bRetired)
+				retired++;
+		}
+
 		Print("=== ML DATA CAPTURE DRIVING STATISTICS ===", LogLevel.NORMAL);
-		Print(string.Format("Director time: %1 min, groups: %2/%3, waypoints completed: %4", minutes.ToString(-1, 1), m_aGroups.Count(), m_iMaxAIGroups, m_iTotalWaypointsCompleted), LogLevel.NORMAL);
+		Print(string.Format("Director time: %1 min, groups: %2/%3 (%4 retired), waypoints completed: %5", minutes.ToString(-1, 1), m_aGroups.Count(), m_iMaxAIGroups, retired, m_iTotalWaypointsCompleted), LogLevel.NORMAL);
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			// The totals a retired group reached; no live state, which no longer changes.
+			if (state.m_bRetired)
+			{
+				float retiredMin = state.m_fRetiredAtS / 60.0;
+				Print(string.Format("Group %1: retired %2 min after the director start: %3; distance=%4 m waypoints=%5 stuck_resets=%6 dismounts=%7 reseats=%8 move_failures=%9",
+					state.m_iGroupId, retiredMin.ToString(-1, 1), state.m_sRetireReason, state.m_fDistance.ToString(-1, 1), state.m_iWaypointsCompleted,
+					state.m_iStuckResets, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures), LogLevel.NORMAL);
+				continue;
+			}
+
 			// string.Format takes at most 9 arguments: the seat fields are formatted first.
-			string seat = string.Format("driver_seated=%1 driver_ready=%2 dismounts=%3 reseats=%4 move_failures=%5",
-				state.m_bDriverSeated, state.m_bDriverReady, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures);
+			string seat = string.Format("driver_seated=%1 driver_ready=%2 dismounts=%3 reseats=%4 move_failures=%5 released_waypoints=%6 limit_resets=%7 avoided_targets=%8",
+				state.m_bDriverSeated, state.m_bDriverReady, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures, state.m_iReleasedWaypoints, state.m_iLimitResets, DescribeTargetIds(state.m_aAvoidTargetIds));
 			Print(string.Format("Group %1: distance=%2 m max_speed=%3 km/h waypoints=%4 stuck_resets=%5 target=%6 %7 %8",
 				state.m_iGroupId, state.m_fDistance.ToString(-1, 1), state.m_fMaxSpeed.ToString(-1, 1), state.m_iWaypointsCompleted,
 				state.m_iStuckResets, state.GetCurrentTargetId(), seat, DescribeGroup(state)), LogLevel.NORMAL);

@@ -6,20 +6,24 @@
 //
 // RIG R1 (DC_RigR1 of DD-4-probe, reused unchanged, so its E-05 / E-06 / E-06A qualification holds): during
 //   readiness, once DC_EgoSession has spawned the ego, the rig camera is attached to it (mount, pitch, vFOV and clip
-//   planes are this component's attributes, with the DD-4-probe defaults) and made current. An attach failure refuses
+//   planes are this component's attributes, with the DD-4-probe defaults except the near plane: 0.03 m, below the
+//   Shape fiducial at 0.05 m of the dc-2.0 freeze; the probes drew the bands at 1 m with 0.1 m) and made current. An attach failure refuses
 //   readiness (camera init failure fails the session before any directory exists); readiness waits until the
 //   camera is current and attached. While capturing, a frame whose rig camera is not current or not attached ends
 //   the session with camera_lost (DC_ImageScheduler logs cam_current / cam_attached per slot).
 //
 // HF STREAM (dc-2.0 9.3, every render frame from the open to the seal, the drain included, so hf.render_frame of
 //   the last row is session_end end.render_frame): render_frame = BaseWorld.GetFrameNumber(), world_time_ms,
-//   last_physics_step (the most recent OnStepPost, -1 before the first), paused (ChimeraWorld.IsGameTimePaused),
+//   last_physics_step (the physics_step of the most recent callback, always of an earlier frame: the callback of a
+//   frame follows its EOnFrame; the image of frame C shows the state logged in hf row C + 1, dc-2.0 section 6),
+//   paused (ChimeraWorld.IsGameTimePaused),
 //   the camera's world transform (CameraBase.GetWorldCameraTransform), the ego's world transform, fps
 //   (System.GetFPS()). A frame number that does not advance is not written again (counted in session_end
 //   observed.hf_frame_repeats).
 //
-// session.json rig.*: rig_name, mount, vfov_deg (read back from the camera); rig_id part: rig, vehicle, mount,
-// pitch, vFOV. Release: the previous camera is current again and the rig camera is deleted; on world teardown the
+// session.json rig.*: rig_name, mount, vfov_deg and near_plane_m (read back from the camera); rig_id part: rig,
+// vehicle, mount, pitch, vFOV, near plane (it sets the depth precision of every pixel and whether the Shape fiducial
+// at DC_ImageScheduler m_fShapeDepthM is drawn: 0.03 m with 0.05 m is the default, 0.1 m with 1.0 m the fallback). Release: the previous camera is current again and the rig camera is deleted; on world teardown the
 // camera dies with the world and only the reference is dropped.
 // ============================================================================
 
@@ -41,7 +45,7 @@ class DC_HfRecorder : DC_SessionModule
 	[Attribute("50", UIWidgets.Slider, "Vertical field of view [deg] (r2 3.4)", "10 120 1", category: "Rig")]
 	protected float m_fVerticalFovDeg;
 
-	[Attribute("0.1", UIWidgets.Slider, "Near clip plane [m]", "0.01 10 0.01", category: "Rig")]
+	[Attribute("0.03", UIWidgets.Slider, "Near clip plane [m]: below the Shape fiducial's depth (DC_ImageScheduler m_fShapeDepthM, 0.05 m at the dc-2.0 freeze), else the bands are clipped (the probes ran 0.1 m with the bands at 1 m)", "0.01 10 0.01", category: "Rig")]
 	protected float m_fNearPlaneM;
 
 	[Attribute("3000", UIWidgets.Slider, "Far clip plane [m]", "100 20000 10", category: "Rig")]
@@ -80,6 +84,7 @@ class DC_HfRecorder : DC_SessionModule
 	//! Attaches rig R1 as soon as the ego exists; ready while the camera is current and attached
 	override bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		IEntity ego = m_Session.GetEgo();
 		if (!ego)
 		{
@@ -115,7 +120,21 @@ class DC_HfRecorder : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! rig.rig_name, rig.mount, rig.vfov_deg
+	//! The near plane of the rig camera as read back (CameraBase.GetNearPlane, CameraBase.c:44), else the attribute
+	protected float GetNearPlaneRead()
+	{
+		if (m_Rig)
+		{
+			CameraBase camera = m_Rig.GetCamera();
+			if (camera)
+				return camera.GetNearPlane();
+		}
+
+		return m_fNearPlaneM;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! rig.rig_name, rig.mount, rig.vfov_deg, rig.near_plane_m
 	override void WriteSessionJson(string section, notnull DC_JsonWriter json)
 	{
 		if (section != "rig")
@@ -133,10 +152,11 @@ class DC_HfRecorder : DC_SessionModule
 			vFovRead = m_Rig.GetVerticalFovRead();
 
 		json.AddFloat("vfov_deg", vFovRead, 4);
+		json.AddFloat("near_plane_m", GetNearPlaneRead(), 4);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! rig_id part: rig, vehicle, mount x,y,z, pitch, vFOV read back
+	//! rig_id part: rig, vehicle, mount x,y,z, pitch, vFOV and near plane read back
 	override string GetRigIdPart()
 	{
 		float vFovRead = m_fVerticalFovDeg;
@@ -145,7 +165,7 @@ class DC_HfRecorder : DC_SessionModule
 
 		string mount = DC_RigR1.FormatVector(m_vMountPos, 3);
 		mount.Replace(" ", ",");
-		return DC_RigR1.RIG_NAME + "|" + m_sVehicleName + "|m" + mount + "|p" + m_fMountPitchDeg.ToString(-1, 2) + "|v" + vFovRead.ToString(-1, 2);
+		return DC_RigR1.RIG_NAME + "|" + m_sVehicleName + "|m" + mount + "|p" + m_fMountPitchDeg.ToString(-1, 2) + "|v" + vFovRead.ToString(-1, 2) + "|n" + GetNearPlaneRead().ToString(-1, 3);
 	}
 
 	//------------------------------------------------------------------------------------------------

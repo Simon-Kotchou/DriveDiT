@@ -17,19 +17,27 @@
 //      must match the map card of m_sMapId. Everon is never captured here (sealed test map).
 //   4. Readiness: the event mask is set, every module prepares (the ego is spawned and settles, rig R1 attaches, the
 //      fiducial bands appear) and is polled once per frame. Meanwhile the physics-step source is counted as in
-//      DC_ProbeRunner: "simulate" if any EOnSimulate arrived, else "fixedframe" (WARNING), else none (refusal). A
-//      readiness timeout or a module refusal is an ERROR and creates no directory.
+//      DC_ProbeRunner: "simulate" if any EOnSimulate arrived, else "fixedframe" (WARNING), else none (refusal), and
+//      the engine fixed step dt is measured (STEP TIMING below); the clocks follow from it. A readiness timeout or a
+//      module refusal is an ERROR and creates no directory.
 //   5. Open: session id <map>_<trial>_<UTC>_<exe>_<inst>_<rand4> (UTC wall clock, rand4 seeded with GetTickCount,
 //      never world time); an existing directory is refused (ERROR, nothing written). Then session.json (written once),
 //      heartbeat.csv (header), the modules open their streams, events session_start.
-//   6. Running: physics_step is -1 at open and +1 at the top of every EOnSimulate (or EOnFixedFrame in the fallback);
-//      OnStepPre, OnStepPost (rows), OnStepDecide (episodes, HL decisions) per step; OnFrameStart and OnFrame per
-//      render frame. world_time_ms is WorldTimestamp.DiffMilliseconds against the open. warmup_end and the planned
-//      end are checked on every step; heartbeat.csv gets a row every m_fHeartbeatPeriodS of world time, and
-//      $profile:DC_STOP is checked at each heartbeat.
-//   7. End: duration, dc_stop: the modules stop (no new episode or image request) and drain (hf and ctl rows go on
-//      until no image request is in flight or the in-flight timeout passed). Play stop and every failure seal at
-//      once. Sealing commits every registered stream and writes session_end.json last; status ok only when every
+//   6. Running (frame-bound rows, dc-2.0 freeze decision D-A): one dispatched callback per EOnFixedFrame /
+//      EOnPostFixedFrame pair (or per EOnSimulate / EOnPostSimulate when the engine delivers them), which covers
+//      covered_steps engine fixed steps (BaseWorld.GetFixedSteps() of the frame, read in its EOnFrame; 1 per
+//      EOnSimulate); physics_step is -1 at open and advances by covered_steps at the top of every callback, so it is
+//      the index of the last step the callback covers. OnStepPre (held command), OnStepPost (rows), OnStepDecide
+//      (episodes, HL decisions) per callback, with timeSlice = covered_steps x the measured step dt; OnFrameStart,
+//      OnFrame per render frame and OnPostFrame after its physics update. world_time_ms is
+//      WorldTimestamp.DiffMilliseconds against the open, read once at the top of each callback (the frame clock).
+//      Decisions lie on a world-time grid every 1000 / decision_hz ms from the first callback's world time: a
+//      callback at or past the next grid point is a decision callback (IsDecisionStep), and grid points a hitch
+//      skipped are counted. warmup_end and the planned end are checked on every callback; heartbeat.csv gets a row
+//      every m_fHeartbeatPeriodS of world time, and $profile:DC_STOP is checked at each heartbeat.
+//   7. End: duration, dc_stop, ego_disabled (EndPlanned): the modules stop (no new episode or image request) and drain (hf and ctl rows go on
+//      until no image request is in flight or the in-flight timeout passed). Play stop, every failure and a destroyed
+//      ego (EndAtOnce: ego_destroyed, not an error, status ok; dc-2.0 5.3) seal at once. Sealing commits every registered stream and writes session_end.json last; status ok only when every
 //      commit succeeded and the reason is not an error. Shutdown is idempotent: the event mask is cleared and the
 //      only queued call (FallbackStart) is removed, so ScriptCallQueue.Dump() shows no DC_* entry afterwards.
 //
@@ -43,12 +51,37 @@
 //   the modules' DC_SessionStream writers, which the session owns (RegisterStream) so that it can still commit them
 //   on world teardown without calling another component.
 //
-// TBD PARAMETERS (dc-2.0 section 1; [Attribute]s with the draft default, recorded in session.json): TBD-1 k rule
-//   (computed from GetFixedTimeSlice, the decision rate and the telemetry period bound m_fTelemetryMaxPeriodS),
-//   TBD-2 image rate, in-flight timeout and lead, TBD-3 writer semantics (keep logs open, re-check file lengths),
+// STEP TIMING (dc-2.0 section 6, D-A; probe runs 3-4 on 1.8: fixed steps of 1/30 s, 1 to 3 merged into one
+//   EOnFixedFrame while capturing): BaseWorld.GetFixedTimeSlice() reports n/30 for a frame of n steps and is never
+//   the step dt (session.json engine.fixed_time_slice_s keeps its value at the open for provenance only). During
+//   readiness every unpaused step callback gives one ratio, its time slice / the fixed steps of its frame (the
+//   EOnFixedFrame slice is covered_steps x the step: covered / 30 on 21296 of 21296 rows of run 3, so the ratio is
+//   the step even in merged frames; 1 step per EOnSimulate); BaseWorld.GetFixedTimeSlice() / GetFixedSteps() read in
+//   the same callback is kept as a cross-check. After every readiness frame (once STEP_DT_MIN_STEPS steps and
+//   STEP_DT_MIN_RATIOS ratios were seen) TryChooseStepDt decides, never locking in a guess:
+//     - engine: at least STEP_DT_AGREE_FRAC of the ratios lie within STEP_DT_AGREEMENT of their median -> the median;
+//     - measured: else the measured span (the EOnFrame time slices after the first frame with a step through the
+//       last one, over the steps run in them) once it is long (STEP_DT_SPAN_MIN_STEPS), stable (its two halves, split
+//       at half its steps, agree within STEP_DT_AGREEMENT) and confirms the ratio median within STEP_DT_AGREEMENT.
+//       The span's endpoint error (the accumulator remainder and backlog at both ends) is not bounded by itself;
+//       these conditions keep it within half of C28's 1% tolerance of the median;
+//     - neither: the measurement goes on; at the readiness timeout readiness is refused with the reason
+//       (m_sStepDtWaiting), so no session opens with an untrustworthy step dt.
+//   All values go to session.json observed.
+//   physics_steps_per_decision N = floor(1000 / decision_hz / step_dt_ms + 0.5) (6 at the 5 Hz default).
+//
+// TBD PARAMETERS (dc-2.0 section 1; [Attribute]s with the value decided at the freeze, recorded in session.json):
+//   TBD-1 frame-bound rows and the measured step dt (above), TBD-2 image rate (5 Hz default; 10 Hz only through the
+//   trial conf key image_hz, clocks.image_hz_setting trial_conf, D-B), in-flight timeout and lead, TBD-3 writer
+//   semantics (keep logs open, re-check file lengths; both off),
 //   TBD-6 Workbench escape (off on DC_Arland; the probe layer alone has it on), TBD-8 render-settings modules. Facts
 //   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance, the ego's
 //   gearbox) are written to the extra "observed" objects of session.json and session_end.json.
+//
+// EVENTS: LogVehicleEvent writes one events row naming its vehicle slot (LogEvent: the ego's) in the current episode;
+//   LogVehicleEventInEpisode names the episode the event belongs to (dc-2.0 9.5.1 episode ownership: a crash row
+//   written after its episode ended). The crash kinds come from DC_CrashWatch; a teleport or respawn row of a slot
+//   isolates that slot's collision detector (DC_CrashWatch.NoteRepositioned).
 //
 // FAULT CASES (m_sFaultCase, empty in the layer; for the acceptance runbook only, every one ends in an ERROR or a
 //   failed session): readiness_timeout, session_dir_exists, zero_ego, chunk_dir_blocked.
@@ -301,7 +334,7 @@ class DC_SessionModuleClass : ScriptComponentClass
 class DC_SessionModule : ScriptComponent
 {
 	//------------------------------------------------------------------------------------------------
-	//! Modules are called in ascending order (ego 10, streams 20, hf 30, images 40)
+	//! Modules are called in ascending order (ego 10, crash events 15, streams 20, hf 30, images 40)
 	int GetDispatchOrder()
 	{
 		return 100;
@@ -318,11 +351,12 @@ class DC_SessionModule : ScriptComponent
 	//! Polled once per frame until every module is ready. waitingFor names what is missing (for the timeout ERROR)
 	bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Writes this module's keys into the session.json object named section ("rig", "control", "observed")
+	//! Writes this module's keys into the session.json object named section ("rig", "control", "events", "observed")
 	void WriteSessionJson(string section, notnull DC_JsonWriter json)
 	{
 	}
@@ -343,13 +377,14 @@ class DC_SessionModule : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Top of a physics step (EOnSimulate, or EOnFixedFrame in the fallback): the held command is applied here
+	//! Top of a callback (EOnFixedFrame, or EOnSimulate when the engine delivers it): the held command is applied here
+	//! for all its covered steps; physicsStep is the last step it covers, timeSlice = covered_steps x the step dt
 	void OnStepPre(int physicsStep, float timeSlice)
 	{
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Same step after the simulation: the rows of the step
+	//! Same callback after its covered steps: the rows of the callback (worldMs = its world time, the frame clock)
 	void OnStepPost(int physicsStep, float timeSlice, int worldMs)
 	{
 	}
@@ -369,6 +404,12 @@ class DC_SessionModule : ScriptComponent
 	//------------------------------------------------------------------------------------------------
 	//! Every render frame after OnFrameStart
 	void OnFrame(int renderFrame, float timeSlice, int worldMs)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! EOnPostFrame of every render frame while capturing, after its physics update (the camera has its transform)
+	void OnPostFrame(int renderFrame)
 	{
 	}
 
@@ -451,10 +492,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected bool m_bEscapeBindToProcessStart;
 
 	// === CLOCKS (TBD-1, TBD-2) ===
-	[Attribute("0.05", UIWidgets.Slider, "TBD-1 rule: telemetry_every_k is the largest divisor k of physics_steps_per_decision with k x GetFixedTimeSlice() <= this period [s] (+1 us), at least 1 (session.json clocks.telemetry_max_period_s)", "0.001 1 0.001", category: "Clocks")]
-	protected float m_fTelemetryMaxPeriodS;
-
-	[Attribute("10", UIWidgets.Slider, "Image slot rate [Hz] (TBD-2: 10, or the 5 Hz fallback). The HL decision rate equals it; physics_steps_per_decision and telemetry_every_k follow the TBD-1 rule", "1 30 1", category: "Clocks")]
+	[Attribute("5", UIWidgets.Slider, "Image slot rate [Hz] (TBD-2 decided: the production default 5; 10 only through the trial conf key image_hz, never here). The HL decision rate equals it; physics_steps_per_decision follows from the measured step dt (TBD-1)", "5 10 5", category: "Clocks")]
 	protected float m_fImageHz;
 
 	[Attribute("2000", UIWidgets.Slider, "A screenshot request not seen on disk after this long [ms of real time] stops blocking the next slot (TBD-2)", "100 60000 100", category: "Clocks")]
@@ -512,8 +550,22 @@ class DC_Session : SCR_BaseGameModeComponent
 
 	//! dc-2.0 section 6 / schema: sessions are at most 30 min (the fiducial code is unique for 73 min at 60 FPS)
 	static const float MAX_SESSION_S = 1800;
-	//! TBD-1 rule: tolerance added to m_fTelemetryMaxPeriodS (1 us)
-	static const float TELEMETRY_PERIOD_TOL_S = 0.000001;
+	//! TBD-2 (D-B): the production image rate, and the only other rate a trial conf may set
+	static const float DEFAULT_IMAGE_HZ = 5;
+	static const float OVERRIDE_IMAGE_HZ = 10;
+	static const string IMAGE_HZ_DEFAULT = "default";
+	static const string IMAGE_HZ_TRIAL_CONF = "trial_conf";
+	//! STEP TIMING: fixed steps and step-callback ratios seen in readiness before the step dt is chosen
+	static const int STEP_DT_MIN_STEPS = 30;
+	static const int STEP_DT_MIN_RATIOS = 30;
+	//! STEP TIMING: a ratio agrees within this relative distance of the median; this fraction of them must agree.
+	//! The same distance bounds the measured span's halves and its distance to the median (half of C28's 1%)
+	static const float STEP_DT_AGREEMENT = 0.005;
+	static const float STEP_DT_AGREE_FRAC = 0.9;
+	//! STEP TIMING: the measured span counts only from this many steps (3 s at 1/30 s)
+	static const int STEP_DT_SPAN_MIN_STEPS = 90;
+	static const string STEP_DT_ENGINE = "engine";
+	static const string STEP_DT_MEASURED = "measured";
 	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
 	static const int TRIAL_CONF_MAX_BYTES = 4096;
 
@@ -529,14 +581,16 @@ class DC_Session : SCR_BaseGameModeComponent
 	static const string END_ZERO_EGO = "zero_ego";
 	static const string END_EGO_LOST = "ego_lost";
 	static const string END_CAMERA_LOST = "camera_lost";
+	static const string END_EGO_DESTROYED = "ego_destroyed";		//!< not an error: a crash is valid data (dc-2.0 5.3)
+	static const string END_EGO_DISABLED = "ego_disabled";		//!< not an error: tilted, immobile or burning between episodes too long (5.3)
 
 	static const string FAULT_READINESS_TIMEOUT = "readiness_timeout";
 	static const string FAULT_SESSION_DIR_EXISTS = "session_dir_exists";
 	static const string FAULT_ZERO_EGO = "zero_ego";
 	static const string FAULT_CHUNK_DIR_BLOCKED = "chunk_dir_blocked";
 
-	//! events.kind values of dc-2.0 section 9.5
-	protected static ref array<string> s_aEventKinds = {"session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"};
+	//! events.kind values of dc-2.0 section 9.5 (the crash kinds of 9.5.1 after collision)
+	protected static ref array<string> s_aEventKinds = {"session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"};
 
 	// === STATE ===
 	protected bool m_bStarted;					//!< StartRun ran (any machine), never cleared
@@ -546,6 +600,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected ref DC_LaunchInfo m_LaunchInfo;
 	protected ref array<DC_SessionModule> m_aModules = {};		//!< sorted by GetDispatchOrder
 	protected ref array<ref DC_SessionStream> m_aStreams = {};	//!< the only strong references to the writers
+	protected ref DC_ImageRowQueue m_ImageQueue;	//!< the held img rows (DC_ImageScheduler), written at any seal
 
 	// trial
 	protected string m_sTrialId;
@@ -566,9 +621,36 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected string m_sEngineVersionExpected;
 	protected float m_fMeasuredSizeM;
 	protected float m_fMeasuredLatitudeDeg;
-	protected float m_fFixedTimeSliceS;
+	protected float m_fFixedTimeSliceS;			//!< GetFixedTimeSlice() at the open: provenance only, never the step dt
 	protected int m_iStepsPerDecision = 1;
-	protected int m_iTelemetryEveryK = 1;
+	protected string m_sImageHzSetting = IMAGE_HZ_DEFAULT;
+	protected bool m_bTrialImageHzRead;			//!< the conf has an "image_hz" (trial.conf holds only the keys present)
+	protected int m_iDecisionPeriodMs = 200;
+	protected int m_iImagePeriodMs = 200;
+
+	// step timing (STEP TIMING): measured in readiness
+	protected float m_fStepDtS;					//!< 0 until measured
+	protected string m_sStepDtSource;
+	protected float m_fMeasuredStepS;			//!< m_fSpanS / m_iSpanSteps (the measured fixed step)
+	protected int m_iReadinessFixedSteps;		//!< sum of GetFixedSteps() over the unpaused readiness frames
+	protected bool m_bReadinessStepSeen;		//!< the first readiness frame with a fixed step has passed
+	protected float m_fReadinessFrameS;			//!< Kahan sum of the EOnFrame time slices after that frame
+	protected float m_fReadinessFrameCompS;
+	protected int m_iReadinessStepsAfter;		//!< fixed steps of the frames after it
+	protected float m_fSpanS;					//!< m_fReadinessFrameS at the last frame with a fixed step
+	protected int m_iSpanSteps;					//!< m_iReadinessStepsAfter at that frame
+	protected ref array<float> m_aSpanTimesS = {};	//!< m_fSpanS after each frame with a fixed step
+	protected ref array<int> m_aSpanStepCounts = {};	//!< m_iSpanSteps after each frame with a fixed step
+	protected float m_fSpanHalfAS;				//!< the measured span's first half [s per step], 0 until measured
+	protected float m_fSpanHalfBS;				//!< its second half
+	protected string m_sStepDtWaiting;			//!< why no step dt was chosen yet (the readiness timeout's reason)
+	protected ref array<float> m_aStepRatios = {};	//!< per step callback: time slice / fixed steps of its frame
+	protected ref array<float> m_aSliceRatios = {};	//!< per step callback: GetFixedTimeSlice() / GetFixedSteps()
+	protected float m_fStepRatioMedianS;
+	protected float m_fStepRatioAgreeFrac;
+	protected float m_fSliceRatioMedianS;
+	protected int m_iFrameFixedSteps;			//!< GetFixedSteps() as this frame's EOnFrame read it
+	protected int m_iFrameFixedStepsFrame = -1;
 
 	// readiness
 	protected float m_fPrepareStartMs;
@@ -589,15 +671,25 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected WorldTimestamp m_StartTimestamp;
 	protected bool m_bHasStartTimestamp;
 	protected int m_iStartUnix;
-	protected int m_iPhysicsStep = -1;			//!< -1 at open, +1 at the top of every dispatched step
+	protected int m_iPhysicsStep = -1;			//!< -1 at open, + covered_steps at the top of every callback
 	protected int m_iLastPostStep = -1;			//!< last step whose OnStepPost was dispatched
-	protected int m_iStepZeroWorldMs = -1;		//!< world_time_ms of physics step 0 (image grid anchor)
+	protected int m_iLastStepEpisodeId = -1;	//!< the episode that owns m_iLastPostStep (its ctl episode_id)
+	protected int m_iGridAnchorMs = -1;			//!< world_time_ms of the first callback (decision and image grid anchor)
+	protected int m_iCoveredSteps;				//!< engine fixed steps the current callback covers
+	protected int m_iCallbackRenderFrame;		//!< render frame of the current callback
+	protected int m_iCallbackWorldMs;			//!< world_time_ms of the current callback (read at its top)
+	protected int m_iNextDecisionGrid;			//!< next decision grid point
+	protected bool m_bDecisionStep;				//!< the current callback is a decision callback
+	protected int m_iDecisionGridSkipped;		//!< grid points reached by a callback that had passed an earlier one
+	protected int m_iMergedSteps;				//!< engine steps beyond the first of one callback
+	protected int m_iMaxCoveredSteps;
+	protected int m_iZeroStepCallbacks;			//!< fixed-frame callbacks whose frame reported 0 fixed steps (counted as 1)
 	protected int m_iLastStepWorldMs = -1;
 	protected int m_iEpisodeId = -1;
 	protected bool m_bWarmupOver;
 	protected bool m_bStopping;
 	protected string m_sEndReason;
-	protected string m_sFailureReason;			//!< first failure: an error end reason
+	protected string m_sFailureReason;			//!< first failure (an error end reason) or an immediate end (ego_destroyed)
 	protected string m_sFailureDetail;
 	protected bool m_bWriteFailed;
 	protected int m_iDrainStartTickMs;
@@ -741,7 +833,7 @@ class DC_Session : SCR_BaseGameModeComponent
 			return;
 		}
 
-		if (!ComputeClocks(failure))
+		if (!CheckRates(failure))
 		{
 			Refuse("clocks: " + failure);
 			return;
@@ -761,6 +853,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! -dcTrial <id>, else the ACTIVE pointer; then $profile:dc_trials/<id>.json (dc-2.0 section 5.2)
 	protected bool ResolveTrial(out string failure)
 	{
+		failure = string.Empty;
 		string cliTrial;
 		if (System.GetCLIParam(CLI_TRIAL, cliTrial) && !cliTrial.Trim().IsEmpty())
 		{
@@ -850,6 +943,15 @@ class DC_Session : SCR_BaseGameModeComponent
 			m_bTrialImagesRead = true;
 		}
 
+		// TBD-2 (D-B): 10 Hz only as this explicit session setting, recorded as clocks.image_hz_setting trial_conf
+		float imageHz;
+		if (ReadNumber(context, "image_hz", imageHz))
+		{
+			m_fImageHz = imageHz;
+			m_sImageHzSetting = IMAGE_HZ_TRIAL_CONF;
+			m_bTrialImageHzRead = true;
+		}
+
 		if (m_fDurationS <= 0 || m_fWarmupS < 0 || m_fWarmupS + m_fDurationS > MAX_SESSION_S)
 		{
 			failure = string.Format("warmup_s %1 + duration_s %2 must be positive and at most %3 s", m_fWarmupS, m_fDurationS, MAX_SESSION_S);
@@ -917,6 +1019,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! A JSON number as float: written as a decimal or as an integer
 	protected bool ReadNumber(notnull JsonLoadContext context, string key, out float value)
 	{
+		value = 0;
 		if (!context.DoesKeyExist(key))
 			return false;
 
@@ -936,6 +1039,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! pin.engine_version_expected; DD-14a). Without it the check is recorded as not done.
 	protected bool CheckBuild(out string failure)
 	{
+		failure = string.Empty;
 		m_sBuildVersion = GetGame().GetBuildVersion();
 		JsonLoadContext context = new JsonLoadContext(false);
 		if (!context.LoadFromFile(m_LaunchInfo.m_sRecordPath))
@@ -976,6 +1080,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! extent) and the weather manager's latitude; never parsed from GetWorldFile() (CR-100)
 	protected bool CheckFingerprint(out string failure)
 	{
+		failure = string.Empty;
 		if (m_sMapId != "arland" && m_sMapId != "kolguyev")
 		{
 			failure = "map id '" + m_sMapId + "' is not a capture map of this component (arland, kolguyev)";
@@ -1015,31 +1120,169 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! TBD-1 in this order: N = floor(1 / decision_hz / slice + 0.5), then k = the largest divisor of N with
-	//! k x slice <= m_fTelemetryMaxPeriodS (draft 50 ms, +1 us), at least 1. The decision rate is the image rate (TBD-2)
-	protected bool ComputeClocks(out string failure)
+	//! TBD-2 (D-B): the layer's rate is the production default 5 Hz; a trial conf may set 10 Hz (image_hz_setting
+	//! trial_conf) or 5 Hz; any other rate refuses (no directory)
+	protected bool CheckRates(out string failure)
 	{
-		m_fFixedTimeSliceS = GetGame().GetWorld().GetFixedTimeSlice();
-		if (m_fFixedTimeSliceS <= 0 || m_fImageHz <= 0 || m_fTelemetryMaxPeriodS <= 0)
+		failure = string.Empty;
+		bool isDefault = Math.AbsFloat(m_fImageHz - DEFAULT_IMAGE_HZ) < 0.001;
+		bool isOverride = Math.AbsFloat(m_fImageHz - OVERRIDE_IMAGE_HZ) < 0.001;
+		if (m_sImageHzSetting == IMAGE_HZ_DEFAULT && !isDefault)
 		{
-			failure = string.Format("fixed time slice %1 s, image rate %2 Hz, telemetry period bound %3 s", m_fFixedTimeSliceS, m_fImageHz, m_fTelemetryMaxPeriodS);
+			failure = string.Format("image rate %1 Hz on the layer: the production default is %2 Hz, and %3 Hz only through the trial conf key image_hz (dc-2.0 TBD-2, D-B)", m_fImageHz.ToString(-1, 3), DEFAULT_IMAGE_HZ, OVERRIDE_IMAGE_HZ);
 			return false;
 		}
 
-		m_iStepsPerDecision = Math.Floor(1.0 / m_fImageHz / m_fFixedTimeSliceS + 0.5);
+		if (!isDefault && !isOverride)
+		{
+			failure = string.Format("trial conf image_hz %1: only %2 (the default) or %3 Hz (dc-2.0 TBD-2, D-B)", m_fImageHz.ToString(-1, 3), DEFAULT_IMAGE_HZ, OVERRIDE_IMAGE_HZ);
+			return false;
+		}
+
+		// D-B: the setting names the rate, not where it came from: a trial conf that sets 5 Hz still runs the default
+		if (isDefault)
+		{
+			m_fImageHz = DEFAULT_IMAGE_HZ;
+			m_sImageHzSetting = IMAGE_HZ_DEFAULT;
+		}
+		else
+		{
+			m_fImageHz = OVERRIDE_IMAGE_HZ;
+			m_sImageHzSetting = IMAGE_HZ_TRIAL_CONF;
+		}
+
+		m_iDecisionPeriodMs = Math.Round(1000 / m_fImageHz);
+		m_iImagePeriodMs = m_iDecisionPeriodMs;
+		Print(string.Format(LOG + "clocks: images and decisions at %1 Hz (%2), a %3 ms world-time grid", m_fImageHz.ToString(-1, 1), m_sImageHzSetting, m_iDecisionPeriodMs), LogLevel.NORMAL);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: chooses the step dt from what readiness has seen so far, then N = floor(1000 / decision_hz /
+	//! step_dt_ms + 0.5). Never fails and never locks in a guess: without a trustworthy estimate it returns false,
+	//! m_sStepDtWaiting says why, and the measurement goes on (the readiness timeout refuses with that reason)
+	protected bool TryChooseStepDt()
+	{
+		int ratios = m_aStepRatios.Count();
+		m_fStepRatioMedianS = MedianOf(m_aStepRatios);
+		m_fSliceRatioMedianS = MedianOf(m_aSliceRatios);
+		m_fStepRatioAgreeFrac = AgreeFraction(m_aStepRatios, m_fStepRatioMedianS);
+		MeasureSpan();
+		if (ratios >= STEP_DT_MIN_RATIOS && m_fStepRatioMedianS > 0 && m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC)
+		{
+			SetStepDt(m_fStepRatioMedianS, STEP_DT_ENGINE);
+			return true;
+		}
+
+		// the ratios disagree: the measured span only when it is long, stable and confirms their median
+		float tolS = STEP_DT_AGREEMENT * m_fStepRatioMedianS;
+		bool longSpan = m_iSpanSteps >= STEP_DT_SPAN_MIN_STEPS && m_fSpanHalfAS > 0 && m_fSpanHalfBS > 0;
+		bool stable = longSpan && Math.AbsFloat(m_fSpanHalfAS - m_fSpanHalfBS) <= tolS;
+		bool confirmed = m_fStepRatioMedianS > 0 && Math.AbsFloat(m_fMeasuredStepS - m_fStepRatioMedianS) <= tolS;
+		if (ratios >= STEP_DT_MIN_RATIOS && stable && confirmed)
+		{
+			SetStepDt(m_fMeasuredStepS, STEP_DT_MEASURED);
+			return true;
+		}
+
+		string halves = m_fSpanHalfAS.ToString(-1, 6) + " / " + m_fSpanHalfBS.ToString(-1, 6);
+		bool firstWait = m_sStepDtWaiting.IsEmpty();
+		m_sStepDtWaiting = string.Format("a trustworthy step dt: %1 step-callback ratios, a fraction %2 of them within 0.5 percent of their median %3 s (needs %4 ratios and %5); measured span %6 s over %7 steps, halves %8 s (needs %9 steps, halves and median within 0.5 percent)", ratios, m_fStepRatioAgreeFrac.ToString(-1, 3), m_fStepRatioMedianS.ToString(-1, 6), STEP_DT_MIN_RATIOS, STEP_DT_AGREE_FRAC, m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, halves, STEP_DT_SPAN_MIN_STEPS);
+		// the readiness log names the reason once, when the estimators first disagree (the refusal repeats it)
+		if (firstWait)
+			Print(LOG + "WARNING: readiness: no trustworthy step dt yet, measuring on (refused at the readiness timeout if it stays so): waiting for " + m_sStepDtWaiting, LogLevel.WARNING);
+
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the chosen step dt and N
+	protected void SetStepDt(float stepDtS, string source)
+	{
+		m_fStepDtS = stepDtS;
+		m_sStepDtSource = source;
+		m_sStepDtWaiting = string.Empty;
+		m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);
 		if (m_iStepsPerDecision < 1)
 			m_iStepsPerDecision = 1;
 
-		float maxPeriodS = m_fTelemetryMaxPeriodS + TELEMETRY_PERIOD_TOL_S;
-		m_iTelemetryEveryK = 1;
-		for (int divisor = 1; divisor <= m_iStepsPerDecision; divisor++)
+		Print(string.Format(LOG + "clocks: step dt %1 s (%2; callback ratio median %3 s over %4 callbacks, %5 of them within 0.5 percent; GetFixedTimeSlice / GetFixedSteps median %6 s; measured %7 s over %8 fixed steps), N=%9 steps per decision", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fStepRatioMedianS.ToString(-1, 6), m_aStepRatios.Count(), m_fStepRatioAgreeFrac.ToString(-1, 3), m_fSliceRatioMedianS.ToString(-1, 6), m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, m_iStepsPerDecision), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the measured span (m_fSpanS / m_iSpanSteps) and its two halves, split at the first frame with at
+	//! least half of its steps (0 while there is no such split)
+	protected void MeasureSpan()
+	{
+		m_fMeasuredStepS = 0;
+		m_fSpanHalfAS = 0;
+		m_fSpanHalfBS = 0;
+		if (m_iSpanSteps <= 0)
+			return;
+
+		m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;
+		int half = m_iSpanSteps / 2;
+		for (int i = 0, count = m_aSpanStepCounts.Count(); i < count; i++)
 		{
-			if (m_iStepsPerDecision % divisor == 0 && divisor * m_fFixedTimeSliceS <= maxPeriodS)
-				m_iTelemetryEveryK = divisor;
+			int stepsBefore = m_aSpanStepCounts[i];
+			if (stepsBefore < half)
+				continue;
+
+			if (stepsBefore <= 0 || stepsBefore >= m_iSpanSteps)
+				return;
+
+			m_fSpanHalfAS = m_aSpanTimesS[i] / stepsBefore;
+			m_fSpanHalfBS = (m_fSpanS - m_aSpanTimesS[i]) / (m_iSpanSteps - stepsBefore);
+			return;
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the fraction of the values within STEP_DT_AGREEMENT of the median, 0 when empty
+	protected float AgreeFraction(notnull array<float> values, float median)
+	{
+		int n = values.Count();
+		if (n == 0 || median <= 0)
+			return 0;
+
+		float agree = 0;		// float: an int quotient would truncate
+		foreach (float value : values)
+		{
+			if (Math.AbsFloat(value - median) <= STEP_DT_AGREEMENT * median)
+				agree += 1;
 		}
 
-		Print(string.Format(LOG + "clocks: slice %1 s, decisions and images at %2 Hz, N=%3 steps per decision, telemetry every k=%4 steps (k x slice <= %5 s)", m_fFixedTimeSliceS.ToString(-1, 6), m_fImageHz.ToString(-1, 1), m_iStepsPerDecision, m_iTelemetryEveryK, m_fTelemetryMaxPeriodS.ToString(-1, 6)), LogLevel.NORMAL);
-		return true;
+		return agree / n;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the median of the values (sorted in place; the mean of the two middle values of an even count), 0
+	//! when empty
+	protected float MedianOf(notnull array<float> values)
+	{
+		int n = values.Count();
+		if (n == 0)
+			return 0;
+
+		values.Sort();
+		int mid = n / 2;
+		if (n % 2 == 1)
+			return values[mid];
+
+		return 0.5 * (values[mid - 1] + values[mid]);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: one ratio per unpaused readiness step callback (coveredSteps = the fixed steps of its frame)
+	protected void NoteStepRatio(float timeSlice, int coveredSteps)
+	{
+		if (m_ePhase != DC_ESessionPhase.PREPARING || m_fStepDtS > 0 || IsPaused() || coveredSteps <= 0)
+			return;
+
+		m_aStepRatios.Insert(timeSlice / coveredSteps);
+		BaseWorld world = GetGame().GetWorld();
+		if (world && world.GetFixedSteps() > 0)
+			m_aSliceRatios.Insert(world.GetFixedTimeSlice() / world.GetFixedSteps());
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1130,6 +1373,21 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		float elapsedS = (GetGame().GetWorld().GetWorldTime() - m_fPrepareStartMs) / 1000;
+		// The step dt's own reason comes first, also when a module (the recorder's BeginDriver) waits for it too, so
+		// the readiness timeout's refusal names it (review round 3)
+		if (m_fStepDtS <= 0)
+		{
+			string stepDtWaiting = m_sStepDtWaiting;
+			int ratioCount = m_aStepRatios.Count();
+			if (stepDtWaiting.IsEmpty())
+				stepDtWaiting = "the step dt measurement (" + m_iReadinessFixedSteps.ToString() + " of " + STEP_DT_MIN_STEPS.ToString() + " fixed steps, " + ratioCount.ToString() + " of " + STEP_DT_MIN_RATIOS.ToString() + " step-callback ratios)";
+
+			if (waiting.IsEmpty())
+				waiting = "DC_Session: " + stepDtWaiting;
+			else
+				waiting = "DC_Session: " + stepDtWaiting + "; " + waiting;
+		}
+
 		if (waiting.IsEmpty())
 		{
 			if (DecideStepSource(elapsedS))
@@ -1183,7 +1441,10 @@ class DC_Session : SCR_BaseGameModeComponent
 		m_StartTimestamp = world.GetTimestamp();
 		m_bHasStartTimestamp = true;
 		m_iStartUnix = System.GetUnixTime();
+		m_fFixedTimeSliceS = world.GetFixedTimeSlice();		// provenance only (n/30 of this frame on 1.8)
 		m_iPhysicsStep = -1;
+		m_iGridAnchorMs = -1;
+		m_iNextDecisionGrid = 0;
 		m_iNextHeartbeatMs = HeartbeatPeriodMs();
 		m_ePhase = DC_ESessionPhase.CAPTURING;
 
@@ -1229,6 +1490,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! Builds the session id and creates the directory; refuses an existing one (nothing written)
 	protected bool MakeSessionDir(out string failure)
 	{
+		failure = string.Empty;
 		m_sExeKind = GetExeKind();
 		m_sInstance = GetInstanceTag();
 		string utcCompact;
@@ -1315,6 +1577,9 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (m_bTrialImagesRead)
 			json.AddBool("images", m_bTrialImages);
 
+		if (m_bTrialImageHzRead)
+			json.AddFloat("image_hz", m_fImageHz, 3);
+
 		json.EndObject();
 		json.AddInt("seed", m_iTrialSeed);
 		json.AddFloat("warmup_s", m_fWarmupS, 3);
@@ -1342,6 +1607,8 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.AddString("build_version", m_sBuildVersion);
 		json.AddString("build_time", game.GetBuildTime());
 		json.AddFloat("fixed_time_slice_s", m_fFixedTimeSliceS, 9);
+		json.AddFloat("step_dt_s", m_fStepDtS, 9);
+		json.AddString("step_dt_source", m_sStepDtSource);
 		json.EndObject();
 
 		json.BeginObject("pin");
@@ -1387,14 +1654,22 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.EndObject();
 
 		json.BeginObject("clocks");
-		json.AddInt("telemetry_every_k", m_iTelemetryEveryK);
 		json.AddInt("physics_steps_per_decision", m_iStepsPerDecision);
-		json.AddFloat("telemetry_max_period_s", m_fTelemetryMaxPeriodS, 6);
 		json.AddFloat("decision_hz", m_fImageHz, 3);
 		json.AddFloat("image_hz", m_fImageHz, 3);
+		json.AddString("image_hz_setting", m_sImageHzSetting);
 		json.AddInt("img_inflight_timeout_ms", m_iImgInflightTimeoutMs);
 		json.AddInt("img_lead_ms", m_iImgLeadMs);
 		json.AddFloat("chunk_max_s", m_fChunkMaxS, 3);
+		json.EndObject();
+
+		// dc-2.0 10.1 events.*: the crash-event parameters (DC_CrashWatch; TBD-10)
+		json.BeginObject("events");
+		foreach (DC_SessionModule eventsModule : m_aModules)
+		{
+			eventsModule.WriteSessionJson("events", json);
+		}
+
 		json.EndObject();
 
 		json.BeginObject("rig");
@@ -1431,6 +1706,15 @@ class DC_Session : SCR_BaseGameModeComponent
 		// Not in the dc-2.0 field table: run-time facts behind the TBD tolerances (proposed for the freeze)
 		json.BeginObject("observed");
 		json.AddString("step_source", m_sStepSource);
+		json.AddFloat("readiness_step_ratio_median_s", m_fStepRatioMedianS, 9);
+		json.AddInt("readiness_step_ratios", m_aStepRatios.Count());
+		json.AddFloat("readiness_step_ratio_agree_frac", m_fStepRatioAgreeFrac, 4);
+		json.AddFloat("readiness_slice_ratio_median_s", m_fSliceRatioMedianS, 9);
+		json.AddFloat("readiness_measured_step_s", m_fMeasuredStepS, 9);
+		json.AddFloat("readiness_measured_half_a_s", m_fSpanHalfAS, 9);
+		json.AddFloat("readiness_measured_half_b_s", m_fSpanHalfBS, 9);
+		json.AddInt("readiness_measured_span_steps", m_iSpanSteps);
+		json.AddInt("readiness_fixed_steps", m_iReadinessFixedSteps);
 		json.AddInt("readiness_simulate_events", m_iSimulateCount);
 		json.AddInt("readiness_fixedframe_events", m_iFixedFrameCount);
 		json.AddString("engine_version_expected", m_sEngineVersionExpected);
@@ -1788,13 +2072,14 @@ class DC_Session : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	protected int GetDispatchEventMask()
 	{
-		return EntityEvent.FRAME | EntityEvent.SIMULATE | EntityEvent.POSTSIMULATE | EntityEvent.FIXEDFRAME | EntityEvent.POSTFIXEDFRAME;
+		return EntityEvent.FRAME | EntityEvent.POSTFRAME | EntityEvent.SIMULATE | EntityEvent.POSTSIMULATE | EntityEvent.FIXEDFRAME | EntityEvent.POSTFIXEDFRAME;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	override void EOnSimulate(IEntity owner, float timeSlice)
 	{
 		m_iSimulateCount++;
+		NoteStepRatio(timeSlice, 1);		// one call per fixed step
 		if (m_sStepSource == STEP_SIMULATE)
 			HandleStepPre(timeSlice);
 	}
@@ -1811,6 +2096,8 @@ class DC_Session : SCR_BaseGameModeComponent
 	override void EOnFixedFrame(IEntity owner, float timeSlice)
 	{
 		m_iFixedFrameCount++;
+		NoteStepRatio(timeSlice, GetFrameFixedSteps());		// STEP TIMING: the slice covers the frame's steps
+
 		if (m_sStepSource == STEP_FIXEDFRAME)
 			HandleStepPre(timeSlice);
 	}
@@ -1827,6 +2114,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	override void EOnFrame(IEntity owner, float timeSlice)
 	{
 		m_iFrameCount++;
+		NoteFrameSteps(timeSlice);
 		if (m_ePhase == DC_ESessionPhase.PREPARING)
 		{
 			UpdateReadiness();
@@ -1838,7 +2126,101 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Top of a physics step: physics_step + 1, OnStepPre
+	//! After the frame's physics update (the camera applies its transform here, CameraBase.c:18): OnPostFrame
+	override void EOnPostFrame(IEntity owner, float timeSlice)
+	{
+		if (!IsCapturing())
+			return;
+
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			module.OnPostFrame(GetRenderFrame());
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: GetFixedSteps() of this frame for its callback; in readiness the unpaused frames' fixed steps are
+	//! counted and, after the first frame with a step, their time slices summed (the measured span); from
+	//! STEP_DT_MIN_STEPS steps and STEP_DT_MIN_RATIOS step-callback ratios on, every frame tries to choose the step dt
+	protected void NoteFrameSteps(float timeSlice)
+	{
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+			return;
+
+		m_iFrameFixedSteps = world.GetFixedSteps();
+		m_iFrameFixedStepsFrame = world.GetFrameNumber();
+		if (m_ePhase != DC_ESessionPhase.PREPARING || m_fStepDtS > 0 || IsPaused())
+			return;
+
+		m_iReadinessFixedSteps += m_iFrameFixedSteps;
+		if (!m_bReadinessStepSeen)
+		{
+			// the accumulator's remainder before the first step is not a step: the span starts after this frame
+			m_bReadinessStepSeen = m_iFrameFixedSteps > 0;
+		}
+		else
+		{
+			// Kahan summation (as DC_ProbeRunner.MeasureFrame)
+			float addS = timeSlice - m_fReadinessFrameCompS;
+			float sumS = m_fReadinessFrameS + addS;
+			m_fReadinessFrameCompS = (sumS - m_fReadinessFrameS) - addS;
+			m_fReadinessFrameS = sumS;
+			m_iReadinessStepsAfter += m_iFrameFixedSteps;
+			if (m_iFrameFixedSteps > 0)
+			{
+				m_fSpanS = m_fReadinessFrameS;
+				m_iSpanSteps = m_iReadinessStepsAfter;
+				m_aSpanTimesS.Insert(m_fSpanS);
+				m_aSpanStepCounts.Insert(m_iSpanSteps);
+			}
+		}
+
+		// the ratios of this frame's callbacks follow its EOnFrame: those of the earlier frames count. A step dt that is
+		// not trustworthy yet is chosen in a later frame or never (the readiness timeout refuses with the reason)
+		if (m_iReadinessFixedSteps < STEP_DT_MIN_STEPS || m_aStepRatios.Count() < STEP_DT_MIN_RATIOS)
+			return;
+
+		TryChooseStepDt();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fixed steps of the current frame: the value its EOnFrame read (the callbacks follow it under the same frame
+	//! number: run 4, 0 mismatches in 10215 calls), else BaseWorld.GetFixedSteps() now; -1 without a world
+	protected int GetFrameFixedSteps()
+	{
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+			return -1;
+
+		if (world.GetFrameNumber() == m_iFrameFixedStepsFrame)
+			return m_iFrameFixedSteps;
+
+		return world.GetFixedSteps();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine fixed steps the callback covers: 1 per EOnSimulate; the frame's GetFixedSteps() in the fixedframe
+	//! source, counted as 1 (and noted) when the frame reports none
+	protected int GetCallbackCoveredSteps()
+	{
+		if (m_sStepSource != STEP_FIXEDFRAME)
+			return 1;
+
+		int steps = GetFrameFixedSteps();
+		if (steps < 1)
+		{
+			m_iZeroStepCallbacks++;
+			return 1;
+		}
+
+		return steps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Top of a callback: physics_step + covered_steps, its render frame and world time, whether it is a decision
+	//! callback (the first at or past the next world-time grid point), then OnStepPre with timeSlice = covered_steps x
+	//! the step dt (the engine's raw argument is not used: GetFixedTimeSlice reports n/30, D-A)
 	protected void HandleStepPre(float timeSlice)
 	{
 		if (!IsCapturing())
@@ -1847,13 +2229,28 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (m_iPhysicsStep >= 0 && m_iLastPostStep < m_iPhysicsStep)
 			m_iPreWithoutPost++;
 
-		m_iPhysicsStep++;
+		int covered = GetCallbackCoveredSteps();
+		m_iCoveredSteps = covered;
+		m_iPhysicsStep += covered;
+		if (covered > 1)
+			m_iMergedSteps += covered - 1;
+
+		if (covered > m_iMaxCoveredSteps)
+			m_iMaxCoveredSteps = covered;
+
+		m_iCallbackRenderFrame = GetRenderFrame();
+		m_iCallbackWorldMs = GetWorldMs();
+		if (m_iGridAnchorMs < 0)
+			m_iGridAnchorMs = m_iCallbackWorldMs;
+
+		m_bDecisionStep = m_iCallbackWorldMs >= m_iGridAnchorMs + m_iNextDecisionGrid * m_iDecisionPeriodMs;
+		float sliceS = covered * m_fStepDtS;
 		foreach (DC_SessionModule module : m_aModules)
 		{
 			if (!m_sFailureReason.IsEmpty())
 				break;
 
-			module.OnStepPre(m_iPhysicsStep, timeSlice);
+			module.OnStepPre(m_iPhysicsStep, sliceS);
 		}
 
 		SealOnFailure();
@@ -1873,21 +2270,20 @@ class DC_Session : SCR_BaseGameModeComponent
 			return;
 		}
 
-		int worldMs = GetWorldMs();
+		int worldMs = m_iCallbackWorldMs;		// the callback's world time, read at its top (the frame clock)
 		if (worldMs <= m_iLastStepWorldMs)
 			m_iStepsWithoutWorldAdvance++;
 
 		m_iLastStepWorldMs = worldMs;
 		m_iLastPostStep = m_iPhysicsStep;
-		if (m_iPhysicsStep == 0)
-			m_iStepZeroWorldMs = worldMs;
-
+		m_iLastStepEpisodeId = m_iEpisodeId;		// begun in OnStepPre of this step, ended only after its rows
+		float sliceS = m_iCoveredSteps * m_fStepDtS;
 		foreach (DC_SessionModule module : m_aModules)
 		{
 			if (!m_sFailureReason.IsEmpty())
 				break;
 
-			module.OnStepPost(m_iPhysicsStep, timeSlice, worldMs);
+			module.OnStepPost(m_iPhysicsStep, sliceS, worldMs);
 		}
 
 		if (m_sFailureReason.IsEmpty() && !m_bWarmupOver && worldMs >= m_fWarmupS * 1000)
@@ -1905,6 +2301,15 @@ class DC_Session : SCR_BaseGameModeComponent
 				break;
 
 			decider.OnStepDecide(m_iPhysicsStep);
+		}
+
+		// The grid moves on past this callback's world time; grid points it passed in one go are skipped (a hitch)
+		if (m_bDecisionStep)
+		{
+			int reached = (worldMs - m_iGridAnchorMs) / m_iDecisionPeriodMs;
+			m_iDecisionGridSkipped += reached - m_iNextDecisionGrid;
+			m_iNextDecisionGrid = reached + 1;
+			m_bDecisionStep = false;
 		}
 
 		SealOnFailure();
@@ -2049,6 +2454,12 @@ class DC_Session : SCR_BaseGameModeComponent
 			{
 				module.OnSessionClosing(endReason);
 			}
+		}
+		else if (m_ImageQueue && endReason != END_ZERO_EGO)
+		{
+			// World teardown calls no module: the held img rows are written here (the image scheduler's
+			// OnSessionClosing does it otherwise), a request in flight with done_render_frame empty
+			m_iImagesPending = m_ImageQueue.CloseAll(GetWorldMs());
 		}
 
 		if (endReason == END_ZERO_EGO)
@@ -2215,8 +2626,13 @@ class DC_Session : SCR_BaseGameModeComponent
 		NoteObserved("post_without_pre", m_iPostWithoutPre.ToString());
 		NoteObserved("pre_without_post", m_iPreWithoutPost.ToString());
 		NoteObserved("steps_without_world_advance", m_iStepsWithoutWorldAdvance.ToString());
+		NoteObserved("merged_fixed_steps", m_iMergedSteps.ToString());
+		NoteObserved("max_covered_steps", m_iMaxCoveredSteps.ToString());
+		NoteObserved("zero_step_callbacks", m_iZeroStepCallbacks.ToString());
 		NoteObserved("failure", m_sFailureDetail);
 		json.BeginObject("observed");
+		// the one contract field of the object (dc-2.0 10.2, int; C08 compares it with its rebuild of the grid)
+		json.AddInt("decision_grid_points_skipped", m_iDecisionGridSkipped);
 		for (int i = 0, count = m_aObservedKeys.Count(); i < count; i++)
 		{
 			json.AddString(m_aObservedKeys[i], m_aObservedValues[i]);
@@ -2248,10 +2664,11 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! true for every end reason but duration, stop and dc_stop (the session_end.json status is then failed)
+	//! true for every end reason but duration, stop, dc_stop, ego_destroyed and ego_disabled (the session_end.json
+	//! status is then failed)
 	static bool IsErrorEndReason(string endReason)
 	{
-		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP;
+		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP && endReason != END_EGO_DESTROYED && endReason != END_EGO_DISABLED;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2279,6 +2696,10 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		m_aModules.Clear();
+		if (m_ImageQueue)
+			m_ImageQueue.Clear();
+
+		m_ImageQueue = null;
 		ArmaReforgerScripted game = GetGame();
 		if (game)
 		{
@@ -2377,6 +2798,33 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Ends the session after the current dispatch with a non-error end reason (ego_destroyed, dc-2.0 5.3): no module
+	//! is called for the rest of the step or frame, the seal follows at once (no drain), status ok when every commit
+	//! succeeded. The first failure or end is kept
+	void EndAtOnce(string endReason, string detail)
+	{
+		if (!m_sFailureReason.IsEmpty() || !IsCapturing())
+			return;
+
+		m_sFailureReason = endReason;
+		m_sFailureDetail = detail;
+		Print(LOG + "session ends at once: " + endReason + ": " + detail, LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A planned end requested by a module with a non-error end reason (ego_disabled, dc-2.0 5.3): the same path as
+	//! duration and dc_stop (no new episode or image request, drain, seal). Ignored unless capturing; logs one WARNING
+	void EndPlanned(string endReason, string detail)
+	{
+		if (m_ePhase != DC_ESessionPhase.CAPTURING)
+			return;
+
+		Print(LOG + "WARNING: planned end " + endReason + ": " + detail, LogLevel.WARNING);
+		NoteObserved("planned_end_detail", detail);
+		BeginEnd(endReason);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! A short or failed write (chunk, commit line, heartbeat row, session.json): the session stops with
 	//! script_error:write_fail and acknowledges no further row (dc-2.0 section 8)
 	void FailWrite(string detail)
@@ -2407,6 +2855,14 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The held img rows: the session keeps the only strong reference so that a world-teardown seal, which calls no
+	//! module, still writes them (dc-2.0 section 6: a seal without drain writes the row of a request in flight)
+	void RegisterImageQueue(notnull DC_ImageRowQueue rowQueue)
+	{
+		m_ImageQueue = rowQueue;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	DC_SessionStream FindStream(string name)
 	{
 		foreach (DC_SessionStream stream : m_aStreams)
@@ -2419,9 +2875,27 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One events row (dc-2.0 9.5) into the registered events stream; the line is always printed. kind must be a
-	//! contract event kind; payload is 'key=value' pairs joined by ';' (',', '"', CR and LF become '_')
+	//! One events row of the ego (veh_slot_id = the ego slot): see LogVehicleEvent
 	bool LogEvent(string kind, string payload)
+	{
+		return LogVehicleEvent(m_iEgoSlotId, kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row (dc-2.0 9.5) of vehicle slot vehSlotId (-1 = none) in the current episode: see
+	//! LogVehicleEventInEpisode
+	bool LogVehicleEvent(int vehSlotId, string kind, string payload)
+	{
+		return LogVehicleEventInEpisode(vehSlotId, m_iEpisodeId, kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row (dc-2.0 9.5) naming vehicle slot vehSlotId (-1 = none) and the episode it belongs to (-1 =
+	//! none; dc-2.0 9.5.1: the episode of its occurrence, even after that episode ended) into the registered events
+	//! stream; event_seq, physics_step, render_frame and world_time_ms are those of the writing. The line is always
+	//! printed. kind must be a contract event kind; payload is 'key=value' pairs joined by ';' (',', '"', CR and LF
+	//! become '_'). A teleport or respawn row isolates the slot's collision detector
+	bool LogVehicleEventInEpisode(int vehSlotId, int episodeId, string kind, string payload)
 	{
 		string clean = payload;
 		clean.Replace(",", "_");
@@ -2434,7 +2908,7 @@ class DC_Session : SCR_BaseGameModeComponent
 			return false;
 		}
 
-		Print(string.Format(LOG + "event %1 %2 (step %3, episode %4)", kind, clean, m_iLastPostStep, m_iEpisodeId), LogLevel.NORMAL);
+		Print(string.Format(LOG + "event %1 %2 (slot %3, step %4, episode %5)", kind, clean, vehSlotId, m_iLastPostStep, episodeId), LogLevel.NORMAL);
 		DC_SessionStream events = FindStream("events");
 		if (!events || !m_bHasStartTimestamp)
 			return false;
@@ -2446,12 +2920,12 @@ class DC_Session : SCR_BaseGameModeComponent
 		int worldMs = GetWorldMs();
 		m_EventRow.Clear();
 		m_EventRow.AddInt(m_iEventSeq);
-		m_EventRow.AddInt(m_iEpisodeId);
+		m_EventRow.AddInt(episodeId);
 		m_EventRow.AddInt(m_iLastPostStep);		// the last completed step (dc-2.0 9.5)
 		m_EventRow.AddInt(GetRenderFrame());
 		m_EventRow.AddInt(worldMs);
 		m_EventRow.AddString(kind);
-		m_EventRow.AddInt(m_iEgoSlotId);
+		m_EventRow.AddInt(vehSlotId);
 		m_EventRow.AddString(clean);
 		if (!events.AddRow(m_EventRow, m_iEventSeq, worldMs))
 		{
@@ -2460,6 +2934,9 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		m_iEventSeq++;
+		if (kind == "teleport" || kind == "respawn")
+			DC_CrashWatch.NoteRepositioned(vehSlotId);
+
 		return true;
 	}
 
@@ -2650,10 +3127,60 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! world_time_ms of physics step 0 (the image grid anchor), -1 before it
-	int GetStepZeroWorldMs()
+	//! The episode that owns GetLastPostStep() (its ctl episode_id), -1 for none: the episode of a report between
+	//! callbacks (dc-2.0 9.5.1), also right after EndEpisode cleared the current one
+	int GetLastStepEpisodeId()
 	{
-		return m_iStepZeroWorldMs;
+		return m_iLastStepEpisodeId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! world_time_ms of the first callback, the anchor of the decision and image grids (dc-2.0 section 6), -1 before
+	int GetGridAnchorWorldMs()
+	{
+		return m_iGridAnchorMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true inside a decision callback (OnStepPre to OnStepDecide): the first callback at or past the next grid point
+	bool IsDecisionStep()
+	{
+		return m_bDecisionStep;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine fixed steps the current (or last) callback covers (ctl and telemetry covered_steps)
+	int GetCoveredSteps()
+	{
+		return m_iCoveredSteps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! render_frame of the current (or last) callback (ctl and telemetry render_frame)
+	int GetCallbackRenderFrame()
+	{
+		return m_iCallbackRenderFrame;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Decision grid period [ms] (1000 / decision_hz)
+	int GetDecisionPeriodMs()
+	{
+		return m_iDecisionPeriodMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Image grid period [ms] (1000 / image_hz)
+	int GetImagePeriodMs()
+	{
+		return m_iImagePeriodMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The measured engine fixed step dt [s] (STEP TIMING), 0 before it is measured
+	float GetStepDtS()
+	{
+		return m_fStepDtS;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2670,23 +3197,17 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! GetFixedTimeSlice() at the open (session.json engine.fixed_time_slice_s): provenance only, never the step dt
 	float GetFixedTimeSliceS()
 	{
 		return m_fFixedTimeSliceS;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! clocks.physics_steps_per_decision (TBD-1)
+	//! clocks.physics_steps_per_decision (TBD-1): the nominal steps of a decision interval
 	int GetStepsPerDecision()
 	{
 		return m_iStepsPerDecision;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	//! clocks.telemetry_every_k (TBD-1)
-	int GetTelemetryEveryK()
-	{
-		return m_iTelemetryEveryK;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2846,6 +3367,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! is read on both sides of the time, so a read across midnight takes the time again with the later date
 	static string FormatUtc(out string compact)
 	{
+		compact = string.Empty;
 		int year;
 		int month;
 		int day;

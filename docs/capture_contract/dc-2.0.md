@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22
+Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -27,10 +27,9 @@ Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; u
   freeze any change of nav behaviour (progress window, lookahead, maneuver window, stop clearance, route-deviation
   limit) or of the route schema is a new `nav_version` (nav_v2), stamped in `episodes.nav_version` and
   `session.json versions.nav_version`; nav_v1 output never changes in place.
-- Change control. Until the freeze, edits land on this branch. The freeze (T0-ENG core GO, target 2026-10-24) replaces
-  every blocking TBD with the measured value, sets the status line to FROZEN and needs sign-off from the DD-4-min,
-  DD-5-min and DD-7-min authors. After the freeze any change of a field, unit, sign, key, cadence or registry rule is
-  a new version dc-2.x and re-runs the L-gate. A build change (1.8 to 1.9, a 1.9.x hotfix) also re-runs the L-gate
+- Change control. dc-2.0 is FROZEN since 2026-11-04 (section 16 lists every freeze decision with its date and
+  evidence): any change of a field, unit, sign, key, cadence or registry rule is a new version dc-2.x and re-runs
+  the L-gate. TBD-10 values may still be measured, because they are session.json values, never fields. A build change (1.8 to 1.9, a 1.9.x hotfix) also re-runs the L-gate
   but does not change the contract version: per-build values live in session.json and in files keyed by `build_key`,
   never in this contract.
 
@@ -1268,3 +1267,29 @@ Rules (r2 3.3, R35):
     a stop pending until progress passes it by 2 m, terminal `route_end` stops only, `nav_valid` above 30 m (13);
   - the route schema: `lane_side` in {right, center, mixed}, the polyline is the driving line, split tags per map
     (`val_c` is a session property, not a route tag), exactly one `route_end` stop at the route end (13).
+
+## 16. Changelog
+
+dc-2.0 was frozen on 2026-11-04 after the user adopted the freeze decisions D-A to D-E on 2026-11-03
+(`t0/freeze/DECISIONS_dc2_freeze.md`); the reader, validator and capture core that follow it are DD-5-min and
+DD-4-min (`t0/freeze/FREEZE_IMPL.md`). Each row is one decision or folded fact, the date it was decided and its
+evidence; the JSON twin carries the same rows (`changelog`).
+
+<!-- dc2:changelog -->
+| Id | Date | Decision | Evidence |
+|---|---|---|---|
+| D-A | 2026-11-03 | TBD-1: frame-bound rows. One ctl and one telemetry row per fixed-frame callback with physics_step (the engine fixed-step clock, + covered_steps per row), covered_steps and render_frame; the step dt is measured, never GetFixedTimeSlice; physics_steps_per_decision from the measured step; decisions on a world-time grid, taken at the first callback at or past the grid point and applied from the next physics step; clocks.telemetry_every_k withdrawn, engine.step_dt_s and step_dt_source added (sections 6, 9.1, 9.2, 10.1) | probe run 4 E-10 (18113 steps in 10215 callbacks, 44% merged); run 3 E-10 (t0/run3/RUN3_SUMMARY.md 8); decision memo t0/freeze/DECISIONS_dc2_freeze.md |
+| D-B | 2026-11-03 | TBD-2: image_hz = decision_hz = 5 as the production default (N = 6); 10 Hz only as the trial-conf session setting clocks.image_hz_setting trial_conf (N = 3), with the validator's SOFT C37 unless the session's capture utilisation u95 <= 0.85 (sections 6, 10.1, 12) | E-05 runs 1, 3 and 4 (p95 latency 101 / 99 ms at 10 Hz on the runway, 7.85% missing in the forest); decision memo |
+| D-C | 2026-11-03 | TBD-9: road_key text unchanged and session-local; cross-session joins by the unordered endpoint pair within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break; no field change (9.2 road_key, 9.8 road) | E-08a runs 1-3: 13 of 181 keys differ between runs 2 and 3, endpoints unique (t0d/decoder/E08B.md 7) |
+| D-D | 2026-11-03 | Trails (Type Path, 11.1 km on Arland) dropped from routes and road-km: no field change here; the validator thresholds lose the C32 trail key (CAPTURE_PROGRAM 5.2) and the E-08a tool expects the 34.5 km engine network | E-08b (t0d/decoder/E08B.md); t0/freeze/DD_DE_APPLIED.md |
+| D-E | 2026-11-03 | R-3 maneuver typing (the straighter of two same-side branches within 35 deg is straight): a nav_v1 route-generator rule, no field change here | t0/freeze/DD_DE_APPLIED.md (DD-7-min c7024d2) |
+| TBD-3 | 2026-11-04 | Writer semantics confirmed as the r2 default (append per line, exact Write counts, null open on read-only targets, WRITE truncates); commit logs consistent after a process kill | E-19 run 3 with the e19kill play: PASS, 212 of 212 commit lines (t0/freeze/e19_kill_2026-11-04.txt) |
+| TBD-4 | 2026-11-03 | The engine appends .png: frames/f_<slot_id:08d>.png | E-05 runs 3-4 (5992/5992, 5999/5999) |
+| TBD-5 | 2026-11-03 | steer_sign +1 (a positive SetSteering turns right; the draft -1 is refuted), yaw_axis_sign +1, local axes x right, y up, z forward | E-01 run 3 (corr 0.954; 15/15 E-02a cells) |
+| TBD-6 | 2026-11-03 | The launch id is visible to a Workbench Play (launch_mode cli) | E-11 run 3 (-dcLaunchId visible=1) |
+| TBD-7 | 2026-11-03 | Manual gearbox; S105 6 gears, 4 forward: 0 reverse, 1 neutral, 2..5 forward; general rule from the vanilla gear computation | E-04 runs 2-3, E-01 run 3; SCR_ToggleHandbrakeAction.c:100-108, SCR_VehicleGearCondition.c:32-44 (1.8.0.13) |
+| TBD-8 | 2026-11-03 | Render-settings dump keys of E-20 (VideoUserSettings, DisplayUserSettings); the client compare follows at the first client session | E-20 runs 2-3 |
+| FIDUCIAL | 2026-11-03 | rig.fiducial carrier = the debug-Shape carrier at depth_m 0.05 (the widget carrier is a diagnostic only, it never reaches screenshots); rig.fiducial gains carrier and depth_m | probe run 4 E-06: shape 5999 of 5999 decoded, widget 0 of 5999 (t0/run4/RUN4_SUMMARY.md) |
+| CAPTURE-PHASE | 2026-11-03 | The logged pose follows the frame clock and the image of render frame C shows the state of hf row C + 1; img.done_render_frame added (captured = done_render_frame - 1 in Workbench); hf joins ctl and telemetry exactly (section 6, 9.4) | run 3 E-06A (argmin k = +1 on 628 of 640 moving images, pose corr 1.0000); run 4 E-06 (5999 of 5999) |
+| TBD-10 | 2026-11-04 | Stays PROVISIONAL: the crash-detector values are session.json parameters measured by the TBD-10 probe (a value, never a field) | t0d/crash_events/IMPL.md |
+| FREEZE | 2026-11-04 | Status FROZEN: every field, unit, sign, key, cadence or registry rule change from now on is a new version dc-2.x and re-runs the L-gate; per-build values stay in session.json and in files keyed by build_key | this changelog; t0/freeze/FREEZE_IMPL.md |

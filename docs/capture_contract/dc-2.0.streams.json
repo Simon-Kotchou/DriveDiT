@@ -1,11 +1,28 @@
 {
   "schema": "drivedit.dc-streams/1",
   "contract_version": "dc-2.0",
-  "status": "DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22",
+  "status": "FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22",
   "spec": "docs/capture_contract/dc-2.0.md",
   "features": "docs/capture_contract/features_v1.json",
   "route_schema": "drivedit_nav/route_schema.json",
   "probe_results": "docs/trials/T0-ENG.md",
+  "changelog": [
+    {"id": "D-A", "date": "2026-11-03", "decision": "TBD-1: frame-bound rows. One ctl and one telemetry row per fixed-frame callback with physics_step (the engine fixed-step clock, + covered_steps per row), covered_steps and render_frame; the step dt is measured, never GetFixedTimeSlice; physics_steps_per_decision from the measured step; decisions on a world-time grid, taken at the first callback at or past the grid point and applied from the next physics step; clocks.telemetry_every_k withdrawn, engine.step_dt_s and step_dt_source added (sections 6, 9.1, 9.2, 10.1)", "evidence": "probe run 4 E-10 (18113 steps in 10215 callbacks, 44% merged); run 3 E-10 (t0/run3/RUN3_SUMMARY.md 8); decision memo t0/freeze/DECISIONS_dc2_freeze.md"},
+    {"id": "D-B", "date": "2026-11-03", "decision": "TBD-2: image_hz = decision_hz = 5 as the production default (N = 6); 10 Hz only as the trial-conf session setting clocks.image_hz_setting trial_conf (N = 3), with the validator's SOFT C37 unless the session's capture utilisation u95 <= 0.85 (sections 6, 10.1, 12)", "evidence": "E-05 runs 1, 3 and 4 (p95 latency 101 / 99 ms at 10 Hz on the runway, 7.85% missing in the forest); decision memo"},
+    {"id": "D-C", "date": "2026-11-03", "decision": "TBD-9: road_key text unchanged and session-local; cross-session joins by the unordered endpoint pair within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break; no field change (9.2 road_key, 9.8 road)", "evidence": "E-08a runs 1-3: 13 of 181 keys differ between runs 2 and 3, endpoints unique (t0d/decoder/E08B.md 7)"},
+    {"id": "D-D", "date": "2026-11-03", "decision": "Trails (Type Path, 11.1 km on Arland) dropped from routes and road-km: no field change here; the validator thresholds lose the C32 trail key (CAPTURE_PROGRAM 5.2) and the E-08a tool expects the 34.5 km engine network", "evidence": "E-08b (t0d/decoder/E08B.md); t0/freeze/DD_DE_APPLIED.md"},
+    {"id": "D-E", "date": "2026-11-03", "decision": "R-3 maneuver typing (the straighter of two same-side branches within 35 deg is straight): a nav_v1 route-generator rule, no field change here", "evidence": "t0/freeze/DD_DE_APPLIED.md (DD-7-min c7024d2)"},
+    {"id": "TBD-3", "date": "2026-11-04", "decision": "Writer semantics confirmed as the r2 default (append per line, exact Write counts, null open on read-only targets, WRITE truncates); commit logs consistent after a process kill", "evidence": "E-19 run 3 with the e19kill play: PASS, 212 of 212 commit lines (t0/freeze/e19_kill_2026-11-04.txt)"},
+    {"id": "TBD-4", "date": "2026-11-03", "decision": "The engine appends .png: frames/f_<slot_id:08d>.png", "evidence": "E-05 runs 3-4 (5992/5992, 5999/5999)"},
+    {"id": "TBD-5", "date": "2026-11-03", "decision": "steer_sign +1 (a positive SetSteering turns right; the draft -1 is refuted), yaw_axis_sign +1, local axes x right, y up, z forward", "evidence": "E-01 run 3 (corr 0.954; 15/15 E-02a cells)"},
+    {"id": "TBD-6", "date": "2026-11-03", "decision": "The launch id is visible to a Workbench Play (launch_mode cli)", "evidence": "E-11 run 3 (-dcLaunchId visible=1)"},
+    {"id": "TBD-7", "date": "2026-11-03", "decision": "Manual gearbox; S105 6 gears, 4 forward: 0 reverse, 1 neutral, 2..5 forward; general rule from the vanilla gear computation", "evidence": "E-04 runs 2-3, E-01 run 3; SCR_ToggleHandbrakeAction.c:100-108, SCR_VehicleGearCondition.c:32-44 (1.8.0.13)"},
+    {"id": "TBD-8", "date": "2026-11-03", "decision": "Render-settings dump keys of E-20 (VideoUserSettings, DisplayUserSettings); the client compare follows at the first client session", "evidence": "E-20 runs 2-3"},
+    {"id": "FIDUCIAL", "date": "2026-11-03", "decision": "rig.fiducial carrier = the debug-Shape carrier at depth_m 0.05 (the widget carrier is a diagnostic only, it never reaches screenshots); rig.fiducial gains carrier and depth_m", "evidence": "probe run 4 E-06: shape 5999 of 5999 decoded, widget 0 of 5999 (t0/run4/RUN4_SUMMARY.md)"},
+    {"id": "CAPTURE-PHASE", "date": "2026-11-03", "decision": "The logged pose follows the frame clock and the image of render frame C shows the state of hf row C + 1; img.done_render_frame added (captured = done_render_frame - 1 in Workbench); hf joins ctl and telemetry exactly (section 6, 9.4)", "evidence": "run 3 E-06A (argmin k = +1 on 628 of 640 moving images, pose corr 1.0000); run 4 E-06 (5999 of 5999)"},
+    {"id": "TBD-10", "date": "2026-11-04", "decision": "Stays PROVISIONAL: the crash-detector values are session.json parameters measured by the TBD-10 probe (a value, never a field)", "evidence": "t0d/crash_events/IMPL.md"},
+    {"id": "FREEZE", "date": "2026-11-04", "decision": "Status FROZEN: every field, unit, sign, key, cadence or registry rule change from now on is a new version dc-2.x and re-runs the L-gate; per-build values stay in session.json and in files keyed by build_key", "evidence": "this changelog; t0/freeze/FREEZE_IMPL.md"}
+  ],
   "tbd_by_probe": [
     {
       "id": "TBD-1",

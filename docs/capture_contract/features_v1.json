@@ -2,7 +2,7 @@
   "schema": "drivedit.features/1",
   "features_version": "features_v1",
   "contract_version": "dc-2.0",
-  "status": "DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; user decision D15 adopted 2026-10-22",
+  "status": "FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22",
   "spec": "docs/capture_contract/dc-2.0.md",
   "streams": "docs/capture_contract/dc-2.0.streams.json",
   "classes": {

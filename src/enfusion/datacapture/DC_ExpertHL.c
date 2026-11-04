@@ -15,14 +15,18 @@
 //                  session's pin, accepted by llc_v1's card rules (use_class from the launch record); llc_sha and
 //                  expert_sha = sha256 of DC_LLCv1.c and DC_ExpertHL.c as deployed; stamps and signs to session.json
 //                  control.*;
-//   BeginEpisode   at a decision step after the warm-up, when the ego stands at the route start (distance, heading,
-//                  speed), at most m_iMaxEpisodes, m_fEpisodeGapS after the previous one: mode E, driver expert;
+//   BeginEpisode   in a decision callback after the warm-up, when the ego stands at the route start (distance,
+//                  heading, speed), at most m_iMaxEpisodes, m_fEpisodeGapS after the previous one: mode E, driver
+//                  expert;
 //   ApplyStep      every fixed-frame callback with a held command (EOnFixedFrame): llc_v1 over the callback's
 //                  timeSlice = covered_steps x the measured step dt (dc-2.0 D-A: 1 to 3 steps of 1/30 s per callback);
-//   PostStep       every physics step of the episode (EOnPostSimulate): ordered route progress and lane errors on
-//                  the state after the step, the expert evaluated on that state (exp_*_now), terminations;
-//   Decide         every decision step (P mod N == 0; N = 6 at 60 Hz, 10 Hz): the command evaluated in PostStep of
-//                  the same step, so in mode E action_cmd of decision t equals exp_*_now at P_t (dc-2.0 section 6);
+//   PostStep       every callback of the episode (EOnPostFixedFrame): ordered route progress and lane errors on
+//                  the state after the callback, the expert evaluated on that state (exp_*_now), terminations; in a
+//                  decision callback (DC_DriverContext.IsDecisionStep: the first callback at or past the next point
+//                  of the world-time grid, every 1000 / decision_hz ms) that evaluation is also the decision;
+//   Decide         in every decision callback of the episode (only there: the core asks on the world-time grid, never
+//                  on physics_step mod N): the decision PostStep of the same callback took, so in mode E action_cmd
+//                  of decision t equals exp_*_now at P_t (dc-2.0 section 6, R-01);
 //   EndEpisode / EndDriver   log lines (the core parks the ego).
 //
 // EXPERT (pure pursuit and a speed profile on the route polyline, the driving line of the drivedit_nav route)
@@ -36,8 +40,9 @@
 //              backwards by m_fProfileDecelMps2; accel = m_fSpeedGain x (profile at progress + speed x
 //              m_fSpeedPreviewS - speed), clamped to [-m_fBrakeMaxMps2, m_fAccelMaxMps2];
 //   dir        +1 (forward-only, T0-MIN); 0 once the ego stands within m_fEndToleranceM of the route end;
-//   held       the command of decision t is held over (P_t, P_t + N] by the core (zero-order hold, [t, t + 100 ms)).
-// Terminations (the first one reported wins, at the next decision step), with the r2 1.3 definitions dc-2.0 9.6
+//   held       the command of decision t is held by the core from the callback after P_t through the next
+//              decision callback (zero-order hold over (P_t, P_t+1], nominally 200 ms at 5 Hz; the step count varies).
+// Terminations (the first one reported wins, at the next decision callback), with the r2 1.3 definitions dc-2.0 9.6
 // names by default: route_complete (stopped at the end: progress >= 98 % of the route and within m_fEndToleranceM
 // of its last point), route_deviation (|lane_lat_err_m| > m_fDeviationM, 30 m), offroad (|lane_lat_err_m| beyond
 // the lane corridor half width w/2 + m_fOffroadMarginM for more than m_fOffroadS, w/2 + 0.5 m for 3 s; w/2 is the
@@ -588,7 +593,7 @@ class DC_ExpertHL
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Ordered progress (nav_v1 rule) and the lane errors of the state after a physics step
+	//! Ordered progress (nav_v1 rule) and the lane errors of the state after a callback
 	void Update(vector position, float headingRad)
 	{
 		float s;
@@ -605,7 +610,7 @@ class DC_ExpertHL
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The expert command on the state after a physics step (call Update first)
+	//! The expert command on the state after a callback (call Update first)
 	void Evaluate(vector position, float headingRad, float speed, notnull DC_HLCommand command)
 	{
 		float remaining = m_Route.m_fLengthM - m_fProgress;
@@ -826,7 +831,8 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected ref DC_VehicleCard m_Card;
 	protected ref DC_LLCv1 m_LLC;
 	protected ref DC_ExpertHL m_Expert;
-	protected ref DC_HLCommand m_Decision = new DC_HLCommand();
+	protected ref DC_HLCommand m_Now = new DC_HLCommand();		//!< the expert on the state after the last callback (exp_*_now)
+	protected ref DC_HLCommand m_Decision = new DC_HLCommand();	//!< the command taken in the last decision callback
 	protected string m_sRouteFailure;
 	protected bool m_bRouteTried;
 	protected bool m_bReady;
@@ -839,7 +845,7 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected int m_iEpisodes;
 	protected int m_iEpisodeStartMs;
 	protected int m_iLastEndMs = -1;
-	protected int m_iDecisionStep = -1;
+	protected int m_iDecisionStep = -1;		//!< physics_step of the decision callback whose PostStep took m_Decision; -1 none
 	protected int m_iSlowSinceMs = -1;
 	protected int m_iEngineOffSinceMs = -1;
 	protected int m_iOffCorridorSinceMs = -1;
@@ -1012,7 +1018,8 @@ class DC_ExpertDriver : DC_DriverInterface
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Progress, lane errors, the expert on the state after the step, terminations (EOnPostSimulate)
+	//! Progress, lane errors, the expert on the state after the callback (exp_*_now), terminations (EOnPostFixedFrame);
+	//! in a decision callback of the world-time grid (ctx.IsDecisionStep) that evaluation is the decision Decide returns
 	override void PostStep(int physicsStep, float timeSlice, notnull DC_DriverPost post)
 	{
 		if (!m_bInEpisode)
@@ -1032,13 +1039,17 @@ class DC_ExpertDriver : DC_DriverInterface
 		float speed = simulation.GetSpeedKmh() / 3.6;
 
 		m_Expert.Update(position, headingRad);
-		m_Expert.Evaluate(position, headingRad, speed, m_Decision);
-		m_iDecisionStep = physicsStep;
+		m_Expert.Evaluate(position, headingRad, speed, m_Now);
+		if (m_Context.IsDecisionStep())
+		{
+			m_Decision.CopyFrom(m_Now);
+			m_iDecisionStep = physicsStep;
+		}
 
 		post.m_bHasExpert = true;
-		post.m_fExpKappa = m_Decision.m_fKappa;
-		post.m_fExpAccel = m_Decision.m_fAccel;
-		post.m_iExpDir = m_Decision.m_iDir;
+		post.m_fExpKappa = m_Now.m_fKappa;
+		post.m_fExpAccel = m_Now.m_fAccel;
+		post.m_iExpDir = m_Now.m_iDir;
 		post.m_bHasRoute = true;
 		post.m_fLaneLatErrM = m_Expert.GetLateral();
 		post.m_fLaneHeadErrRad = m_Expert.GetHeadingError();
@@ -1059,10 +1070,12 @@ class DC_ExpertDriver : DC_DriverInterface
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The command evaluated in PostStep of this decision step (held over (P, P + N])
+	//! The decision PostStep took in this decision callback (held from the next callback through the next decision
+	//! callback). Called by the core only in decision callbacks of the world-time grid; false (the core keeps the held
+	//! command) only if PostStep did not evaluate this callback, which CanDecide rules out at an episode's first decision
 	override bool Decide(int physicsStep, notnull DC_HLCommand command)
 	{
-		if (!m_bInEpisode || m_iDecisionStep != physicsStep)
+		if (!m_bInEpisode || !m_Context.IsDecisionStep() || m_iDecisionStep != physicsStep)
 			return false;
 
 		command.CopyFrom(m_Decision);

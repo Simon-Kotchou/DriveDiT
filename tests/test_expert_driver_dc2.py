@@ -5,7 +5,9 @@ fixed-frame callback; a callback covers 1 to 3 engine steps of the measured step
 1.8), and decisions lie on the 200 ms world-time grid (DC_DriverContext.IsDecisionStep). These tests read the Enforce
 sources (the statements the Python models mirror) and check, per adaptation of t0/freeze/FREEZE_IMPL.md section 5:
   - llc_v1 step time: every integrator advances by the callback's timeSlice (covered_steps x step dt), the clutch dip by
-    covered steps; GetFixedTimeSlice() is never a step dt and a callback is never counted as one step.
+    covered steps; GetFixedTimeSlice() is never a step dt and a callback is never counted as one step;
+  - decisions on the grid: the expert's decision is the evaluation of a decision callback's PostStep
+    (ctx.IsDecisionStep), never keyed on physics_step mod N; exp_*_now is evaluated in every callback.
 """
 
 import math
@@ -17,6 +19,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 SOURCES = os.path.join(REPO, "src", "enfusion", "datacapture")
 LLC_SOURCE = os.path.join(SOURCES, "DC_LLCv1.c")
 EXPERT_SOURCE = os.path.join(SOURCES, "DC_ExpertHL.c")
+SESSION_SOURCE = os.path.join(SOURCES, "DC_Session.c")
+DECISION_PERIOD_MS = 200                # 1000 / decision_hz at the frozen 5 Hz
 STEP_DT = 1.0 / 30.0                    # the measured step dt on 1.8 (dc-2.0 section 6, D-A)
 RUN4_STEPS, RUN4_CALLBACKS = 18113, 10215   # T0-ENG run 4 E-10: steps and fixed-frame callbacks of one Play
 
@@ -80,6 +84,61 @@ def merged_pattern(total_steps):
     while sum(pattern) < total_steps:
         pattern.append(min(covered[len(pattern) % len(covered)], total_steps - sum(pattern)))
     return pattern
+
+
+def capture_callbacks(seconds, fps=39.0, stall_every=25, stall_ms=80.0):
+    """Fixed-frame callbacks of a capture session on the frame clock: (covered steps, physics_step, world_ms) per
+    frame. Frames last 1000 / fps ms with a capture stall every stall_every frames (the D-A shape: 1 to 3 steps of
+    STEP_DT per callback); world_ms is the frame's world time, read at the callback's top."""
+    callbacks, t, frame, physics_step = [], 0.0, 0, -1
+    while t < seconds * 1000.0:
+        length = stall_ms if frame % stall_every == stall_every - 1 else 1000.0 / fps
+        covered = int((t + length) / (STEP_DT * 1000.0)) - int(t / (STEP_DT * 1000.0))
+        if covered > 0:                     # a frame without a step has no fixed-frame callback
+            physics_step += covered
+            callbacks.append((covered, physics_step, int(t)))
+        t += length
+        frame += 1
+    return callbacks
+
+
+class CoreGrid:
+    """Mirror of DC_Session's decision grid (HandleStepPre / HandleStepPost, asserted in
+    test_the_model_follows_the_core): a callback is a decision callback when its world time reached the next grid
+    point; the grid then moves past it."""
+
+    def __init__(self, period_ms=DECISION_PERIOD_MS):
+        self.period, self.anchor, self.next_grid, self.skipped = period_ms, -1, 0, 0
+
+    def is_decision(self, world_ms):
+        if self.anchor < 0:
+            self.anchor = world_ms
+        return world_ms >= self.anchor + self.next_grid * self.period
+
+    def after_post(self, world_ms, decision):
+        if decision:
+            reached = (world_ms - self.anchor) // self.period
+            self.skipped += reached - self.next_grid
+            self.next_grid = reached + 1
+
+
+class ExpertDecisions:
+    """Mirror of DC_ExpertDriver.PostStep / Decide: exp_*_now every callback, the decision only in a decision
+    callback."""
+
+    def __init__(self):
+        self.now, self.decision, self.decision_step = None, None, -1
+
+    def post_step(self, physics_step, evaluation, is_decision):
+        self.now = evaluation
+        if is_decision:
+            self.decision = self.now
+            self.decision_step = physics_step
+
+    def decide(self, physics_step, is_decision):
+        if not is_decision or self.decision_step != physics_step:
+            return None
+        return self.decision
 
 
 class LlcStepTimeTest(unittest.TestCase):
@@ -167,6 +226,62 @@ class LlcStepTimeTest(unittest.TestCase):
         model = LlcStepModel(rate_per_s=0.0, tau_s=0.0, dip_steps=0)
         model.step(0.0, 3.0, 0.0, 2, 0.0, 2)
         self.assertAlmostEqual(model.speed_ref, 3.0 * 2 * STEP_DT, places=12)
+
+
+class DecisionGridTest(unittest.TestCase):
+    """(b) the expert decides only in decision callbacks of the world-time grid."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.expert = read(EXPERT_SOURCE)
+        cls.session = read(SESSION_SOURCE)
+
+    def test_the_model_follows_the_core(self):
+        pre = enforce_body(self.session, "DC_Session", "HandleStepPre")
+        self.assertIn("if (m_iGridAnchorMs < 0) m_iGridAnchorMs = m_iCallbackWorldMs; m_bDecisionStep = "
+                      "m_iCallbackWorldMs >= m_iGridAnchorMs + m_iNextDecisionGrid * m_iDecisionPeriodMs;", pre)
+        post = enforce_body(self.session, "DC_Session", "HandleStepPost")
+        self.assertIn("if (m_bDecisionStep) { int reached = (worldMs - m_iGridAnchorMs) / m_iDecisionPeriodMs; "
+                      "m_iDecisionGridSkipped += reached - m_iNextDecisionGrid; m_iNextDecisionGrid = reached + 1; "
+                      "m_bDecisionStep = false; }", post)
+        # IsDecisionStep holds from OnStepPre through every OnStepDecide of the callback: the reset follows the deciders
+        self.assertLess(post.index("decider.OnStepDecide(m_iPhysicsStep);"), post.index("m_bDecisionStep = false;"))
+
+    def test_post_step_takes_the_decision_only_in_a_decision_callback(self):
+        post_step = enforce_body(self.expert, "DC_ExpertDriver", "PostStep")
+        self.assertIn("m_Expert.Evaluate(position, headingRad, speed, m_Now); if (m_Context.IsDecisionStep()) { "
+                      "m_Decision.CopyFrom(m_Now); m_iDecisionStep = physicsStep; }", post_step)
+        for field in ("m_fExpKappa = m_Now.m_fKappa;", "m_fExpAccel = m_Now.m_fAccel;", "m_iExpDir = m_Now.m_iDir;"):
+            self.assertIn(field, post_step)                 # exp_*_now: every callback's own evaluation
+        decide = enforce_body(self.expert, "DC_ExpertDriver", "Decide")
+        self.assertIn("if (!m_bInEpisode || !m_Context.IsDecisionStep() || m_iDecisionStep != physicsStep) return "
+                      "false; command.CopyFrom(m_Decision); return true;", decide)
+        code = code_only(self.expert)
+        self.assertIsNone(re.search(r"physicsStep\s*%|%\s*(?:N\b|m_i\w*Steps|\w*GetStepsPerDecision)", code))
+
+    def test_one_decision_per_grid_callback_equal_to_its_exp_now(self):
+        callbacks = capture_callbacks(30.0)
+        grid, expert = CoreGrid(), ExpertDecisions()
+        decided = []
+        for index, (covered, physics_step, world_ms) in enumerate(callbacks):
+            is_decision = grid.is_decision(world_ms)
+            evaluation = ("exp_now", index)                 # stands for the expert on this callback's state
+            expert.post_step(physics_step, evaluation, is_decision)
+            if is_decision:                                 # the core calls Decide only here
+                command = expert.decide(physics_step, is_decision)
+                self.assertEqual(command, evaluation)       # mode E: action_cmd of decision t = exp_*_now at P_t
+                decided.append(physics_step)
+            else:
+                self.assertIsNone(expert.decide(physics_step, is_decision))
+            grid.after_post(world_ms, is_decision)
+        # one decision per 200 ms of world time (nothing skipped at 39 FPS with 80 ms stalls)
+        self.assertEqual(grid.skipped, 0)
+        self.assertEqual(len(decided), callbacks[-1][2] // DECISION_PERIOD_MS + 1)
+        # merged steps: decision intervals vary around N = 6 and physics_step mod 6 does not find the grid callbacks
+        intervals = {b - a for a, b in zip(decided, decided[1:])}
+        self.assertTrue(len(intervals) > 1 and min(intervals) <= 6 <= max(intervals), intervals)
+        by_mod = [p for _, p, _ in callbacks if p % 6 == 0]
+        self.assertNotEqual(by_mod, decided)
 
 
 if __name__ == "__main__":

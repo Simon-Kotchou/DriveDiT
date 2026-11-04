@@ -196,6 +196,8 @@ class SCR_MLDataCaptureGroupState : Managed
 	string m_sWatchdogNote;			//!< key of the latest once-per-dismount seat watchdog line, empty = none since the last return
 	int m_iMoveFailures;			//!< failed vanilla group moves (OnMoveFailed)
 	string m_sLastMoveFailure;		//!< "<EMoveError> (vehicle <name>)" of the latest failed group move
+	int m_iFailedReseats;			//!< seat watchdog attempts in a row that seated nobody (FailReseat)
+	string m_sLastReseatFailure;	//!< key of the latest of them
 	float m_fLastMoveFailureMs = -1;	//!< world time of the latest failed group move, -1 = none
 
 	bool m_bRetired;				//!< RetireGroup ran: no waypoint, never a new one, no seat watchdog, no move-failure counting
@@ -530,6 +532,11 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	static const int MAX_RESEATS_WITHOUT_PROGRESS = 3;
 	//! Stuck resets after the reseat limit per group; the next time the limit is reached the group is retired
 	static const int MAX_LIMIT_RESETS = 3;
+	//! Seat watchdog attempts in a row that seat nobody (spawn refused, corpse stuck in the seat, boarding refused, ...)
+	//! before the group is retired
+	static const int MAX_FAILED_RESEATS = 5;
+	//! A pilot seat without a living driver this long retires the group, seat watchdog on or off [s]
+	static const float MAX_UNSEATED_S = 300;
 	//! Stuck resets of any kind (CheckStuck, reseat limit, avoid-list relocation) without a completed waypoint in between;
 	//! one more retires the group (CountReset), so no reset loop is endless
 	static const int MAX_RESETS_WITHOUT_WAYPOINT = 4;
@@ -2305,6 +2312,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 				}
 
 				state.m_bReseatedThisDismount = false;
+				state.m_iFailedReseats = 0;
 				Print(string.Format("[DataCapture] Group %1: driver back in the pilot seat of %2 after %3 s: %4 (dismount %5, reseats %6)", state.m_iGroupId, vehicleName, outS.ToString(-1, 1), how, state.m_iDismounts, state.m_iReseats), LogLevel.NORMAL);
 			}
 
@@ -2322,11 +2330,19 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			Print(string.Format("[DataCapture] WARNING: group %1: no living driver in the pilot seat of %2 (dismount %3 at %4 km/h, handbrake %5, %6, %7) %8", state.m_iGroupId, vehicleName, state.m_iDismounts, speed.ToString(-1, 1), state.m_Simulation.IsHandbrakeOn(), DescribeMoveFailures(state), DescribeVehicleDamage(state.m_Vehicle), DescribeGroup(state)), LogLevel.WARNING);
 		}
 
+		// A car that stays without a driver this long is lost for the capture, whatever kept it so.
+		float unseatedS = elapsedS - state.m_fDismountedAtS;
+		if (unseatedS >= MAX_UNSEATED_S)
+		{
+			RetireGroup(state, string.Format("no living driver in the pilot seat of %1 for %2 s (seat watchdog attempts that failed in a row: %3, last: %4)", vehicleName, unseatedS.ToString(-1, 0), state.m_iFailedReseats, state.m_sLastReseatFailure));
+			return;
+		}
+
 		if (m_fReseatAfterS <= 0 || elapsedS < state.m_fReseatDueS)
 			return;
 
 		state.m_fReseatDueS = elapsedS + m_fReseatAfterS;
-		ReseatDriver(state, elapsedS - state.m_fDismountedAtS);
+		ReseatDriver(state, unseatedS);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2335,6 +2351,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//! - the car cannot move or is on fire (IsVehicleUsable): the vanilla AI would order the driver straight out again.
 	//! - the last MAX_RESEATS_WITHOUT_PROGRESS reseats left the car within m_fStuckDistanceM of where the previous one put
 	//!   the driver in, after MAX_LIMIT_RESETS stuck resets: those did not help either.
+	//! - MAX_FAILED_RESEATS attempts in a row seated nobody (FailReseat below); WatchDriverSeat also retires the group
+	//!   after MAX_UNSEATED_S without a living driver in the pilot seat.
 	//! After MAX_RESEATS_WITHOUT_PROGRESS such reseats (the vanilla AI keeps ordering the driver out where the car
 	//! stands) the reseat below is followed by a stuck reset (ResetAfterReseatLimit).
 	//! It seats nobody, and says why once per dismount (LogOncePerDismount), when:
@@ -2371,6 +2389,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			return;
 		}
 
+		// Recovery that keeps failing (the seat stays inaccessible, the corpse will not come out, boarding is refused)
+		if (state.m_iFailedReseats >= MAX_FAILED_RESEATS)
+		{
+			RetireGroup(state, string.Format("the seat watchdog failed %1 times in a row to seat a driver into %2 (last: %3) after %4 s", state.m_iFailedReseats, vehicleName, state.m_sLastReseatFailure, unseatedS.ToString(-1, 0)));
+			return;
+		}
+
 		vector position = state.m_Vehicle.GetOrigin();
 		if (vector.Distance(position, state.m_vLastReseatPosition) >= m_fStuckDistanceM)
 			state.m_iReseatsWithoutProgress = 0;
@@ -2388,7 +2413,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			string occupantState = DescribeDriver(occupant);
 			if (occupantState != "dead")
 			{
-				LogOncePerDismount(state, "occupied", string.Format("[DataCapture] WARNING: group %1: cannot reseat the driver of %2 after %3 s: the pilot seat is taken by %4 (%5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), occupant, occupantState, DescribeGroup(state)), LogLevel.WARNING);
+				FailReseat(state, "occupied", string.Format("[DataCapture] WARNING: group %1: cannot reseat the driver of %2 after %3 s: the pilot seat is taken by %4 (%5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), occupant, occupantState, DescribeGroup(state)), LogLevel.WARNING);
 				return;
 			}
 
@@ -2400,7 +2425,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (corpseAccess && corpseAccess.FindSuitableTeleportLocation(exitTransform))
 				movedOut = corpseAccess.GetOutVehicle_NoDoor(exitTransform, false, false);
 
-			LogOncePerDismount(state, "corpse", string.Format("[DataCapture] WARNING: group %1: a dead character sits in the pilot seat of %2 after %3 s - moving it out first, the next attempt seats a new driver (accepted %4)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), movedOut), LogLevel.WARNING);
+			FailReseat(state, "corpse", string.Format("[DataCapture] WARNING: group %1: a dead character sits in the pilot seat of %2 after %3 s - moving it out first, the next attempt seats a new driver (accepted %4)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), movedOut), LogLevel.WARNING);
 			return;
 		}
 
@@ -2411,7 +2436,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			CompartmentAccessComponent access = driver.GetCompartmentAccessComponent();
 			if (!access)
 			{
-				LogOncePerDismount(state, "no_access", string.Format("[DataCapture] ERROR: group %1: cannot reseat the driver of %2: it has no CompartmentAccessComponent", state.m_iGroupId, vehicleName), LogLevel.ERROR);
+				FailReseat(state, "no_access", string.Format("[DataCapture] ERROR: group %1: cannot reseat the driver of %2: it has no CompartmentAccessComponent", state.m_iGroupId, vehicleName), LogLevel.ERROR);
 				return;
 			}
 
@@ -2419,13 +2444,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (access.IsInCompartment() && !access.IsGettingIn())
 			{
 				bool leftSeat = access.GetOutVehicle(EGetOutType.TELEPORT, -1, ECloseDoorAfterActions.INVALID, false);
-				LogOncePerDismount(state, "other_seat", string.Format("[DataCapture] WARNING: group %1: the driver of %2 sits in another seat after %3 s - teleporting it out first (accepted %4, %5)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), leftSeat, transition), LogLevel.WARNING);
+				FailReseat(state, "other_seat", string.Format("[DataCapture] WARNING: group %1: the driver of %2 sits in another seat after %3 s - teleporting it out first (accepted %4, %5)", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), leftSeat, transition), LogLevel.WARNING);
 				return;
 			}
 
 			if (!access.GetInVehicle(state.m_Vehicle, pilotSlot, true, -1, ECloseDoorAfterActions.INVALID, false))
 			{
-				LogOncePerDismount(state, "refused", string.Format("[DataCapture] WARNING: group %1: reseating the driver of %2 after %3 s failed: GetInVehicle refused (pilot seat accessible=%4, %5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), pilotSlot.IsCompartmentAccessible(), transition, DescribeGroup(state)), LogLevel.WARNING);
+				FailReseat(state, "refused", string.Format("[DataCapture] WARNING: group %1: reseating the driver of %2 after %3 s failed: GetInVehicle refused (pilot seat accessible=%4, %5) %6", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), pilotSlot.IsCompartmentAccessible(), transition, DescribeGroup(state)), LogLevel.WARNING);
 				return;
 			}
 
@@ -2439,7 +2464,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		if (driverState != "none" && driverState != "dead")
 		{
-			LogOncePerDismount(state, "not_replaced", string.Format("[DataCapture] WARNING: group %1: the driver of %2 is %3 after %4 s out of the pilot seat - not replaced %5", state.m_iGroupId, vehicleName, driverState, unseatedS.ToString(-1, 0), DescribeGroup(state)), LogLevel.WARNING);
+			FailReseat(state, "not_replaced", string.Format("[DataCapture] WARNING: group %1: the driver of %2 is %3 after %4 s out of the pilot seat - not replaced %5", state.m_iGroupId, vehicleName, driverState, unseatedS.ToString(-1, 0), DescribeGroup(state)), LogLevel.WARNING);
 			return;
 		}
 
@@ -2448,7 +2473,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		IEntity newDriver = pilotSlot.SpawnCharacterInCompartment(m_sDriverPrefab, aiGroup);
 		if (!newDriver)
 		{
-			LogOncePerDismount(state, "spawn_failed", string.Format("[DataCapture] WARNING: group %1: replacing the %2 driver of %3 failed (pilot seat accessible=%4) %5", state.m_iGroupId, driverState, vehicleName, pilotSlot.IsCompartmentAccessible(), DescribeGroup(state)), LogLevel.WARNING);
+			FailReseat(state, "spawn_failed", string.Format("[DataCapture] WARNING: group %1: replacing the %2 driver of %3 failed (pilot seat accessible=%4) %5", state.m_iGroupId, driverState, vehicleName, pilotSlot.IsCompartmentAccessible(), DescribeGroup(state)), LogLevel.WARNING);
 			return;
 		}
 
@@ -2644,6 +2669,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		state.m_iReseatsWithoutProgress++;
 		state.m_vLastReseatPosition = position;
 		state.m_bReseatedThisDismount = true;
+		state.m_iFailedReseats = 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One seat watchdog attempt that seated nobody: counted for MAX_FAILED_RESEATS and logged once per dismount.
+	protected void FailReseat(SCR_MLDataCaptureGroupState state, string key, string message, LogLevel level)
+	{
+		state.m_iFailedReseats++;
+		state.m_sLastReseatFailure = key;
+		LogOncePerDismount(state, key, message, level);
 	}
 
 	//------------------------------------------------------------------------------------------------

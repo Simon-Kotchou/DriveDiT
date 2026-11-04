@@ -283,6 +283,29 @@ def check_c12(ctx):
     return result(ctx, "C12", severity, FAIL if issues else PASS, value, thr, detail, not_evaluated=skipped)
 
 
+def _pending_integrity(s):
+    """Writer integrity of the completions (review rounds 2 and 3, N1, N2, N6): images.pending_at_end is 0 or 1; the
+    issued rows with done_render_frame empty and no img_timeout event (pending_at_seal) are that many, the newest
+    issued slot when it is 1; every other such row is a dropped completion. {"issues": [...], "dropped": [slots]}."""
+    issues = []
+    declared = s.end_get("images.pending_at_end") if s.end is not None else None
+    pending_end = declared if isinstance(declared, int) and not isinstance(declared, bool) else 0
+    if pending_end not in (0, 1):
+        issues.append("images.pending_at_end %r: one request is in flight at a time, so at most 1 can be pending at "
+                      "the seal" % (declared,))
+    issued_slots = [r["slot_id"] for r in s.images if r["issue_status"] == "issued"]
+    pending = [r["slot_id"] for r in s.images if r.get("pending_at_seal")]
+    newest = issued_slots[-1:] if pending_end == 1 else []
+    dropped = [slot for slot in pending if slot not in newest]
+    if dropped:
+        issues.append("%d issued request(s) without done_render_frame and without an img_timeout event besides the "
+                      "one the seal may leave pending (images.pending_at_end %r; slots %s): a completion the writer "
+                      "dropped" % (len(dropped), declared, first(dropped, 5)))
+    if pending_end == 1 and newest and newest[0] not in pending:
+        issues.append("images.pending_at_end 1, but the newest issued slot %d is not pending" % newest[0])
+    return {"issues": issues, "dropped": dropped}
+
+
 def check_c13a(ctx):
     """Fiducial pairing (r2 5.1 C13a): of the readable images, >= C13a.min_decode_frac decode in both bands with
     agreeing 18-bit codes (C13a.code_bits); every decoded captured_render_frame (the code unwrapped against
@@ -291,9 +314,11 @@ def check_c13a(ctx):
     drain caught in flight (section 6): its row is issued with done_render_frame empty and no img_timeout event, it
     is counted in images.pending_at_end, its image shows the terminal frame (captured = end.render_frame) whose hf row
     exists, and only its pose row C + 1 is missing; it is pending, never a join failure (masks 0). Any other capture
-    past the seal is a join failure (review round 2). Writer integrity: the issued rows with done_render_frame empty
-    and no img_timeout event must be exactly images.pending_at_end of them and the newest issued slots (one request in
-    flight); any other such row is a completion the writer dropped. No capture offset (captured - issued frame) is
+    past the seal is a join failure (review round 2). Writer integrity: images.pending_at_end is 0 or 1 (one request
+    in flight at a time, the writer's single-request guard; review round 3), and the issued rows with
+    done_render_frame empty and no img_timeout event are that many: the newest issued slot when it is 1 (skipped_busy
+    or make_failed rows may follow it); any other such row is a completion the writer dropped. These rules hold
+    also when no image is readable. No capture offset (captured - issued frame) is
     negative (a frame captured before its request is a stale or misnamed file); no decision sample uses a future image
     (obs_t captured after the decision's render frame, obs_age_ms < 0). The offset p50 and p99 and how often the
     captured frame equals img.done_render_frame - 1 (Workbench 1.8: always, run 4) are reported."""
@@ -302,8 +327,12 @@ def check_c13a(ctx):
     s = ctx.session
     thr = ctx.thr("C13a")
     fid = ctx.reader.fiducial
+    integrity = _pending_integrity(s)
     readable = [r for r in s.images if r["png_w"] is not None]
     if not readable:
+        if integrity["issues"]:
+            return result(ctx, "C13a", HARD, FAIL, {"dropped_completions": len(integrity["dropped"])}, thr,
+                          integrity["issues"][0])
         return result(ctx, "C13a", HARD, NOT_EVALUATED, None, thr, "no readable image")
     decoded = [r for r in readable if r["fid_ok"]]
     frac = len(decoded) / float(len(readable))
@@ -313,21 +342,8 @@ def check_c13a(ctx):
     with_done = [r for r in decoded if r["done_render_frame"] is not None]
     done_agree = sum(1 for r in with_done if r["captured_render_frame"] == r["done_render_frame"] - 1)
     offsets = [r["captured_render_frame"] - r["issue_render_frame"] for r in decoded]
-    issues = []
-    # writer integrity of the completions (review round 2, N1 and N2)
-    pending_end = s.end_get("images.pending_at_end") if s.end is not None else None
-    pending_end = pending_end if isinstance(pending_end, int) and not isinstance(pending_end, bool) else 0
-    issued_slots = [r["slot_id"] for r in s.images if r["issue_status"] == "issued"]
-    pending = [r["slot_id"] for r in s.images if r.get("pending_at_seal")]
-    newest = issued_slots[len(issued_slots) - pending_end:] if pending_end > 0 else []
-    dropped = [slot for slot in pending if slot not in newest]
-    if dropped:
-        issues.append("%d issued request(s) without done_render_frame and without an img_timeout event besides the "
-                      "%d the seal left pending (images.pending_at_end; slots %s): a completion the writer dropped"
-                      % (len(dropped), pending_end, first(dropped, 5)))
-    if len(pending) - len(dropped) != pending_end:
-        issues.append("images.pending_at_end %d, but %d newest issued row(s) are pending" % (
-            pending_end, len(pending) - len(dropped)))
+    issues = list(integrity["issues"])
+    dropped = integrity["dropped"]
     if thr.get("code_bits") != fid.CODE_BITS:
         issues.append("decoder has %d code bits, thresholds %r" % (fid.CODE_BITS, thr.get("code_bits")))
     if frac < thr.get("min_decode_frac", 0.995):

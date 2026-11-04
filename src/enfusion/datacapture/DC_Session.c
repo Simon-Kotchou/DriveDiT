@@ -1186,7 +1186,12 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		string halves = m_fSpanHalfAS.ToString(-1, 6) + " / " + m_fSpanHalfBS.ToString(-1, 6);
+		bool firstWait = m_sStepDtWaiting.IsEmpty();
 		m_sStepDtWaiting = string.Format("a trustworthy step dt: %1 step-callback ratios, a fraction %2 of them within 0.5 percent of their median %3 s (needs %4 ratios and %5); measured span %6 s over %7 steps, halves %8 s (needs %9 steps, halves and median within 0.5 percent)", ratios, m_fStepRatioAgreeFrac.ToString(-1, 3), m_fStepRatioMedianS.ToString(-1, 6), STEP_DT_MIN_RATIOS, STEP_DT_AGREE_FRAC, m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, halves, STEP_DT_SPAN_MIN_STEPS);
+		// the readiness log names the reason once, when the estimators first disagree (the refusal repeats it)
+		if (firstWait)
+			Print(LOG + "WARNING: readiness: no trustworthy step dt yet, measuring on (refused at the readiness timeout if it stays so): waiting for " + m_sStepDtWaiting, LogLevel.WARNING);
+
 		return false;
 	}
 
@@ -1368,12 +1373,19 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		float elapsedS = (GetGame().GetWorld().GetWorldTime() - m_fPrepareStartMs) / 1000;
-		if (waiting.IsEmpty() && m_fStepDtS <= 0)
+		// The step dt's own reason comes first, also when a module (the recorder's BeginDriver) waits for it too, so
+		// the readiness timeout's refusal names it (review round 3)
+		if (m_fStepDtS <= 0)
 		{
-			waiting = m_sStepDtWaiting;
+			string stepDtWaiting = m_sStepDtWaiting;
 			int ratioCount = m_aStepRatios.Count();
+			if (stepDtWaiting.IsEmpty())
+				stepDtWaiting = "the step dt measurement (" + m_iReadinessFixedSteps.ToString() + " of " + STEP_DT_MIN_STEPS.ToString() + " fixed steps, " + ratioCount.ToString() + " of " + STEP_DT_MIN_RATIOS.ToString() + " step-callback ratios)";
+
 			if (waiting.IsEmpty())
-				waiting = "the step dt measurement (" + m_iReadinessFixedSteps.ToString() + " of " + STEP_DT_MIN_STEPS.ToString() + " fixed steps, " + ratioCount.ToString() + " of " + STEP_DT_MIN_RATIOS.ToString() + " step-callback ratios)";
+				waiting = "DC_Session: " + stepDtWaiting;
+			else
+				waiting = "DC_Session: " + stepDtWaiting + "; " + waiting;
 		}
 
 		if (waiting.IsEmpty())

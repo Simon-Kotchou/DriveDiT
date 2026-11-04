@@ -296,7 +296,11 @@ class WriterContractTest(unittest.TestCase):
         self.assertIn("TryChooseStepDt();", note)
         self.assertNotIn("ComputeClocks", self.session)
         self.assertNotIn("STEP_DT_MAX_WAIT_STEPS", self.session)
-        self.assertIn("waiting = m_sStepDtWaiting;", body(self.session, "protected void UpdateReadiness("))
+        readiness = body(self.session, "protected void UpdateReadiness(")
+        self.assertIn("string stepDtWaiting = m_sStepDtWaiting;", readiness)       # round 3: never masked
+        self.assertIn('waiting = "DC_Session: " + stepDtWaiting + "; " + waiting;', readiness)
+        self.assertLess(readiness.index("if (m_fStepDtS <= 0)"), readiness.index("if (waiting.IsEmpty())\n\t\t{"))
+        self.assertIn('"WARNING: readiness: no trustworthy step dt yet', choose)
         self.assertIn("m_aStepRatios.Insert(timeSlice / coveredSteps);",
                       body(self.session, "protected void NoteStepRatio("))
         self.assertIn("NoteStepRatio(timeSlice, GetFrameFixedSteps());",

@@ -212,6 +212,16 @@ class SCR_MLDataCaptureGroupState : Managed
 	bool m_bGroupAIDeactivated;		//!< SuspendWaypoint deactivated the group's AI while it had no leader
 
 	static const int MOVE_FAILURE_LOG_LIMIT = 50;
+	//! UNKNOWN waypoint-move releases per group; one more retires the group (the group cannot plan its moves)
+	static const int MAX_RELEASED_WAYPOINTS = 3;
+	//! Targets one group may avoid (m_aAvoidTargetIds)
+	static const int MAX_AVOIDED_TARGETS = 5;
+
+	string m_sRetireDue;			//!< why the record asks for retirement on the next monitor tick (CheckGroupMembers), empty = no
+	bool m_bAvoidListCleared;		//!< AssignNextWaypoint cleared the avoid list once, after moving the car to its spawn point
+	float m_fNoTargetSinceMs = -1;	//!< world time since which no drive target qualifies, -1 = one does
+	int m_iResetsSinceWaypoint;		//!< stuck resets and relocations since the group last completed a waypoint (CountReset)
+	ref array<vector> m_aStuckPlaces = {};	//!< where the car stood at each reset: FindResetPose keeps away from them
 
 	//------------------------------------------------------------------------------------------------
 	void SCR_MLDataCaptureGroupState(int groupId, SCR_AIGroup group, Vehicle vehicle, VehicleWheeledSimulation simulation, IEntity spawnPoint)
@@ -366,6 +376,21 @@ class SCR_MLDataCaptureGroupState : Managed
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Adds a target to the group's avoid list, which holds at most MAX_AVOIDED_TARGETS.
+	//! \return true when the target is avoided now
+	bool AvoidTarget(int targetId)
+	{
+		if (m_aAvoidTargetIds.Contains(targetId))
+			return true;
+
+		if (m_aAvoidTargetIds.Count() >= MAX_AVOIDED_TARGETS)
+			return false;
+
+		m_aAvoidTargetIds.Insert(targetId);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! OnMoveFailed of an UNKNOWN failure of a waypoint move, i.e. at SCR_AIProcessFailedMovementResult.c:78, before that
 	//! node decides (:81-101). If the current group activity (GetCurrentAction, :85) still has its related waypoint, the
 	//! node raises NodeErrorOnce (:99; a VM-exception dialog in Workbench, error.log 2026-11-03 17:53:01) and parks the
@@ -410,15 +435,21 @@ class SCR_MLDataCaptureGroupState : Managed
 
 		m_Group.RemoveWaypoint(waypoint);
 		int targetId = m_aWaypoints[index].m_iTargetId;
-		if (!m_aAvoidTargetIds.Contains(targetId))
-			m_aAvoidTargetIds.Insert(targetId);
+		string avoidText = "avoided by this group from now on";
+		if (!AvoidTarget(targetId))
+			avoidText = string.Format("not avoided (this group already avoids %1 targets, the most)", MAX_AVOIDED_TARGETS);
 
 		if (m_iSuspendedWaypoint == index)
 			m_iSuspendedWaypoint = -1;
 
+		// The next target after the usual delay; past MAX_RELEASED_WAYPOINTS the director retires the group on its next
+		// tick (from the call queue, not inside this node).
 		m_iReleasedWaypoints++;
-		m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime();
-		return string.Format("waypoint of target %1 released (activities cancelled without completing it, waypoint removed; release %2): this group avoids the target from now on, the next one follows on the next director tick", targetId, m_iReleasedWaypoints);
+		m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + m_iWaypointDelayMs;
+		if (m_iReleasedWaypoints > MAX_RELEASED_WAYPOINTS && m_sRetireDue.IsEmpty())
+			m_sRetireDue = string.Format("%1 UNKNOWN waypoint-move failures (more than %2): the group cannot plan its moves", m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS);
+
+		return string.Format("waypoint of target %1 released (activities cancelled without completing it, waypoint removed; release %2/%3): target %4, the next one follows in %5 ms", targetId, m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS, avoidText, m_iWaypointDelayMs);
 	}
 }
 
@@ -499,6 +530,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	static const int MAX_RESEATS_WITHOUT_PROGRESS = 3;
 	//! Stuck resets after the reseat limit per group; the next time the limit is reached the group is retired
 	static const int MAX_LIMIT_RESETS = 3;
+	//! Stuck resets of any kind (CheckStuck, reseat limit, avoid-list relocation) without a completed waypoint in between;
+	//! one more retires the group (CountReset), so no reset loop is endless
+	static const int MAX_RESETS_WITHOUT_WAYPOINT = 4;
+	//! The reseat-limit reset avoids the target only when the car got stuck this close to it [m]
+	static const float AVOID_NEAR_TARGET_M = 500;
+	//! A group for which no drive target qualifies this long, without avoided targets to blame, is retired [ms]
+	static const int NO_TARGET_RETIRE_MS = 60000;
 	//! Good poses (RecordGoodPose), the places ResetAfterReseatLimit puts a car back to: one every GOOD_POSE_INTERVAL_S
 	//! while a ready driver drives it at GOOD_POSE_MIN_KMH or more, tilted by less than about 20 degrees (up vector y),
 	//! the newest GOOD_POSE_COUNT kept (2 minutes of driving)
@@ -1429,13 +1467,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			here = state.m_Vehicle.GetOrigin();
 
 		array<int> candidates = {};
+		int avoidedOut;	// targets that only the avoid list excluded
 		for (int i = 0; i < count; i++)
 		{
 			if (i == current)
-				continue;
-
-			// A target this group got stuck on or failed to plan to (ResetAfterReseatLimit, ReleaseFailedWaypoint)
-			if (state.m_aAvoidTargetIds.Contains(state.m_aWaypoints[i].m_iTargetId))
 				continue;
 
 			vector position = state.m_aWaypoints[i].m_vPosition;
@@ -1445,22 +1480,53 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (current >= 0 && vector.DistanceXZ(position, state.m_aWaypoints[current].m_vPosition) < exclusion)
 				continue;
 
+			// A target this group got stuck on or failed to plan to (ResetAfterReseatLimit, ReleaseFailedWaypoint)
+			if (state.m_aAvoidTargetIds.Contains(state.m_aWaypoints[i].m_iTargetId))
+			{
+				avoidedOut++;
+				continue;
+			}
+
 			candidates.Insert(i);
 		}
 
+		float nowMs = GetGame().GetWorld().GetWorldTime();
 		if (candidates.IsEmpty())
 		{
-			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+			// Never a ready driver without a target: once, move the car and clear the avoid list; the next time, retire.
+			if (avoidedOut > 0)
+			{
+				if (state.m_bAvoidListCleared)
+				{
+					RetireGroup(state, string.Format("no drive target left again: this group avoids%1, after its avoid list was cleared once", DescribeTargetIds(state.m_aAvoidTargetIds)));
+					return;
+				}
+
+				ClearAvoidList(state, retryMs);
+				return;
+			}
+
+			if (state.m_fNoTargetSinceMs < 0)
+				state.m_fNoTargetSinceMs = nowMs;
+
+			if (nowMs - state.m_fNoTargetSinceMs >= NO_TARGET_RETIRE_MS)
+			{
+				RetireGroup(state, string.Format("no drive target was %1 m or more away from the vehicle and the current target for %2 s", exclusion, NO_TARGET_RETIRE_MS / 1000));
+				return;
+			}
+
+			state.m_fNextAssignAtMs = nowMs + retryMs;
 			if (!state.m_bNoTargetWarned)
 			{
 				state.m_bNoTargetWarned = true;
-				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target (avoided after stuck resets and failed waypoint moves:%3) - no new waypoint, retrying every %4 ms", groupId, exclusion, DescribeTargetIds(state.m_aAvoidTargetIds), retryMs), LogLevel.WARNING);
+				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target - no new waypoint, retrying every %3 ms, retired after %4 s", groupId, exclusion, retryMs, NO_TARGET_RETIRE_MS / 1000), LogLevel.WARNING);
 			}
 
 			return;
 		}
 
 		state.m_bNoTargetWarned = false;
+		state.m_fNoTargetSinceMs = -1;
 		int next = candidates[Math.RandomIntInclusive(0, candidates.Count() - 1)];
 		int previousTargetId = state.GetCurrentTargetId();
 		SCR_MLDataCaptureWaypoint record = state.m_aWaypoints[next];
@@ -1493,6 +1559,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 			m_iTotalWaypointsCompleted++;
 			state.m_iWaypointsCompleted++;
+			state.m_iResetsSinceWaypoint = 0;
 
 			if (state.m_Group)
 				state.m_Group.RemoveWaypoint(completedWaypoint);
@@ -1928,12 +1995,59 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (!state.m_Vehicle || !state.m_SpawnPoint)
 			return;
 
+		if (!CountReset(state, "stuck for 30 s with a ready driver"))
+			return;
+
 		state.m_iStuckResets++;
 		Print(string.Format("[DataCapture] Group %1: vehicle %2 stuck for %3 s - resetting to %4 (reset %5)", state.m_iGroupId, state.m_Vehicle.GetName(), m_fStuckTimeS, state.m_SpawnPoint.GetName(), state.m_iStuckResets), LogLevel.WARNING);
 
 		vector transform[4];
 		GetSpawnResetTransform(state, transform);
 		TeleportVehicle(state, transform);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Books one stuck reset or relocation of the car, before it happens, and remembers where the car stands (L6:
+	//! FindResetPose keeps away from these places). The resets since the last completed waypoint are bounded: past
+	//! MAX_RESETS_WITHOUT_WAYPOINT the group is retired instead, so no reset loop is endless (OnWaypointCompleted
+	//! starts the count again).
+	//! \return false when the group was retired instead
+	protected bool CountReset(SCR_MLDataCaptureGroupState state, string kind)
+	{
+		if (state.m_iResetsSinceWaypoint >= MAX_RESETS_WITHOUT_WAYPOINT)
+		{
+			RetireGroup(state, string.Format("stuck: %1 resets without completing a waypoint did not help (next: %2)", state.m_iResetsSinceWaypoint, kind));
+			return false;
+		}
+
+		state.m_iResetsSinceWaypoint++;
+		if (state.m_Vehicle)
+			state.m_aStuckPlaces.Insert(state.m_Vehicle.GetOrigin());
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every drive target the group could take is on its avoid list (AssignNextWaypoint): once per group, the car goes
+	//! to its spawn point (a known road point, as CheckStuck's reset) and the avoid list is cleared, so the excluded
+	//! targets are tried again from there; the next target follows retryMs later.
+	protected void ClearAvoidList(SCR_MLDataCaptureGroupState state, int retryMs)
+	{
+		string cleared = DescribeTargetIds(state.m_aAvoidTargetIds);
+		if (state.m_Vehicle && state.m_SpawnPoint)
+		{
+			if (!CountReset(state, "avoid list exhausted"))
+				return;
+
+			vector transform[4];
+			GetSpawnResetTransform(state, transform);
+			TeleportVehicle(state, transform);
+		}
+
+		state.m_bAvoidListCleared = true;
+		state.m_aAvoidTargetIds.Clear();
+		state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+		Print(string.Format("[DataCapture] WARNING: group %1: every drive target it could take was avoided (%2): car moved to its spawn point, avoid list cleared (once per group), the next target follows in %3 ms", state.m_iGroupId, cleared, retryMs), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1976,6 +2090,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	{
 		if (state.m_bRetired || !state.m_bDrivingStarted)
 			return;
+
+		// Asked for by the record inside a vanilla node (ReleaseFailedWaypoint), done here from the call queue.
+		if (!state.m_sRetireDue.IsEmpty())
+		{
+			RetireGroup(state, state.m_sRetireDue);
+			return;
+		}
 
 		if (!state.m_Group)
 		{
@@ -2348,9 +2469,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//! AI_Car_2 on target 11 on 2026-11-03). The car, with the driver just seated, is teleported away
 	//! (TeleportVehicle, as CheckStuck's reset) to the newest good pose RESET_MIN_DISTANCE_M or more from it and twice the
 	//! completion radius or more from the target it failed on (the last place it drove through at speed, upright), else
-	//! to its group's spawn point. The failed target is taken from the group and avoided by it from now on; the next
-	//! target follows m_iWaypointDelay later, when the driver sits in the car at its new place. ReseatDriver retires the
-	//! group when the limit is reached again after MAX_LIMIT_RESETS of these.
+	//! to its group's spawn point; never back near an earlier stuck place. The failed target is taken from the group,
+	//! and avoided by it from now on only when the car got stuck within AVOID_NEAR_TARGET_M of it; the next target
+	//! follows m_iWaypointDelay later, when the driver sits in the car at its new place. ReseatDriver retires the group
+	//! when the limit is reached again after MAX_LIMIT_RESETS of these; CountReset bounds all resets together.
 	protected void ResetAfterReseatLimit(SCR_MLDataCaptureGroupState state)
 	{
 		vector from = state.m_Vehicle.GetOrigin();
@@ -2359,6 +2481,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		vector failedTarget = from;
 		if (failedTargetId > 0)
 			failedTarget = state.m_aWaypoints[failedIndex].m_vPosition;
+
+		// Bounded with every other reset; also remembers this stuck place, which FindResetPose keeps away from.
+		if (!CountReset(state, "reseat limit"))
+			return;
 
 		float nowS = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 1000.0;
 		vector transform[4];
@@ -2394,15 +2520,24 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		state.m_iReseatsWithoutProgress = 0;
 		state.m_vLastReseatPosition = transform[3];
 
+		// The next target in any case; the failed one is avoided only when it is still the group's current waypoint and the
+		// car got stuck near it: stuck far away (AI_Car_4 on 2026-11-03, 1.7 km from target 11) blames the route, not
+		// the target.
 		string target = "none";
 		if (failedTargetId > 0)
 		{
-			target = failedTargetId.ToString();
-			if (!state.m_aAvoidTargetIds.Contains(failedTargetId))
-				state.m_aAvoidTargetIds.Insert(failedTargetId);
+			AIWaypoint failedWaypoint = state.m_aWaypoints[failedIndex].m_Waypoint;
+			float targetDistance = vector.DistanceXZ(from, failedTarget);
+			target = string.Format("%1 not avoided (stuck %2 m from it)", failedTargetId, targetDistance.ToString(-1, 0));
+			if (state.m_Group && state.m_Group.GetCurrentWaypoint() == failedWaypoint && targetDistance <= AVOID_NEAR_TARGET_M)
+			{
+				target = string.Format("%1 avoided by this group from now on (stuck %2 m from it)", failedTargetId, targetDistance.ToString(-1, 0));
+				if (!state.AvoidTarget(failedTargetId))
+					target = string.Format("%1 not avoided (this group already avoids %2 targets, the most)", failedTargetId, SCR_MLDataCaptureGroupState.MAX_AVOIDED_TARGETS);
+			}
 
 			if (state.m_Group)
-				state.m_Group.RemoveWaypoint(state.m_aWaypoints[failedIndex].m_Waypoint);
+				state.m_Group.RemoveWaypoint(failedWaypoint);
 		}
 
 		state.m_iSuspendedWaypoint = -1;
@@ -2410,7 +2545,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		string what = string.Format("stuck reset %1/%2 after %3 reseats in a row without %4 moving %5 m", state.m_iLimitResets, MAX_LIMIT_RESETS, MAX_RESEATS_WITHOUT_PROGRESS, state.m_Vehicle.GetName(), m_fStuckDistanceM);
 		float distance = vector.Distance(from, transform[3]);
-		Print(string.Format("[DataCapture] WARNING: group %1: %2: car and driver teleported %3 m from %4 to %5 (%6); target %7 avoided by this group from now on, the next target follows in %8 ms %9", state.m_iGroupId, what, distance.ToString(-1, 0), from, transform[3], where, target, m_iWaypointDelay, DescribeGroup(state)), LogLevel.WARNING);
+		Print(string.Format("[DataCapture] WARNING: group %1: %2: car and driver teleported %3 m from %4 to %5 (%6); target %7, the next target follows in %8 ms %9", state.m_iGroupId, what, distance.ToString(-1, 0), from, transform[3], where, target, m_iWaypointDelay, DescribeGroup(state)), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2431,7 +2566,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! \return the newest good pose (index into m_aGoodPoseTimesS) at least RESET_MIN_DISTANCE_M from the stuck car and
-	//! twice the completion radius from the failed target, or -1
+	//! from every earlier stuck place of the group, and twice the completion radius from the failed target, or -1
 	protected int FindResetPose(SCR_MLDataCaptureGroupState state, vector from, vector failedTarget)
 	{
 		float targetClearance = 2 * m_fWaypointRadius;
@@ -2444,10 +2579,26 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (vector.DistanceXZ(position, failedTarget) < targetClearance)
 				continue;
 
+			if (IsNearStuckPlace(state, position))
+				continue;
+
 			return pose;
 		}
 
 		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return true when position lies within RESET_MIN_DISTANCE_M of a place where this group's car stood at a reset
+	protected bool IsNearStuckPlace(SCR_MLDataCaptureGroupState state, vector position)
+	{
+		foreach (vector stuckPlace : state.m_aStuckPlaces)
+		{
+			if (vector.DistanceXZ(position, stuckPlace) < RESET_MIN_DISTANCE_M)
+				return true;
+		}
+
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------

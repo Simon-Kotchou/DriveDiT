@@ -28,8 +28,8 @@
 //      end are checked on every step; heartbeat.csv gets a row every m_fHeartbeatPeriodS of world time, and
 //      $profile:DC_STOP is checked at each heartbeat.
 //   7. End: duration, dc_stop: the modules stop (no new episode or image request) and drain (hf and ctl rows go on
-//      until no image request is in flight or the in-flight timeout passed). Play stop and every failure seal at
-//      once. Sealing commits every registered stream and writes session_end.json last; status ok only when every
+//      until no image request is in flight or the in-flight timeout passed). Play stop, every failure and a destroyed
+//      ego (EndAtOnce: ego_destroyed, not an error, status ok; dc-2.0 5.3) seal at once. Sealing commits every registered stream and writes session_end.json last; status ok only when every
 //      commit succeeded and the reason is not an error. Shutdown is idempotent: the event mask is cleared and the
 //      only queued call (FallbackStart) is removed, so ScriptCallQueue.Dump() shows no DC_* entry afterwards.
 //
@@ -49,6 +49,10 @@
 //   TBD-6 Workbench escape (off on DC_Arland; the probe layer alone has it on), TBD-8 render-settings modules. Facts
 //   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance, the ego's
 //   gearbox) are written to the extra "observed" objects of session.json and session_end.json.
+//
+// EVENTS: LogVehicleEvent writes one events row naming its vehicle slot (LogEvent: the ego's). The crash kinds of
+//   dc-2.0 9.5.1 come from DC_CrashWatch; a teleport or respawn row of a slot suppresses that slot's collision detector
+//   for 500 ms (DC_CrashWatch.NoteRepositioned).
 //
 // FAULT CASES (m_sFaultCase, empty in the layer; for the acceptance runbook only, every one ends in an ERROR or a
 //   failed session): readiness_timeout, session_dir_exists, zero_ego, chunk_dir_blocked.
@@ -301,7 +305,7 @@ class DC_SessionModuleClass : ScriptComponentClass
 class DC_SessionModule : ScriptComponent
 {
 	//------------------------------------------------------------------------------------------------
-	//! Modules are called in ascending order (ego 10, streams 20, hf 30, images 40)
+	//! Modules are called in ascending order (ego 10, crash events 15, streams 20, hf 30, images 40)
 	int GetDispatchOrder()
 	{
 		return 100;
@@ -322,7 +326,7 @@ class DC_SessionModule : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Writes this module's keys into the session.json object named section ("rig", "control", "observed")
+	//! Writes this module's keys into the session.json object named section ("rig", "control", "events", "observed")
 	void WriteSessionJson(string section, notnull DC_JsonWriter json)
 	{
 	}
@@ -529,14 +533,15 @@ class DC_Session : SCR_BaseGameModeComponent
 	static const string END_ZERO_EGO = "zero_ego";
 	static const string END_EGO_LOST = "ego_lost";
 	static const string END_CAMERA_LOST = "camera_lost";
+	static const string END_EGO_DESTROYED = "ego_destroyed";		//!< not an error: a crash is valid data (dc-2.0 5.3)
 
 	static const string FAULT_READINESS_TIMEOUT = "readiness_timeout";
 	static const string FAULT_SESSION_DIR_EXISTS = "session_dir_exists";
 	static const string FAULT_ZERO_EGO = "zero_ego";
 	static const string FAULT_CHUNK_DIR_BLOCKED = "chunk_dir_blocked";
 
-	//! events.kind values of dc-2.0 section 9.5
-	protected static ref array<string> s_aEventKinds = {"session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"};
+	//! events.kind values of dc-2.0 section 9.5 (the crash kinds of 9.5.1 after collision)
+	protected static ref array<string> s_aEventKinds = {"session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"};
 
 	// === STATE ===
 	protected bool m_bStarted;					//!< StartRun ran (any machine), never cleared
@@ -597,7 +602,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected bool m_bWarmupOver;
 	protected bool m_bStopping;
 	protected string m_sEndReason;
-	protected string m_sFailureReason;			//!< first failure: an error end reason
+	protected string m_sFailureReason;			//!< first failure (an error end reason) or an immediate end (ego_destroyed)
 	protected string m_sFailureDetail;
 	protected bool m_bWriteFailed;
 	protected int m_iDrainStartTickMs;
@@ -1395,6 +1400,15 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.AddInt("img_inflight_timeout_ms", m_iImgInflightTimeoutMs);
 		json.AddInt("img_lead_ms", m_iImgLeadMs);
 		json.AddFloat("chunk_max_s", m_fChunkMaxS, 3);
+		json.EndObject();
+
+		// dc-2.0 10.1 events.*: the crash-event parameters (DC_CrashWatch; TBD-10)
+		json.BeginObject("events");
+		foreach (DC_SessionModule eventsModule : m_aModules)
+		{
+			eventsModule.WriteSessionJson("events", json);
+		}
+
 		json.EndObject();
 
 		json.BeginObject("rig");
@@ -2248,10 +2262,11 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! true for every end reason but duration, stop and dc_stop (the session_end.json status is then failed)
+	//! true for every end reason but duration, stop, dc_stop and ego_destroyed (the session_end.json status is then
+	//! failed)
 	static bool IsErrorEndReason(string endReason)
 	{
-		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP;
+		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP && endReason != END_EGO_DESTROYED;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2377,6 +2392,20 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Ends the session after the current dispatch with a non-error end reason (ego_destroyed, dc-2.0 5.3): no module
+	//! is called for the rest of the step or frame, the seal follows at once (no drain), status ok when every commit
+	//! succeeded. The first failure or end is kept
+	void EndAtOnce(string endReason, string detail)
+	{
+		if (!m_sFailureReason.IsEmpty() || !IsCapturing())
+			return;
+
+		m_sFailureReason = endReason;
+		m_sFailureDetail = detail;
+		Print(LOG + "session ends at once: " + endReason + ": " + detail, LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! A short or failed write (chunk, commit line, heartbeat row, session.json): the session stops with
 	//! script_error:write_fail and acknowledges no further row (dc-2.0 section 8)
 	void FailWrite(string detail)
@@ -2419,9 +2448,17 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One events row (dc-2.0 9.5) into the registered events stream; the line is always printed. kind must be a
-	//! contract event kind; payload is 'key=value' pairs joined by ';' (',', '"', CR and LF become '_')
+	//! One events row of the ego (veh_slot_id = the ego slot): see LogVehicleEvent
 	bool LogEvent(string kind, string payload)
+	{
+		return LogVehicleEvent(m_iEgoSlotId, kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row (dc-2.0 9.5) naming vehicle slot vehSlotId (-1 = none) into the registered events stream; the
+	//! line is always printed. kind must be a contract event kind; payload is 'key=value' pairs joined by ';' (',',
+	//! '"', CR and LF become '_'). A teleport or respawn row suppresses the slot's collision detector
+	bool LogVehicleEvent(int vehSlotId, string kind, string payload)
 	{
 		string clean = payload;
 		clean.Replace(",", "_");
@@ -2434,7 +2471,7 @@ class DC_Session : SCR_BaseGameModeComponent
 			return false;
 		}
 
-		Print(string.Format(LOG + "event %1 %2 (step %3, episode %4)", kind, clean, m_iLastPostStep, m_iEpisodeId), LogLevel.NORMAL);
+		Print(string.Format(LOG + "event %1 %2 (slot %3, step %4, episode %5)", kind, clean, vehSlotId, m_iLastPostStep, m_iEpisodeId), LogLevel.NORMAL);
 		DC_SessionStream events = FindStream("events");
 		if (!events || !m_bHasStartTimestamp)
 			return false;
@@ -2451,7 +2488,7 @@ class DC_Session : SCR_BaseGameModeComponent
 		m_EventRow.AddInt(GetRenderFrame());
 		m_EventRow.AddInt(worldMs);
 		m_EventRow.AddString(kind);
-		m_EventRow.AddInt(m_iEgoSlotId);
+		m_EventRow.AddInt(vehSlotId);
 		m_EventRow.AddString(clean);
 		if (!events.AddRow(m_EventRow, m_iEventSeq, worldMs))
 		{
@@ -2460,6 +2497,9 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		m_iEventSeq++;
+		if (kind == "teleport" || kind == "respawn")
+			DC_CrashWatch.NoteRepositioned(vehSlotId);
+
 		return true;
 	}
 

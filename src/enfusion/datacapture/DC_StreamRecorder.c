@@ -15,7 +15,9 @@
 //     park is the core's, not llc_v1's); then input_pre_* is read back through the actuator.
 //   OnStepPost (EOnPostSimulate): input_post_* read back; inside an episode the driver's PostStep re-evaluates the
 //     expert on the state after P (exp_*_now, lane errors, route progress, termination); the ctl row of P is
-//     buffered, then the telemetry row when P mod k == 0.
+//     buffered, then the telemetry row when P mod k == 0 (dv_max_mps from DC_CrashWatch, order 15, which has seen
+//     P). A crash of the ego latches its termination through LatchTermination before the driver's of the same step,
+//     so the first terminal event wins (dc-2.0 9.5.1).
 //   OnStepDecide (after every module's OnStepPost; DC_EgoSession has begun or ended the episode by then): at a
 //     decision step (P mod N == 0) inside an episode the driver's Decide gives the command applied over
 //     (P, P + N]. A step without a held command writes mode I, driver none and empty hl_*; inside an episode the
@@ -865,6 +867,7 @@ class DC_StreamRecorder : DC_SessionModule
 	// === STATE ===
 	protected DC_Session m_Session;
 	protected DC_DriverInterface m_Driver;
+	protected DC_CrashWatch m_CrashWatch;
 	protected bool m_bDriverSearched;
 	protected bool m_bDriverBegun;
 	protected ref DC_Actuator m_Actuator;
@@ -911,6 +914,7 @@ class DC_StreamRecorder : DC_SessionModule
 			return false;
 
 		m_Session = session;
+		m_CrashWatch = DC_CrashWatch.Cast(GetOwner().FindComponent(DC_CrashWatch));
 		DC_DriverInterface driver = GetDriver();
 		if (driver)
 			Print(LOG + "driver: " + driver.ClassName(), LogLevel.NORMAL);
@@ -1143,6 +1147,7 @@ class DC_StreamRecorder : DC_SessionModule
 
 		m_bDriverBegun = false;
 		m_Driver = null;
+		m_CrashWatch = null;
 		m_Context = null;
 		m_Actuator = null;
 		m_Ctl = null;
@@ -1197,7 +1202,7 @@ class DC_StreamRecorder : DC_SessionModule
 		DC_ProbeCsv.AddVectorColumns(columns, "vel_local");
 		DC_ProbeCsv.AddVectorColumns(columns, "angvel_local");
 		DC_ProbeCsv.AddVectorColumns(columns, "acc_local");
-		array<string> vehicle = {"speed_engine_mps", "gear", "rpm", "engine_on", "handbrake", "ground_contact", "wheel_count"};
+		array<string> vehicle = {"speed_engine_mps", "dv_max_mps", "gear", "rpm", "engine_on", "handbrake", "ground_contact", "wheel_count"};
 		foreach (string name : vehicle)
 		{
 			columns.Insert(name);
@@ -1346,6 +1351,12 @@ class DC_StreamRecorder : DC_SessionModule
 		m_Row.AddVector(simulation.GetAngularVelocityLocal(), 6);
 		m_Row.AddVector(simulation.GetAccelerationLocal(), 4);
 		m_Row.AddFloat(simulation.GetSpeedKmh() / 3.6, 4);
+		float dvMax;
+		if (m_CrashWatch && m_CrashWatch.TakeDvMax(m_Session.GetEgoSlotId(), dvMax))
+			m_Row.AddFloat(dvMax, 4);
+		else
+			m_Row.AddEmpty();		// dv_max_mps: fewer than W + 1 detector samples so far
+
 		m_Row.AddInt(simulation.GetGear());
 		m_Row.AddFloat(simulation.EngineGetRPM(), 1);
 		m_Row.AddBool(simulation.EngineIsOn());
@@ -1544,6 +1555,24 @@ class DC_StreamRecorder : DC_SessionModule
 	string GetTermination()
 	{
 		return m_sTermination;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A terminal crash event of the ego (DC_CrashWatch: collision or rollover, dc-2.0 9.5.1): the episode's
+	//! termination unless one is latched already (the first terminal event wins); ignored outside an episode
+	void LatchTermination(string reason)
+	{
+		if (!m_Session || m_Session.GetEpisodeId() < 0 || !m_sTermination.IsEmpty())
+			return;
+
+		if (s_aTerminations.Find(reason) < 0)
+		{
+			Print(LOG + "ERROR: crash termination '" + reason + "' is not an episodes.termination_reason - not latched", LogLevel.ERROR);
+			return;
+		}
+
+		m_sTermination = reason;
+		Print(string.Format(LOG + "episode %1: termination %2 latched at physics step %3", m_Session.GetEpisodeId(), reason, m_Session.GetLastPostStep()), LogLevel.NORMAL);
 	}
 
 	//------------------------------------------------------------------------------------------------

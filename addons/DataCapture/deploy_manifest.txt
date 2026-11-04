@@ -47,5 +47,6 @@ script src/enfusion/datacapture/DC_ChunkWriter.c
 script src/enfusion/datacapture/DC_StreamRecorder.c
 script src/enfusion/datacapture/DC_VehicleRegistry.c
 script src/enfusion/datacapture/DC_EgoSession.c
+script src/enfusion/datacapture/DC_CrashWatch.c
 script src/enfusion/datacapture/DC_HfRecorder.c
 script src/enfusion/datacapture/DC_ImageScheduler.c

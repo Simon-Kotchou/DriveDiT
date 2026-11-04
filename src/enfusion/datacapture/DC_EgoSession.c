@@ -24,14 +24,21 @@
 //
 // CAPTURE
 //   - liveness and identity at the top of every frame and before and after the simulation of every physics step
-//     (before any row of it): the entity exists, is not deleted or destroyed, and still carries the registered GetID
-//     token. A loss before the first ctl row ends the session with zero_ego (0 rows, 0 images), later with ego_lost;
+//     (before any row of it): the entity exists, is not deleted, and still carries the registered GetID token. A loss
+//     before the first ctl row ends the session with zero_ego (0 rows, 0 images), later with ego_lost;
+//   - a destroyed ego (DamageManagerComponent.IsDestroyed) after the first ctl row is a crash, which is data (dc-2.0
+//     5.3): DC_CrashWatch writes its pending collision row, veh_damage state=destroyed and veh_fire_start when it
+//     burns, and the session ends at once with ego_destroyed (status ok); the open episode ends at the seal with the
+//     termination the crash watch latched (collision). Before the first ctl row it is still zero_ego;
 //   - episodes: at a decision step (physics_step mod N == 0) after warmup_end, while no episode runs and the session
 //     is not stopping, the driver's BeginEpisode is asked in OnStepPre (so the rows of that step carry the episode;
 //     the null driver never begins one). A termination the driver reports, or the planned end, ends the episode at
 //     the next decision step in OnStepDecide, after that step's rows: DC_DriverInterface.EndEpisode, one episodes
 //     row (chunk_max_rows 1, so it is committed at once), events episode_start / episode_end, the ego parked. The
-//     seal ends an episode still open at the last step (session_stop, or script_error after an error).
+//     seal ends an episode still open at the last step (session_stop, or script_error after an error);
+//   - crash events (DC_CrashWatch, dc-2.0 9.5.1): the end of an episode waits while the ego's collision row is
+//     pending (at most events.episode_end_wait_ms after its onset), so the row carries the episode id and precedes
+//     episode_end; no episode begins while the ego is immobile (movement damage >= 1) or burning.
 //
 // Release: the ego is parked and kept (it dies with the world); on world teardown only references are dropped.
 // ============================================================================
@@ -79,6 +86,7 @@ class DC_EgoSession : DC_SessionModule
 	// === STATE ===
 	protected DC_Session m_Session;
 	protected DC_StreamRecorder m_Recorder;
+	protected DC_CrashWatch m_CrashWatch;
 	protected ref DC_VehicleRegistry m_Registry;
 	protected ref DC_ActuatorModeA m_Actuator;
 	protected IEntity m_Ego;
@@ -98,6 +106,7 @@ class DC_EgoSession : DC_SessionModule
 	protected int m_iEpisodeStartWorldMs;
 	protected int m_iLastWorldMs;
 	protected string m_sStopTermination;		//!< latched when the planned end begins during an episode
+	protected bool m_bDisabledNoted;			//!< the "no episode while the ego is immobile or burning" line was printed
 	protected string m_sEpisodeWeather;
 	protected float m_fEpisodeTodH;
 	protected float m_fEpisodeRain;
@@ -122,6 +131,14 @@ class DC_EgoSession : DC_SessionModule
 		if (!m_Recorder)
 		{
 			session.RefuseReadiness("no DC_StreamRecorder on the game mode (the ego actuator has no user)");
+			return false;
+		}
+
+		// The crash events and session.json events.* of dc-2.0 9.5.1 / 10.1 are part of every session
+		m_CrashWatch = DC_CrashWatch.Cast(GetOwner().FindComponent(DC_CrashWatch));
+		if (!m_CrashWatch)
+		{
+			session.RefuseReadiness("no DC_CrashWatch on the game mode (crash events and session.json events.*)");
 			return false;
 		}
 
@@ -337,8 +354,14 @@ class DC_EgoSession : DC_SessionModule
 		if (reason.IsEmpty())
 			reason = m_Recorder.GetTermination();
 
-		if (!reason.IsEmpty())
-			EndEpisode(physicsStep, reason);
+		if (reason.IsEmpty())
+			return;
+
+		// The ego's collision row still pending (at most events.episode_end_wait_ms after its onset): the end waits
+		if (m_CrashWatch && m_CrashWatch.HoldEpisodeEnd(m_iSlotId))
+			return;
+
+		EndEpisode(physicsStep, reason);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -377,6 +400,10 @@ class DC_EgoSession : DC_SessionModule
 			m_Session.NoteObserved("ego_manual_steps_without_gear", stepsWithoutGear.ToString());
 		}
 
+		// Pending crash rows first, so they precede episode_end and carry the episode id
+		if (m_CrashWatch)
+			m_CrashWatch.FlushPendingRows();
+
 		if (m_iEpisodeId < 0)
 			return;
 
@@ -406,6 +433,7 @@ class DC_EgoSession : DC_SessionModule
 
 		m_Actuator = null;
 		m_Recorder = null;
+		m_CrashWatch = null;
 		m_Episodes = null;
 		m_Damage = null;
 		m_Ego = null;
@@ -413,24 +441,40 @@ class DC_EgoSession : DC_SessionModule
 
 	//------------------------------------------------------------------------------------------------
 	//! Fails the session when the ego is lost: zero_ego before the first ctl row (DC_StreamRecorder.HasCtlRow), ego_lost
-	//! after it
+	//! after it. A destroyed ego after the first ctl row ends it with ego_destroyed (not an error, dc-2.0 5.3) once the
+	//! crash watch has written the crash rows
 	protected bool CheckEgo()
 	{
 		string failure;
-		if (IsEgoAlive(failure))
+		if (!IsEgoPresent(failure))
+		{
+			string reason = DC_Session.END_EGO_LOST;
+			if (!m_Recorder || !m_Recorder.HasCtlRow())
+				reason = DC_Session.END_ZERO_EGO;
+
+			m_Session.Fail(reason, failure);
+			return false;
+		}
+
+		if (!m_Damage || !m_Damage.IsDestroyed())
 			return true;
 
-		string reason = DC_Session.END_EGO_LOST;
 		if (!m_Recorder || !m_Recorder.HasCtlRow())
-			reason = DC_Session.END_ZERO_EGO;
+		{
+			m_Session.Fail(DC_Session.END_ZERO_EGO, "the ego is destroyed before the first ctl row");
+			return false;
+		}
 
-		m_Session.Fail(reason, failure);
+		if (m_CrashWatch)
+			m_CrashWatch.FinishDestroyedSlot(m_iSlotId);
+
+		m_Session.EndAtOnce(DC_Session.END_EGO_DESTROYED, "the ego is destroyed");
 		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The ego exists, is not deleted or destroyed and still carries its registered GetID token (C35)
-	protected bool IsEgoAlive(out string failure)
+	//! The ego exists, is not deleted and still carries its registered GetID token (C35); it may be destroyed
+	protected bool IsEgoPresent(out string failure)
 	{
 		failure = string.Empty;
 		if (m_bFaultEgoLost)
@@ -445,13 +489,23 @@ class DC_EgoSession : DC_SessionModule
 			return false;
 		}
 
+		return m_Registry.CheckIdentity(m_iSlotId, m_Ego, failure);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The ego is present (IsEgoPresent) and not destroyed
+	protected bool IsEgoAlive(out string failure)
+	{
+		if (!IsEgoPresent(failure))
+			return false;
+
 		if (m_Damage && m_Damage.IsDestroyed())
 		{
 			failure = "the ego is destroyed";
 			return false;
 		}
 
-		return m_Registry.CheckIdentity(m_iSlotId, m_Ego, failure);
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -462,6 +516,17 @@ class DC_EgoSession : DC_SessionModule
 		if (!driver)
 			return;
 
+		// No episode while the ego cannot drive or burns (dc-2.0 9.5.1); repositioning is a teleport or respawn
+		if (m_CrashWatch && m_CrashWatch.IsSlotDisabled(m_iSlotId))
+		{
+			if (!m_bDisabledNoted)
+				Print(LOG + "WARNING: no new episode: the ego is immobile or burning", LogLevel.WARNING);
+
+			m_bDisabledNoted = true;
+			return;
+		}
+
+		m_bDisabledNoted = false;
 		DC_EpisodeInfo info = new DC_EpisodeInfo();
 		info.m_iSeed = m_Session.GetTrialSeed() + m_iNextEpisodeId;
 		if (!driver.BeginEpisode(m_iNextEpisodeId, physicsStep, info))
@@ -539,7 +604,7 @@ class DC_EgoSession : DC_SessionModule
 		DC_EpisodeInfo info = m_EpisodeInfo;
 		VehicleWheeledSimulation simulation;
 		string failure;
-		if (m_Actuator && IsEgoAlive(failure))
+		if (m_Actuator && IsEgoPresent(failure))
 			simulation = m_Actuator.GetSimulation();
 
 		m_Row.Clear();

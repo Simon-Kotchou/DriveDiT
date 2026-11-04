@@ -430,10 +430,19 @@ class SCR_MLDataCaptureGroupState : Managed
 		if (!waypoint)
 			return "its activity has no waypoint any more, vanilla only fails it";
 
+		// CancelActivitiesRelatedToWaypoint skips activities that already completed or failed (:772-776), which would
+		// keep the reference that :87 tests; so the current activity's reference is broken here in any case, as
+		// SCR_AIActivityBase.Fail(true) does (SCR_AIActivity.c:79-80).
+		EAIActionState actionState = activity.GetActionState(); // Game/generated/AI/AIActionBase.c:21
+		string cancelText = "activity cancelled";
+		if (actionState == EAIActionState.COMPLETED || actionState == EAIActionState.FAILED)
+			cancelText = "activity already " + typename.EnumToString(EAIActionState, actionState) + ", its waypoint reference cleared";
+
 		groupUtility.CancelActivitiesRelatedToWaypoint(waypoint, doNotCompleteWaypoint: true);
+		activity.m_RelatedWaypoint = null;
 		int index = FindWaypoint(waypoint);
 		if (index < 0)
-			return "not a director waypoint: its activities were cancelled, the group keeps it";
+			return cancelText + "; not a director waypoint, the group keeps it";
 
 		m_Group.RemoveWaypoint(waypoint);
 		int targetId = m_aWaypoints[index].m_iTargetId;
@@ -451,7 +460,7 @@ class SCR_MLDataCaptureGroupState : Managed
 		if (m_iReleasedWaypoints > MAX_RELEASED_WAYPOINTS && m_sRetireDue.IsEmpty())
 			m_sRetireDue = string.Format("%1 UNKNOWN waypoint-move failures (more than %2): the group cannot plan its moves", m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS);
 
-		return string.Format("waypoint of target %1 released (activities cancelled without completing it, waypoint removed; release %2/%3): target %4, the next one follows in %5 ms", targetId, m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS, avoidText, m_iWaypointDelayMs);
+		return string.Format("waypoint of target %1 released (%2 without completing it, waypoint removed; release %3/%4): target %5, the next one follows in %6 ms", targetId, cancelText, m_iReleasedWaypoints, MAX_RELEASED_WAYPOINTS, avoidText, m_iWaypointDelayMs);
 	}
 }
 
@@ -1649,12 +1658,12 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		int ready;
 		int canSeat;	// ready, or still able to become ready: seated, or a driver pending / walking in (boarding not FAILED)
 		int boardingFailed;
+		int retiredGroups;	// retired during the boarding window: they never become ready
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			// A group retired during the boarding window never becomes ready.
 			if (state.m_bRetired)
 			{
-				boardingFailed++;
+				retiredGroups++;
 				continue;
 			}
 
@@ -1688,7 +1697,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		int minReady = GetMinSeatedGroups();
 		if (canSeat < minReady)
 		{
-			FinishReadiness(string.Format("[DataCapture] ERROR: only %1 of %2 groups can still get a ready driver (%3 failed to start, %4 got no driver), fewer than the minimum of %5 - collector session NOT started", canSeat, m_iMaxAIGroups, m_iGroupsFailed, boardingFailed, minReady));
+			FinishReadiness(string.Format("[DataCapture] ERROR: only %1 of %2 groups can still get a ready driver (%3 failed to start, %4 got no driver, %5 retired), fewer than the minimum of %6 - collector session NOT started", canSeat, m_iMaxAIGroups, m_iGroupsFailed, boardingFailed, retiredGroups, minReady));
 			LogMissingGroups(LogLevel.ERROR);
 			return;
 		}
@@ -1698,7 +1707,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (ready == canSeat)
 		{
 			missing = MissingGroupIds();
-			Print(string.Format("[DataCapture] ERROR: TKT-01 acceptance NOT met: %1/%2 drivers ready after %3 s and no other group can get one (%4 failed to start, %5 got no driver) - starting a partial session without groups:%6", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1), m_iGroupsFailed, boardingFailed, missing), LogLevel.ERROR);
+			Print(string.Format("[DataCapture] ERROR: TKT-01 acceptance NOT met: %1/%2 drivers ready after %3 s and no other group can get one (%4 failed to start, %5 got no driver, %6 retired) - starting a partial session without groups:%7", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1), m_iGroupsFailed, boardingFailed, retiredGroups, missing), LogLevel.ERROR);
 			LogMissingGroups(LogLevel.WARNING);
 			StartCaptureSession(string.Format("%1/%2 drivers ready after %3 s", ready, m_iMaxAIGroups, elapsedS.ToString(-1, 1)));
 			return;

@@ -728,9 +728,87 @@ class DefectTest(unittest.TestCase):
             reader.open_session("/mnt/c/__dd5_no_such_dir__/" + GOLDEN_ID)
 
 
+crash_dv = load("dc2_crash_dv", "data/dc2/crash_dv.py")
+E01_RUNS = os.path.join(FIXTURES, "e01_s105_runs.csv")
+STEP_MS = 1000.0 / 30.0           # the 1/30 s physics step of 1.8 (probe run 4, E-10)
+
+
+def e01_runs():
+    """{run: [(t_ms, vx, vz)]} of the E-01 S105 per-step probe (full brakes, steering, full throttle; resets
+    excluded): the physics time of each engine step and its horizontal world-frame velocity."""
+    runs = {}
+    with open(E01_RUNS, "rb") as f:
+        lines = f.read().decode("ascii").split("\n")[1:-1]
+    for line in lines:
+        run, _, step, _, vx, vz = line.split(",")
+        runs.setdefault(int(run), []).append((int(step) * STEP_MS, float(vx), float(vz)))
+    return runs
+
+
+class CrashDetectorTest(unittest.TestCase):
+    """The reference detector of contract 9.5.1 (data/dc2/crash_dv.py) on frame-bound callbacks of 1 to 3 merged
+    steps of 1/30 s (freeze decision D-A)."""
+
+    PATTERNS = ((1,), (2,), (3,), (1, 2, 1, 3, 1, 1, 2, 1, 3, 2), (3, 1, 3, 3, 2, 3, 1, 3))
+
+    def test_e01_braking_never_crosses_the_threshold(self):
+        runs = e01_runs()
+        self.assertEqual(len(runs), 6)
+        for pattern in self.PATTERNS:
+            worst = 0.0
+            for samples in runs.values():
+                series, det = crash_dv.dv_series(crash_dv.frame_bound(samples, pattern))
+                self.assertEqual(det.onsets, [], pattern)
+                worst = max([worst] + [dv for _, dv in series if dv is not None])
+            # 2.01 m/s per 100 ms at full brake (E-01), whatever the merging; interpolation may shave or add a little
+            self.assertLess(worst, 2.3, pattern)
+            self.assertGreater(worst, 1.5, pattern)
+
+    def test_a_window_of_callbacks_would_fire_on_braking(self):
+        # the review's H1: 3 callbacks of 3 merged steps span 300 ms, and full braking gives 5.09 m/s over 300 ms
+        worst = 0.0
+        for run in e01_runs().values():
+            samples = crash_dv.frame_bound(run, (3,))
+            worst = max([worst] + [math.hypot(y[1] - x[1], y[2] - x[2]) for x, y in zip(samples, samples[3:])])
+        self.assertGreater(worst, 4.0)
+
+    def test_an_impact_fires_at_any_merging(self):
+        for pattern in self.PATTERNS:
+            samples = [(i * STEP_MS, 0.0, 8.0 if i < 60 else 0.0) for i in range(120)]
+            series, det = crash_dv.dv_series(crash_dv.frame_bound(samples, pattern))
+            self.assertEqual(len(det.onsets), 1, pattern)
+            self.assertGreaterEqual(det.onsets[0]["peak"], 7.9, pattern)
+            self.assertAlmostEqual(math.hypot(*det.onsets[0]["ref"]), 8.0, 4)
+
+    def test_a_hitch_is_not_a_change(self):
+        det = crash_dv.Detector()
+        for i in range(10):
+            dv = det.step(i * 34, 0.0, 8.0)
+            if i < 3:
+                self.assertIsNone(dv)                           # history shorter than the window
+        # 300 ms without a callback, then a very different velocity: the samples around t - 100 ms are 300 ms apart
+        self.assertIsNone(det.step(9 * 34 + 300, 0.0, 0.0))
+        self.assertEqual(det.onsets, [])
+        self.assertEqual(len(det.samples), 1)                  # the history restarted at the current sample
+        t0 = 9 * 34 + 300
+        self.assertIsNone(det.step(t0 + 50, 0.0, 0.0))         # history shorter than the window
+        self.assertEqual(det.step(t0 + 100, 0.0, 0.0), 0.0)
+
+    def test_a_reset_clears_the_history_and_equal_times_replace(self):
+        det = crash_dv.Detector()
+        for i in range(8):
+            det.step(i * 33, 0.0, 8.0)
+        det.reset()
+        self.assertIsNone(det.step(300, 0.0, 0.0))
+        self.assertIsNone(det.step(300, 0.0, 5.0))              # no world-time advance: replaces the sample
+        self.assertEqual(det.samples, [(300, 0.0, 5.0)])
+        self.assertEqual(det.onsets, [])
+
+
 class CrashTest(unittest.TestCase):
-    """Contract 9.5.1 on the crash variant of make_synthetic (episode 1 ends in a collision; the ego is destroyed in
-    the tail and the session ends with ego_destroyed, status ok)."""
+    """Contract 9.5.1 on the crash variant of make_synthetic, in the shape DD-4-min writes it: in episode 1 the ego
+    stops dead against a rock and is destroyed 4 steps later; the crash rows, the episode end and the seal share the
+    terminal step L; the session ends with ego_destroyed, status ok."""
 
     @classmethod
     def setUpClass(cls):
@@ -748,42 +826,81 @@ class CrashTest(unittest.TestCase):
         self.assertEqual((s.end_get("status"), s.end_get("end_reason")), ("ok", "ego_destroyed"))
         self.assertEqual(s.problems_for("C01"), [])
 
-    def test_crash_events_are_parsed(self):
+    def test_crash_rows_at_the_terminal_step(self):
         s = self.session
-        self.assertEqual([c["kind"] for c in s.crash_events],
-                         ["teleport", "veh_damage", "collision", "veh_damage", "veh_fire_start"])
+        self.assertEqual([c["kind"] for c in s.crash_events], ["teleport", "collision", "veh_damage", "veh_fire_start"])
         self.assertTrue(all(c["problems"] == [] for c in s.crash_events), s.crash_events)
-        collision = [c for c in s.crash_events if c["kind"] == "collision"][0]
-        ep1 = {e: i for i, e in enumerate(s.streams["episodes"].col("episode_id"))}[1]
-        end = s.streams["episodes"].col("end_physics_step")[ep1]
-        self.assertEqual(collision["values"]["onset_step"], end - 18)
-        self.assertEqual(collision["step"], end - 18)
-        self.assertEqual(collision["physics_step"], end - 6)
+        last = s.streams["ctl"].col("physics_step")[-1]
+        ep = {e: i for i, e in enumerate(s.streams["episodes"].col("episode_id"))}[1]
+        self.assertEqual(s.streams["episodes"].col("end_physics_step")[ep], last)
+        self.assertEqual(s.end_get("end.physics_step"), last)
+        self.assertEqual(s.streams["episodes"].col("termination_reason")[ep], "collision")
+        crash = s.crash_events[1:]
+        self.assertEqual([(c["physics_step"], c["episode_id"], c["in_episode"]) for c in crash], [(last, 1, True)] * 3)
+        collision = crash[0]
+        self.assertEqual(collision["values"]["onset_step"], last - 4)
         self.assertEqual((collision["values"]["src"], collision["values"]["other"]), ("dv_contact", "rock"))
-        self.assertAlmostEqual(collision["values"]["dv_mps"], 7.42)
-        self.assertEqual(collision["terminal"], "collision")
-        damage = [c for c in s.crash_events if c["kind"] == "veh_damage"]
-        self.assertEqual([c["values"]["state"] for c in damage], ["intermediary", "destroyed"])
-        self.assertEqual([c["episode_id"] for c in damage], [1, -1])
-        self.assertEqual(s.streams["episodes"].col("termination_reason")[ep1], "collision")
+        self.assertGreaterEqual(collision["values"]["dv_mps"], 4.0)
+        # telemetry.dv_max_mps carries the same quantity at the impact
+        tel = s.streams["telemetry"]
+        at = tel.col("physics_step").index(last - 4 - (last - 4) % s.clocks["k"] + s.clocks["k"] * 0)
+        self.assertGreaterEqual(tel.col("dv_max_mps")[at], 4.0)
+        self.assertEqual(crash[1]["values"]["state"], "destroyed")
 
     def test_first_terminal_ego_event(self):
         s = self.session
         self.assertEqual(sorted(s.terminal_ego), [1])
-        self.assertEqual(s.terminal_ego[1]["kind"], "collision")       # onset_step before the veh_damage row
+        self.assertEqual(s.terminal_ego[1]["kind"], "collision")         # its onset precedes the destroyed row
+        self.assertEqual(s.terminal_ego_confirmed[1]["kind"], "collision")
 
     def test_policy_valid_is_0_from_the_crash_on(self):
         n = self.session.clocks["N"]
         onset = self.session.terminal_ego[1]["step"]
         golden = {d["decision_step"]: d["masks"] for d in self.golden.decisions}
-        checked = 0
+        before = after = 0
         for d in self.session.decisions:
-            want = dict(golden[d["decision_step"]])
-            if d["episode_id"] == 1 and onset <= d["decision_step"] + n:
-                want["policy_valid"] = 0
-                checked += want != golden[d["decision_step"]]
-            self.assertEqual(d["masks"], want, d["decision_step"])      # wm_valid and the rest unchanged
-        self.assertGreater(checked, 0)
+            if d["decision_step"] + n < onset:
+                self.assertEqual(d["masks"], golden[d["decision_step"]], d["decision_step"])
+                before += 1
+            elif d["episode_id"] == 1:
+                self.assertEqual(d["masks"]["policy_valid"], 0, d["decision_step"])
+                after += 1
+        self.assertGreater(before, 50)
+        self.assertGreater(after, 0)
+
+    def test_an_onset_outside_its_episode_is_not_terminal(self):
+        tmp = temp_dir("dc2_reader_crash_out_")
+        try:
+            dst = os.path.join(tmp, self.out["session_id"])
+            shutil.copytree(self.out["session_dir"], dst)
+
+            def early(lines):                # the review's probe: onset_step -100 claimed for episode 1
+                return [l.replace("onset_step=%d;" % (self.session.terminal_ego[1]["step"]), "onset_step=-100;")
+                        for l in lines]
+            names = sorted(n for n in os.listdir(os.path.join(dst, "events")) if n.startswith("chunk_"))
+            rewrite_chunk(dst, "events", int(names[-1][6:11]), early)
+            s = reader.open_session(dst, vehicle_card=CARD)
+            collision = [c for c in s.crash_events if c["kind"] == "collision"][0]
+            self.assertEqual((collision["step"], collision["in_episode"]), (-100, False))
+            self.assertEqual(s.terminal_ego[1]["kind"], "veh_damage")     # the destroyed row still counts
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_a_traffic_reset_never_masks_the_ego(self):
+        s = reader.open_session(GOLDEN_DIR, vehicle_card=CARD)
+        before = [dict(d["masks"]) for d in s.decisions]
+        ev = s.streams["events"]
+        mid = [d["decision_step"] for d in s.decisions if d["masks"]["wm_valid"] == 1][40]
+        row = {c: None for c in ev.columns}
+        row.update({"event_seq": len(ev), "episode_id": 0, "physics_step": mid, "render_frame": 0,
+                    "world_time_ms": 0, "kind": "teleport", "veh_slot_id": 9, "payload": "reason=stuck_reset"})
+        ev.append_rows([row])
+        reader._build_decisions(s)
+        self.assertEqual([d["masks"] for d in s.decisions], before)       # the review's reproduction, fixed
+        ev.append_rows([dict(row, event_seq=len(ev), veh_slot_id=s.streams["telemetry"].col("ego_slot_id")[0])])
+        reader._build_decisions(s)
+        masked = [d for d in s.decisions if d["masks"]["teleport"] == 1]
+        self.assertTrue(masked and all(d["masks"]["wm_valid"] == 0 for d in masked))
 
     def test_payload_parsing(self):
         payloads = self.session.schema.payloads
@@ -800,13 +917,23 @@ class CrashTest(unittest.TestCase):
                            ("state=dead;in_seat=0;state=alive", "repeated"), ("state=dead;in_seat=2", "0 or 1")):
             _, problems = reader.check_payload("driver_state", text, payloads)
             self.assertTrue(any(word in p for p in problems), (text, problems))
-        _, problems = reader.check_payload("rollover", "up_y=1e-3", payloads)
+        _, problems = reader.check_payload("rollover", "onset_step=4;up_y=1e-3", payloads)
         self.assertTrue(problems)                                        # no exponent (section 8)
         self.assertEqual(reader.check_payload("veh_fire_end", "", payloads), ({}, []))
         self.assertTrue(reader.check_payload("veh_fire_end", "fire_state=burning", payloads)[1])
         _, problems = reader.check_payload("collision", "onset_step=4;dv_mps=5.00;v_mps=3.00;other=rock;src=dv;"
                                            "other_prefab=a=b", payloads)
         self.assertTrue(problems)
+        # payload ranges and minimums (the review's probe: health=2.00;movement_damage=-4.00)
+        _, problems = reader.check_payload("veh_damage", "state=intermediary;health=2.00;movement_damage=-4.00",
+                                           payloads)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(any("outside [0, 1]" in p for p in problems))
+        for kind, text in (("rollover", "onset_step=4;up_y=1.50"),
+                           ("collision", "onset_step=4;dv_mps=-1.00;v_mps=3.00;other=rock;src=dv"),
+                           ("stuck", "stuck_s=-2.00")):
+            self.assertTrue(reader.check_payload(kind, text, payloads)[1], text)
+        self.assertEqual(reader.check_payload("rollover", "onset_step=4;up_y=-1.00", payloads)[1], [])
 
     def test_terminal_rules(self):
         self.assertEqual(reader.terminal_reason("collision", {"src": "dv"}), "collision")
@@ -818,7 +945,46 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(reader.terminal_reason("rollover", {"up_y": 0.2}), "rollover")
         for kind in ("driver_state", "dismount", "remount", "veh_fire_end", "stuck", "teleport"):
             self.assertIsNone(reader.terminal_reason(kind, {}), kind)
+        # onset and confirmation (9.5.1): a rollover begins at its first tilted step and is confirmed at its row
+        self.assertEqual(reader.onset_and_confirmation("rollover", {"onset_step": 40}, 55), (40, 55))
+        self.assertEqual(reader.onset_and_confirmation("collision", {"onset_step": 40}, 52), (40, 40))
+        self.assertEqual(reader.onset_and_confirmation("veh_damage", {}, 52), (52, 52))
 
+
+class FrameBoundCrashTest(unittest.TestCase):
+    """The crash on frame-bound rows (D-A): kind crash_30hz, 30 Hz physics, 1 to 3 steps per row."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_reader_fb_")
+        cls.out = synth.generate(os.path.join(cls.tmp, "fb"), kind="crash_30hz")
+        cls.session = reader.open_session(cls.out["session_dir"], vehicle_card=CARD)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_rows_cover_one_to_three_steps(self):
+        w = self.session.streams["ctl"].col("world_time_ms")
+        gaps = set(b - a for a, b in zip(w, w[1:]))
+        self.assertEqual(gaps, {33, 34, 66, 67, 100})
+        self.assertEqual((self.session.clocks["k"], self.session.clocks["N"]), (1, 3))
+
+    def test_crash_rows_and_masks(self):
+        s = self.session
+        last = s.streams["ctl"].col("physics_step")[-1]
+        crash = [c for c in s.crash_events if c["kind"] != "teleport"]
+        self.assertEqual([(c["kind"], c["physics_step"], c["episode_id"]) for c in crash],
+                         [("collision", last, 1), ("veh_damage", last, 1), ("veh_fire_start", last, 1)])
+        onset = crash[0]["values"]["onset_step"]
+        self.assertEqual(onset, last - 2)
+        dv = dict(zip(s.streams["telemetry"].col("physics_step"), s.streams["telemetry"].col("dv_max_mps")))
+        self.assertGreaterEqual(dv[onset], 4.0)
+        self.assertLess(max(v for p, v in dv.items() if v is not None and p < onset), 4.0)
+        self.assertEqual(s.terminal_ego[1]["step"], onset)
+        n = s.clocks["N"]
+        self.assertTrue(all(d["masks"]["policy_valid"] == 0 for d in s.decisions
+                            if d["episode_id"] == 1 and d["decision_step"] + n >= onset))
 
 class LegacyGuardTest(unittest.TestCase):
     """data/enfusion_preprocessing.py raises naming the missing column instead of reading zeros (CR-081)."""

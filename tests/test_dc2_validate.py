@@ -31,6 +31,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -581,7 +582,7 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(code, 0, [(c["id"], c["detail"]) for c in rep["checks"] if c["status"] != "PASS"])
         c36 = by_id(rep)["C36"]
         self.assertEqual((c36["severity"], c36["status"]), ("HARD", "PASS"))
-        self.assertEqual(c36["value"], {"crash_events": 5, "crash_terminations": 1, "terminal_ego_episodes": 1,
+        self.assertEqual(c36["value"], {"crash_events": 4, "crash_terminations": 1, "terminal_ego_episodes": 1,
                                         "ego_destroyed": True})
         self.assertTrue(c36["provisional"])                    # TBD-10 while dc-2.0 is a DRAFT
         self.assertEqual(by_id(rep)["C01"]["status"], "PASS")  # ego_destroyed is a normal end
@@ -592,12 +593,12 @@ class CrashTest(unittest.TestCase):
 
     def test_collision_below_the_threshold_fails(self):
         session = self.copy("dv")
-        self.payloads(session, "collision", lambda v: v.replace("dv_mps=7.42", "dv_mps=3.10"))
+        self.payloads(session, "collision", lambda v: re.sub(r";dv_mps=[0-9.]+", ";dv_mps=3.10", v))
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C36"]))
         self.assertIn("below events.collision_dv_mps", by_id(rep)["C36"]["detail"])
         session = self.copy("contact")                         # a contact-only row may lie below the threshold
-        self.payloads(session, "collision", lambda v: v.replace("dv_mps=7.42", "dv_mps=3.10").replace(
+        self.payloads(session, "collision", lambda v: re.sub(r";dv_mps=[0-9.]+", ";dv_mps=3.10", v).replace(
             "src=dv_contact", "src=contact"))
         code, rep = self.check(session, "--checks", "C36")
         self.assertEqual((code, by_id(rep)["C36"]["status"]), (0, "PASS"))   # veh_damage still explains the end
@@ -612,8 +613,8 @@ class CrashTest(unittest.TestCase):
     def test_bad_payloads_fail(self):
         for name, fn in (("enum", lambda v: v.replace("other=rock", "other=moon")),
                          ("unknown", lambda v: v + ";colour=red"),
-                         ("missing", lambda v: v.replace("v_mps=7.91;", "")),
-                         ("exponent", lambda v: v.replace("dv_mps=7.42", "dv_mps=7e0"))):
+                         ("missing", lambda v: re.sub(r";v_mps=[0-9.]+", "", v)),
+                         ("exponent", lambda v: re.sub(r";dv_mps=[0-9.]+", ";dv_mps=7e0", v))):
             session = self.copy("payload_" + name)
             self.payloads(session, "collision", fn)
             code, rep = self.check(session, "--checks", "C36")
@@ -658,7 +659,7 @@ class CrashTest(unittest.TestCase):
         self.assertEqual((code, failing(rep)), (1, ["C35"]))
         self.assertIn("unknown other_slot(s) [7]", by_id(rep)["C35"]["detail"])
         session = self.copy("veh")
-        add_event(session, 0, "rollover", "up_y=0.20", 9, physics_step=0)
+        add_event(session, 0, "rollover", "onset_step=0;up_y=0.20", 9, physics_step=0)
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C35"]))
         self.assertIn("unknown vehicle slot(s) [9]", by_id(rep)["C35"]["detail"])

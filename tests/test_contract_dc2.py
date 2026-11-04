@@ -42,7 +42,7 @@ SPEC_MD = os.path.join(CONTRACT_DIR, "dc-2.0.md")
 STREAMS_JSON = os.path.join(CONTRACT_DIR, "dc-2.0.streams.json")
 FEATURES_JSON = os.path.join(CONTRACT_DIR, "features_v1.json")
 
-STATUS_LINE = ("Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review round 1 "
+STATUS_LINE = ("Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 and 2 "
                "corrections folded in on 2026-11-04 before any capture, changelog in section "
                "16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22")
 T0ENG = "docs/trials/T0-ENG.md"
@@ -810,10 +810,11 @@ class StreamSchemaTest(unittest.TestCase):
         for want in ("D-A", "D-B", "D-C", "D-D", "D-E", "TBD-3", "TBD-4", "TBD-5", "TBD-6", "TBD-7", "FIDUCIAL",
                      "CAPTURE-PHASE", "FREEZE"):
             self.assertIn(want, ids)
-        # review round 1: the pre-capture corrections, in the md and in both JSON twins, after the freeze row
-        review = [i for i in ids if i.startswith("R1-")]
+        # review rounds 1 and 2: the pre-capture corrections, in the md and in both JSON twins, after the freeze row
+        review = [i for i in ids if i.startswith("R1-") or i.startswith("R2-")]
         self.assertEqual(review, ["R1-OBS", "R1-SEAL", "R1-STEPDT", "R1-HZ", "R1-CLOCK", "R1-HLSEQ", "R1-C37", "R1-LAG",
-                                  "R1-ROAD", "R1-NEAR", "R1-BRIDGE", "R1-TEXT", "R1-REFREEZE"])
+                                  "R1-ROAD", "R1-NEAR", "R1-BRIDGE", "R1-TEXT", "R1-REFREEZE", "R2-SEAL", "R2-C37",
+                                  "R2-BRIDGE", "R2-STEPDT", "R2-HLSEQ", "R2-ADMIT", "R2-REFREEZE"])
         self.assertEqual(ids[ids.index("FREEZE") + 1:], review)
         self.assertTrue(all(c["date"] == "2026-11-04" for c in self.schema["changelog"] if c["id"] in review))
         with open(FEATURES_JSON, encoding="ascii") as f:

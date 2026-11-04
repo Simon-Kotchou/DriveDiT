@@ -103,6 +103,7 @@
     "collision_refractory_ms": 1000,
     "episode_end_wait_ms": 250,
     "crash_cooldown_ms": 3000,
+    "episode_block_max_ms": 60000,
     "rollover_up_y": 0.5,
     "rollover_hold_ms": 500,
     "state_poll_ms": 100,

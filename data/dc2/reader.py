@@ -43,10 +43,13 @@ steps of one episode, so they split at gaps, episode boundaries and masks.
 Crash events (section 9.5.1): the rows of the kinds that event_payloads defines are parsed into Session.crash_events
 (payload values typed by their key spec, ranges and minimums included, with the problems C36 reports). A row belongs
 to its episode_id (episode ownership); its step is the onset (onset_step of a collision or rollover, else
-physics_step) and must lie inside that episode, a row with episode_id -1 outside every episode. Terminal ego events
-(a collision with src dv or dv_contact, a veh_damage with a state other than undamaged or movement_damage >= 1, a
-veh_fire_start, a rollover) count only inside their episode: Session.terminal_ego[e] is the first by onset,
-Session.terminal_ego_confirmed[e] the first by confirmation (a rollover is confirmed at its row, the end of the hold).
+physics_step) and must lie inside that episode, a row with episode_id -1 outside every episode, and never after the
+row's own physics_step (chronology). Terminal ego events (a collision with src dv or dv_contact, a veh_damage with a
+state other than undamaged or movement_damage >= 1, a veh_fire_start, a rollover) count only when both hold:
+Session.terminal_ego[e] is the first by onset, Session.terminal_ego_confirmed[e] the first by confirmation (a rollover
+is confirmed at its row, the end of the hold; confirmed_inside tells whether that was inside the episode). The core is
+the only source of the terminations collision and rollover, so an episode's termination collision or rollover is the
+reason of its first terminal ego event by confirmation, confirmed inside it (C36).
 A decision step whose window (P_t, P_t + N] contains or follows the earliest onset is not policy-valid (wm_valid
 unchanged: crash dynamics are world-model data). The teleport mask uses only teleport and respawn rows of the ego slot
 or of no vehicle (veh_slot_id -1).
@@ -1213,9 +1216,10 @@ def episode_bounds(s):
 def _read_crash_events(s):
     """Session.crash_events: one dict per events row of a kind in event_payloads, in row order: event_seq, episode_id,
     physics_step, world_time_ms, kind, veh_slot_id, values, problems, step (the onset), confirm_step, in_episode (the
-    onset lies inside its episode_id's bounds, or inside none for episode_id -1), ego (the row names an ego slot) and
-    terminal (terminal_reason of an ego row). terminal_ego / terminal_ego_confirmed: {episode_id: the episode's first
-    terminal ego event inside it, by onset / by confirmation}."""
+    onset lies inside its episode_id's bounds, or inside none for episode_id -1), chrono_ok (the onset is not after
+    the row's physics_step), confirmed_inside (confirm_step <= the episode's end_physics_step), ego (the row names an
+    ego slot) and terminal (terminal_reason of an ego row). terminal_ego / terminal_ego_confirmed: {episode_id: the
+    episode's first valid (in_episode, chrono_ok) terminal ego event by onset / by confirmation}."""
     ev = s.streams["events"]
     payloads = s.schema.payloads
     egos = ego_slots(s)
@@ -1237,12 +1241,15 @@ def _read_crash_events(s):
                                "physics_step": ev.data["physics_step"][i],
                                "world_time_ms": ev.data["world_time_ms"][i], "kind": kind,
                                "veh_slot_id": ev.data["veh_slot_id"][i], "values": values, "problems": problems,
-                               "step": step, "confirm_step": confirm, "in_episode": inside, "ego": ego,
+                               "step": step, "confirm_step": confirm, "in_episode": inside,
+                               "chrono_ok": step <= ev.data["physics_step"][i],
+                               "confirmed_inside": e is not None and e in bounds and confirm <= bounds[e][1],
+                               "ego": ego,
                                "terminal": terminal_reason(kind, values) if ego else None})
     s.terminal_ego, s.terminal_ego_confirmed = {}, {}
     for c in s.crash_events:
         e = c["episode_id"]
-        if c["terminal"] is None or e is None or e < 0 or not c["in_episode"]:
+        if c["terminal"] is None or e is None or e < 0 or not c["in_episode"] or not c["chrono_ok"]:
             continue
         if e not in s.terminal_ego or c["step"] < s.terminal_ego[e]["step"]:
             s.terminal_ego[e] = c

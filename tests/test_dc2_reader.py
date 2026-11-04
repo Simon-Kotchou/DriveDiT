@@ -193,7 +193,7 @@ class GoldenTest(unittest.TestCase):
         diffs = []
         compare(self.golden, view, "golden", diffs)
         self.assertEqual(diffs, [], "reader differs from golden.json: %s" % diffs[:10])
-        self.assertEqual(len(self.golden["decision_steps"]), 130)
+        self.assertEqual(len(self.golden["decision_steps"]), 68)
         self.assertEqual(len(self.golden["pixels"]["slots"]), 4)
 
     def test_compare_catches_a_value_off_by_more_than_the_tolerance(self):
@@ -245,20 +245,43 @@ class GoldenTest(unittest.TestCase):
         self.assertEqual(s.problems, [])
         self.assertTrue(s.sealed)
         for name in ("ctl", "telemetry", "hf", "img", "events"):
-            self.assertEqual(len(s.streams[name].commits), 2, name)     # the 10 s chunk rule
+            self.assertEqual(len(s.streams[name].commits), 2, name)     # the 10 s and chunk_max_rows rules
         self.assertEqual(len(s.streams["episodes"].commits), 2)         # chunk_max_rows 1
-        self.assertEqual(s.streams["ctl"].col("physics_step"), list(range(780)))
-        self.assertEqual(s.streams["telemetry"].col("physics_step"), list(range(0, 780, 3)))
+        # frame-bound rows (D-A): one ctl and one telemetry row per callback, physics_step + covered_steps per row
+        ctl, tel = s.streams["ctl"], s.streams["telemetry"]
+        steps, covered = ctl.col("physics_step"), ctl.col("covered_steps")
+        self.assertEqual(len(steps), 310)
+        self.assertEqual(steps[0], covered[0] - 1)
+        self.assertTrue(all(b - a == c for a, b, c in zip(steps, steps[1:], covered[1:])))
+        self.assertEqual(set(covered), {1, 2, 3})
+        self.assertEqual(tel.col("physics_step"), steps)
+        self.assertEqual(tel.col("covered_steps"), covered)
+        frames = ctl.col("render_frame")
+        self.assertTrue(all(b > a for a, b in zip(frames, frames[1:])))     # at most one callback per frame
+        self.assertLess(len(steps), len(s.streams["hf"]))                   # frames without a fixed step
         self.assertNotIn("traffic", [n for n, st in s.streams.items() if st.present])
 
     def test_timing_from_session_json(self):
         c = self.session.clocks
-        self.assertEqual((c["k"], c["N"], c["image_hz"], c["img_lead_ms"]), (3, 6, 10.0, 0))
-        self.assertAlmostEqual(c["image_period_ms"], 100.0)
-        self.assertEqual(reader.tbd1_rule(c["slice_s"]), (6, 3))
-        self.assertEqual(reader.tbd1_rule(1 / 50.0), (5, 1))
-        self.assertEqual(reader.tbd1_rule(1 / 30.0), (3, 1))
-        self.assertEqual(reader.tbd1_rule(1 / 60.0, 5.0), (12, 3))      # TBD-2 5 Hz fallback: N 12 at 60 Hz
+        self.assertEqual((c["N"], c["decision_hz"], c["image_hz"], c["image_hz_setting"], c["img_lead_ms"]),
+                         (6, 5.0, 5.0, "default", 0))
+        self.assertAlmostEqual(c["image_period_ms"], 200.0)
+        self.assertEqual(c["decision_period_ms"], 200)
+        self.assertAlmostEqual(c["step_dt_s"], 1 / 30.0, places=5)
+        self.assertNotIn("k", c)
+        self.assertEqual(reader.steps_per_decision(5, c["step_dt_s"]), 6)
+        self.assertEqual(reader.steps_per_decision(10, 1 / 30.0), 3)
+        self.assertEqual(reader.steps_per_decision(5, 1 / 60.0), 12)
+        self.assertEqual(reader.grid_period_ms(5), 200)
+        self.assertIsNone(reader.grid_period_ms(3))           # 1000 / 3 ms is not an integer grid
+        world = self.session.streams["ctl"].col("world_time_ms")
+        calls, skipped = reader.decision_callbacks(world, 5)
+        self.assertEqual(skipped, 0)
+        self.assertEqual([g for _, g in calls], list(range(len(calls))))
+        for i, g in calls:
+            self.assertGreaterEqual(world[i], world[0] + 200 * g)
+            self.assertTrue(i == 0 or world[i - 1] < world[0] + 200 * g)
+        self.assertEqual(reader.decision_callbacks([0, 50, 450, 500], 5), ([(0, 0), (2, 2)], 1))
 
     def test_fiducial_join_across_the_wrap(self):
         s = self.session
@@ -270,71 +293,88 @@ class GoldenTest(unittest.TestCase):
         for r in s.images:
             self.assertEqual(r["code"], r["captured_render_frame"] % reader.fiducial.CODE_MODULUS)
             self.assertEqual(hf.col("render_frame")[r["hf_index"]], r["captured_render_frame"])
-            self.assertEqual(r["captured_render_frame"] - r["issue_render_frame"], 1)
+            self.assertEqual(r["captured_render_frame"], r["issue_render_frame"])
+            self.assertEqual(r["captured_render_frame"], r["done_render_frame"] - 1)     # Workbench 1.8, run 4
+            self.assertEqual(hf.col("render_frame")[r["pose_hf_index"]], r["captured_render_frame"] + 1)
 
     def test_hf_joins(self):
         s = self.session
         hf, ctl, tel = s.streams["hf"], s.streams["ctl"], s.streams["telemetry"]
+        cb_frame = dict(zip(ctl.col("physics_step"), ctl.col("render_frame")))
         for i, lps in enumerate(hf.col("last_physics_step")):
             if lps < 0:
                 self.assertIsNone(s.hf_ctl[i])
                 self.assertIsNone(s.hf_tel[i])
                 continue
             self.assertEqual(ctl.col("physics_step")[s.hf_ctl[i]], lps)
-            t = tel.col("physics_step")[s.hf_tel[i]]
-            self.assertTrue(0 <= lps - t < s.clocks["k"])
+            self.assertEqual(tel.col("physics_step")[s.hf_tel[i]], lps)          # exact (a row per callback)
+            self.assertLess(cb_frame[lps], hf.col("render_frame")[i])         # the callback of an earlier frame
+        self.assertEqual(s.grid_anchor_ms, ctl.col("world_time_ms")[0])
 
     def test_decision_boundary_r01(self):
         s = self.session
         ctl = s.streams["ctl"]
         idx = ctl.index()
+        steps = ctl.col("physics_step")
         n = s.clocks["N"]
-        by_step = {d["decision_step"]: d for d in s.decisions}
         checked = 0
-        for d in s.decisions:
+        for t, d in enumerate(s.decisions):
             p = d["decision_step"]
             if d["masks"]["wm_valid"] != 1:
                 continue
-            nxt = ctl.row(idx[p + 1])
-            cur = ctl.row(idx[p])
-            # action_cmd_t is the command applied from P_t + 1; in mode E it equals the label decided after P_t
+            i = idx[p]
+            nxt, cur = ctl.row(i + 1), ctl.row(i)
+            # action_cmd_t is the command of the row after C_t; in mode E it equals the label decided at C_t
             self.assertEqual(d["action_cmd"], [nxt["hl_kappa"], nxt["hl_accel"], nxt["hl_dir"]])
             self.assertEqual(d["action_cmd"], d["action_label"])
-            # the row of P_t still holds the previous decision's command; hl_seq increments at P_t + 1 only
-            prev = by_step.get(p - n)
-            if prev is not None and prev["masks"]["wm_valid"] == 1:
+            # the row of C_t still holds the previous decision's command; hl_seq increments on the next row only
+            prev = s.decisions[t - 1]
+            if prev["masks"]["wm_valid"] == 1:
                 self.assertEqual([cur["hl_kappa"], cur["hl_accel"], cur["hl_dir"]], prev["action_cmd"])
-                self.assertNotEqual(cur["hl_kappa"], nxt["hl_kappa"])
             self.assertEqual(nxt["hl_seq"], cur["hl_seq"] + 1)
-            for j in range(2, n + 1):
-                self.assertEqual(ctl.row(idx[p + j])["hl_seq"], nxt["hl_seq"])
+            p_next = s.decisions[t + 1]["decision_step"]
+            self.assertEqual(d["interval_steps"], p_next - p)
+            for j in range(i + 1, idx[p_next] + 1):                 # held over the decision interval
+                self.assertEqual(ctl.row(j)["hl_seq"], nxt["hl_seq"])
             self.assertEqual(len(d["action_exec"]), n)
+            inside = min(n, p_next - p)
+            self.assertTrue(all(e is not None for e in d["action_exec"][:inside]))
+            self.assertTrue(all(e is None for e in d["action_exec"][inside:]))
+            # each step of the exec window comes from the ctl row that covers it
+            for q, e in zip(range(p + 1, p + inside + 1), d["action_exec"]):
+                j = reader.covering_row(steps, ctl.col("covered_steps"), q)
+                self.assertEqual(e[1], ctl.col("llc_throttle")[j])
             self.assertLessEqual(d["obs_last_physics_step"], p)
             checked += 1
-        self.assertEqual(checked, 98)       # 100 in-episode steps less each episode's first (obs before it)
+        self.assertEqual(checked, 52)
+        self.assertGreater(len(set(d["interval_steps"] for d in s.decisions if d["interval_steps"])), 2)
 
     def test_segments_and_masks(self):
         s = self.session
         self.assertEqual(s.segments, [
-            {"episode_id": 0, "first_decision_step": 126, "last_decision_step": 414, "n_steps": 49},
-            {"episode_id": 1, "first_decision_step": 456, "last_decision_step": 744, "n_steps": 49}])
+            {"episode_id": 0, "first_decision_step": 61, "last_decision_step": 211, "n_steps": 26},
+            {"episode_id": 1, "first_decision_step": 235, "last_decision_step": 385, "n_steps": 26}])
         by_step = {d["decision_step"]: d for d in s.decisions}
-        self.assertEqual(by_step[114]["masks"]["warmup"], 1)
-        self.assertEqual(by_step[120]["masks"]["warmup"], 0)
-        # the first decision of an episode sees an image from before the episode started: masked
-        self.assertEqual((by_step[120]["obs_valid"], by_step[120]["masks"]["wm_valid"]), (1, 0))
-        self.assertEqual(by_step[432]["masks"]["teleport"], 1)
-        self.assertEqual(by_step[438]["masks"]["teleport"], 1)      # its obs (step 433) predates the teleport (434)
-        self.assertEqual(by_step[420]["masks"]["wm_valid"], 0)     # the window leaves the episode
-        self.assertEqual(by_step[120]["state"][3], 1)               # forward gear through the card (TBD-7)
-        self.assertEqual(by_step[0]["state"][3], 0)
+        self.assertEqual(by_step[55]["masks"]["warmup"], 1)
+        self.assertEqual(by_step[61]["masks"]["warmup"], 0)
+        # the first decision of an episode sees the image of its own frame: the state after its callback (pose row)
+        self.assertEqual((by_step[61]["obs_last_physics_step"], by_step[61]["obs_age_ms"]), (61, 0))
+        self.assertEqual(by_step[61]["masks"]["wm_valid"], 1)
+        # an image whose frame had no callback shows the state of an earlier callback (80 ms older here)
+        self.assertEqual((by_step[75]["obs_last_physics_step"], by_step[75]["obs_age_ms"]), (72, 80))
+        self.assertEqual(by_step[217]["masks"]["teleport"], 1)          # the teleport (step 222) is in its interval
+        self.assertEqual(by_step[225]["masks"]["teleport"], 1)          # its obs (step 222) is at the teleport
+        self.assertEqual(by_step[217]["masks"]["wm_valid"], 0)          # the interval leaves the episode
+        self.assertEqual(by_step[61]["state"][3], 1)                    # forward gear through the card (TBD-7)
+        self.assertEqual(by_step[0]["state"][3], 0)                     # neutral
+        self.assertIsNone(s.decisions[-1]["interval_steps"])           # the last decision has no interval
 
     def test_exports_contract_sign(self):
         s = self.session
         ctl = s.streams["ctl"]
         for i in range(len(ctl)):
             raw = ctl.col("input_post_steer")[i]
-            self.assertEqual(s.ctl_export["steer_input"][i], -raw)   # steer_sign -1 (TBD-5 default)
+            self.assertEqual(s.ctl_export["steer_input"][i], raw)    # steer_sign +1 (TBD-5 decided)
         tel = s.streams["telemetry"]
         heading = s.telemetry_export["heading_rad"]
         self.assertTrue(numpy.allclose(heading, numpy.arctan2(tel.array("fwd_x"), tel.array("fwd_z"))))
@@ -350,27 +390,29 @@ class GoldenTest(unittest.TestCase):
     def test_dir_state_through_the_card(self):
         t0min = {"gear_indices_forward": [3], "gear_index_neutral": None, "gear_index_reverse": None}
         self.assertEqual([reader.dir_state_of(t0min, g) for g in (3, 1, 2, None)], [1, 0, 0, None])
-        measured = {"gear_indices_forward": [3, 4], "gear_index_neutral": 1, "gear_index_reverse": 0}
-        self.assertEqual([reader.dir_state_of(measured, g) for g in (4, 1, 0, 2)], [1, 0, -1, None])
+        s105 = {"gear_indices_forward": [2, 3, 4, 5], "gear_index_neutral": 1, "gear_index_reverse": 0}  # TBD-7
+        self.assertEqual([reader.dir_state_of(s105, g) for g in (2, 5, 1, 0, 6)], [1, 1, 0, -1, None])
 
 
-class FiveHzTest(unittest.TestCase):
-    """The TBD-2 5 Hz fallback: image_hz = decision_hz = 5, N = 12, k = 3."""
+class TenHzTest(unittest.TestCase):
+    """The non-default 10 Hz setting (TBD-2): image_hz = decision_hz = 10, N = 3, clocks.image_hz_setting trial_conf."""
 
     def test_reproduces_its_golden(self):
-        tmp = temp_dir("dc2_5hz_")
+        tmp = temp_dir("dc2_10hz_")
         try:
-            out = synth.generate(os.path.join(tmp, "s"), kind="golden_5hz", golden_json=os.path.join(tmp, "g.json"))
+            out = synth.generate(os.path.join(tmp, "s"), kind="golden_10hz", golden_json=os.path.join(tmp, "g.json"))
             with open(os.path.join(tmp, "g.json"), "rb") as f:
                 golden = json.loads(f.read().decode("ascii"))
             s = reader.open_session(out["session_dir"], vehicle_card=CARD)
-            self.assertEqual((s.clocks["N"], s.clocks["k"], s.clocks["image_hz"]), (12, 3, 5.0))
+            self.assertEqual((s.clocks["N"], s.clocks["image_hz"], s.clocks["image_hz_setting"]),
+                             (3, 10.0, "trial_conf"))
+            self.assertEqual(s.meta_get("trial.conf")["image_hz"], 10)
             slots = [p["slot_id"] for p in golden["pixels"]["slots"]]
             view = json.loads(json.dumps(s.golden_view(slots, golden["pixels"]["stride"])))
             diffs = []
             compare(golden, view, "golden", diffs)
             self.assertEqual(diffs, [], diffs[:10])
-            self.assertEqual(len(s.decisions[50]["action_exec"]), 12)
+            self.assertEqual(len(s.decisions[50]["action_exec"]), 3)
             self.assertTrue(any(d["masks"]["wm_valid"] for d in s.decisions))
         finally:
             shutil.rmtree(tmp)
@@ -412,7 +454,7 @@ class DefectTest(unittest.TestCase):
         c05 = s.problems_for("C05")
         self.assertEqual(len(c05), 1)
         self.assertIn("missing required column(s) vel_local_z", c05[0].message)
-        self.assertEqual(s.streams["telemetry"].col("physics_step")[0], 600)    # chunk 0 refused, chunk 1 read
+        self.assertEqual(s.streams["telemetry"].col("physics_step")[0], 263)    # chunk 0 refused, chunk 1 read
 
     def test_unknown_column_refuses_the_chunk(self):
         session = copy_golden(self.tmp)
@@ -437,11 +479,11 @@ class DefectTest(unittest.TestCase):
         s = reader.open_session(session, strict=False, decode_images=False)
         tel = s.streams["telemetry"]
         lengths = set(len(tel.col(c)) for c in tel.columns)
-        self.assertEqual(lengths, {258})
+        self.assertEqual(lengths, {308})
         msgs = [p.message for p in s.problems_for("C05")]
         self.assertTrue(any("column acc_local_z" in m for m in msgs), msgs)
         self.assertTrue(any("20 fields" in m for m in msgs), msgs)
-        self.assertNotIn(12, tel.col("physics_step"))
+        self.assertNotIn(11, tel.col("physics_step"))           # the truncated row (line 9)
         with self.assertRaises(reader.ReaderError):
             reader.open_session(session, decode_images=False)
 
@@ -467,41 +509,41 @@ class DefectTest(unittest.TestCase):
         shutil.copyfile(src, os.path.join(session, "ctl", "chunk_00002.csv"))
         s = reader.open_session(session, decode_images=False)
         self.assertEqual(s.streams["ctl"].uncommitted, ["chunk_00002.csv"])
-        self.assertEqual(len(s.streams["ctl"]), 780)
+        self.assertEqual(len(s.streams["ctl"]), 310)
 
     def test_commit_mismatch_raises_in_strict_mode(self):
         session = copy_golden(self.tmp)
         commit = os.path.join(session, "img", "commit.csv")
         with open(commit, "rb") as f:
             text = f.read().decode("ascii")
-        self.assertIn("\n0,0,99,100,", text)
+        self.assertIn("\n0,0,49,50,", text)
         with open(commit, "wb") as f:
-            f.write(text.replace("\n0,0,99,100,", "\n0,0,99,99,", 1).encode("ascii"))
+            f.write(text.replace("\n0,0,49,50,", "\n0,0,48,50,", 1).encode("ascii"))
         with self.assertRaisesRegex(reader.ReaderError, "C34"):
             reader.open_session(session, decode_images=False)
         s = reader.open_session(session, strict=False, decode_images=False)
-        self.assertTrue(any("commit line says 99" in p.message for p in s.problems_for("C34")))
+        self.assertTrue(any("commit line says 0..48" in p.message for p in s.problems_for("C34")))
 
     def test_gap_variant_splits_the_segment(self):
         out = synth.generate(os.path.join(self.tmp, "gap"), variant="gap")
         s = reader.open_session(out["session_dir"], vehicle_card=CARD)
-        self.assertNotIn(304, s.streams["ctl"].col("physics_step"))
+        self.assertNotIn(64, s.streams["ctl"].col("physics_step"))
+        self.assertIn(64, s.streams["telemetry"].col("physics_step"))
         by_step = {d["decision_step"]: d for d in s.decisions}
-        self.assertEqual(by_step[300]["masks"]["wm_valid"], 0)
-        self.assertIsNone(by_step[300]["action_exec"][3])          # step 304
-        self.assertEqual(s.segments[:2], [
-            {"episode_id": 0, "first_decision_step": 126, "last_decision_step": 294, "n_steps": 29},
-            {"episode_id": 0, "first_decision_step": 306, "last_decision_step": 414, "n_steps": 19}])
+        self.assertEqual(by_step[61]["masks"]["wm_valid"], 0)          # its interval (61, 66] lost two rows
+        self.assertIsNone(by_step[61]["action_exec"][2])                 # step 64
+        self.assertEqual(s.segments[0], {"episode_id": 0, "first_decision_step": 66, "last_decision_step": 211,
+                                         "n_steps": 25})
 
     def test_missing_commit_variant_discards_the_tail(self):
         out = synth.generate(os.path.join(self.tmp, "mc"), variant="missing_commit")
-        # the seal says the session ran to step 779; the committed ctl rows stop at 599: a builder must refuse it
-        with self.assertRaisesRegex(reader.ReaderError, "C34 ctl/: committed rows end at physics_step 599"):
+        # the seal says the session ran to step 407; the committed ctl rows stop at 300: a builder must refuse it
+        with self.assertRaisesRegex(reader.ReaderError, "C34 ctl/: committed rows end at physics_step 300"):
             reader.open_session(out["session_dir"], decode_images=False)
         for s in (reader.open_session(out["session_dir"], decode_images=False, salvage=True),
                   reader.open_session(out["session_dir"], decode_images=False, strict=False)):
             self.assertEqual(s.streams["ctl"].uncommitted, ["chunk_00001.csv"])
-            self.assertEqual(s.streams["ctl"].col("physics_step")[-1], 599)
+            self.assertEqual(s.streams["ctl"].col("physics_step")[-1], 300)
 
     def test_unsealed_session(self):
         session = copy_golden(self.tmp)
@@ -518,7 +560,7 @@ class DefectTest(unittest.TestCase):
         with self.assertRaisesRegex(reader.ReaderError, "status 'failed'"):
             reader.open_session(session, decode_images=False)
         s = reader.open_session(session, decode_images=False, salvage=True)
-        self.assertEqual(len(s.streams["ctl"]), 780)
+        self.assertEqual(len(s.streams["ctl"]), 310)
         s = reader.open_session(session, decode_images=False, strict=False)
         self.assertEqual(len(s.problems_for("C01")), 1)
         edit_json(os.path.join(session, "session_end.json"),
@@ -554,8 +596,8 @@ class DefectTest(unittest.TestCase):
         with open(commit, "wb") as f:
             f.write(("\n".join(lines[:2]) + "\n").encode("ascii"))
         edit_json(os.path.join(session, "session_end.json"),
-                  lambda o: o["counts"]["telemetry"].update({"rows": 200, "chunks": 1, "last_key": 597}))
-        with self.assertRaisesRegex(reader.ReaderError, "telemetry/: committed rows end at physics_step 597"):
+                  lambda o: o["counts"]["telemetry"].update({"rows": 200, "chunks": 1, "last_key": 262}))
+        with self.assertRaisesRegex(reader.ReaderError, "telemetry/: committed rows end at physics_step 262"):
             reader.open_session(session, decode_images=False)
 
     def test_overflowing_number_is_refused(self):
@@ -571,9 +613,9 @@ class DefectTest(unittest.TestCase):
         session = copy_golden(self.tmp)
 
         def dup(lines):
-            row = lines[302].split(",")                 # physics_step 301 (header is line 0)
-            self.assertEqual(row[0], "301")
-            return lines[:303] + [lines[302]] + lines[303:]
+            row = lines[200].split(",")                 # the 200th row (header is line 0)
+            self.assertEqual(row[0], "262")
+            return lines[:201] + [lines[200]] + lines[201:]
 
         rewrite_chunk(session, "ctl", 0, dup)
         with self.assertRaisesRegex(reader.ReaderError, "C07 ctl/: key physics_step not strictly increasing"):
@@ -619,45 +661,48 @@ class DefectTest(unittest.TestCase):
 
     def test_obs_needs_the_hf_joins(self):
         base = reader.open_session(golden_source(), vehicle_card=CARD)
-        d = next(x for x in base.decisions if x["decision_step"] == 300)
-        lps = d["obs_last_physics_step"]          # 295: its as-of telemetry row is step 294
+        d = next(x for x in base.decisions if x["decision_step"] == 151)
+        lps = d["obs_last_physics_step"]          # 151: the image's pose row joins telemetry at that step
         session = copy_golden(self.tmp)
-        rewrite_chunk(session, "telemetry", 0, lambda lines: [ln for ln in lines if not ln.startswith("%d," % (
-            lps - lps % 3))])
+        rewrite_chunk(session, "telemetry", 0, lambda lines: [ln for ln in lines if not ln.startswith("%d," % lps)])
         s = reader.open_session(session, vehicle_card=CARD, strict=False)
-        d2 = next(x for x in s.decisions if x["decision_step"] == 300)
+        d2 = next(x for x in s.decisions if x["decision_step"] == 151)
         self.assertNotEqual(d2["obs_slot_id"], d["obs_slot_id"])
         self.assertEqual(d2["masks"]["wm_valid"], 0)
 
     def test_teleport_between_obs_and_decision_masks_it(self):
         session = copy_golden(self.tmp)
+        base = reader.open_session(golden_source(), vehicle_card=CARD)
+        d = next(x for x in base.decisions if x["decision_step"] == 301)
+        self.assertEqual((d["obs_last_physics_step"], d["masks"]["teleport"]), (301, 0))
 
         def add_teleport(lines):
-            end = lines[1].split(",")                   # 6,1,750,...,episode_end
-            tele = ["6", "1", "597", str(int(end[3]) - 153), str(int(end[4]) - 2550), "teleport", "1", "reason=test"]
+            end = lines[1].split(",")                   # 6,1,391,...,episode_end
+            tele = ["6", "1", "298", str(int(end[3]) - 80), str(int(end[4]) - 2700), "teleport", "1", "reason=test"]
             end[0] = "7"
             return [lines[0], ",".join(tele), ",".join(end)]
 
         rewrite_chunk(session, "events", 1, add_teleport, keys=True)
         s = reader.open_session(session, vehicle_card=CARD)
-        d = next(x for x in s.decisions if x["decision_step"] == 600)
-        self.assertEqual(d["obs_last_physics_step"], 595)        # pre-teleport image, post-teleport state
+        d = next(x for x in s.decisions if x["decision_step"] == 301)
+        self.assertEqual((d["masks"]["teleport"], d["masks"]["wm_valid"], d["masks"]["policy_valid"]), (0, 1, 1))
+        d = next(x for x in s.decisions if x["decision_step"] == 295)        # the teleport lies in its interval
         self.assertEqual((d["masks"]["teleport"], d["masks"]["wm_valid"], d["masks"]["policy_valid"]), (1, 0, 0))
 
     def test_command_held_and_exec_channels_complete(self):
         for column, value in (("hl_kappa", "0.012345"), ("llc_throttle", "")):
             session = copy_golden(self.tmp, column)
-            set_column(session, "ctl", 0, column, lambda key, v: value if key == 303 else v)
+            set_column(session, "ctl", 0, column, lambda key, v: value if key == 154 else v)
             s = reader.open_session(session, vehicle_card=CARD, strict=False)
-            d = next(x for x in s.decisions if x["decision_step"] == 300)
+            d = next(x for x in s.decisions if x["decision_step"] == 151)
             self.assertEqual(d["masks"]["wm_valid"], 0, column)
-            self.assertEqual(d["masks"]["policy_valid"], 1, column)    # the label at P_t is unaffected
+            self.assertEqual(d["masks"]["policy_valid"], 1, column)    # the label at C_t is unaffected
 
     def test_react_visible_at_the_label_step(self):
         session = copy_golden(self.tmp)
-        set_column(session, "ctl", 0, "react_visible", lambda key, v: "0" if key == 300 else v)
+        set_column(session, "ctl", 0, "react_visible", lambda key, v: "0" if key == 151 else v)
         s = reader.open_session(session, vehicle_card=CARD)
-        d = next(x for x in s.decisions if x["decision_step"] == 300)
+        d = next(x for x in s.decisions if x["decision_step"] == 151)
         self.assertEqual((d["masks"]["policy_valid"], d["masks"]["wm_valid"]), (0, 1))
 
     def test_vehicle_card_hash(self):
@@ -836,9 +881,9 @@ class CrashDetectorTest(unittest.TestCase):
 
 
 class CrashTest(unittest.TestCase):
-    """Contract 9.5.1 on the crash variant of make_synthetic, in the shape DD-4-min writes it: in episode 1 the ego
-    stops dead against a rock and is destroyed 4 steps later; the crash rows, the episode end and the seal share the
-    terminal step L; the session ends with ego_destroyed, status ok."""
+    """Contract 9.5.1 on the crash variant of make_synthetic, in the shape DD-4-min writes it (frame-bound rows, D-A):
+    in episode 1 the ego stops dead against a rock and is destroyed two callbacks after the detector's onset; the crash
+    rows, the episode end and the seal share the terminal step L; the session ends with ego_destroyed, status ok."""
 
     @classmethod
     def setUpClass(cls):
@@ -868,13 +913,15 @@ class CrashTest(unittest.TestCase):
         crash = s.crash_events[1:]
         self.assertEqual([(c["physics_step"], c["episode_id"], c["in_episode"]) for c in crash], [(last, 1, True)] * 3)
         collision = crash[0]
-        self.assertEqual(collision["values"]["onset_step"], last - 4)
+        steps = s.streams["ctl"].col("physics_step")
+        self.assertEqual(collision["values"]["onset_step"], steps[-3])      # two callbacks before L
         self.assertEqual((collision["values"]["src"], collision["values"]["other"]), ("dv_contact", "rock"))
         self.assertGreaterEqual(collision["values"]["dv_mps"], 4.0)
-        # telemetry.dv_max_mps carries the same quantity at the impact
+        # telemetry.dv_max_mps carries the same quantity at the impact (one telemetry row per callback)
         tel = s.streams["telemetry"]
-        at = tel.col("physics_step").index(last - 4 - (last - 4) % s.clocks["k"] + s.clocks["k"] * 0)
-        self.assertGreaterEqual(tel.col("dv_max_mps")[at], 4.0)
+        dv = dict(zip(tel.col("physics_step"), tel.col("dv_max_mps")))
+        self.assertGreaterEqual(dv[steps[-3]], 4.0)
+        self.assertLess(max(v for p, v in dv.items() if v is not None and p < steps[-3]), 4.0)
         self.assertEqual(crash[1]["values"]["state"], "destroyed")
 
     def test_first_terminal_ego_event(self):
@@ -889,7 +936,7 @@ class CrashTest(unittest.TestCase):
         golden = {d["decision_step"]: d["masks"] for d in self.golden.decisions}
         before = after = 0
         for d in self.session.decisions:
-            if d["decision_step"] + n < onset:
+            if d["decision_step"] + (d["interval_steps"] or n) < onset:
                 self.assertEqual(d["masks"], golden[d["decision_step"]], d["decision_step"])
                 before += 1
             elif d["episode_id"] == 1:
@@ -1008,41 +1055,6 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(reader.onset_and_confirmation("collision", {"onset_step": 40}, 52), (40, 40))
         self.assertEqual(reader.onset_and_confirmation("veh_damage", {}, 52), (52, 52))
 
-
-class FrameBoundCrashTest(unittest.TestCase):
-    """The crash on frame-bound rows (D-A): kind crash_30hz, 30 Hz physics, 1 to 3 steps per row."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = temp_dir("dc2_reader_fb_")
-        cls.out = synth.generate(os.path.join(cls.tmp, "fb"), kind="crash_30hz")
-        cls.session = reader.open_session(cls.out["session_dir"], vehicle_card=CARD)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp)
-
-    def test_rows_cover_one_to_three_steps(self):
-        w = self.session.streams["ctl"].col("world_time_ms")
-        gaps = set(b - a for a, b in zip(w, w[1:]))
-        self.assertEqual(gaps, {33, 34, 66, 67, 100})
-        self.assertEqual((self.session.clocks["k"], self.session.clocks["N"]), (1, 3))
-
-    def test_crash_rows_and_masks(self):
-        s = self.session
-        last = s.streams["ctl"].col("physics_step")[-1]
-        crash = [c for c in s.crash_events if c["kind"] != "teleport"]
-        self.assertEqual([(c["kind"], c["physics_step"], c["episode_id"]) for c in crash],
-                         [("collision", last, 1), ("veh_damage", last, 1), ("veh_fire_start", last, 1)])
-        onset = crash[0]["values"]["onset_step"]
-        self.assertEqual(onset, last - 2)
-        dv = dict(zip(s.streams["telemetry"].col("physics_step"), s.streams["telemetry"].col("dv_max_mps")))
-        self.assertGreaterEqual(dv[onset], 4.0)
-        self.assertLess(max(v for p, v in dv.items() if v is not None and p < onset), 4.0)
-        self.assertEqual(s.terminal_ego[1]["step"], onset)
-        n = s.clocks["N"]
-        self.assertTrue(all(d["masks"]["policy_valid"] == 0 for d in s.decisions
-                            if d["episode_id"] == 1 and d["decision_step"] + n >= onset))
 
 class LegacyGuardTest(unittest.TestCase):
     """data/enfusion_preprocessing.py raises naming the missing column instead of reading zeros (CR-081)."""

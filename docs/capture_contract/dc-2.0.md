@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 and 2 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
+Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 to 3 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -400,25 +400,27 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   timed out, skipped, refused, or the session sealed), in slot order, with `done_render_frame` the render frame in which
   the writer first saw the file. A seal that does not drain (`ego_destroyed`, a Play stop, an error) writes the row of a
   request still in flight with `done_render_frame` empty (`images.pending_at_end`); the engine may still write its file.
+  With one request in flight at a time `images.pending_at_end` is 0 or 1; more fails C13a (HARD).
 - **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`, drawn by the debug-Shape carrier) from each
   image and joins `hf` at that `captured_render_frame` C (C13a, exact). In Workbench 1.8 C = `img.done_render_frame`
   - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth.
   C37 measures each issued slot's capture stall at its decoded frame C (a dropped `done_render_frame` cannot remove a
   slow capture), refuses the evidence where `done_render_frame` contradicts C + 1, and assumes the worst case (u = 1)
-  for an issued slot it cannot measure. Writer integrity (C13a): the issued rows with `done_render_frame` empty and
-  no `img_timeout` event are exactly `images.pending_at_end` of them, the newest issued slots; any other such row is
-  a completion the writer dropped.
+  for an issued slot it cannot measure; only the one request the seal caught in flight (below) is left out. Writer
+  integrity (C13a): `images.pending_at_end` is 0 or 1, and the issued rows with `done_render_frame` empty and no
+  `img_timeout` event are that many, the newest issued slot when it is 1 (rows after it may be `skipped_busy` or
+  `make_failed`); any other such row is a completion the writer dropped.
   The image of render frame C shows the state logged in hf row C + 1 (run 3 E-06A: argmin k = +1 on 628 of 640 moving
   images, RMS 0.11-1.87 px against 2.6-5.6 px at k = 0): that row is the image's pose row. Its `cam_*` and `veh_*` are
   the pose at capture, its `last_physics_step` joins `ctl` and `telemetry` exactly (both have a row for every
   callback), and the pose belongs to the world time of hf row C. The one exemption from the exact joins is the request
-  a seal without drain caught in flight: its row is issued with `done_render_frame` empty and no `img_timeout` event,
-  it is counted in `images.pending_at_end`, its image shows the terminal render frame (C = `end.render_frame`, whose
-  hf row exists) and only its pose row C + 1 is missing; it is not joined and its decision masks are 0, like a
-  pending slot, never a join failure. A later frame cannot carry a decodable code (the seal releases the fiducial
-  carrier in the same frame), so any other capture without its hf rows is a join failure (C13a). These joins do not
-  prove the scene's age; E-06A (marker reprojection per rig x exe x build, at k = +1) and C13b do: C13b requires the
-  best lag to be +1 whenever the yaw signal suffices.
+  a seal without drain caught in flight: the unique newest issued slot, its row issued with `done_render_frame` empty
+  and no `img_timeout` event, `images.pending_at_end` 1, its image shows the terminal render frame (C =
+  `end.render_frame`, whose hf row exists) and only its pose row C + 1 is missing; it is not joined and its decision
+  masks are 0, like a pending slot, never a join failure. A later frame cannot carry a decodable code (the seal
+  releases the fiducial carrier in the same frame), so any other capture without its hf rows is a join failure (C13a).
+  These joins do not prove the scene's age; E-06A (marker reprojection per rig x exe x build, at k = +1) and C13b do:
+  C13b requires the best lag to be +1 whenever the yaw signal suffices.
 - **Sampling at the model boundary.** Decision step t at P_t uses the samples of the decision boundary above; obs_t is
   the newest image whose pose row (hf row C + 1) has `last_physics_step` <= P_t and whose captured frame C is at or
   before the render frame of C_t, so its world time (hf row C) is at or before that of C_t: a frame without a callback
@@ -1168,7 +1170,7 @@ the harvester, never treated as complete.
 | `pin.build_key` | str | - | yes, null ok | Repeated from session.json (same null rule; the harvester's harvest.json then carries it). |
 | `engine.build_version` | str | - | yes | GetBuildVersion() read again at the end; C02 requires it to equal the start value. |
 | `counts` | object | - | yes | Per stream: {rows, chunks, last_key} of committed data. |
-| `images` | object | - | yes | {requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3). |
+| `images` | object | - | yes | {requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3): 0 or 1, as one request is in flight at a time (C13a fails more). |
 | `episodes` | int | - | yes | Number of episode rows committed. |
 | `heartbeats` | int | - | yes | Number of heartbeat rows appended. |
 | `observed.decision_grid_points_skipped` | int | - | no | Decision grid points a hitch skipped, as the writer counted them (section 6); C08 compares it with its own rebuild of the grid. The observed object holds further run-time facts that are not contract fields. |
@@ -1322,8 +1324,8 @@ dc-2.0 was frozen on 2026-11-04 after the user adopted the freeze decisions D-A 
 (`t0/freeze/DECISIONS_dc2_freeze.md`); the reader, validator and capture core that follow it are DD-5-min and
 DD-4-min (`t0/freeze/FREEZE_IMPL.md`). Each row is one decision or folded fact, the date it was decided and its
 evidence; both JSON twins carry the same rows (`changelog` in `dc-2.0.streams.json` and `features_v1.json`). The
-rows R1-* and R2-* are the pre-capture corrections of the freeze review rounds 1 (Codex and Claude) and 2 (Codex),
-both 2026-11-04: no dc-2.0 session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of
+rows R1-*, R2-* and R3-* are the pre-capture corrections of the freeze review rounds 1 (Codex and Claude), 2 and 3
+(Codex), all 2026-11-04: no dc-2.0 session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of
 a dc-2.x.
 
 <!-- dc2:changelog -->
@@ -1364,3 +1366,6 @@ a dc-2.x.
 | R2-HLSEQ | 2026-11-04 | hl_seq -1 is the no-command sentinel (hl_* empty) and may advance only on the row after a decision callback of a starting or continuing episode (section 6, ctl.hl_seq; C07) | Codex N5: adding 1 to every golden hl_seq after step 0 (0 during the warm-up) passed C07; validator test |
 | R2-ADMIT | 2026-11-04 | Episode admission handshake: an episode starts at a decision callback only when the driver confirms it will decide in that callback or supplies an initial command; a driver that cannot decide yet defers to the next grid point and nothing is committed; a kept command is numbered again; only a first Decide without a command after an admission without an initial command fails the session (section 6) | coordinator decision on Codex round 2 recommendation 3(a): renumbered holds give 68 distinct samples for 68 decisions; DD-7's DC_ExpertHL.Decide returns false when its PostStep skipped the step, which must defer, not end the session; writer model tests |
 | R2-REFREEZE | 2026-11-04 | Review round 2 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 2 fixes) |
+| R3-PENDING | 2026-11-04 | images.pending_at_end is 0 or 1 (one request in flight at a time; more fails C13a, HARD); the seal exemption, and the only slot C37 may leave out, is the unique newest issued slot when it is 1, with skipped_busy or make_failed rows after it still allowed; any other issued row without done_render_frame and img_timeout is a dropped completion (section 6, session_end.json images, timing.joins.capture_pose) | Codex review round 3 N6 (t0/freeze/review/CODEX3.md): 20 slow captures with cleared completions, pending_at_end 20 and fiducials re-encoded to the terminal frame passed the full validator (u95 0.8 without them); the last 3 golden completions cleared with pending_at_end 3 passed without an image edit; reader and validator tests |
+| R3-STEPDT-LOG | 2026-11-04 | The readiness log names the step dt's own reason once when its estimators first disagree, and the readiness timeout's refusal leads with it even while a module waits for the step dt too (section 6 Step dt: refused with the reason) | Codex round 3 LOW: UpdateReadiness let the recorder's generic wait mask the reason (DC_Session.c UpdateReadiness); writer test |
+| R3-REFREEZE | 2026-11-04 | Review round 3 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 3 fixes) |

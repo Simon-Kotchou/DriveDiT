@@ -58,16 +58,19 @@ with deletes still to do must also have this run's --every-n and rule version.
 Before the first mutation of a unit. The directory chain is opened from the root one component at a time with
 O_DIRECTORY | O_NOFOLLOW; the unit directory, frames/ and the record directory must be the very directories planned
 (device and inode). The inputs that made the unit eligible are read again through those descriptors and must be
-unchanged: a play's run_footer.txt and run_header.txt (the same bytes); a session's result.json, dc_validate.json,
-SHA256SUMS (the same bytes), its catalog rows (read again under the lock), its img and events files and, for every
-slot still to delete, its derivative (the SHA256SUMS sha256); every kept file must still be there. Last, each
+unchanged: a play's run_footer.txt and run_header.txt (the same bytes) and its age (--min-age-days, recomputed
+over every file of the play at any depth; only the play's own RETENTION.json and its .dd6tmp are left out); a
+session's session.json admission, result.json, dc_validate.json, SHA256SUMS (the same bytes), its catalog rows
+(read again under the lock), its file set (enumerated again: exactly SHA256SUMS's, no new file and no symlink) and
+every listed file that is not a delete (the SHA256SUMS sha256); every kept file must still be there. Last, each
 descriptor's /proc/self/fd path must still be its path below the root. Any change holds the unit untouched.
 
 Deletes, through a private staging directory. frames/.retention_staging/ is created in the pinned frames/
-descriptor. Each file to delete must still be the regular file planned (device, inode, size, mtime); it is renamed
-into the staging directory (one atomic rename between the two descriptors), and only the staged file is checked: the
-same regular file planned, hashed through its descriptor to its sha256 (SHA256SUMS for a session, the record for a
-play). Then it is unlinked from staging. A staged file that fails the check is linked back to its frames/ name
+descriptor. Each file to delete must still be the regular file planned (device, inode, size, mtime, and the ctime
+it had at planning, so an in-place rewrite that restores its mtime is caught); it is renamed into the staging
+directory (one atomic rename between the two descriptors), and only the staged file is checked: the same regular
+file planned, hashed through its descriptor to its sha256 (SHA256SUMS for a session, the record for a play). Then
+it is unlinked from staging. A staged file that fails the check is linked back to its frames/ name
 (never over an existing file) and the unit is held; the first file that fails stops the unit. The staging directory
 is removed when the unit is done. A run killed with files in staging leaves them where verify_sums still finds
 them; the next --apply restores every staged file to frames/ first (deterministically: it never finishes a delete
@@ -141,6 +144,9 @@ RULE_VERSION = harvest.RETENTION_RULE_VERSION
 RECORD_NAME = harvest.RETENTION_NAME
 RECORD_SCHEMA = harvest.RETENTION_SCHEMA
 RECORD_TMP = RECORD_NAME + harvest.TMP_SUFFIX
+PLAY_OWN = (RECORD_NAME, RECORD_TMP)    # the only retention-owned paths of a play (at its root)
+SESSION_OWN = ("%s/%s" % (harvest.HARVEST_DIR, RECORD_NAME), "%s/%s" % (harvest.HARVEST_DIR, RECORD_TMP))
+SESSION_UNLISTED = ("%s/%s" % (harvest.HARVEST_DIR, harvest.SUMS_NAME),) + SESSION_OWN
 DEFAULT_EVERY_N = 100
 DEFAULT_MIN_AGE_DAYS = 1.0
 EVENT_WINDOW_MS = harvest.RETENTION_EVENT_WINDOW_MS
@@ -248,23 +254,24 @@ def read_at(dir_fd, name, limit):
         os.close(fd)
 
 
-def newest_mtime(dir_fd):
-    """The newest mtime of any regular file below a directory descriptor, at any depth, every directory opened
-    O_DIRECTORY | O_NOFOLLOW (symlinks are not followed and not counted); RETENTION.json and its .dd6tmp are
-    retention's own and left out. 0.0 for no file."""
+def newest_mtime(dir_fd, own=(), prefix=""):
+    """The newest mtime of any entry other than a directory (regular files, and symlinks by their own lstat) below a
+    unit's directory descriptor, at any depth, every directory opened O_DIRECTORY | O_NOFOLLOW (never followed).
+    Only the exact retention-owned paths own (relative to the unit root: PLAY_OWN or SESSION_OWN), and only as
+    regular files, are left out; the same name anywhere else counts. Directory mtimes do not count (retention's own
+    deletes change them). 0.0 for no entry."""
     newest = 0.0
     for name in os.listdir(dir_fd):
-        if name in (RECORD_NAME, RECORD_TMP):
-            continue
+        rel = prefix + name
         st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        if stat.S_ISREG(st.st_mode):
-            newest = max(newest, st.st_mtime)
-        elif stat.S_ISDIR(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
             sub = os.open(name, DIR_FLAGS, dir_fd=dir_fd)
             try:
-                newest = max(newest, newest_mtime(sub))
+                newest = max(newest, newest_mtime(sub, own, rel + "/"))
             finally:
                 os.close(sub)
+        elif not (stat.S_ISREG(st.st_mode) and rel in own):
+            newest = max(newest, st.st_mtime)
     return newest
 
 
@@ -334,6 +341,7 @@ class Plan:
         self.ident = {}
         self.ids = {}
         self.stats = {}
+        self.ctimes = {}                    # st_ctime_ns at planning of every file to delete (in-place rewrites)
         self.inputs = {}                    # what made the unit eligible, re-checked before its first mutation
         self.inputs_age = None              # a play's newest file mtime at planning
         self.listed = {}
@@ -588,6 +596,7 @@ class Retention:
                 plan.delete.append({"file": f_rel, "slot": slot, "sha256": listed[f_rel], "bytes": st.st_size})
                 plan.present.add(f_rel)
                 plan.stats[f_rel] = ident(st)
+                plan.ctimes[f_rel] = st.st_ctime_ns
         return plan
 
     # -- probe plays ------------------------------------------------------------------------------
@@ -635,7 +644,7 @@ class Retention:
                        "run_header.txt": harvest.sha256_bytes(header_bytes)}
         pfd = os.open(path, DIR_FLAGS)
         try:
-            newest = newest_mtime(pfd)          # every file of the play, at any depth (not RETENTION.json)
+            newest = newest_mtime(pfd, PLAY_OWN)    # every file of the play, at any depth
         finally:
             os.close(pfd)
         present = {}                        # f_rel -> (slot, lstat) of the raw frames on disk
@@ -656,6 +665,7 @@ class Retention:
                 self.args.min_age_days, age / 3600.0))
         for f_rel, (_, st) in present.items():
             plan.stats[f_rel] = ident(st)
+            plan.ctimes[f_rel] = st.st_ctime_ns
         record_path = os.path.join(path, RECORD_NAME)
         if os.path.lexists(record_path):
             data = read_small(record_path, harvest.RETENTION_MAX_BYTES)     # read once: validated, then used
@@ -722,7 +732,9 @@ class Retention:
             full = os.path.join(plan.path, e["file"])
             if os.path.lexists(full):
                 plan.present.add(e["file"])
-                plan.stats.setdefault(e["file"], ident(os.lstat(full)))
+                st = os.lstat(full)
+                plan.stats.setdefault(e["file"], ident(st))
+                plan.ctimes.setdefault(e["file"], st.st_ctime_ns)
         if plan.todo() and (doc.get("every_n") != self.args.every_n or doc.get("rule_version") != RULE_VERSION):
             raise Skip("held", "%s was recorded with --every-n %s (%s) and still has %d delete(s) to do; this run "
                        "has --every-n %d: a record never widens what is deleted, so pass --every-n %s to complete "
@@ -875,7 +887,7 @@ class Retention:
             try:
                 fd = os.open(path, DIR_FLAGS)
                 try:
-                    newest = newest_mtime(fd)
+                    newest = newest_mtime(fd, PLAY_OWN if self.args.probes else SESSION_OWN)
                 finally:
                     os.close(fd)
             except OSError as e:
@@ -993,11 +1005,13 @@ class Retention:
     def recheck_inputs(self, plan, ufd, ffd, rfd):
         """Right before a unit's first mutation, read again through the pinned descriptors what made it eligible.
         A play: run_footer.txt and run_header.txt (the same bytes), and --min-age-days recomputed over every file of
-        the play (newest_mtime). A session: session.json admitted again (the same bytes, still Arland dc-2.0 under
-        this id), result.json, dc_validate.json and SHA256SUMS (the same bytes), its catalog rows (read again, under
-        the lock), and every file SHA256SUMS lists that is not a delete of this run (kept frames, derivatives,
-        streams, metadata) hashed to its SHA256SUMS sha256. Every kept frame must still be there. Skip held on any
-        change."""
+        the play (newest_mtime, only the play's own RETENTION.json left out). A session: session.json admitted again
+        (the same bytes, still Arland dc-2.0 under this id), result.json, dc_validate.json and SHA256SUMS (the same
+        bytes), its catalog rows (read again, under the lock), its files enumerated again (exactly SHA256SUMS's,
+        less the deletes a record already did: no new file, no symlink, no special file), and every listed file
+        that is not a delete (kept frames, derivatives, streams, metadata) hashed to its SHA256SUMS sha256. Every
+        kept frame must still be there, and every pending delete must still be the file planned (device, inode,
+        size, mtime, ctime). Skip held on any change."""
         def unchanged(dir_fd, name, limit, what):
             data = read_at(dir_fd, name, limit)
             if data is None or harvest.sha256_bytes(data) != plan.inputs[what]:
@@ -1006,7 +1020,7 @@ class Retention:
         if plan.kind == "probe_play":
             for name in ("run_footer.txt", "run_header.txt"):
                 unchanged(ufd, name, KV_LIMIT, name)
-            newest = newest_mtime(ufd)
+            newest = newest_mtime(ufd, PLAY_OWN)
             if newest > plan.inputs_age or time.time() - newest < self.args.min_age_days * 86400.0:
                 raise Skip("held", "a file of the play was written after it was planned (--min-age-days %g no "
                            "longer holds); nothing was written or deleted" % self.args.min_age_days)
@@ -1025,6 +1039,16 @@ class Retention:
             if json.dumps(rows, sort_keys=True) != plan.inputs["catalog"]:
                 raise Skip("held", "the session's catalog rows changed after it was planned; nothing was written "
                            "or deleted")
+        for e in plan.todo():                   # every pending delete is still the file planned (ctime included)
+            name = frame_name(e["file"])
+            try:
+                st = os.stat(name, dir_fd=ffd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or ident(st) != plan.stats.get(e["file"]) \
+                    or st.st_ctime_ns != plan.ctimes.get(e["file"]):
+                raise Skip("held", "%s changed after it was planned (not the same regular file, size, mtime or "
+                           "ctime); nothing was written or deleted" % e["file"])
         for e in plan.kept:
             name = frame_name(e.get("file"))
             try:
@@ -1035,11 +1059,39 @@ class Retention:
                 raise Skip("held", "kept file %s is gone after the unit was planned; nothing was written or "
                            "deleted" % e.get("file"))
         if plan.kind == "session":
+            present = self.inventory_at(ufd) - set(SESSION_UNLISTED)
+            gone = set(e["file"] for e in plan.delete) - set(e["file"] for e in plan.todo())
+            expected = set(plan.listed) - gone
+            if present != expected:
+                raise Skip("held", "the session's files no longer match SHA256SUMS (unlisted %s, missing %s) after it "
+                           "was planned; nothing was written or deleted" % (
+                               sorted(present - expected)[:2], sorted(expected - present)[:2]))
             deletes = set(e["file"] for e in plan.delete)           # this run's, and those a record already did
             for rel in sorted(plan.listed):
                 if rel not in deletes and self.hash_rel(ufd, rel) != plan.listed[rel]:
                     raise Skip("held", "%s is gone or changed after the session was planned (its SHA256SUMS sha256 "
                                "no longer matches); nothing was written or deleted" % rel)
+
+    def inventory_at(self, dir_fd, prefix=""):
+        """The relative paths of every regular file below a pinned directory descriptor, at any depth (directories
+        opened O_DIRECTORY | O_NOFOLLOW). Skip held on a symlink or any other entry that is neither a regular file
+        nor a directory: the session-wide symlink prohibition of harvest.tree_files, enforced again."""
+        out = set()
+        for name in os.listdir(dir_fd):
+            rel = prefix + name
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if stat.S_ISDIR(st.st_mode):
+                sub = os.open(name, DIR_FLAGS, dir_fd=dir_fd)
+                try:
+                    out |= self.inventory_at(sub, rel + "/")
+                finally:
+                    os.close(sub)
+            elif stat.S_ISREG(st.st_mode):
+                out.add(rel)
+            else:
+                raise Skip("held", "%s is a symlink or not a regular file inside the session (after it was "
+                           "planned); nothing was written or deleted" % rel)
+        return out
 
     def hash_rel(self, ufd, rel):
         """sha256 of the regular file rel below the pinned unit descriptor, every component opened O_NOFOLLOW; None
@@ -1175,10 +1227,11 @@ class Retention:
         return freed, deleted, problem
 
     def stage_one(self, ffd, sfd, e, plan):
-        """Delete one planned frame: it must still be the regular file planned; it is renamed into the staging
-        directory (atomically), the staged file is checked (the regular file planned, its sha256 through its
-        descriptor) and only then unlinked from staging. A staged file that fails is linked back to frames/ and Skip
-        held is raised. Returns its size, None when it is already gone."""
+        """Delete one planned frame: it must still be the regular file planned (device, inode, size, mtime, and the
+        ctime it had at planning); it is renamed into the staging directory (atomically; the rename itself moves the
+        ctime, so the staged check compares the rest), the staged file is checked (the regular file planned, its
+        sha256 through its descriptor) and only then unlinked from staging. A staged file that fails is linked back
+        to frames/ and Skip held is raised. Returns its size, None when it is already gone."""
         name = frame_name(e["file"])
         if name is None:
             raise AssertionError("refusing %r: not a raw screenshot name" % (e["file"],))
@@ -1186,8 +1239,9 @@ class Retention:
             st = os.stat(name, dir_fd=ffd, follow_symlinks=False)
         except FileNotFoundError:
             return None
-        if not stat.S_ISREG(st.st_mode) or ident(st) != plan.stats.get(e["file"]):
-            raise Skip("held", "%s changed after it was planned (not the same regular file, size or mtime)" %
+        if not stat.S_ISREG(st.st_mode) or ident(st) != plan.stats.get(e["file"]) \
+                or st.st_ctime_ns != plan.ctimes.get(e["file"]):
+            raise Skip("held", "%s changed after it was planned (not the same regular file, size, mtime or ctime)" %
                        e["file"])
         self.hook("before_stage")
         try:
@@ -1314,7 +1368,9 @@ class Retention:
     def hash_planned(self, ffd, e, plan):
         """(sha256, fstat) of a planned frame, read through a descriptor opened with O_NOFOLLOW in the pinned frames/
         descriptor (for a new probe record); Skip held unless it is the regular file planned (device, inode, size,
-        mtime) before and after the read."""
+        mtime) with the ctime it had at planning, before and after the read. The ctime binds the hash to the file as
+        planned: an in-place rewrite that restores the mtime still moves the ctime, so it never becomes its own
+        deletion baseline."""
         name = frame_name(e["file"])
         if name is None:
             raise AssertionError("refusing %r: not a raw screenshot name" % (e["file"],))
@@ -1326,13 +1382,15 @@ class Retention:
             raise Skip("held", "%s cannot be opened without following a symlink (%s)" % (e["file"], err))
         try:
             st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or ident(st) != plan.stats.get(e["file"]):
-                raise Skip("held", "%s changed after it was planned (not the same regular file, size or mtime)" %
-                           e["file"])
+            if not stat.S_ISREG(st.st_mode) or ident(st) != plan.stats.get(e["file"]) \
+                    or st.st_ctime_ns != plan.ctimes.get(e["file"]):
+                raise Skip("held", "%s changed after it was planned (not the same regular file, size, mtime or "
+                           "ctime)" % e["file"])
             h = hashlib.sha256()
             for block in iter(lambda: os.read(fd, 1 << 20), b""):
                 h.update(block)
-            if ident(os.fstat(fd)) != ident(st):
+            after = os.fstat(fd)
+            if ident(after) != ident(st) or after.st_ctime_ns != st.st_ctime_ns:
                 raise Skip("held", "%s changed while it was hashed" % e["file"])
         finally:
             os.close(fd)

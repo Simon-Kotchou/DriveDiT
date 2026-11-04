@@ -372,8 +372,9 @@ PAYLOAD_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 CRASH_KINDS = ["veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover"]
 PAYLOAD_KINDS = ["collision"] + CRASH_KINDS + ["stuck", "teleport"]
 SESSION_EVENT_PARAMS = {"events.collision_dv_mps": 4.0, "events.collision_window_ms": 100,
-                        "events.collision_peak_ms": 200, "events.collision_refractory_ms": 1000,
-                        "events.episode_end_wait_ms": 250, "events.rollover_up_y": 0.5,
+                        "events.collision_window_tol_ms": 50, "events.collision_peak_ms": 200,
+                        "events.collision_refractory_ms": 1000, "events.episode_end_wait_ms": 250,
+                        "events.crash_cooldown_ms": 3000, "events.rollover_up_y": 0.5,
                         "events.rollover_hold_ms": 500, "events.state_poll_ms": 100}
 
 
@@ -427,6 +428,13 @@ def payload_violations(schema):
                 errors.append("%s: enum without values" % where)
             if "enum" in k and k["type"] != "enum":
                 errors.append("%s: values on a %s key" % (where, k["type"]))
+            if ("range" in k or "min" in k) and k["type"] not in ("int", "float"):
+                errors.append("%s: a range or min on a %s key" % (where, k["type"]))
+            if "range" in k and not (isinstance(k["range"], list) and len(k["range"]) == 2
+                                     and k["range"][0] < k["range"][1]):
+                errors.append("%s: bad range %r" % (where, k["range"]))
+            if "min" in k and not isinstance(k["min"], (int, float)):
+                errors.append("%s: min is not a number" % where)
             if not k["desc"].strip() or "|" in k["desc"]:
                 errors.append("%s: empty description or '|' in it" % where)
     return errors
@@ -596,6 +604,9 @@ class StreamSchemaTest(unittest.TestCase):
         bad = copy.deepcopy(self.schema)
         bad["event_payloads"]["kinds"]["crash"] = []
         self.assertTrue(payload_violations(bad))
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["veh_damage"][1]["range"] = [1, 0]
+        self.assertTrue(payload_violations(bad))
 
     def test_spec_payload_table_equals_json(self):
         self.assertEqual(md_payload_violations(self.schema, self.spec), [])
@@ -619,6 +630,20 @@ class StreamSchemaTest(unittest.TestCase):
         for key in ("onset_step", "dv_mps", "v_mps", "other", "src"):
             self.assertTrue(collision[key]["required"], key)
         self.assertEqual(self.schema["event_payloads"]["kinds"]["veh_fire_end"], [])
+        rollover = {k["key"]: k for k in self.schema["event_payloads"]["kinds"]["rollover"]}
+        self.assertTrue(rollover["onset_step"]["required"])
+        self.assertEqual(list(rollover), ["onset_step", "up_y"])
+        damage = {k["key"]: k for k in self.schema["event_payloads"]["kinds"]["veh_damage"]}
+        self.assertEqual((damage["health"]["range"], damage["movement_damage"]["range"]), ([0, 1], [0, 1]))
+        for key in ("dv_mps", "v_mps", "impulse_ns"):
+            self.assertEqual(collision[key]["min"], 0, key)
+        # frame-bound rows (D-A): the window is world time, never a step count
+        crash = self.spec[self.spec.index("### 9.5.1 Crash events"):self.spec.index("### 9.6 Stream")]
+        for phrase in ("world time, never a count of steps or callbacks", "collision_window_tol_ms",
+                       "Episode ownership", "PrepareReposition", "crash_cooldown_ms", "by onset or by confirmation",
+                       "of the ego slot and of no vehicle"):
+            self.assertIn(phrase, crash, phrase)
+        self.assertNotIn("6 at 60 Hz", crash)
         self.assertIn("### 9.5.1 Crash events", self.spec)
         terminations = {f["name"]: f for f in self.schema["streams"]["episodes"]["fields"]}["termination_reason"]
         self.assertIn("collision", terminations["enum"])

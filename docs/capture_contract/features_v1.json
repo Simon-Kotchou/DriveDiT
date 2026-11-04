@@ -214,11 +214,11 @@
       },
       "rule": "Loss and sampling masks; never a model input and never a prediction target.",
       "channels": [
-        {"name": "policy_valid", "unit": "-", "source": "ctl.react_visible", "absolute": false, "build_scoped": false, "desc": "Built by the builder: 0 for X/A rows, while a reaction to an actor with ctl.react_visible 0 lasts (the in-engine visibility test of r2 3.1; reserved until DD-4/DD-7), for nav_valid 0, for decision steps without a valid image (decision_index.obs_valid 0, C29) and for every decision step whose action window (P_t, P_t + N] contains or follows the onset_step of the episode's first terminal ego crash event (dc-2.0 9.5.1; wm_valid stays 1 there)."},
+        {"name": "policy_valid", "unit": "-", "source": "ctl.react_visible", "absolute": false, "build_scoped": false, "desc": "Built by the builder: 0 for X/A rows, while a reaction to an actor with ctl.react_visible 0 lasts (the in-engine visibility test of r2 3.1; reserved until DD-4/DD-7), for nav_valid 0, for decision steps without a valid image (decision_index.obs_valid 0, C29) and for every decision step whose action window (P_t, P_t + N] contains or follows the earliest onset of the episode's terminal ego crash events (dc-2.0 9.5.1; wm_valid stays 1 there)."},
         {"name": "wm_valid", "unit": "-", "source": "builder", "absolute": false, "build_scoped": false, "desc": "0 across gaps, fiducial failures, teleports, nav_valid 0 and decision_index.obs_valid 0."},
         {"name": "warmup", "unit": "-", "source": "events.kind=warmup_end", "absolute": false, "build_scoped": false, "desc": "1 during the session warm-up."},
         {"name": "env_transition", "unit": "-", "source": "events.kind=env_change", "absolute": false, "build_scoped": false, "desc": "1 for 15 s after an environment change."},
-        {"name": "teleport", "unit": "-", "source": "events.kind=teleport", "absolute": false, "build_scoped": false, "desc": "1 at a teleport or respawn."}
+        {"name": "teleport", "unit": "-", "source": "events.kind=teleport", "absolute": false, "build_scoped": false, "desc": "1 at a teleport or respawn of the ego (or of no vehicle, veh_slot_id -1); a traffic reset never masks ego samples (dc-2.0 9.5.1)."}
       ]
     },
     {

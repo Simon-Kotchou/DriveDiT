@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic dc-2.0 sessions for DD-5-min: the golden fixture, the negative fixtures and the C17 loop sessions.
 
-    python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR [--kind golden|t0_loop|golden_10hz]
+    python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out DIR [--kind golden|t0_loop|golden_10hz|client_1408]
         [--variant gap|missing_commit|reused_slot|crash|crash_unexplained|destroyed_unexplained]
         [--golden-json FILE] [--routes-dir DIR]
 
@@ -53,6 +53,10 @@ The masks and the obs rule repeat the contract's rules (section 6).
 
 Kind golden_10hz is the golden session at the non-default 10 Hz setting (image_hz = decision_hz = 10, N = 3,
 clocks.image_hz_setting trial_conf, the trial conf naming image_hz 10); the tests generate it, it is not committed.
+
+Kind client_1408 (DD-6-min) is the golden drive captured by a packaged client instead of Workbench: exe cl, instance
+i01, source class client_1408x720, 1408x720 images (a 1280x720 core between two 64 px bands), a dd-launch/1 record
+of exe client. The harvester tests generate it; it is not committed.
 
 Variants (negative fixtures; each breaks one check):
   gap             two consecutive ctl rows inside an episode-0 decision interval are missing (C06); telemetry, commit
@@ -111,7 +115,8 @@ EVENT_PARAMS = {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_
                 "crash_cooldown_ms": 3000, "episode_block_max_ms": 60000, "rollover_up_y": 0.5,
                 "rollover_hold_ms": 500, "state_poll_ms": 100,
                 "contact_source": "vanilla_process_collision"}
-KINDS = ("golden", "t0_loop", "golden_10hz")
+KINDS = ("golden", "t0_loop", "golden_10hz", "client_1408")
+RECORD_EXE = {"wb": "wb", "cl": "client", "cld": "client"}    # dd-launch exe of a session exe.kind
 
 STEP_MS3 = 100                  # one engine fixed step in thirds of a ms (1/30 s, TBD-1 decided)
 STEP_DT_S = 1.0 / 30.0
@@ -191,6 +196,18 @@ SPECS = {
         "warmup_ms": 2000, "route": "golden_s_curve_v1", "v_ref": 8.0,
         "episodes": [{"max_ms": 5000}, {"max_ms": 5000}], "between_ms": 500, "teleport_offset_ms": 250,
         "tail_ms": 500, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
+    },
+    # The golden drive in the packaged client (DD-6-min harvester tests): the client source class, 1408x720 images
+    # with a 1280x720 core (generated in the tests, not committed).
+    "client_1408": {
+        "session_id": "arland_T0b_20261025T094500Z_cl_i01_c140", "trial_id": "T0b", "seed": 0,
+        "start_utc": (2026, 10, 25, 9, 45, 0), "render_frame0": 261900, "decision_hz": 5,
+        "warmup_ms": 2000, "route": "golden_s_curve_v1", "v_ref": 8.0,
+        "episodes": [{"max_ms": 5000}, {"max_ms": 5000}], "between_ms": 500, "teleport_offset_ms": 250,
+        "tail_ms": 500, "image_w": 1408, "image_h": 720, "band_px": 64, "fill_route_sha": True,
+        "exe": "cl", "instance": "i01", "source_class": "client_1408x720",
+        # the golden azimuth span over the wider core, so C13b's shift search sees one texture period
+        "rad_per_px": RAD_PER_PX * 128.0 / 1280.0,
     },
     # 108 s: the 60 s C17 warm-up standing, then one mode-E lap of the synthetic loop (trial T1, so C17 is SOFT).
     "t0_loop": {
@@ -583,7 +600,7 @@ def render_image(spec, step, code):
     img = numpy.full((h, w, 3), 70, dtype=numpy.uint8)
     core_w = w - 2 * band
     u = numpy.arange(core_w, dtype=float) - core_w / 2.0 + 0.5
-    az = step["psi"] + u * RAD_PER_PX
+    az = step["psi"] + u * spec.get("rad_per_px", RAD_PER_PX)
     tex = numpy.zeros(core_w)
     for period, amp, phase in TEX:
         tex += amp * numpy.sin(2.0 * math.pi * az / period + phase)
@@ -833,7 +850,8 @@ def trial_conf(spec):
 
 def session_json(spec, start_unix, card_sha):
     sid = spec["session_id"]
-    launch_id = "%s-wb-%s" % (_iso(start_unix - 60).replace("-", "").replace(":", ""), sid[-4:])
+    exe = spec.get("exe", "wb")
+    launch_id = "%s-%s-%s" % (_iso(start_unix - 60).replace("-", "").replace(":", ""), RECORD_EXE[exe], sid[-4:])
     w, h, band = spec["image_w"], spec["image_h"], spec["band_px"]
     render_settings = {"synthetic": True, "VideoUserSettings": {}, "DisplayUserSettings": {}}
     return {
@@ -846,7 +864,8 @@ def session_json(spec, start_unix, card_sha):
         "trial": {"trial_id": spec["trial_id"], "source": "cli",
                   "conf": trial_conf(spec),
                   "seed": spec["seed"], "warmup_s": 0.0, "duration_s": 0.0},
-        "exe": {"kind": "wb", "instance": "i00", "cli": {"dcLaunchId": launch_id, "dcTrial": spec["trial_id"]}},
+        "exe": {"kind": exe, "instance": spec.get("instance", "i00"),
+                "cli": {"dcLaunchId": launch_id, "dcTrial": spec["trial_id"]}},
         "engine": {"build_version": "1.8.0.13", "build_time": "synthetic", "fixed_time_slice_s": round(STEP_DT_S, 6),
                    "step_dt_s": round(STEP_DT_S, 6), "step_dt_source": "engine"},
         "pin": {"pin_id": "1.8.0.13", "pin_sha256": _hex("synthetic pin 1.8.0.13"), "build_key": None,
@@ -871,8 +890,8 @@ def session_json(spec, start_unix, card_sha):
                 "ego_prefab": "synthetic/S105.et",
                 "mount": {"fwd_m": 1.8, "up_m": 1.5, "right_m": 0.0, "pitch_deg": -4.0}, "vfov_deg": 50.0,
                 "near_plane_m": 0.03,
-                "writer": "MakeScreenshot", "source_class": "wb_viewport", "capture_wh": [w, h],
-                "core_wh": [w - 2 * band, h], "band_px": band, "derivative_wh": [512, 288],
+                "writer": "MakeScreenshot", "source_class": spec.get("source_class", "wb_viewport"),
+                "capture_wh": [w, h], "core_wh": [w - 2 * band, h], "band_px": band, "derivative_wh": [512, 288],
                 "derivative_codec": "jpeg_q95",
                 "fiducial": {"version": "v2", "bits": 18, "patches": 6, "bits_per_patch": 3, "patch_px": 32,
                              "margin_px": 16, "gap_px": 8, "mirrored": True, "carrier": "shape", "depth_m": 0.05},
@@ -894,19 +913,21 @@ def launch_record(meta):
     """The session's dd-launch/1 record as DD-0's preflight writes it (tools/pin/preflight.py make_record): status
     ok, the 22 named checks of both apps, the observed appmanifest buildids. Synthetic values, no host name."""
     pin = meta["pin"]
+    exe = RECORD_EXE[meta["exe"]["kind"]]
+    instance = meta["exe"]["instance"] if exe == "client" else None
     observed = {"game": {"appid": 1874880, "buildid": pin["game_buildid"], "target_buildid": pin["game_buildid"],
                          "auto_update_behavior": "1"},
                 "tools": {"appid": 1874910, "buildid": pin["tools_buildid"], "target_buildid": pin["tools_buildid"],
                           "auto_update_behavior": "1"}}
     return {"schema": pin["launch_schema"], "launch_id": pin["launch_id"], "status": "ok",
-            "utc": meta["created_utc"], "exe": "wb", "instance": None,
+            "utc": meta["created_utc"], "exe": exe, "instance": instance,
             "pin": {"path": "synthetic/pin_%s.json" % pin["pin_id"], "pin_id": pin["pin_id"],
                     "sha256": pin["pin_sha256"], "resolved_by": "active-pointer", "pointer": "synthetic/ACTIVE"},
             "observed": observed,
             "checks": [{"name": "%s.%s" % (app, c), "ok": True, "detail": "synthetic"}
                        for app in ("game", "tools") for c in PREFLIGHT_CHECKS],
             "host": {"hostname": "synthetic", "wsl_distro": None, "python": "synthetic"},
-            "argv": ["--pin-active", "--exe", "wb"]}
+            "argv": ["--pin-active", "--exe", exe] + (["--instance", instance] if instance else [])}
 
 
 def _json_text(obj):

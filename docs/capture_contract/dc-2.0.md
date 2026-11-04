@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review round 1 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
+Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 and 2 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -323,16 +323,21 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
 - **Step dt.** The engine fixed step dt is measured during readiness, per frame with at least one fixed step: the step
   callback's time slice divided by the steps it covers (`EOnFixedFrame` reports n x the step for a frame of n steps:
   covered_steps / 30 on 21296 of 21296 rows of run 3 E-10, so the ratio is the step even in merged frames; 1 per
-  `EOnSimulate`). The step dt is the median of these ratios once at least 30 frames gave one and 90% of them lie within
-  0.5% of the median (`step_dt_source` engine). Only when the ratios disagree is it the measured fixed step
-  (`measured`): the world time between the first and the last readiness frame with a step over the steps run after the
-  first, which leaves out the not yet stepped remainder at the start. `session.json engine.step_dt_s`, `step_dt_source`;
-  `session.json observed` keeps `readiness_step_ratio_median_s`, `readiness_step_ratios`,
-  `readiness_step_ratio_agree_frac`, `readiness_measured_step_s` and, as a cross-check, `readiness_slice_ratio_median_s`
-  (`GetFixedTimeSlice()` / `GetFixedSteps()` read in the same callbacks). `BaseWorld.GetFixedTimeSlice()` alone reports
-  n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is never the step dt; `engine.fixed_time_slice_s`
-  keeps its raw value at the open for provenance only. A module that needs the physics time of a callback uses
-  `covered_steps` x `step_dt`.
+  `EOnSimulate`). From 30 fixed steps and 30 ratios on, every readiness frame decides afresh, never locking in a
+  guess: the step dt is the median of the ratios once 90% of them lie within 0.5% of it (`step_dt_source` engine);
+  while they disagree, the measurement goes on, and the measured fixed step (`measured`: the EOnFrame time slices
+  after the first frame with a step through the last one, over the steps run in them) is taken only once its span is
+  long (at least 90 steps), stable (its two halves, split at half its steps, agree within 0.5%) and confirms the ratio
+  median within 0.5%, half of C28's 1% tolerance. The span alone is not bounded: the fixed-step accumulator's
+  remainder and backlog at both of its ends stay in it (review round 2: 34 ms frames with one step each measure 0.034
+  s, 2% high). Without a trustworthy value by the readiness timeout readiness is refused with the reason, so no
+  session opens with an untrustworthy step dt. `session.json engine.step_dt_s`, `step_dt_source`; `session.json
+  observed` keeps `readiness_step_ratio_median_s`, `readiness_step_ratios`, `readiness_step_ratio_agree_frac`,
+  `readiness_measured_step_s`, `readiness_measured_half_a_s`, `readiness_measured_half_b_s` and, as a cross-check,
+  `readiness_slice_ratio_median_s` (`GetFixedTimeSlice()` / `GetFixedSteps()` read in the same callbacks).
+  `BaseWorld.GetFixedTimeSlice()` alone reports n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is
+  never the step dt; `engine.fixed_time_slice_s` keeps its raw value at the open for provenance only. A module that
+  needs the physics time of a callback uses `covered_steps` x `step_dt`.
 - **Decision grid (D-A, D-B).** `physics_steps_per_decision` N = floor(1000 / `decision_hz` / step_dt_ms + 0.5) (an
   explicit half-up rounding, the same in Python and Enforce): 6 at the 5 Hz default and 3 at the 10 Hz override with
   1/30 s steps. N is the nominal length of a decision interval and of `action_exec`; the real interval varies.
@@ -347,11 +352,16 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   (`EOnPostFixedFrame`) and then, still in that callback, the HL driver decides on the state of that row. The new
   command applies from physics step P_t + 1, the first step of the next callback, and is held through the next
   decision callback C_t+1, so:
-  - `ctl.hl_*` of a row is the command applied in that row's covered steps. `hl_seq` is -1 until the first command;
-    it advances by 1 exactly on the row after every decision callback of an episode that goes on (a driver that
-    keeps its command, `Decide` false, gets the held command numbered again with the same values; false at the
-    episode's first decision fails the session) and stays on every other row; a command changes only together with
-    an `hl_seq` increment, or at an episode boundary (C07);
+  - `ctl.hl_*` of a row is the command applied in that row's covered steps. `hl_seq` is -1, the no-command sentinel
+    (`hl_*` empty), until the first command; it advances by 1 exactly on the row after every decision callback of an
+    episode that starts or goes on (a driver that keeps its command, `Decide` false, gets the held command numbered
+    again with the same values) and on no other row, so no number exists before the first episode; a command changes
+    only together with an `hl_seq` increment, or at an episode boundary (C07);
+  - an episode is admitted at a decision callback only after the driver's admission handshake: it confirms that this
+    callback's decision will give the first command, or it supplies an initial command with the episode start; a
+    driver that cannot decide yet defers the admission to the next grid point and nothing is committed, so a driver
+    that is not ready never fails a session. Only a first decision without a command after an admission without an
+    initial command fails the session (`script_error`), which a well-behaved driver never reaches;
   - the decision interval of t is the steps (P_t, P_t+1] of n_t = P_t+1 - P_t steps: nominally N, but the fixed-step
     clock lags world time by up to about 250-310 ms while capturing (runs 3-4) and catches up, so n_t varies around N;
   - `ctl.exp_*_now` of a row is the expert re-evaluated after its callback; at C_t it is the label of decision t;
@@ -360,10 +370,14 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
     P_t + 1 .. P_t + N, step q taken from the ctl row that covers it (a row covers `physics_step` - `covered_steps` + 1
     .. `physics_step`), an entry left empty when q lies past P_t+1 (the interval was shorter than N; steps of a longer
     interval past P_t + N are not in the tensor); obs_t+1 at C_t+1 holds exactly the n_t steps of `action_cmd_t`;
-  - the closed-loop bridge (DD-8) holds the next physics step after the rows of C_t, waits until obs_t's file is
-    done (`done_render_frame` >= the render frame of C_t + 1: obs_t is often the image of C_t's own frame, which is
-    rendered after the callback; the frames go on, the physics does not), then sends state_t and obs_t and applies
-    the returned command from step P_t + 1, so training and test see the same boundary.
+  - the closed-loop bridge (DD-8) holds the next physics step after the rows of C_t and waits until the current
+    render frame is at least the render frame of C_t + 1 and obs_t's file has completed (its `done_render_frame` set
+    and at or before the current frame; by then its pose row C + 1 exists). obs_t is often the image of C_t's own
+    frame, which is rendered after the callback and completes in the next frame; an older obs_t completed earlier
+    (17 of 52 policy-valid golden decisions, 22 of 100 at 10 Hz), so the wait compares the current frame, never the
+    image's fixed completion frame, with C_t + 1. The frames go on, the physics does not; then the bridge sends
+    state_t and obs_t and applies the returned command from step P_t + 1, so training and test see the same
+    boundary.
 - **Clock of the logged state (frame clock).** The logged pose follows world time, not the fixed-step clock: the pose
   in hf row n is the pose at the world time of frame n - 1 (run 3 E-06A: between consecutive hf rows the displacement
   equals speed x world dt of the frame, corr 1.0000 over 15,304 pairs, |difference| p95 0.1 ms; against the fixed
@@ -388,15 +402,23 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   request still in flight with `done_render_frame` empty (`images.pending_at_end`); the engine may still write its file.
 - **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`, drawn by the debug-Shape carrier) from each
   image and joins `hf` at that `captured_render_frame` C (C13a, exact). In Workbench 1.8 C = `img.done_render_frame`
-  - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth
-  (C37 uses `done_render_frame` only where the decoded frame confirms it).
+  - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth.
+  C37 measures each issued slot's capture stall at its decoded frame C (a dropped `done_render_frame` cannot remove a
+  slow capture), refuses the evidence where `done_render_frame` contradicts C + 1, and assumes the worst case (u = 1)
+  for an issued slot it cannot measure. Writer integrity (C13a): the issued rows with `done_render_frame` empty and
+  no `img_timeout` event are exactly `images.pending_at_end` of them, the newest issued slots; any other such row is
+  a completion the writer dropped.
   The image of render frame C shows the state logged in hf row C + 1 (run 3 E-06A: argmin k = +1 on 628 of 640 moving
   images, RMS 0.11-1.87 px against 2.6-5.6 px at k = 0): that row is the image's pose row. Its `cam_*` and `veh_*` are
   the pose at capture, its `last_physics_step` joins `ctl` and `telemetry` exactly (both have a row for every
-  callback), and the pose belongs to the world time of hf row C. An image captured in the session's last render frame
-  (a request in flight at a seal without drain) has no pose row: it is not joined and its decision masks are 0, like
-  a pending slot, never a join failure. These joins do not prove the scene's age; E-06A (marker reprojection per rig
-  x exe x build, at k = +1) and C13b do: C13b requires the best lag to be +1 whenever the yaw signal suffices.
+  callback), and the pose belongs to the world time of hf row C. The one exemption from the exact joins is the request
+  a seal without drain caught in flight: its row is issued with `done_render_frame` empty and no `img_timeout` event,
+  it is counted in `images.pending_at_end`, its image shows the terminal render frame (C = `end.render_frame`, whose
+  hf row exists) and only its pose row C + 1 is missing; it is not joined and its decision masks are 0, like a
+  pending slot, never a join failure. A later frame cannot carry a decodable code (the seal releases the fiducial
+  carrier in the same frame), so any other capture without its hf rows is a join failure (C13a). These joins do not
+  prove the scene's age; E-06A (marker reprojection per rig x exe x build, at k = +1) and C13b do: C13b requires the
+  best lag to be +1 whenever the yaw signal suffices.
 - **Sampling at the model boundary.** Decision step t at P_t uses the samples of the decision boundary above; obs_t is
   the newest image whose pose row (hf row C + 1) has `last_physics_step` <= P_t and whose captured frame C is at or
   before the render frame of C_t, so its world time (hf row C) is at or before that of C_t: a frame without a callback
@@ -520,7 +542,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `episode_id` | int | - | yes | Current episode; -1 outside an episode (warm-up, settle, between episodes). |
 | `mode` | enum | - | yes | Capture mode of this callback (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle). Values: E, N, R, X, D, H, A, I. |
 | `driver` | enum | - | yes | Who produced the executed HL command of this step (C18, C27). Values: expert, policy, human, ai, none. |
-| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1 until the first command; it advances by 1 exactly on the row after every decision callback of an episode that goes on (the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1; a kept command is numbered again) and stays on every other row; a command changes only with an increment or at an episode boundary (section 6, TBD-1). [TBD-1] |
+| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1, the no-command sentinel (hl_* empty), until the first command; it advances by 1 exactly on the row after every decision callback of an episode that starts or goes on (the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1; a kept command is numbered again) and on no other row; a command changes only with an increment or at an episode boundary (section 6, TBD-1). [TBD-1] |
 | `hl_kappa` | float | 1/m | no | Held HL curvature target applied in this callback's covered steps (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision callback), right-positive. Empty in mode I. [right+] |
 | `hl_accel` | float | m/s2 | no | Held HL acceleration target applied in this callback (action_cmd.a_target, desired). |
 | `hl_dir` | int | - | no | Held HL direction command applied in this callback: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
@@ -1300,8 +1322,9 @@ dc-2.0 was frozen on 2026-11-04 after the user adopted the freeze decisions D-A 
 (`t0/freeze/DECISIONS_dc2_freeze.md`); the reader, validator and capture core that follow it are DD-5-min and
 DD-4-min (`t0/freeze/FREEZE_IMPL.md`). Each row is one decision or folded fact, the date it was decided and its
 evidence; both JSON twins carry the same rows (`changelog` in `dc-2.0.streams.json` and `features_v1.json`). The
-rows R1-* are the pre-capture corrections of the freeze review round 1 (Codex and Claude, 2026-11-04): no dc-2.0
-session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of a dc-2.x.
+rows R1-* and R2-* are the pre-capture corrections of the freeze review rounds 1 (Codex and Claude) and 2 (Codex),
+both 2026-11-04: no dc-2.0 session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of
+a dc-2.x.
 
 <!-- dc2:changelog -->
 | Id | Date | Decision | Evidence |
@@ -1331,6 +1354,13 @@ session existed and nothing was pushed, so they were folded into dc-2.0 itself i
 | R1-LAG | 2026-11-04 | C13b requires the best lag +1 whenever the yaw signal suffices; lags 0 and -1 fail (a code rule, the thresholds file is unchanged) (section 6) | Claude M2; validator test with the hf poses shifted by one row |
 | R1-ROAD | 2026-11-04 | The D-C road join is one-to-one: candidate pairs within 2 m are ranked by the segment Hausdorff distance and assigned greedily, ambiguous twins reported; the endpoints are unique for exact equality only (section 1 TBD-9, 9.8 road) | Codex X4, Claude L7: A [(0,0),(10,0)] picked the parallel B2 [(0,0.1),(10,0.1)] over B1 [(0,0),(0.5,0),(10,0)]; E-08a: 4 twin pairs 0.49-1.56 m apart; tools tests |
 | R1-NEAR | 2026-11-04 | rig.near_plane_m added to session.json and to rig_id; the Shape fiducial at 0.05 m with near plane 0.03 m awaits the first capture Play's E-06 check, 1.0 m with 0.1 m being the allowed recorded fallback (10.1 rig.near_plane_m, rig.fiducial) | Claude M4: probe run 4 E-06 ran at depth 1.0 m with near plane 0.1 m (t0/run4/e06.txt) |
-| R1-BRIDGE | 2026-11-04 | The closed-loop bridge holds the next physics step until obs_t is done (done_render_frame >= the render frame of C_t + 1) before it sends state_t and obs_t (section 6) | Claude M5: obs_t is the image of C_t's own render frame in 35 of 52 policy-valid golden decisions |
+| R1-BRIDGE | 2026-11-04 | The closed-loop bridge holds the next physics step until the current render frame is at least C_t's frame + 1 and obs_t's file has completed (done_render_frame set and at or before the current frame) before it sends state_t and obs_t (section 6; the predicate was corrected in review round 2, R2-BRIDGE) | Claude M5: obs_t is the image of C_t's own render frame in 35 of 52 policy-valid golden decisions |
 | R1-TEXT | 2026-11-04 | decision_index.hl_seq may be empty for a decision at the last ctl row; slot 0 is issued in the frame after the anchor's; session_end.json observed.decision_grid_points_skipped declared (int, cross-checked by C08); the contract test compares descriptions, Range, Values and tags; nav_v1 and the route schema no longer say DRAFT; actuation mode A applies the setters in every callback | Claude L4, L5, L6, L8 (t0/freeze/review/CLAUDE_REVIEW.md) |
 | R1-REFREEZE | 2026-11-04 | Review round 1 corrections folded into dc-2.0 itself: no dc-2.0 session was captured and nothing was pushed, so no dc-2.x; the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 1 fixes) |
+| R2-SEAL | 2026-11-04 | The seal exemption from the exact image joins is only the request a seal without drain caught in flight (issued, done_render_frame empty, no img_timeout event, counted in images.pending_at_end, the newest issued slot) whose image is of end.render_frame with that hf row present; any other capture without its hf rows is a join failure (section 6; C13a) | Codex review round 2 N1 (t0/freeze/review/CODEX2.md): golden slot 67 re-encoded to frame 262296, past the seal at 262291, passed the validator; reader and validator mutation tests |
+| R2-C37 | 2026-11-04 | C37 measures every issued slot's capture stall at its decoded frame C, uses done_render_frame only as a cross-check and assumes u = 1 for an issued slot it cannot measure; issued rows with done_render_frame empty and no img_timeout beyond images.pending_at_end are completions the writer dropped (C13a) (section 6) | Codex N2: clearing done_render_frame on the 33 slow captures of a mixed 80/90 ms 10 Hz session turned C37's FAIL (u95 0.9) into a PASS; validator tests |
+| R2-BRIDGE | 2026-11-04 | The bridge waits until the current render frame >= C_t's frame + 1 and obs_t's file has completed (done_render_frame set and <= the current frame); the round-1 predicate done_render_frame >= C_t + 1 never held for an older obs_t (section 6, timing.decision.bridge_pause; R1-BRIDGE corrected) | Codex N3: 17 of 52 policy-valid golden decisions and 22 of 100 at 10 Hz (decision 75: frame 261972, obs slot 12 done at 261972); reader test against the golden |
+| R2-STEPDT | 2026-11-04 | The step dt is decided afresh every readiness frame and never locked in: the ratio median when 90% of the ratios agree within 0.5%; else the measured span only when it covers >= 90 steps, its halves agree within 0.5% and it lies within 0.5% of the median (half of C28's 1%); else readiness is refused at its timeout. The claim that dropping the first frame removes the span's remainder bias is withdrawn (section 6) | Codex N4: 34 ms frames with one step and 4 of the first 30 ratios 2% off locked in 0.034 s and failed C28; 87 of 1056 recorded windows had a span more than 1% off; writer model tests |
+| R2-HLSEQ | 2026-11-04 | hl_seq -1 is the no-command sentinel (hl_* empty) and may advance only on the row after a decision callback of a starting or continuing episode (section 6, ctl.hl_seq; C07) | Codex N5: adding 1 to every golden hl_seq after step 0 (0 during the warm-up) passed C07; validator test |
+| R2-ADMIT | 2026-11-04 | Episode admission handshake: an episode starts at a decision callback only when the driver confirms it will decide in that callback or supplies an initial command; a driver that cannot decide yet defers to the next grid point and nothing is committed; a kept command is numbered again; only a first Decide without a command after an admission without an initial command fails the session (section 6) | coordinator decision on Codex round 2 recommendation 3(a): renumbered holds give 68 distinct samples for 68 decisions; DD-7's DC_ExpertHL.Decide returns false when its PostStep skipped the step, which must defer, not end the session; writer model tests |
+| R2-REFREEZE | 2026-11-04 | Review round 2 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 2 fixes) |

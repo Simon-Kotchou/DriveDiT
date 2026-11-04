@@ -287,12 +287,16 @@ def check_c13a(ctx):
     """Fiducial pairing (r2 5.1 C13a): of the readable images, >= C13a.min_decode_frac decode in both bands with
     agreeing 18-bit codes (C13a.code_bits); every decoded captured_render_frame (the code unwrapped against
     issue_render_frame) joins an hf row exactly and has its pose row, hf row captured + 1 (the image of frame C shows
-    the state of hf row C + 1, contract section 6; 0 join failures), except an image captured in the session's last
-    render frame (end.render_frame): a seal without drain caught its request in flight, its pose row never exists,
-    and it is counted as pending, never as a join failure (its decision masks are 0); no capture offset (captured -
-    issued frame) is negative (a frame captured before its request is a stale or misnamed file); no decision sample
-    uses a future image (obs_t captured after the decision's render frame, obs_age_ms < 0). The offset p50 and p99
-    and how often the captured frame equals img.done_render_frame - 1 (Workbench 1.8: always, run 4) are reported."""
+    the state of hf row C + 1, contract section 6; 0 join failures). The one exemption is the request a seal without
+    drain caught in flight (section 6): its row is issued with done_render_frame empty and no img_timeout event, it
+    is counted in images.pending_at_end, its image shows the terminal frame (captured = end.render_frame) whose hf row
+    exists, and only its pose row C + 1 is missing; it is pending, never a join failure (masks 0). Any other capture
+    past the seal is a join failure (review round 2). Writer integrity: the issued rows with done_render_frame empty
+    and no img_timeout event must be exactly images.pending_at_end of them and the newest issued slots (one request in
+    flight); any other such row is a completion the writer dropped. No capture offset (captured - issued frame) is
+    negative (a frame captured before its request is a stale or misnamed file); no decision sample uses a future image
+    (obs_t captured after the decision's render frame, obs_age_ms < 0). The offset p50 and p99 and how often the
+    captured frame equals img.done_render_frame - 1 (Workbench 1.8: always, run 4) are reported."""
     if ctx.load_error:
         return unreadable(ctx, "C13a")
     s = ctx.session
@@ -310,6 +314,20 @@ def check_c13a(ctx):
     done_agree = sum(1 for r in with_done if r["captured_render_frame"] == r["done_render_frame"] - 1)
     offsets = [r["captured_render_frame"] - r["issue_render_frame"] for r in decoded]
     issues = []
+    # writer integrity of the completions (review round 2, N1 and N2)
+    pending_end = s.end_get("images.pending_at_end") if s.end is not None else None
+    pending_end = pending_end if isinstance(pending_end, int) and not isinstance(pending_end, bool) else 0
+    issued_slots = [r["slot_id"] for r in s.images if r["issue_status"] == "issued"]
+    pending = [r["slot_id"] for r in s.images if r.get("pending_at_seal")]
+    newest = issued_slots[len(issued_slots) - pending_end:] if pending_end > 0 else []
+    dropped = [slot for slot in pending if slot not in newest]
+    if dropped:
+        issues.append("%d issued request(s) without done_render_frame and without an img_timeout event besides the "
+                      "%d the seal left pending (images.pending_at_end; slots %s): a completion the writer dropped"
+                      % (len(dropped), pending_end, first(dropped, 5)))
+    if len(pending) - len(dropped) != pending_end:
+        issues.append("images.pending_at_end %d, but %d newest issued row(s) are pending" % (
+            pending_end, len(pending) - len(dropped)))
     if thr.get("code_bits") != fid.CODE_BITS:
         issues.append("decoder has %d code bits, thresholds %r" % (fid.CODE_BITS, thr.get("code_bits")))
     if frac < thr.get("min_decode_frac", 0.995):
@@ -330,6 +348,7 @@ def check_c13a(ctx):
                       "frame or obs_age_ms < 0; decision steps %s)" % (len(future), first(future, 5)))
     margins = [r["fid_margin"] for r in decoded if r["fid_margin"] is not None]
     value = {"decode_frac": frac, "join_failures": len(unjoined), "pending_after_seal": len(after_seal),
+             "dropped_completions": len(dropped),
              "future_obs": len(future), "offset_p50": percentile(offsets, 50),
              "offset_p99": percentile(offsets, 99), "negative_offsets": sum(1 for o in offsets if o < 0),
              "min_margin": min(margins) if margins else None,

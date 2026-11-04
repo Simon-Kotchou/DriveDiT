@@ -528,7 +528,12 @@ def simulate(spec, route):
             if phase == "tail" and world >= phase_end_ms:
                 stopping = True                     # the planned end: no new slot; the drain ends the session
         prev_world = world
-        world += STALL_MS if frame["issued"] else FRAME_MS[pattern % len(FRAME_MS)]
+        if frame["issued"]:                 # a spec may cycle several capture stalls (the C37 tests)
+            stalls = spec.get("stall_ms", (STALL_MS,))
+            world += stalls[sum(1 for sl in sim.slots if sl.get("issue_frame") is not None and
+                                sl["issue_frame"] < f) % len(stalls)]
+        else:
+            world += FRAME_MS[pattern % len(FRAME_MS)]
         if not frame["issued"]:
             pattern += 1
         f += 1

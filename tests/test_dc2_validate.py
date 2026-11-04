@@ -708,23 +708,78 @@ class CrashRulesOnGoldenTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def test_a_rollover_ended_at_its_onset_validates(self):
-        # DD-7's expert ends the episode at the first tilted step; the core confirms the rollover 500 ms later and
-        # writes its row into that episode after episode_end (contract 9.5.1, episode ownership)
-        session = copy_golden(self.tmp)
-        set_column(session, "episodes", "termination_reason", lambda key, v: "rollover" if key == 0 else v)
-        s = dc_validate.base.load_reader().open_session(session, decode_images=False)
-        ev = s.streams["events"]
-        i = [j for j, (k, e) in enumerate(zip(ev.col("kind"), ev.col("episode_id")))
-             if k == "episode_end" and e == 0][0]
-        end = s.streams["episodes"].col("end_physics_step")[0]
-        add_event(session, ev.col("event_seq")[i], "rollover", "onset_step=%d;up_y=0.31" % (end - 3), 1,
-                  physics_step=end + 30)
+    def golden_with(self, name, rows, termination=None, end_reason=None):
+        """A golden copy with rows (anchor kind, kind, payload, physics_step) inserted after the anchor event (of
+        episode 0, or the teleport between the episodes, which has none), with episode 0's termination and the
+        session's end reason changed."""
+        session = copy_golden(os.path.join(self.tmp, name))
+        if termination:
+            set_column(session, "episodes", "termination_reason", lambda key, v: termination if key == 0 else v)
+        if end_reason:
+            edit_json(os.path.join(session, "session_end.json"), lambda o: o.update({"end_reason": end_reason}))
+        for anchor, kind, payload, step in rows:
+            s = dc_validate.base.load_reader().open_session(session, decode_images=False)
+            ev = s.streams["events"]
+            i = [j for j, (k, ep) in enumerate(zip(ev.col("kind"), ev.col("episode_id")))
+                 if k == anchor and (ep == 0 or anchor in ("warmup_end", "teleport"))][-1]
+            add_event(session, ev.col("event_seq")[i], kind, payload, 1, physics_step=step)
+        return session
+
+    def episode0(self):
+        s = dc_validate.base.load_reader().open_session(GOLDEN_DIR, decode_images=False)
+        ep = s.streams["episodes"]
+        return ep.col("start_physics_step")[0], ep.col("end_physics_step")[0]
+
+    def c36(self, session):
         code, rep = run_json("--session", session, "--routes-dir", ROUTES, "--checks", "C35,C36")
-        self.assertEqual((code, by_id(rep)["C36"]["status"]), (0, "PASS"), by_id(rep)["C36"])
-        set_column(session, "episodes", "termination_reason", lambda key, v: "collision" if key == 0 else v)
-        code, rep = run_json("--session", session, "--routes-dir", ROUTES, "--checks", "C36")
-        self.assertIn("termination_reason collision, but its first terminal ego event", by_id(rep)["C36"]["detail"])
+        return by_id(rep)["C36"]
+
+    def test_a_confirmed_rollover_is_the_only_rollover_termination(self):
+        start, end = self.episode0()
+        # the core's rollover: tilted at end - 40, confirmed (row) at end - 10, inside the episode
+        ok = self.golden_with("confirmed", [("episode_start", "rollover", "onset_step=%d;up_y=0.31" % (end - 40),
+                                             end - 10)], termination="rollover")
+        self.assertEqual(self.c36(ok)["status"], "PASS", self.c36(ok))
+        # an expert that ended at the first tilted step: the hold confirmed only after the episode ended
+        late = self.golden_with("late", [("episode_end", "rollover", "onset_step=%d;up_y=0.31" % (end - 3),
+                                          end + 30)], termination="rollover")
+        self.assertIn("after the episode ended", self.c36(late)["detail"])
+        # a tilt that righted itself before the hold: no rollover row, so a rollover termination is unexplained
+        none = self.golden_with("unconfirmed", [], termination="rollover")
+        self.assertIn("termination_reason rollover without a terminal ego crash event", self.c36(none)["detail"])
+        mixed = self.golden_with("mixed", [("episode_start", "rollover", "onset_step=%d;up_y=0.31" % (end - 40),
+                                            end - 10)], termination="collision")
+        self.assertIn("termination_reason collision, but its first terminal ego event", self.c36(mixed)["detail"])
+
+    def test_a_contact_reported_after_its_episode_ended(self):
+        # episode 0 ends at step P; a vanilla contact reported before the next step carries P and episode 0
+        start, end = self.episode0()
+        payload = "onset_step=%d;dv_mps=1.10;v_mps=2.00;other=static;impulse_ns=2400.00;src=contact" % end
+        owned = self.golden_with("owned", [("episode_end", "collision", payload, end)])
+        self.assertEqual(self.c36(owned)["status"], "PASS", self.c36(owned))
+        # the round-1 writer paired step P with the cleared episode (-1): rejected
+        session = copy_golden(os.path.join(self.tmp, "cleared"))
+        add_event(session, 0, "collision", payload, 1, physics_step=end)
+        self.assertIn("episode_id -1, but its step %d lies inside an episode" % end, self.c36(session)["detail"])
+
+    def test_a_rollover_confirmed_before_its_onset_fails(self):
+        start, end = self.episode0()
+        bad = self.golden_with("chrono", [("episode_start", "rollover", "onset_step=%d;up_y=0.31" % (start + 40),
+                                           start + 20)], termination="rollover")
+        detail = self.c36(bad)["detail"]
+        self.assertIn("onset_step %d after the row's physics_step %d" % (start + 40, start + 20), detail)
+
+    def test_ego_disabled_needs_a_disabled_ego(self):
+        start, end = self.episode0()
+        tail = end + 5                           # between episode 0 and 1: a step of no episode (episode_id -1)
+        immobile = self.golden_with("immobile", [("teleport", "veh_damage",
+                                                   "state=intermediary;health=0.40;movement_damage=1.00", tail)],
+                                    end_reason="ego_disabled")
+        self.assertEqual(self.c36(immobile)["status"], "PASS", self.c36(immobile))
+        code, rep = run_json("--session", immobile, "--routes-dir", ROUTES, "--checks", "C01")
+        self.assertEqual(by_id(rep)["C01"]["status"], "PASS")            # ego_disabled is a normal end
+        plain = self.golden_with("plain", [], end_reason="ego_disabled")
+        self.assertIn("end_reason ego_disabled, but the ego", self.c36(plain)["detail"])
 
     def test_traffic_slot_pairs_are_checked(self):
         for name, fn, word in (

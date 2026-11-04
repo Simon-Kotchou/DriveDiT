@@ -130,7 +130,8 @@ def make_captured(root, tag="5e01", slots=range(250), events=(), verdict="PASS",
         write(os.path.join(dest, "frames", "f_%08d%s" % (s, suffix)), tiny_png(s))
     img = [{"slot_id": s, "episode_id": 0, "ego_slot_id": 0, "requested_world_ms": T0_MS + s * PERIOD_MS,
             "issue_status": "issued", "issue_world_ms": slot_ms(s), "issue_render_frame": 100 + 4 * s,
-            "issue_physics_step": 50 + 6 * s, "path": "frames/f_%08d" % s, "cam_current": 1, "cam_attached": 1}
+            "issue_physics_step": 50 + 6 * s, "path": "frames/f_%08d" % s, "cam_current": 1, "cam_attached": 1,
+            "done_render_frame": 101 + 4 * s}                                    # dc-2.0 frozen img row
            for s in slots if s not in no_img]
     synth.write_stream(os.path.join(dest, "img"), STREAMS["img"], img, 10.0)
     rows = [{"event_seq": i, "episode_id": 0, "physics_step": 10 * i, "render_frame": 20 * i, "world_time_ms": ms,

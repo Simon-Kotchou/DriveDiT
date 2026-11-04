@@ -7,7 +7,7 @@
 Every test builds a synthetic data root (the layout of /mnt/e/DriveDiT: wb_profile/, client_profiles/iNN/, logs/,
 pin/) in a temporary directory under $TMPDIR (on /dev/shm/ or /mnt/e/, else /dev/shm/) and passes it with
 --test-root, so nothing is written under /mnt/e/DriveDiT. Sessions come from the DD-5-min generator
-(tests/fixtures/capture_dc2/make_synthetic.py, kinds golden, golden_5hz and client_1408). The generator also writes
+(tests/fixtures/capture_dc2/make_synthetic.py, kinds golden, golden_10hz and client_1408). The generator also writes
 the harvester's sidecars; the tests move them where the engine and the launchers put their originals instead: the
 launch record to <profile>/profile/dc_launch/ and pin/launches/, the console log to <profile>/logs/logs_<local
 time>/ (with lines of the same session outside its window, a VME and a script error outside it, a crash.log of a
@@ -64,7 +64,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 HARVEST = os.path.join(REPO, "tools", "harvester", "harvest.py")
 GOLDEN_JSON = os.path.join(REPO, "tests", "fixtures", "capture_dc2", "golden.json")
 WB_ID = "arland_T0b_20261025T091512Z_wb_i00_5e00"
-WB5_ID = "arland_T0b_20261025T093000Z_wb_i00_5e05"
+WB10_ID = "arland_T0b_20261025T093000Z_wb_i00_5e10"     # kind golden_10hz
 CL_ID = "arland_T0b_20261025T094500Z_cl_i01_c140"
 LOCAL_OFFSET_S = -7 * 3600          # the engine logs' local time is UTC-7, as on the capture machine
 PIN = {"schema": "dd-pin/1", "pin_id": "1.8.0.13", "ticket": "synthetic",
@@ -368,7 +368,7 @@ class HarvestWorkbenchTest(unittest.TestCase):
         self.assertEqual((rep["verdict"], rep["exit_code"]), ("PASS", 0))
         checks = dict((c["id"], c) for c in rep["checks"])
         self.assertEqual(checks["C02"]["status"], "PASS")         # the launch record copy and build_key joined
-        self.assertEqual(checks["C11"]["value"]["screenshot_saved_lines"], 130)    # the slice holds the session only
+        self.assertEqual(checks["C11"]["value"]["screenshot_saved_lines"], 68)     # the slice holds the session only
         self.assertEqual(checks["C20"]["status"], "PASS")         # the VME and script error outside the window
         result = read_json(os.path.join(self.dest, "_harvest", "result.json"))
         self.assertEqual((result["verdict"], result["route"], result["dest"]),
@@ -383,7 +383,7 @@ class HarvestWorkbenchTest(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(columns, [f["name"] for f in fields])
         decoded = [r for r in rows if r["fid_ok"]]
-        self.assertEqual(len(decoded), 130)
+        self.assertEqual(len(decoded), 68)
         names = sorted(os.listdir(os.path.join(self.dest, "_harvest", "deriv")))
         self.assertEqual(names, ["f_%08d.jpg" % r["slot_id"] for r in decoded])
         for r in decoded:
@@ -426,7 +426,7 @@ class HarvestWorkbenchTest(unittest.TestCase):
             console = f.read().decode("ascii")
         self.assertNotIn("f_00009999", console)
         self.assertNotIn("Virtual Machine Exception", console)
-        self.assertEqual(console.count("Screenshot saved to"), 130)
+        self.assertEqual(console.count("Screenshot saved to"), 68)
         self.assertEqual(stamp_["engine_logs"]["run"], run_dir_name(read_json(
             os.path.join(self.dest, "session.json"))["start"]["unix_s"] - 3 * 3600))
         self.assertEqual((stamp_["engine_logs"]["start_marker"], stamp_["engine_logs"]["kept_whole"],
@@ -482,7 +482,7 @@ class HarvestClientTest(unittest.TestCase):
         rep = read_json(os.path.join(self.dest, "_harvest", "dc_validate.json"))
         self.assertEqual(rep["verdict"], "PASS")
         result = read_json(os.path.join(self.dest, "_harvest", "result.json"))
-        self.assertEqual((result["decoded"], result["derivatives"]), (130, 130))
+        self.assertEqual((result["decoded"], result["derivatives"]), (68, 68))
         self.assertEqual(result["derivative"]["box"], [64, 0, 1280, 720])
         verify_sums_independently(self, self.dest)
         row = catalog(self.root)[0]
@@ -492,10 +492,10 @@ class HarvestClientTest(unittest.TestCase):
     def test_derivative_is_the_core_without_bands(self):
         import cv2
 
-        raw = reader.fiducial.load_rgb(os.path.join(self.dest, "frames", "f_00000070.png"))
+        raw = reader.fiducial.load_rgb(os.path.join(self.dest, "frames", "f_00000040.png"))
         self.assertEqual(raw.shape, (720, 1408, 3))
         want = cv2.resize(raw[:, 64:1344], (512, 288), interpolation=cv2.INTER_AREA).astype(float)
-        got = decode_jpeg(os.path.join(self.dest, "_harvest", "deriv", "f_00000070.jpg")).astype(float)
+        got = decode_jpeg(os.path.join(self.dest, "_harvest", "deriv", "f_00000040.jpg")).astype(float)
         self.assertLess(numpy.abs(got - want).mean(), 2.0)
         full = cv2.resize(raw, (512, 288), interpolation=cv2.INTER_AREA).astype(float)
         self.assertGreater(numpy.abs(got - full).mean(), numpy.abs(got - want).mean() + 2.0)
@@ -826,7 +826,7 @@ class RefusalTest(unittest.TestCase):
             console = f.read().decode("ascii")
         self.assertNotIn(OTHER_ID, console)
         self.assertNotIn("Virtual Machine Exception", console)
-        self.assertEqual(console.count("Screenshot saved to"), 130)
+        self.assertEqual(console.count("Screenshot saved to"), 68)
 
     def test_own_start_marker_bounds_the_window(self):
         """A previous Play's last lines after its own marker but inside the before-margin stay out once the
@@ -855,10 +855,10 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual(run(self.root)[0], 0)
         with open(os.path.join(self.root, "catalog", "sessions.jsonl"), "ab") as f:
             f.write(b'{"schema":"drivedit.catalog-sess')
-        make_session(self.root, kind="golden_5hz", pin_sha=self.pin_sha)
+        make_session(self.root, kind="golden_10hz", pin_sha=self.pin_sha)
         code, out = run(self.root)
         self.assertEqual(code, 0, out)
-        self.assertEqual([r["session_id"] for r in catalog(self.root)], [WB_ID, WB5_ID])
+        self.assertEqual([r["session_id"] for r in catalog(self.root)], [WB_ID, WB10_ID])
         self.assertIn("repaired catalog/sessions.jsonl: a torn last line", out)
 
     def test_catalog_row_without_its_line_feed_is_kept(self):
@@ -936,7 +936,7 @@ class RefusalTest(unittest.TestCase):
         before = snapshot(self.root)
         code, out = run(self.root)
         self.assert_nothing_written(before, code, out)
-        self.assertIn("TBD-4: frames/ holds 130 file(s) f_<slot:08d> without extension; this run reads "
+        self.assertIn("TBD-4: frames/ holds 68 file(s) f_<slot:08d> without extension; this run reads "
                       "frames/f_<slot:08d>.png only (--screenshot-suffix '.png'", out)
         code, out = run(self.root, "--screenshot-suffix", ".bmp")
         self.assert_nothing_written(before, code, out)
@@ -947,7 +947,7 @@ class RefusalTest(unittest.TestCase):
         checks = dict((c["id"], c) for c in rep["checks"])
         self.assertEqual((rep["verdict"], checks["C10"]["status"], checks["C11"]["status"]), ("PASS", "PASS", "PASS"))
         result = read_json(os.path.join(dest, "_harvest", "result.json"))
-        self.assertEqual((result["decoded"], result["derivatives"]), (130, 130))
+        self.assertEqual((result["decoded"], result["derivatives"]), (68, 68))
         fields = reader.load_schema().raw["derived"]["img_resolved"]["fields"]
         with open(os.path.join(dest, "_harvest", "img_decoded.csv"), "rb") as f:
             _, rows = reader.parse_csv_bytes(f.read(), fields, "img_decoded.csv", [])

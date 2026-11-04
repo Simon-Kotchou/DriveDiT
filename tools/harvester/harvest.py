@@ -87,9 +87,10 @@ that names another session id, so a neighbouring Play's lines stay out. The slic
 headerless crash.log (written by a dying process) is attributed by its modification time: kept whole when that lies
 in the window, else left out and listed in harvest.json; any other headerless log holds the session.
 
-TBD-by-probe. TBD-4: --screenshot-suffix (default the reader's IMAGE_SUFFIX, .png) is the suffix the engine appends
-to the img request path, one of the names the probe scheduler polls (DC_ProbeImages.c m_aSuffixes, the bare name
-included; the reader's IMAGE_SUFFIXES). It goes to dc_validate (--image-suffix), the derivative pass and
+TBD-by-probe. TBD-4 (decided at the dc-2.0 freeze, 2026-11-04: the engine appends .png): --screenshot-suffix
+(default the reader's IMAGE_SUFFIX, .png) is the suffix the engine appends to the img request path; another of the
+names the probe scheduler polls (DC_ProbeImages.c m_aSuffixes, the bare name included; the reader's IMAGE_SUFFIXES)
+is only for a build that names its files differently. It goes to dc_validate (--image-suffix), the derivative pass and
 img_decoded.csv's file column. A file in frames/ named f_<slot:08d> plus another of those suffixes holds the
 session, and the message names the suffix: the reader would not see it (any other stray file is C11's). TBD-6: in
 both launch-guard modes (cli, wb_escape) the launch record is found by pin.launch_id. The other TBDs are read from
@@ -736,7 +737,8 @@ def check_frame_names(c):
             other[suffix] = other.get(suffix, 0) + 1
     if other:
         raise Held("TBD-4: frames/ holds %s; this run reads frames/f_<slot:08d>%s only (--screenshot-suffix %r; "
-                   "pass the suffix TBD-4 settles on), so the session stays in place" % (
+                   "TBD-4 decided .png; pass another suffix only for a build that names its files so), so the "
+                   "session stays in place" % (
                        ", ".join("%d file(s) f_<slot:08d>%s" % (n, suffix or " without extension")
                                  for suffix, n in sorted(other.items())), c.screenshot_suffix, c.screenshot_suffix))
 

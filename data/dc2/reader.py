@@ -103,7 +103,8 @@ READER_VERSION = "dc2-reader/1"
 CONTRACT_VERSION = "dc-2.0"
 IMAGE_SUFFIX = ".png"           # TBD-4 default: the engine appends .png to the extension-less request path
 # TBD-4 candidates: the names the probe scheduler polls for an extension-less request path (DC_ProbeImages.c
-# m_aSuffixes; "" is the bare path). Until the T0-ENG freeze a caller may read any one of them.
+# m_aSuffixes; "" is the bare path). TBD-4 is decided (.png, dc-2.0 freeze); a caller may still read another one to
+# diagnose a build that names its files differently.
 IMAGE_SUFFIXES = (".png", ".bmp.png", ".bmp", ".jpg", "")
 ENV_TRANSITION_MS = 15000       # features_v1 masks.env_transition: 1 for 15 s after an environment change
 LEGACY_MARKERS = ("telemetry.csv", "summary.txt", "session_info.txt")

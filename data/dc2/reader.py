@@ -43,7 +43,9 @@ decision callback. state_t = the telemetry row of C_t; action_label_t = ctl.exp_
 of the row after C_t (decided after the rows of C_t, applied from step P_t + 1); action_exec_t = the executed values
 of the steps P_t + 1 .. P_t + N (N = clocks.physics_steps_per_decision), each from the ctl row that covers it, empty
 past P_t+1; obs_t = the newest decoded image whose pose row (hf row C + 1) joins ctl and telemetry and has
-last_physics_step <= P_t, valid when it is at most one image period old (from the world time of hf row C). A decision
+last_physics_step <= P_t and whose captured frame is at or before C_t's render frame (never a future image, so
+obs_age_ms >= 0), valid when it is at most one image period old (from the world time of hf row C); an image of the
+session's last render frame (a seal without drain) has no pose row and is never obs_t (pose_after_seal). A decision
 step is wm-valid only with every step of its interval covered by ctl rows, a telemetry row at P_t, one episode over
 the interval, the command held unchanged over it (same hl_seq and hl_*), every action_exec entry inside it, a valid
 image of the same episode and no teleport or respawn between the image's last physics step and P_t+1. Segments are
@@ -1052,6 +1054,7 @@ def _image_files(s):
 def _resolve_images(s, decode, visitor):
     img = s.streams["img"]
     hf_index = s.streams["hf"].index()
+    end_frame = s.end_get("end.render_frame") if s.end is not None else None
     s.images = []
     for i in range(len(img)):
         slot = img.data["slot_id"][i]
@@ -1060,7 +1063,7 @@ def _resolve_images(s, decode, visitor):
                "done_render_frame": img.data["done_render_frame"][i], "file": None, "file_exists": 0,
                "png_w": None, "png_h": None, "fid_ok": 0, "fid_status": None, "code": None,
                "captured_render_frame": None, "fid_margin": None, "hf_index": None, "pose_hf_index": None,
-               "error": None}
+               "pose_after_seal": 0, "error": None}
         s.images.append(row)
         rel, error = s.image_files[i]
         if rel is None:
@@ -1090,6 +1093,8 @@ def _resolve_images(s, decode, visitor):
             row["fid_margin"] = fid_margin(rgb, result)
             row["hf_index"] = hf_index.get(row["captured_render_frame"])
             row["pose_hf_index"] = hf_index.get(row["captured_render_frame"] + 1)     # the image's pose row
+            # captured in the last render frame: a seal without drain caught the request in flight, no pose row exists
+            row["pose_after_seal"] = int(isinstance(end_frame, int) and row["captured_render_frame"] >= end_frame)
         if visitor is not None:
             visitor(s, row, rgb)
 
@@ -1323,6 +1328,7 @@ def _build_decisions(s):
                           row["slot_id"], ctl.data["episode_id"][s.hf_ctl[ph]]))
     cands.sort()
     cand_lps = [c[1] for c in cands]
+    cand_frames = [c[0] for c in cands]
     lps_sorted = all(cand_lps[i] <= cand_lps[i + 1] for i in range(len(cand_lps) - 1))
     warm = _event_times(s, ("warmup_end",))
     warmup_end_ms = warm[0][1] if warm else float(s.meta_get("trial.warmup_s", 0.0) or 0.0) * 1000.0
@@ -1367,14 +1373,17 @@ def _build_decisions(s):
                                   cexp["steer_input"][j]])
         hl_seq = None if c1 is None else ctl.data["hl_seq"][c1]
         mode = ctl.data["mode"][c1] if c1 is not None else ctl.data["mode"][c0]
-        # obs_t: newest decoded image whose pose row has last_physics_step <= P_t
+        # obs_t: newest decoded image whose pose row has last_physics_step <= P_t and whose captured frame is at or
+        # before C_t's render frame (a frame without a callback keeps last_physics_step while world time advances:
+        # the step bound alone would admit a future image, review round 1)
+        frame_t = ctl.data["render_frame"][c0]
         obs = None
         if cands:
-            if lps_sorted:     # sorted by captured frame, so the last eligible candidate is the newest
-                j = bisect.bisect_right(cand_lps, p) - 1
+            if lps_sorted:     # sorted by captured frame, so the eligible candidates are a prefix
+                j = min(bisect.bisect_right(cand_lps, p), bisect.bisect_right(cand_frames, frame_t)) - 1
                 obs = cands[j] if j >= 0 else None
             else:
-                eligible = [c for c in cands if c[1] <= p]
+                eligible = [c for c in cands if c[1] <= p and c[0] <= frame_t]
                 obs = max(eligible) if eligible else None
         obs_fields = {"obs_slot_id": None, "obs_captured_render_frame": None, "obs_last_physics_step": None,
                       "obs_age_steps": None, "obs_age_ms": None}
@@ -1407,7 +1416,7 @@ def _build_decisions(s):
         policy_valid = int(t0 is not None and episode is not None and episode >= 0 and has_label
                            and mode not in ("X", "A", "I", None) and obs_valid == 1 and same_episode
                            and not react_hidden and not teleport and not crashed)
-        d = {"decision_step": p, "grid_point": grid, "episode_id": episode, "hl_seq": hl_seq,
+        d = {"decision_step": p, "grid_point": grid, "render_frame": frame_t, "episode_id": episode, "hl_seq": hl_seq,
              "interval_steps": None if p_next is None else p_next - p, "mode": mode, "world_time_ms": world,
              "state": state, "action_cmd": cmd, "action_label": label, "action_exec": exec_rows,
              "obs_valid": obs_valid,

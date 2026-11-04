@@ -1259,6 +1259,219 @@ class ReReviewFindingsTest(unittest.TestCase):
                     self.assertIn("%s is larger than %d bytes" % (fname, limit), line)
 
 
+class Round3FindingsTest(unittest.TestCase):
+    """Regression tests for the third review (retention/review/CODEX3.md), as triaged: a restore keeps its staging
+    copy until the frames/ name is durable (fix 1), an interrupted restore (one inode under both names) is completed
+    (fix 5), the pre-mutation recheck covers session admission, every kept session file and the play's age (fix 3),
+    and --apply refuses to start while a unit in scope was written in the last 10 minutes (the preflight of the
+    operational constraint)."""
+
+    def setUp(self):
+        self.root = th.temp_dir("dd6ret_x_")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def sub(self, name):
+        root = os.path.join(self.root, name)
+        os.mkdir(root)
+        return root
+
+    def kill(self, root, hook, *argv):
+        proc = run_subprocess(root, hook, "--apply", *argv)
+        self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stdout + proc.stderr)
+
+    def staged_session(self, root):
+        """A session killed with frames/f_00000001.png in staging."""
+        _, dest = make_captured(root)
+        self.kill(root, "after_stage")
+        self.assertEqual(staged(dest), ["f_00000001.png"])
+        return dest
+
+    @staticmethod
+    def frames_fsync_fails(dest):
+        """os.fsync raising for the session's frames/ directory only."""
+        st = os.lstat(os.path.join(dest, "frames"))
+        real = os.fsync
+
+        def fsync(fd):
+            got = os.fstat(fd)
+            if (got.st_dev, got.st_ino) == (st.st_dev, st.st_ino):
+                raise OSError(errno.EIO, "injected frames/ fsync failure")
+            return real(fd)
+        return mock.patch("os.fsync", fsync)
+
+    def same_inode(self, dest, name="f_00000001.png"):
+        a = os.lstat(os.path.join(dest, "frames", name))
+        b = os.lstat(os.path.join(dest, "frames", ret.STAGING, name))
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+    # -- fix 1: restore ordering ----------------------------------------------------------------------
+    def test_fix1_a_restore_fsyncs_frames_before_it_removes_the_staging_copy(self):
+        dest = self.staged_session(self.root)
+        frames_id = os.lstat(os.path.join(dest, "frames"))
+        events = []
+        real = {"link": os.link, "fsync": os.fsync, "unlink": os.unlink}
+
+        def link(src, dst, *a, **k):
+            events.append(("link", src))
+            return real["link"](src, dst, *a, **k)
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            events.append(("fsync", "frames" if (st.st_dev, st.st_ino) == (frames_id.st_dev, frames_id.st_ino)
+                           else "other"))
+            return real["fsync"](fd)
+
+        def unlink(name, *a, **k):
+            events.append(("unlink", name))
+            return real["unlink"](name, *a, **k)
+        with mock.patch("os.link", link), mock.patch("os.fsync", fsync), mock.patch("os.unlink", unlink):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 0, out)
+        i_link = events.index(("link", "f_00000001.png"))
+        i_alias = events.index(("unlink", "f_00000001.png"), i_link)
+        self.assertIn(("fsync", "frames"), events[i_link:i_alias])          # frames/ durable before the alias goes
+        self.assertEqual((frame_slots(dest), staged(dest)), ([0, 100, 200, 249], None))
+
+    def test_fix1_a_failed_frames_fsync_keeps_the_staging_copy(self):
+        dest = self.staged_session(self.root)
+        with self.frames_fsync_fails(dest):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(staged(dest), ["f_00000001.png"])                    # the recovery copy is kept
+        self.assertTrue(self.same_inode(dest))
+        code, out = run(self.root, "--apply")                                # and the next run completes it
+        self.assertEqual(code, 0, out)
+        self.assertEqual((frame_slots(dest), staged(dest)), ([0, 100, 200, 249], None))
+
+    def test_fix1_a_rejected_file_whose_restore_fails_keeps_its_staging_copy(self):
+        _, dest = make_captured(self.root)
+        staged_file = os.path.join(dest, "frames", ret.STAGING, "f_00000001.png")
+        changed = []
+
+        def hook(r, name):
+            if name == "after_stage" and not changed:
+                with open(staged_file, "ab") as f:
+                    f.write(b"x")
+                changed.append(name)
+        with self.frames_fsync_fails(dest), mock.patch.object(ret.Retention, "hook", hook):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("putting it back failed", out)
+        self.assertEqual(staged(dest), ["f_00000001.png"])
+        with open(staged_file, "rb") as f:
+            self.assertEqual(f.read(), tiny_png(1) + b"x")                   # the rejected bytes are preserved
+        code, out = run(self.root, "--apply")                                # restored, then held: it changed
+        self.assertEqual(code, 2, out)
+        self.assertIn("recovered ", out)
+        self.assertEqual(staged(dest), None)
+        with open(os.path.join(dest, "frames", "f_00000001.png"), "rb") as f:
+            self.assertEqual(f.read(), tiny_png(1) + b"x")
+
+    # -- fix 5: an interrupted restore ------------------------------------------------------------------
+    def test_fix5_a_kill_at_each_restore_boundary_is_completed_by_the_next_run(self):
+        for hook in ("restore_linked", "restore_synced"):
+            with self.subTest(hook):
+                root = self.sub(hook)
+                dest = self.staged_session(root)
+                self.kill(root, hook)                                       # killed inside the recovery's restore
+                self.assertEqual(staged(dest), ["f_00000001.png"])
+                self.assertTrue(self.same_inode(dest))                      # one inode under both names
+                self.assertTrue(harvest.verify_sums(dest)[0])                # counted once
+                code, out = run(root, "--apply")
+                self.assertEqual(code, 0, out)
+                self.assertIn("recovered ", out)
+                self.assertEqual((frame_slots(dest), staged(dest)), ([0, 100, 200, 249], None))
+
+    # -- fix 3: the pre-mutation recheck ---------------------------------------------------------------
+    def test_fix3_admission_kept_files_and_age_are_rechecked_before_the_first_mutation(self):
+        def session_json_not_arland(root, unit):
+            meta = read_json(os.path.join(unit, "session.json"))
+            meta["map"].update({"map_id": "everon", "terrain": "Eden",
+                                "root_world": "{853E92315D1D9EFE}worlds/Eden/Eden.ent"})
+            write(os.path.join(unit, "session.json"), jtext(meta))
+
+        def kept_frame_truncated(root, unit):
+            write(os.path.join(unit, "frames", "f_00000100.png"), tiny_png(100)[:20])
+
+        def metadata_changed(root, unit):
+            with open(os.path.join(unit, "session_end.json"), "ab") as f:
+                f.write(b" ")
+
+        def kept_derivative_changed(root, unit):
+            with open(os.path.join(unit, "_harvest", "deriv", "f_00000000.jpg"), "ab") as f:
+                f.write(b"x")
+
+        def probe_csv_written(root, unit):
+            with open(os.path.join(unit, "e05_frames.csv"), "ab") as f:
+                f.write(b"1,2\n")
+
+        def probe_kept_frame_written(root, unit):
+            os.utime(os.path.join(unit, "frames", "f_00000200.png"))
+
+        cases = {"session.json no longer Arland": ("session", session_json_not_arland, "session.json changed after "
+                                                   "the session was planned (admission"),
+                 "kept frame truncated": ("session", kept_frame_truncated, "frames/f_00000100.png is gone or changed"),
+                 "metadata changed": ("session", metadata_changed, "session_end.json is gone or changed"),
+                 "kept derivative changed": ("session", kept_derivative_changed,
+                                             "_harvest/deriv/f_00000000.jpg is gone or changed"),
+                 "probe csv written": ("probe", probe_csv_written, "a file of the play was written after it was "
+                                       "planned"),
+                 "probe kept frame written": ("probe", probe_kept_frame_written, "a file of the play was written "
+                                              "after it was planned")}
+        for n, (name, (mode, change, text)) in enumerate(sorted(cases.items())):
+            with self.subTest(name):
+                root = self.sub("case%d" % n)
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    argv = ["--apply"]
+                else:
+                    unit = make_play(root)
+                    argv = ["--probes", "--apply"]
+                original = ret.Retention.apply
+
+                def apply(r, plan):
+                    change(root, unit)
+                    return original(r, plan)
+                with mock.patch.object(ret.Retention, "apply", apply):
+                    code, out = run(root, *argv)
+                self.assertEqual(code, 2, out)
+                self.assertIn(text, out)
+                self.assertEqual(len(frame_slots(unit)), 250, out)
+                for sub in ("", "_harvest"):
+                    self.assertFalse(os.path.exists(os.path.join(unit, sub, "RETENTION.json")), out)
+
+    # -- the --apply preflight ------------------------------------------------------------------------
+    def test_preflight_refuses_apply_while_a_unit_in_scope_was_written_recently(self):
+        _, dest = make_captured(self.root)                                  # files written just now
+        before = th.snapshot(self.root)
+        code, out = run(self.root, "--apply", quiet=None)
+        self.assertEqual(code, 3, out)
+        self.assertIn("refused: --apply preflight: a file of %s was modified" % os.path.relpath(dest, self.root),
+                      out)
+        self.assertEqual(th.snapshot(self.root), before)
+        code, out = run(self.root, quiet=None)                              # a dry run is not refused
+        self.assertEqual(code, 0, out)
+        self.assertIn("would-delete", out)
+        age(dest, 1)
+        code, out = run(self.root, "--apply", quiet=None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(frame_slots(dest), [0, 100, 200, 249])
+
+    def test_preflight_covers_every_play_in_scope(self):
+        old = make_play(self.root, launch="20261024T000000Z-wb-0060")
+        busy = make_play(self.root, launch="20261024T000000Z-wb-0061", footer=None, age_days=0)    # being written
+        before = th.snapshot(self.root)
+        code, out = run(self.root, "--probes", "--apply", quiet=None)
+        self.assertEqual(code, 3, out)
+        self.assertIn("--apply preflight: a file of %s was modified" % os.path.relpath(busy, self.root), out)
+        self.assertEqual(th.snapshot(self.root), before)
+        code, out = run(self.root, "--probes", "--apply", "--under", old, quiet=None)   # only the quiet play
+        self.assertEqual(code, 0, out)
+        self.assertEqual(frame_slots(old), [0, 100, 200, 249])
+
+
 class ScopeTest(unittest.TestCase):
     def setUp(self):
         self.root = th.temp_dir("dd6ret_r_")

@@ -1072,7 +1072,12 @@ def _resolve_images(s, decode, visitor):
     img = s.streams["img"]
     hf_index = s.streams["hf"].index()
     end_frame = s.end_get("end.render_frame") if s.end is not None else None
+    pending_end = s.end_get("images.pending_at_end") if s.end is not None else None
     timed_out = timed_out_slots(s)
+    # one request is in flight at a time: the only request a seal can catch is the newest issued slot, and only when
+    # session_end.json declares exactly one pending (0 or 1; more fails C13a)
+    issued = [img.data["slot_id"][i] for i in range(len(img)) if img.data["issue_status"][i] == "issued"]
+    in_flight_slot = issued[-1] if issued and pending_end == 1 and not isinstance(pending_end, bool) else None
     s.images = []
     for i in range(len(img)):
         slot = img.data["slot_id"][i]
@@ -1115,10 +1120,12 @@ def _resolve_images(s, decode, visitor):
             row["fid_margin"] = fid_margin(rgb, result)
             row["hf_index"] = hf_index.get(row["captured_render_frame"])
             row["pose_hf_index"] = hf_index.get(row["captured_render_frame"] + 1)     # the image's pose row
-            # the one documented exemption (section 6): a request the seal caught in flight (pending_at_seal) whose
-            # image is of the terminal render frame (end.render_frame) and whose captured hf row exists: only its pose
-            # row C + 1 is missing. A capture past the seal, or of a completed or timed-out slot, is a join failure.
-            row["pose_after_seal"] = int(row["pending_at_seal"] == 1 and isinstance(end_frame, int)
+            # the one documented exemption (section 6): the request the seal caught in flight, the unique newest
+            # issued slot with images.pending_at_end 1 (pending_at_seal), whose image is of the terminal render frame
+            # (end.render_frame) and whose captured hf row exists: only its pose row C + 1 is missing. A capture past
+            # the seal, of any other slot, of a completed or timed-out one, is a join failure.
+            row["pose_after_seal"] = int(row["pending_at_seal"] == 1 and slot == in_flight_slot
+                                         and isinstance(end_frame, int)
                                          and row["captured_render_frame"] == end_frame
                                          and row["hf_index"] is not None and row["pose_hf_index"] is None)
         if visitor is not None:

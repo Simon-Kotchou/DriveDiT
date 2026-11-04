@@ -4,28 +4,36 @@
 //
 // A DC_SessionModule (dispatch order 15: after DC_EgoSession 10, before DC_StreamRecorder 20) on the capture game
 // mode. It writes the crash events of docs/capture_contract/dc-2.0.md section 9.5.1 into the events stream through
-// DC_Session.LogVehicleEvent, each naming its vehicle slot (the ego now; traffic slots from DD-4/T2 call WatchSlot).
+// DC_Session.LogVehicleEventInEpisode, each naming its vehicle slot (the ego now; traffic slots from DD-4/T2 call
+// WatchSlot) and the episode in which it occurred.
 //
-// COLLISION DETECTOR (every watched slot, every physics step, OnStepPost)
-//   dv_h(P) = |v_h(P) - v_h(P - W)|, v_h the horizontal (world x, z) part of Physics.GetVelocity() (Physics.c:99),
-//   W = floor(collision_window_ms / slice + 0.5) steps (6 at 60 Hz). The world frame, never the local one: a spin
-//   turns the local velocity vector without any force. Onset: dv_h >= m_fCollisionDvMps outside the refractory
-//   (m_iCollisionRefractoryMs) and the suppression (1000 ms after the slot is watched, 500 ms after a teleport or
-//   respawn of it, NoteRepositioned). dv_mps is the peak of |v_h(t) - v_h(onset - W)| over m_iCollisionPeakMs. The
-//   threshold of 4.0 m/s per 100 ms is PROVISIONAL (TBD-10): 2.0 x the E-01 full-braking maximum and 0.56 x the
-//   weakest impact of the dc-1.0 session_10423; it must be re-measured by the TBD-10 probe, per build_key and again
-//   on 1.9. telemetry.dv_max_mps (TakeDvMax) carries the per-row maximum so a new value can be applied offline.
+// COLLISION DETECTOR (every watched slot, in every physics callback, OnStepPost). Rows are frame-bound (dc-2.0 freeze
+//   decision D-A): one callback covers 1 to 3 merged physics steps of 1/30 s on 1.8 (probe run 4, E-10), so every
+//   window is world time, never a count of steps or callbacks. data/dc2/crash_dv.py is the executable specification:
+//   - each callback stores (world_time_ms, v_h) in a ring of RING_CAPACITY samples per slot, v_h the horizontal
+//     (world x, z) part of Physics.GetVelocity() (Physics.c:99). The world frame: a spin turns the local vector
+//     without any force;
+//   - dv_h = |v_h - v_ref|, v_ref = the velocity at t - m_iCollisionWindowMs, interpolated between the newest sample
+//     at or before that instant and the next one. Samples around it more than window + m_iCollisionWindowTolMs apart
+//     (a hitch; a 3-step callback spans 100 ms) restart the history at the current sample and are not evaluated; a
+//     history that does not reach back is not evaluated either;
+//   - onset: dv_h >= m_fCollisionDvMps outside the refractory and the suppression (1000 ms after the slot is watched,
+//     500 ms after a reposition); dv_mps is the peak of |v_h - v_ref| over m_iCollisionPeakMs of world time. The
+//     4.0 m/s threshold is PROVISIONAL (TBD-10): it must be re-measured by the TBD-10 probe, per build_key and on
+//     1.9. telemetry.dv_max_mps (TakeDvMax) carries the same dv_h, so a new value can be applied offline.
 //
 // CONTACTS (m_bUseContactHook; session.json events.contact_source)
 //   The modded SCR_VehicleDamageManagerComponent.ProcessCollision (DC_CollisionHook.c) calls NoteContact once per new
 //   (vehicle, other entity) contact that passed vanilla's filters. NoteContact returns at once for a vehicle that is
-//   not watched; otherwise it copies numbers and references into one of 4 preallocated records of the slot (no
-//   allocation, no string). In OnFrame a contact within [onset - 100 ms, onset + 250 ms] completes the pending row
-//   (src dv_contact; the largest impulse names other); one without an onset becomes its own row (src contact,
-//   never terminal) unless the slot's last row, within the refractory, had the same other entity (or none).
-//   A pending row is written once a contact matched it and the peak window passed, else once
-//   m_iEpisodeEndWaitMs and 2 render frames passed (ProcessCollision runs 1 to 2 frames after the step). Without a
-//   contact another slot with an onset within 3 steps and 10 m names other=vehicle and other_slot.
+//   not watched; otherwise it copies numbers and references (and the step, episode and world time of the report)
+//   into one of CONTACT_RECORDS preallocated records of the slot: no allocation, no string, no throw path (an
+//   exception after vanilla's super would abort vanilla's OnFrame loop). Contacts within
+//   [onset - 100 ms, onset + 250 ms] are kept until the pending row is written: the largest impulse names other, the
+//   contacts with that entity merge into the row (src dv_contact), every other one becomes its own row (src contact,
+//   never terminal), unless the slot's last row, within the refractory, had the same other entity (or none). A
+//   pending row is written once a contact is in its window and the peak window passed, else once m_iEpisodeEndWaitMs
+//   and 2 render frames passed. Without a contact another slot with an onset within 3 steps and 10 m names
+//   other=vehicle and other_slot. other is classified on the contact's entity, then on each parent up to the root.
 //
 // POLLED STATE (every m_iStatePollMs of world time, OnStepPost; proto getters and cached hit zones only)
 //   veh_damage: DamageManagerComponent.GetState() changes, or GetMovementDamage() crosses 1.0 (DamageManagerComponent.c
@@ -34,14 +42,25 @@
 //   driver_state: CharacterControllerComponent.GetLifeState() of the pilot-seat occupant (Vehicle.GetPilot,
 //   Vehicle.c:114) or of the last one after the seat emptied; dismount / remount: the pilot seat empties / is
 //   occupied again. The first poll writes a row only where the vehicle differs from the default (undamaged, not
-//   burning, a seated driver alive). rollover: up_y below m_fRolloverUpY for m_iRolloverHoldMs, re-armed after 2 s
-//   above 0.8 (per step).
+//   burning, a seated driver alive). rollover: up_y below m_fRolloverUpY for m_iRolloverHoldMs of world time,
+//   written when confirmed with onset_step = the first tilted step; re-armed after 2 s above 0.8.
 //
-// EGO TERMINATION (contract 9.5.1 / 9.6): the first terminal ego event latches DC_StreamRecorder.LatchTermination in
-//   the step it happens (collision at the onset; veh_damage not undamaged or immobile; veh_fire_start: collision;
-//   rollover: rollover), before the recorder's driver latch of that step. DC_EgoSession holds the episode end while
-//   HoldEpisodeEnd (the ego's collision row is pending, at most m_iEpisodeEndWaitMs after the onset), refuses a new
-//   episode while IsSlotDisabled, and calls FinishDestroyedSlot before it ends the session with ego_destroyed.
+// EPISODE OWNERSHIP: a row belongs to the episode of its occurrence (collision onset, contact report, first tilted
+//   step, poll), snapshotted when it occurs, even when it is written after that episode ended; event_seq and
+//   world_time_ms stay in write order.
+//
+// EGO TERMINATION (contract 9.5.1 / 9.6): a terminal ego event latches DC_StreamRecorder.LatchTermination when it is
+//   confirmed (collision at the onset; veh_damage not undamaged or immobile, veh_fire_start: collision; rollover at
+//   the end of the hold), only into its own episode and before the recorder's driver latch of that callback.
+//   DC_EgoSession holds the episode end while HoldEpisodeEnd (the ego's collision row is pending, at most
+//   m_iEpisodeEndWaitMs after the onset), refuses a new episode while IsEpisodeBlocked (a pending row, the
+//   m_iCrashCooldownMs cool-down after the last terminal ego event, tilted, immobile, burning), and calls
+//   FinishDestroyedSlot before it ends the session with ego_destroyed.
+//
+// REPOSITIONING: whoever moves a slot by SetWorldTransform calls PrepareReposition first (DC_DriverContext.
+//   PrepareReposition for the ego): the pending row is written with its peak so far, the held contacts are written,
+//   the history is cleared and the suppression starts before the move. The teleport or respawn row then calls
+//   NoteRepositioned, which clears the history again.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -50,8 +69,10 @@
 class DC_CrashContact
 {
 	bool m_bHeld;				//!< holds a contact that no row has used yet
-	int m_iWorldMs;				//!< world_time_ms when ProcessCollision ran
-	IEntity m_Other;			//!< root entity of the other side (weak)
+	int m_iWorldMs;				//!< world_time_ms when ProcessCollision reported it
+	int m_iStep;				//!< the last completed physics_step then (the onset_step of a contact-only row)
+	int m_iEpisode = -1;		//!< the episode then (the row's episode_id)
+	IEntity m_Other;			//!< the classified entity of the other side (weak)
 	int m_iOtherKind;			//!< DC_CrashWatch.OTHER_*
 	int m_iOtherSlot = -1;		//!< slot of the other vehicle when it is watched
 	float m_fImpulse;			//!< SCR_CollisionDamageContainer.m_fImpulse [N s]
@@ -71,11 +92,12 @@ class DC_CrashSlot
 	ref array<ref DC_CrashContact> m_aContacts = {};
 	bool m_bFinished;							//!< FinishDestroyedSlot ran
 
-	// delta-v ring: the last W + 1 horizontal world velocities
+	// velocity history: a ring of (world_time_ms, v_h); m_iRingHead is the newest sample
+	ref array<int> m_aSampleMs = {};
 	ref array<float> m_aVelX = {};
 	ref array<float> m_aVelZ = {};
-	int m_iRingPos = -1;
-	int m_iSamples;
+	int m_iRingHead = -1;
+	int m_iRingCount;
 	float m_fDvMax;								//!< largest dv_h since the last TakeDvMax
 	bool m_bHasDvMax;
 	int m_iSuppressUntilMs;
@@ -86,21 +108,17 @@ class DC_CrashSlot
 	int m_iOnsetStep;
 	int m_iOnsetMs;
 	int m_iOnsetFrame;
+	int m_iOnsetEpisode = -1;					//!< the episode of the onset (the row's episode_id)
 	vector m_vOnsetPos;
-	float m_fBaseX;								//!< v_h(onset - W)
-	float m_fBaseZ;
-	float m_fPeak;								//!< peak |v_h(t) - v_h(onset - W)|
+	float m_fRefX;								//!< v_ref of the onset
+	float m_fRefZ;
+	float m_fPeak;								//!< peak |v_h(t) - v_ref|
 	float m_fPeakX;
 	float m_fPeakZ;
 	float m_fFwdX;								//!< horizontal forward and right axes at the onset, normalised
 	float m_fFwdZ;
 	float m_fRightX;
 	float m_fRightZ;
-	bool m_bMatched;							//!< a contact completed the pending row
-	IEntity m_MatchedOther;
-	int m_iMatchedKind;
-	int m_iMatchedSlot = -1;
-	float m_fMatchedImpulse;
 
 	// the last written collision row (merge rule) and the last onset (registry match)
 	bool m_bHasLastRow;
@@ -114,6 +132,8 @@ class DC_CrashSlot
 	bool m_bRollArmed = true;
 	bool m_bTilted;
 	int m_iTiltSinceMs;
+	int m_iTiltSinceStep;						//!< the rollover's onset_step
+	int m_iTiltEpisode = -1;
 	bool m_bUpright;
 	int m_iUprightSinceMs;
 
@@ -129,7 +149,7 @@ class DC_CrashSlot
 }
 
 //------------------------------------------------------------------------------------------------
-[ComponentEditorProps(category: "GameScripted/DataCapture", description: "dc-2.0 crash events (contract 9.5.1): world-frame delta-v collisions, vanilla contacts, damage, fire, driver, seat and rollover of every session vehicle; the ego's crash termination")]
+[ComponentEditorProps(category: "GameScripted/DataCapture", description: "dc-2.0 crash events (contract 9.5.1): world-time delta-v collisions, vanilla contacts, damage, fire, driver, seat and rollover of every session vehicle; the ego's crash termination and cool-down")]
 class DC_CrashWatchClass : DC_SessionModuleClass
 {
 }
@@ -138,13 +158,16 @@ class DC_CrashWatchClass : DC_SessionModuleClass
 class DC_CrashWatch : DC_SessionModule
 {
 	// === DETECTOR (session.json events.*, TBD-10; PROVISIONAL until the TBD-10 probe, re-measured per build_key and on 1.9) ===
-	[Attribute("4", UIWidgets.Slider, "Collision onset: horizontal world-frame delta-v over the window [m/s] (TBD-10, PROVISIONAL: 2 x the E-01 full-braking maximum per 100 ms; re-measure per build_key and on 1.9)", "0.5 50 0.1", category: "Crash")]
+	[Attribute("4", UIWidgets.Slider, "Collision onset: horizontal world-frame delta-v over the window of world time [m/s] (TBD-10, PROVISIONAL: 2 x the E-01 full-braking maximum per 100 ms; re-measure per build_key and on 1.9)", "0.5 50 0.1", category: "Crash")]
 	protected float m_fCollisionDvMps;
 
-	[Attribute("100", UIWidgets.Slider, "Delta-v window [ms]; W = floor(window / slice + 0.5) physics steps, at least 1 (TBD-10)", "10 1000 1", category: "Crash")]
+	[Attribute("100", UIWidgets.Slider, "Delta-v window [ms of world time]: v_ref is interpolated at t - window (TBD-10)", "10 1000 1", category: "Crash")]
 	protected int m_iCollisionWindowMs;
 
-	[Attribute("200", UIWidgets.Slider, "dv_mps is the peak delta-v over this long after the onset [ms] (TBD-10)", "0 2000 1", category: "Crash")]
+	[Attribute("50", UIWidgets.Slider, "Gap tolerance [ms]: samples around t - window more than window + this apart restart the history (TBD-10)", "0 1000 1", category: "Crash")]
+	protected int m_iCollisionWindowTolMs;
+
+	[Attribute("200", UIWidgets.Slider, "dv_mps is the peak delta-v over this much world time after the onset [ms] (TBD-10)", "0 2000 1", category: "Crash")]
 	protected int m_iCollisionPeakMs;
 
 	[Attribute("1000", UIWidgets.Slider, "Per-slot refractory after an onset [ms]: further crossings belong to the same impact (TBD-10)", "0 10000 10", category: "Crash")]
@@ -152,6 +175,9 @@ class DC_CrashWatch : DC_SessionModule
 
 	[Attribute("250", UIWidgets.Slider, "An episode end waits at most this long after the onset for the ego's collision row [ms] (TBD-10)", "0 2000 1", category: "Crash")]
 	protected int m_iEpisodeEndWaitMs;
+
+	[Attribute("3000", UIWidgets.Slider, "No new episode until this long after the ego's last terminal crash event [ms] (TBD-10: refractory + rollover hold + a poll + the row wait, and the car comes to rest)", "0 60000 100", category: "Crash")]
+	protected int m_iCrashCooldownMs;
 
 	[Attribute("0.5", UIWidgets.Slider, "rollover when up_y stays below this (0.5 = 60 deg of tilt; TBD-10)", "-1 1 0.01", category: "Crash")]
 	protected float m_fRolloverUpY;
@@ -166,6 +192,7 @@ class DC_CrashWatch : DC_SessionModule
 	protected bool m_bUseContactHook;
 
 	// === CONSTANTS (contract 9.5.1) ===
+	static const int RING_CAPACITY = 32;			//!< samples per slot: the window at any step of 5 ms or more
 	static const int SUPPRESS_AFTER_WATCH_MS = 1000;
 	static const int SUPPRESS_AFTER_TELEPORT_MS = 500;
 	static const int CONTACT_LEAD_MS = 100;			//!< a contact may come this long before its onset
@@ -174,6 +201,7 @@ class DC_CrashWatch : DC_SessionModule
 	static const int ROW_MIN_FRAMES = 2;
 	static const int PARTNER_STEPS = 3;
 	static const float PARTNER_DIST_M = 10;
+	static const int PARENT_DEPTH_MAX = 8;			//!< classification walks at most this many parents
 	static const float ROLLOVER_REARM_UP_Y = 0.8;
 	static const int ROLLOVER_REARM_MS = 2000;
 	static const string TERMINATION_COLLISION = "collision";
@@ -202,8 +230,9 @@ class DC_CrashWatch : DC_SessionModule
 	protected DC_StreamRecorder m_Recorder;
 	protected ref array<ref DC_CrashSlot> m_aSlots = {};
 	protected bool m_bOpen;
-	protected int m_iWindowSteps = 1;
 	protected int m_iNextPollMs;
+	protected bool m_bEgoTerminalSeen;
+	protected int m_iLastEgoTerminalMs;			//!< world_time_ms of the ego's last terminal crash event
 
 	// session_end.json observed
 	protected int m_iCollisionRows;
@@ -211,6 +240,7 @@ class DC_CrashWatch : DC_SessionModule
 	protected int m_iContactsSeen;
 	protected int m_iContactsMerged;
 	protected int m_iContactsOverwritten;
+	protected int m_iHistoryRestarts;
 
 	//------------------------------------------------------------------------------------------------
 	override int GetDispatchOrder()
@@ -236,16 +266,18 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! session.json events.* (contract 10.1) and the window in steps (observed)
+	//! session.json events.* (contract 10.1, in its order)
 	override void WriteSessionJson(string section, notnull DC_JsonWriter json)
 	{
 		if (section == "events")
 		{
 			json.AddFloat("collision_dv_mps", m_fCollisionDvMps, 3);
 			json.AddInt("collision_window_ms", m_iCollisionWindowMs);
+			json.AddInt("collision_window_tol_ms", m_iCollisionWindowTolMs);
 			json.AddInt("collision_peak_ms", m_iCollisionPeakMs);
 			json.AddInt("collision_refractory_ms", m_iCollisionRefractoryMs);
 			json.AddInt("episode_end_wait_ms", m_iEpisodeEndWaitMs);
+			json.AddInt("crash_cooldown_ms", m_iCrashCooldownMs);
 			json.AddFloat("rollover_up_y", m_fRolloverUpY, 3);
 			json.AddInt("rollover_hold_ms", m_iRolloverHoldMs);
 			json.AddInt("state_poll_ms", m_iStatePollMs);
@@ -253,18 +285,14 @@ class DC_CrashWatch : DC_SessionModule
 			return;
 		}
 
-		if (section != "observed")
-			return;
-
-		json.AddInt("crash_window_steps", ComputeWindowSteps());
-		json.AddBool("crash_threshold_provisional", true);
+		if (section == "observed")
+			json.AddBool("crash_threshold_provisional", true);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! The ego is watched from the open on (traffic slots from DD-4/T2 call WatchSlot); the vanilla hook targets this
 	override bool OnSessionOpen(notnull DC_Session session)
 	{
-		m_iWindowSteps = ComputeWindowSteps();
 		m_iNextPollMs = 0;
 		m_bOpen = true;
 		s_Active = this;
@@ -272,7 +300,7 @@ class DC_CrashWatch : DC_SessionModule
 		if (ego)
 			WatchSlot(session.GetEgoSlotId(), ego);
 
-		Print(string.Format(LOG + "watching %1 slot(s): collision dv %2 m/s over %3 ms (%4 steps, PROVISIONAL), contacts %5", m_aSlots.Count(), m_fCollisionDvMps.ToString(-1, 2), m_iCollisionWindowMs, m_iWindowSteps, GetContactSource()), LogLevel.NORMAL);
+		Print(string.Format(LOG + "watching %1 slot(s): collision dv %2 m/s over %3 ms of world time (gap tolerance %4 ms, PROVISIONAL), contacts %5", m_aSlots.Count(), m_fCollisionDvMps.ToString(-1, 2), m_iCollisionWindowMs, m_iCollisionWindowTolMs, GetContactSource()), LogLevel.NORMAL);
 		return true;
 	}
 
@@ -338,6 +366,7 @@ class DC_CrashWatch : DC_SessionModule
 		m_Session.NoteObserved("crash_contacts_seen", m_iContactsSeen.ToString());
 		m_Session.NoteObserved("crash_contacts_merged", m_iContactsMerged.ToString());
 		m_Session.NoteObserved("crash_contacts_overwritten", m_iContactsOverwritten.ToString());
+		m_Session.NoteObserved("crash_history_restarts", m_iHistoryRestarts.ToString());
 		m_bOpen = false;
 	}
 
@@ -364,7 +393,7 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	// Module API (DC_EgoSession, DC_StreamRecorder, DC_Session, traffic from DD-4/T2)
+	// Module API (DC_EgoSession, DC_StreamRecorder, DC_Session, DC_DriverContext, traffic from DD-4/T2)
 	//------------------------------------------------------------------------------------------------
 	//! Watch a vehicle slot from now on (its slot id from DC_VehicleRegistry). Writes no row: the first poll compares
 	//! with the defaults of contract 9.5.1. A slot already watched is left as it is
@@ -390,8 +419,9 @@ class DC_CrashWatch : DC_SessionModule
 			}
 		}
 
-		slot.m_aVelX.Resize(m_iWindowSteps + 1);
-		slot.m_aVelZ.Resize(m_iWindowSteps + 1);
+		slot.m_aSampleMs.Resize(RING_CAPACITY);
+		slot.m_aVelX.Resize(RING_CAPACITY);
+		slot.m_aVelZ.Resize(RING_CAPACITY);
 		for (int i = 0; i < CONTACT_RECORDS; i++)
 		{
 			slot.m_aContacts.Insert(new DC_CrashContact());
@@ -419,7 +449,7 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! telemetry.dv_max_mps: the largest delta-v of the slot since the last call. false while none exists
+	//! telemetry.dv_max_mps: the largest dv_h of the slot since the last call. false while none was evaluated
 	bool TakeDvMax(int slotId, out float value)
 	{
 		DC_CrashSlot slot = FindSlot(slotId);
@@ -450,17 +480,28 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! true while the vehicle cannot drive (movement damage >= 1) or burns: no new episode begins (contract 9.5.1)
-	bool IsSlotDisabled(int slotId)
+	//! true while no new episode may begin for the slot (contract 9.5.1): its collision row is pending, the ego's last
+	//! terminal crash event is younger than m_iCrashCooldownMs, or the vehicle is tilted, immobile or burning
+	//! \param[out] reason the first blocking condition, empty when none
+	bool IsEpisodeBlocked(int slotId, out string reason)
 	{
+		reason = string.Empty;
 		DC_CrashSlot slot = FindSlot(slotId);
-		if (!slot || !slot.m_Damage)
+		if (!slot)
 			return false;
 
-		if (slot.m_Damage.GetMovementDamage() >= 1)
-			return true;
+		if (slot.m_bPending)
+			reason = "its collision row is pending";
+		else if (slotId == m_Session.GetEgoSlotId() && m_bEgoTerminalSeen && m_Session.GetWorldMs() < m_iLastEgoTerminalMs + m_iCrashCooldownMs)
+			reason = "the crash cool-down runs";
+		else if (slot.m_bTilted)
+			reason = "it is tilted";
+		else if (slot.m_Damage && slot.m_Damage.GetMovementDamage() >= 1)
+			reason = "it is immobile";
+		else if (FireStateOf(slot) != SCR_EBurningState.NONE)
+			reason = "it burns";
 
-		return FireStateOf(slot) != SCR_EBurningState.NONE;
+		return !reason.IsEmpty();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -493,12 +534,22 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! A teleport or respawn of the slot was logged: no onset for SUPPRESS_AFTER_TELEPORT_MS (a reset is a one-step
-	//! velocity jump). Called by DC_Session.LogVehicleEvent
+	//! Before a slot is moved by SetWorldTransform (a teleport or respawn; contract 9.5.1): its pending row is written
+	//! with the peak so far and its held contacts are written, then its history is cleared and the suppression starts,
+	//! so neither the jump nor the post-reset velocity is compared with the pre-reset history
+	static void PrepareReposition(int slotId)
+	{
+		if (s_Active)
+			s_Active.IsolateSlot(slotId);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A teleport or respawn row of the slot was logged (DC_Session.LogVehicleEventInEpisode): the same isolation
+	//! again from now, also for a reset that did not call PrepareReposition
 	static void NoteRepositioned(int slotId)
 	{
 		if (s_Active)
-			s_Active.SuppressSlot(slotId);
+			s_Active.IsolateSlot(slotId);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -511,16 +562,27 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! See NoteRepositioned
-	void SuppressSlot(int slotId)
+	//! See PrepareReposition and NoteRepositioned: the pending row (peak so far) and the held contacts are written, the
+	//! history is cleared, the tilt timer restarts and the suppression runs from now
+	void IsolateSlot(int slotId)
 	{
 		DC_CrashSlot slot = FindSlot(slotId);
-		if (m_bOpen && slot)
-			slot.m_iSuppressUntilMs = m_Session.GetWorldMs() + SUPPRESS_AFTER_TELEPORT_MS;
+		if (!m_bOpen || !slot)
+			return;
+
+		int worldMs = m_Session.GetWorldMs();
+		FlushSlot(slot, worldMs, m_Session.GetRenderFrame(), true);
+
+		slot.m_iRingCount = 0;
+		slot.m_bTilted = false;
+		slot.m_bUpright = false;
+		int until = worldMs + SUPPRESS_AFTER_TELEPORT_MS;
+		if (until > slot.m_iSuppressUntilMs)
+			slot.m_iSuppressUntilMs = until;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! See NoteContact
+	//! See NoteContact. Exception-free: every reference is checked before use
 	void AddContact(notnull IEntity owner, notnull SCR_CollisionDamageContainer collision)
 	{
 		if (!m_bOpen || !m_bUseContactHook)
@@ -531,17 +593,18 @@ class DC_CrashWatch : DC_SessionModule
 			return;
 
 		m_iContactsSeen++;
-		IEntity root;
-		IEntity other = collision.m_Other;
-		if (other)
-			root = other.GetRootParent();
-
 		int otherSlot = -1;
-		int otherKind = ClassifyOther(root, otherSlot);
+		IEntity named;
+		int otherKind = ClassifyOther(collision.m_Other, otherSlot, named);
 		DC_CrashContact record = FreeRecord(slot);
+		if (!record)
+			return;
+
 		record.m_bHeld = true;
 		record.m_iWorldMs = m_Session.GetWorldMs();
-		record.m_Other = root;
+		record.m_iStep = m_Session.GetLastPostStep();
+		record.m_iEpisode = m_Session.GetEpisodeId();
+		record.m_Other = named;
 		record.m_iOtherKind = otherKind;
 		record.m_iOtherSlot = otherSlot;
 		record.m_fImpulse = collision.m_fImpulse;
@@ -562,46 +625,28 @@ class DC_CrashWatch : DC_SessionModule
 		IEntity vehicle = slot.m_Vehicle;
 		if (!vehicle || vehicle.IsDeleted())
 		{
-			slot.m_iSamples = 0;
+			slot.m_iRingCount = 0;
 			return;
 		}
 
 		Physics physics = vehicle.GetPhysics();
 		if (!physics)
 		{
-			slot.m_iSamples = 0;
+			slot.m_iRingCount = 0;
 			return;
 		}
 
 		vector velocity = physics.GetVelocity();
-		int ringSize = slot.m_aVelX.Count();
-		slot.m_iRingPos = (slot.m_iRingPos + 1) % ringSize;
-		slot.m_aVelX.Set(slot.m_iRingPos, velocity[0]);
-		slot.m_aVelZ.Set(slot.m_iRingPos, velocity[2]);
-		if (slot.m_iSamples < ringSize)
-			slot.m_iSamples++;
-
 		vector transform[4];
 		vehicle.GetWorldTransform(transform);
 		vector upAxis = transform[1];
-		StepRollover(slot, upAxis[1], worldMs);
-		if (slot.m_iSamples < ringSize)
-			return;
+		StepRollover(slot, upAxis[1], physicsStep, worldMs);
 
-		int oldest = (slot.m_iRingPos + 1) % ringSize;
-		float dx = velocity[0] - slot.m_aVelX.Get(oldest);
-		float dz = velocity[2] - slot.m_aVelZ.Get(oldest);
-		float dv = Math.Sqrt(dx * dx + dz * dz);
-		if (!slot.m_bHasDvMax || dv > slot.m_fDvMax)
-		{
-			slot.m_fDvMax = dv;
-			slot.m_bHasDvMax = true;
-		}
-
+		// the peak of a pending onset, against its own v_ref, over m_iCollisionPeakMs of world time
 		if (slot.m_bPending && worldMs <= slot.m_iOnsetMs + m_iCollisionPeakMs)
 		{
-			float px = velocity[0] - slot.m_fBaseX;
-			float pz = velocity[2] - slot.m_fBaseZ;
+			float px = velocity[0] - slot.m_fRefX;
+			float pz = velocity[2] - slot.m_fRefZ;
 			float peak = Math.Sqrt(px * px + pz * pz);
 			if (peak > slot.m_fPeak)
 			{
@@ -611,17 +656,32 @@ class DC_CrashWatch : DC_SessionModule
 			}
 		}
 
+		float refX;
+		float refZ;
+		if (!SampleVelocity(slot, worldMs, velocity[0], velocity[2], refX, refZ))
+			return;
+
+		float dx = velocity[0] - refX;
+		float dz = velocity[2] - refZ;
+		float dv = Math.Sqrt(dx * dx + dz * dz);
+		if (!slot.m_bHasDvMax || dv > slot.m_fDvMax)
+		{
+			slot.m_fDvMax = dv;
+			slot.m_bHasDvMax = true;
+		}
+
 		if (dv < m_fCollisionDvMps || slot.m_bPending || worldMs < slot.m_iSuppressUntilMs || worldMs < slot.m_iRefractoryUntilMs)
 			return;
 
-		// Onset: the base is v_h(P - W), the axes are the vehicle's at the onset (dv_lon forward-positive, dv_lat right)
+		// Onset: v_ref and the episode are kept; the axes are the vehicle's at the onset (dv_lon forward-positive)
 		slot.m_bPending = true;
 		slot.m_iOnsetStep = physicsStep;
 		slot.m_iOnsetMs = worldMs;
 		slot.m_iOnsetFrame = m_Session.GetRenderFrame();
+		slot.m_iOnsetEpisode = m_Session.GetEpisodeId();
 		slot.m_vOnsetPos = transform[3];
-		slot.m_fBaseX = slot.m_aVelX.Get(oldest);
-		slot.m_fBaseZ = slot.m_aVelZ.Get(oldest);
+		slot.m_fRefX = refX;
+		slot.m_fRefZ = refZ;
 		slot.m_fPeak = dv;
 		slot.m_fPeakX = dx;
 		slot.m_fPeakZ = dz;
@@ -639,18 +699,70 @@ class DC_CrashWatch : DC_SessionModule
 		slot.m_fFwdZ = fwd[2] / fwdLength;
 		slot.m_fRightX = right[0] / rightLength;
 		slot.m_fRightZ = right[2] / rightLength;
-		slot.m_bMatched = false;
-		slot.m_MatchedOther = null;
-		slot.m_iMatchedKind = OTHER_UNKNOWN;
-		slot.m_iMatchedSlot = -1;
-		slot.m_fMatchedImpulse = 0;
 		slot.m_iRefractoryUntilMs = worldMs + m_iCollisionRefractoryMs;
-		LatchEgo(slot, TERMINATION_COLLISION);
+		NoteTerminal(slot, TERMINATION_COLLISION, slot.m_iOnsetEpisode, worldMs);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! up_y below m_fRolloverUpY for m_iRolloverHoldMs: rollover (once until re-armed by 2 s above 0.8)
-	protected void StepRollover(notnull DC_CrashSlot slot, float upY, int worldMs)
+	//! Adds the sample (worldMs, vx, vz) to the slot's ring and interpolates v_ref at worldMs - window (contract
+	//! 9.5.1, data/dc2/crash_dv.py). A sample whose world time does not advance replaces the newest one.
+	//! \return false when the callback is not evaluated (no reference yet, or a gap: the history then restarts)
+	protected bool SampleVelocity(notnull DC_CrashSlot slot, int worldMs, float vx, float vz, out float refX, out float refZ)
+	{
+		refX = 0;
+		refZ = 0;
+		if (slot.m_iRingCount > 0 && worldMs <= slot.m_aSampleMs.Get(slot.m_iRingHead))
+		{
+			slot.m_aVelX.Set(slot.m_iRingHead, vx);
+			slot.m_aVelZ.Set(slot.m_iRingHead, vz);
+			return false;
+		}
+
+		slot.m_iRingHead = (slot.m_iRingHead + 1) % RING_CAPACITY;
+		slot.m_aSampleMs.Set(slot.m_iRingHead, worldMs);
+		slot.m_aVelX.Set(slot.m_iRingHead, vx);
+		slot.m_aVelZ.Set(slot.m_iRingHead, vz);
+		if (slot.m_iRingCount < RING_CAPACITY)
+			slot.m_iRingCount++;
+
+		int target = worldMs - m_iCollisionWindowMs;
+		for (int back = 1; back < slot.m_iRingCount; back++)
+		{
+			int older = (slot.m_iRingHead - back + RING_CAPACITY) % RING_CAPACITY;
+			int olderMs = slot.m_aSampleMs.Get(older);
+			if (olderMs > target)
+				continue;
+
+			int newer = (older + 1) % RING_CAPACITY;
+			int newerMs = slot.m_aSampleMs.Get(newer);
+			if (newerMs - olderMs > m_iCollisionWindowMs + m_iCollisionWindowTolMs)
+			{
+				// a gap (a hitch, a reset): the history restarts at the current sample, nothing is compared across it
+				slot.m_iRingCount = 1;
+				m_iHistoryRestarts++;
+				return false;
+			}
+
+			float part = target - olderMs;
+			float span = newerMs - olderMs;
+			float f = 0;
+			if (span > 0)
+				f = part / span;
+
+			float olderX = slot.m_aVelX.Get(older);
+			float olderZ = slot.m_aVelZ.Get(older);
+			refX = olderX + (slot.m_aVelX.Get(newer) - olderX) * f;
+			refZ = olderZ + (slot.m_aVelZ.Get(newer) - olderZ) * f;
+			return true;
+		}
+
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! up_y below m_fRolloverUpY for m_iRolloverHoldMs: rollover with onset_step = the first tilted step (once until
+	//! re-armed by 2 s above 0.8)
+	protected void StepRollover(notnull DC_CrashSlot slot, float upY, int physicsStep, int worldMs)
 	{
 		if (upY < m_fRolloverUpY)
 		{
@@ -659,13 +771,15 @@ class DC_CrashWatch : DC_SessionModule
 			{
 				slot.m_bTilted = true;
 				slot.m_iTiltSinceMs = worldMs;
+				slot.m_iTiltSinceStep = physicsStep;
+				slot.m_iTiltEpisode = m_Session.GetEpisodeId();
 			}
 
 			if (slot.m_bRollArmed && worldMs - slot.m_iTiltSinceMs >= m_iRolloverHoldMs)
 			{
 				slot.m_bRollArmed = false;
-				LogRow(slot, "rollover", "up_y=" + FormatFloat(upY));
-				LatchEgo(slot, TERMINATION_ROLLOVER);
+				LogRowIn(slot, slot.m_iTiltEpisode, "rollover", "onset_step=" + slot.m_iTiltSinceStep.ToString() + ";up_y=" + FormatFloat(upY));
+				NoteTerminal(slot, TERMINATION_ROLLOVER, slot.m_iTiltEpisode, worldMs);
 			}
 
 			return;
@@ -696,14 +810,13 @@ class DC_CrashWatch : DC_SessionModule
 	{
 		if (slot.m_bPending)
 		{
-			MatchContacts(slot);
 			bool peakDone = worldMs >= slot.m_iOnsetMs + m_iCollisionPeakMs;
 			bool waited = (worldMs >= slot.m_iOnsetMs + m_iEpisodeEndWaitMs) && (renderFrame - slot.m_iOnsetFrame >= ROW_MIN_FRAMES);
-			if (force || waited || (peakDone && slot.m_bMatched))
+			if (force || waited || (peakDone && HasWindowContact(slot)))
 				WriteCollisionRow(slot);
 		}
 
-		// Contacts wait for a pending row (they may complete it) and for CONTACT_LEAD_MS (an onset may still follow)
+		// Contacts wait for a pending row (it may use them) and for CONTACT_LEAD_MS (an onset may still follow)
 		if (slot.m_bPending)
 			return;
 
@@ -724,40 +837,15 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Contacts within [onset - CONTACT_LEAD_MS, onset + CONTACT_LAG_MS] complete the pending row: the largest impulse
-	//! names the other entity; the other contacts with that entity merge into it
-	protected void MatchContacts(notnull DC_CrashSlot slot)
+	protected bool HasWindowContact(notnull DC_CrashSlot slot)
 	{
-		DC_CrashContact best;
 		foreach (DC_CrashContact record : slot.m_aContacts)
 		{
-			if (!record.m_bHeld || !IsInOnsetWindow(slot, record))
-				continue;
-
-			if (!best || record.m_fImpulse > best.m_fImpulse)
-				best = record;
+			if (record.m_bHeld && IsInOnsetWindow(slot, record))
+				return true;
 		}
 
-		if (!best)
-			return;
-
-		if (!slot.m_bMatched || best.m_fImpulse > slot.m_fMatchedImpulse)
-		{
-			slot.m_bMatched = true;
-			slot.m_MatchedOther = best.m_Other;
-			slot.m_iMatchedKind = best.m_iOtherKind;
-			slot.m_iMatchedSlot = best.m_iOtherSlot;
-			slot.m_fMatchedImpulse = best.m_fImpulse;
-		}
-
-		foreach (DC_CrashContact merged : slot.m_aContacts)
-		{
-			if (merged.m_bHeld && IsInOnsetWindow(slot, merged) && merged.m_Other == slot.m_MatchedOther)
-			{
-				merged.m_bHeld = false;
-				m_iContactsMerged++;
-			}
-		}
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -781,19 +869,41 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The collision row of the pending onset (contract 9.5.1 key order)
+	//! The collision row of the pending onset (contract 9.5.1 key order), into the onset's episode. The contacts in
+	//! the onset window are chosen now: the largest impulse names other and the contacts with that entity merge; the
+	//! others stay held and become their own rows
 	protected void WriteCollisionRow(notnull DC_CrashSlot slot)
 	{
+		DC_CrashContact best;
+		foreach (DC_CrashContact record : slot.m_aContacts)
+		{
+			if (!record.m_bHeld || !IsInOnsetWindow(slot, record))
+				continue;
+
+			if (!best || record.m_fImpulse > best.m_fImpulse)
+				best = record;
+		}
+
 		int otherKind = OTHER_UNKNOWN;
 		int otherSlot = -1;
 		IEntity other;
+		float impulse;
 		string src = "dv";
-		if (slot.m_bMatched)
+		if (best)
 		{
-			otherKind = slot.m_iMatchedKind;
-			otherSlot = slot.m_iMatchedSlot;
-			other = slot.m_MatchedOther;
+			otherKind = best.m_iOtherKind;
+			otherSlot = best.m_iOtherSlot;
+			other = best.m_Other;
+			impulse = best.m_fImpulse;
 			src = "dv_contact";
+			foreach (DC_CrashContact merged : slot.m_aContacts)
+			{
+				if (merged.m_bHeld && IsInOnsetWindow(slot, merged) && merged.m_Other == other)
+				{
+					merged.m_bHeld = false;
+					m_iContactsMerged++;
+				}
+			}
 		}
 		else
 		{
@@ -804,11 +914,11 @@ class DC_CrashWatch : DC_SessionModule
 
 		float dvLon = slot.m_fPeakX * slot.m_fFwdX + slot.m_fPeakZ * slot.m_fFwdZ;
 		float dvLat = slot.m_fPeakX * slot.m_fRightX + slot.m_fPeakZ * slot.m_fRightZ;
-		float speedBefore = Math.Sqrt(slot.m_fBaseX * slot.m_fBaseX + slot.m_fBaseZ * slot.m_fBaseZ);
+		float speedBefore = Math.Sqrt(slot.m_fRefX * slot.m_fRefX + slot.m_fRefZ * slot.m_fRefZ);
 		string payload = "onset_step=" + slot.m_iOnsetStep.ToString() + ";dv_mps=" + FormatFloat(slot.m_fPeak) + ";dv_lon_mps=" + FormatFloat(dvLon) + ";dv_lat_mps=" + FormatFloat(dvLat) + ";v_mps=" + FormatFloat(speedBefore);
 		payload += OtherKeys(otherKind, otherSlot, other);
-		if (slot.m_bMatched)
-			payload += ";impulse_ns=" + FormatFloat(slot.m_fMatchedImpulse);
+		if (best)
+			payload += ";impulse_ns=" + FormatFloat(impulse);
 
 		payload += ";src=" + src;
 		slot.m_bPending = false;
@@ -819,21 +929,22 @@ class DC_CrashWatch : DC_SessionModule
 		slot.m_iLastOnsetStep = slot.m_iOnsetStep;
 		slot.m_vLastOnsetPos = slot.m_vOnsetPos;
 		m_iCollisionRows++;
-		LogRow(slot, "collision", payload);
+		LogRowIn(slot, slot.m_iOnsetEpisode, "collision", payload);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! A collision row of a contact without an onset (src contact: below the detector, never terminal)
+	//! A collision row of a contact without an onset (src contact: below the detector, never terminal), at the step and
+	//! in the episode of its report
 	protected void WriteContactRow(notnull DC_CrashSlot slot, notnull DC_CrashContact record)
 	{
-		string payload = "onset_step=" + m_Session.GetLastPostStep().ToString() + ";dv_mps=" + FormatFloat(record.m_fDv) + ";v_mps=" + FormatFloat(record.m_fSpeedBefore);
+		string payload = "onset_step=" + record.m_iStep.ToString() + ";dv_mps=" + FormatFloat(record.m_fDv) + ";v_mps=" + FormatFloat(record.m_fSpeedBefore);
 		payload += OtherKeys(record.m_iOtherKind, record.m_iOtherSlot, record.m_Other);
 		payload += ";impulse_ns=" + FormatFloat(record.m_fImpulse) + ";src=contact";
 		slot.m_bHasLastRow = true;
 		slot.m_iLastRowMs = record.m_iWorldMs;
 		slot.m_LastRowOther = record.m_Other;
 		m_iContactRows++;
-		LogRow(slot, "collision", payload);
+		LogRowIn(slot, record.m_iEpisode, "collision", payload);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -896,6 +1007,8 @@ class DC_CrashWatch : DC_SessionModule
 		if (!vehicle || vehicle.IsDeleted())
 			return;
 
+		int worldMs = m_Session.GetWorldMs();
+		int episodeId = m_Session.GetEpisodeId();
 		SCR_DamageManagerComponent damage = slot.m_Damage;
 		if (damage)
 		{
@@ -906,9 +1019,9 @@ class DC_CrashWatch : DC_SessionModule
 			{
 				slot.m_eDamageState = damageState;
 				slot.m_bImmobile = immobile;
-				LogRow(slot, "veh_damage", "state=" + DamageStateName(damageState) + ";health=" + FormatFloat(damage.GetHealthScaled()) + ";movement_damage=" + FormatFloat(movementDamage));
+				LogRowIn(slot, episodeId, "veh_damage", "state=" + DamageStateName(damageState) + ";health=" + FormatFloat(damage.GetHealthScaled()) + ";movement_damage=" + FormatFloat(movementDamage));
 				if (damageState != EDamageState.UNDAMAGED || immobile)
-					LatchEgo(slot, TERMINATION_COLLISION);
+					NoteTerminal(slot, TERMINATION_COLLISION, episodeId, worldMs);
 			}
 
 			SCR_EBurningState fireState = FireStateOf(slot);
@@ -918,22 +1031,22 @@ class DC_CrashWatch : DC_SessionModule
 				slot.m_bOnFire = onFire;
 				if (onFire)
 				{
-					LogRow(slot, "veh_fire_start", "fire_state=" + FireStateName(fireState));
-					LatchEgo(slot, TERMINATION_COLLISION);
+					LogRowIn(slot, episodeId, "veh_fire_start", "fire_state=" + FireStateName(fireState));
+					NoteTerminal(slot, TERMINATION_COLLISION, episodeId, worldMs);
 				}
 				else
 				{
-					LogRow(slot, "veh_fire_end", string.Empty);
+					LogRowIn(slot, episodeId, "veh_fire_end", string.Empty);
 				}
 			}
 		}
 
-		PollDriver(slot, vehicle);
+		PollDriver(slot, vehicle, episodeId);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! driver_state, dismount and remount of the pilot seat (contract 9.5.1)
-	protected void PollDriver(notnull DC_CrashSlot slot, notnull IEntity vehicle)
+	protected void PollDriver(notnull DC_CrashSlot slot, notnull IEntity vehicle, int episodeId)
 	{
 		if (!slot.m_Car)
 			return;
@@ -953,7 +1066,7 @@ class DC_CrashWatch : DC_SessionModule
 			if (lifeState != slot.m_eDriverState)
 			{
 				slot.m_eDriverState = lifeState;
-				LogRow(slot, "driver_state", "state=" + LifeStateName(lifeState) + ";in_seat=" + DC_LaunchGuard.BoolText(inSeat));
+				LogRowIn(slot, episodeId, "driver_state", "state=" + LifeStateName(lifeState) + ";in_seat=" + DC_LaunchGuard.BoolText(inSeat));
 			}
 		}
 
@@ -961,7 +1074,7 @@ class DC_CrashWatch : DC_SessionModule
 		{
 			slot.m_bInSeat = false;
 			slot.m_bDismounted = true;
-			LogRow(slot, "dismount", "driver=" + LifeStateName(slot.m_eDriverState) + ";v_mps=" + FormatFloat(HorizontalSpeedOf(vehicle)));
+			LogRowIn(slot, episodeId, "dismount", "driver=" + LifeStateName(slot.m_eDriverState) + ";v_mps=" + FormatFloat(HorizontalSpeedOf(vehicle)));
 			return;
 		}
 
@@ -970,7 +1083,7 @@ class DC_CrashWatch : DC_SessionModule
 			// The first occupancy of a seat that was empty when the slot was watched writes no row (contract 9.5.1)
 			slot.m_bInSeat = true;
 			if (slot.m_bDismounted)
-				LogRow(slot, "remount", "driver=" + LifeStateName(slot.m_eDriverState));
+				LogRowIn(slot, episodeId, "remount", "driver=" + LifeStateName(slot.m_eDriverState));
 		}
 	}
 
@@ -980,6 +1093,9 @@ class DC_CrashWatch : DC_SessionModule
 	protected SCR_EBurningState FireStateOf(notnull DC_CrashSlot slot)
 	{
 		SCR_EBurningState highest = SCR_EBurningState.NONE;
+		if (!slot.m_Damage)
+			return highest;
+
 		bool burning;
 		foreach (SCR_FlammableHitZone zone : slot.m_aFlammable)
 		{
@@ -1003,17 +1119,24 @@ class DC_CrashWatch : DC_SessionModule
 	//------------------------------------------------------------------------------------------------
 	// Helpers
 	//------------------------------------------------------------------------------------------------
-	//! The first terminal event of the ego's episode (DC_StreamRecorder ignores a later one and any outside an episode)
-	protected void LatchEgo(notnull DC_CrashSlot slot, string reason)
+	//! A terminal crash event of a slot confirmed now (contract 9.5.1): for the ego it starts the cool-down and is
+	//! latched as the termination of its own episode only (DC_StreamRecorder keeps the first one)
+	protected void NoteTerminal(notnull DC_CrashSlot slot, string reason, int episodeId, int worldMs)
 	{
-		if (m_Recorder && slot.m_iSlotId == m_Session.GetEgoSlotId())
+		if (slot.m_iSlotId != m_Session.GetEgoSlotId())
+			return;
+
+		m_bEgoTerminalSeen = true;
+		m_iLastEgoTerminalMs = worldMs;
+		if (m_Recorder && episodeId >= 0 && episodeId == m_Session.GetEpisodeId())
 			m_Recorder.LatchTermination(reason);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected void LogRow(notnull DC_CrashSlot slot, string kind, string payload)
+	//! One events row of the slot, owned by episodeId (the episode of its occurrence)
+	protected void LogRowIn(notnull DC_CrashSlot slot, int episodeId, string kind, string payload)
 	{
-		m_Session.LogVehicleEvent(slot.m_iSlotId, kind, payload);
+		m_Session.LogVehicleEventInEpisode(slot.m_iSlotId, episodeId, kind, payload);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1063,40 +1186,32 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! OTHER_* of the other side's root entity, in the order of contract 9.5.1
+	//! OTHER_* of the contact's other entity: the classes of contract 9.5.1 are tested on the entity, then on each
+	//! parent up to the root (a generator tree or a composition part is its own class); without a match the entity's
+	//! physics decides dynamic or static
 	//! \param[out] otherSlot the watched slot of a vehicle, else -1
-	protected int ClassifyOther(IEntity root, out int otherSlot)
+	//! \param[out] named the entity that matched (the other entity itself without a match): identity and prefab
+	protected int ClassifyOther(IEntity other, out int otherSlot, out IEntity named)
 	{
 		otherSlot = -1;
-		if (!root)
+		named = other;
+		if (!other)
 			return OTHER_UNKNOWN;
 
-		DC_CrashSlot watched = FindSlotByEntity(root);
-		if (watched)
+		IEntity level = other;
+		for (int depth = 0; level && depth < PARENT_DEPTH_MAX; depth++)
 		{
-			otherSlot = watched.m_iSlotId;
-			return OTHER_VEHICLE;
+			int levelKind = ClassifyEntity(level, otherSlot);
+			if (levelKind != OTHER_UNKNOWN)
+			{
+				named = level;
+				return levelKind;
+			}
+
+			level = level.GetParent();
 		}
 
-		if (Vehicle.Cast(root))
-			return OTHER_VEHICLE;
-
-		if (ChimeraCharacter.Cast(root))
-			return OTHER_CHARACTER;
-
-		if (BaseTree.Cast(root))
-			return OTHER_TREE;
-
-		if (Building.Cast(root))
-			return OTHER_BUILDING;
-
-		if (SCR_IndestructibleEnvironmentalEntity.Cast(root))
-			return OTHER_ROCK;
-
-		if (GenericTerrainEntity.Cast(root))
-			return OTHER_TERRAIN;
-
-		Physics physics = root.GetPhysics();
+		Physics physics = other.GetPhysics();
 		if (!physics)
 			return OTHER_UNKNOWN;
 
@@ -1107,19 +1222,37 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! W in physics steps: floor(window / slice + 0.5), at least 1
-	protected int ComputeWindowSteps()
+	//! OTHER_* of one entity by the class order of contract 9.5.1, OTHER_UNKNOWN when none matches
+	//! \param[out] otherSlot the watched slot of the entity, else -1 (always assigned)
+	protected int ClassifyEntity(notnull IEntity entity, out int otherSlot)
 	{
-		float sliceMs = m_Session.GetFixedTimeSliceS() * 1000;
-		if (sliceMs <= 0)
-			return 1;
+		otherSlot = -1;
+		DC_CrashSlot watched = FindSlotByEntity(entity);
+		if (watched)
+		{
+			otherSlot = watched.m_iSlotId;
+			return OTHER_VEHICLE;
+		}
 
-		float windowMs = m_iCollisionWindowMs;
-		int steps = Math.Floor(windowMs / sliceMs + 0.5);
-		if (steps < 1)
-			steps = 1;
+		if (Vehicle.Cast(entity))
+			return OTHER_VEHICLE;
 
-		return steps;
+		if (ChimeraCharacter.Cast(entity))
+			return OTHER_CHARACTER;
+
+		if (BaseTree.Cast(entity))
+			return OTHER_TREE;
+
+		if (Building.Cast(entity))
+			return OTHER_BUILDING;
+
+		if (SCR_IndestructibleEnvironmentalEntity.Cast(entity))
+			return OTHER_ROCK;
+
+		if (GenericTerrainEntity.Cast(entity))
+			return OTHER_TERRAIN;
+
+		return OTHER_UNKNOWN;
 	}
 
 	//------------------------------------------------------------------------------------------------

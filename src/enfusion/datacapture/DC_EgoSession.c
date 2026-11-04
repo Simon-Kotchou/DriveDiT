@@ -27,9 +27,12 @@
 //     (before any row of it): the entity exists, is not deleted, and still carries the registered GetID token. A loss
 //     before the first ctl row ends the session with zero_ego (0 rows, 0 images), later with ego_lost;
 //   - a destroyed ego (DamageManagerComponent.IsDestroyed) after the first ctl row is a crash, which is data (dc-2.0
-//     5.3): DC_CrashWatch writes its pending collision row, veh_damage state=destroyed and veh_fire_start when it
-//     burns, and the session ends at once with ego_destroyed (status ok); the open episode ends at the seal with the
-//     termination the crash watch latched (collision). Before the first ctl row it is still zero_ego;
+//     5.3), ended at one terminal step L, the last step whose rows are written: seen in OnStepPost, that step's rows
+//     are still written and the end follows in OnStepDecide (L = that step); seen at a frame start or before a step,
+//     L is the previous step. At L DC_CrashWatch writes the pending collision row, veh_damage state=destroyed and
+//     veh_fire_start when it burns, the session ends with ego_destroyed (status ok), and the seal ends the open
+//     episode at L (its end_world_ms is the world time of L) with the latched termination (collision). Before the
+//     first ctl row it is still zero_ego;
 //   - episodes: at a decision step (physics_step mod N == 0) after warmup_end, while no episode runs and the session
 //     is not stopping, the driver's BeginEpisode is asked in OnStepPre (so the rows of that step carry the episode;
 //     the null driver never begins one). A termination the driver reports, or the planned end, ends the episode at
@@ -38,7 +41,8 @@
 //     seal ends an episode still open at the last step (session_stop, or script_error after an error);
 //   - crash events (DC_CrashWatch, dc-2.0 9.5.1): the end of an episode waits while the ego's collision row is
 //     pending (at most events.episode_end_wait_ms after its onset), so the row carries the episode id and precedes
-//     episode_end; no episode begins while the ego is immobile (movement damage >= 1) or burning.
+//     episode_end; no episode begins while DC_CrashWatch.IsEpisodeBlocked (a pending collision row, the
+//     events.crash_cooldown_ms cool-down after the ego's last terminal crash event, tilted, immobile, burning).
 //
 // Release: the ego is parked and kept (it dies with the world); on world teardown only references are dropped.
 // ============================================================================
@@ -106,7 +110,8 @@ class DC_EgoSession : DC_SessionModule
 	protected int m_iEpisodeStartWorldMs;
 	protected int m_iLastWorldMs;
 	protected string m_sStopTermination;		//!< latched when the planned end begins during an episode
-	protected bool m_bDisabledNoted;			//!< the "no episode while the ego is immobile or burning" line was printed
+	protected string m_sBlockedNoted;			//!< the reason of the last "no new episode" line printed (once per reason)
+	protected bool m_bDestroyedAfterStep;		//!< destruction seen in OnStepPost: the session ends after this step's rows
 	protected string m_sEpisodeWeather;
 	protected float m_fEpisodeTodH;
 	protected float m_fEpisodeRain;
@@ -313,14 +318,14 @@ class DC_EgoSession : DC_SessionModule
 	//------------------------------------------------------------------------------------------------
 	override void OnFrameStart(int renderFrame)
 	{
-		CheckEgo();
+		CheckEgo(false);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! Liveness and identity first; then an episode may begin at a decision step
 	override void OnStepPre(int physicsStep, float timeSlice)
 	{
-		if (!CheckEgo())
+		if (!CheckEgo(false))
 			return;
 
 		if (m_iEpisodeId >= 0 || physicsStep % m_Session.GetStepsPerDecision() != 0)
@@ -334,7 +339,7 @@ class DC_EgoSession : DC_SessionModule
 	//! Liveness and identity again after the simulation, before any row of the step (order 10: before the streams)
 	override void OnStepPost(int physicsStep, float timeSlice, int worldMs)
 	{
-		if (!CheckEgo())
+		if (!CheckEgo(true))
 			return;
 
 		m_iLastWorldMs = worldMs;
@@ -346,6 +351,13 @@ class DC_EgoSession : DC_SessionModule
 	//! At a decision step, after its rows: the planned end or the driver's termination ends the episode here
 	override void OnStepDecide(int physicsStep)
 	{
+		// Destruction seen after this step's simulation: its rows are written, the session ends now (step L)
+		if (m_bDestroyedAfterStep)
+		{
+			EndDestroyed();
+			return;
+		}
+
 		if (m_iEpisodeId < 0 || physicsStep % m_Session.GetStepsPerDecision() != 0)
 			return;
 
@@ -441,9 +453,10 @@ class DC_EgoSession : DC_SessionModule
 
 	//------------------------------------------------------------------------------------------------
 	//! Fails the session when the ego is lost: zero_ego before the first ctl row (DC_StreamRecorder.HasCtlRow), ego_lost
-	//! after it. A destroyed ego after the first ctl row ends it with ego_destroyed (not an error, dc-2.0 5.3) once the
-	//! crash watch has written the crash rows
-	protected bool CheckEgo()
+	//! after it. A destroyed ego after the first ctl row ends it with ego_destroyed (not an error, dc-2.0 5.3) at the
+	//! terminal step L: afterStep (OnStepPost) lets this step's rows be written and ends in OnStepDecide; otherwise it
+	//! ends now
+	protected bool CheckEgo(bool afterStep)
 	{
 		string failure;
 		if (!IsEgoPresent(failure))
@@ -465,11 +478,24 @@ class DC_EgoSession : DC_SessionModule
 			return false;
 		}
 
+		if (afterStep)
+		{
+			m_bDestroyedAfterStep = true;
+			return true;
+		}
+
+		EndDestroyed();
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The crash rows at the terminal step L, then the end with ego_destroyed (the seal closes the episode at L)
+	protected void EndDestroyed()
+	{
 		if (m_CrashWatch)
 			m_CrashWatch.FinishDestroyedSlot(m_iSlotId);
 
 		m_Session.EndAtOnce(DC_Session.END_EGO_DESTROYED, "the ego is destroyed");
-		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -516,17 +542,18 @@ class DC_EgoSession : DC_SessionModule
 		if (!driver)
 			return;
 
-		// No episode while the ego cannot drive or burns (dc-2.0 9.5.1); repositioning is a teleport or respawn
-		if (m_CrashWatch && m_CrashWatch.IsSlotDisabled(m_iSlotId))
+		// No episode after a crash until the cool-down passed and the ego can drive (dc-2.0 9.5.1)
+		string blocked;
+		if (m_CrashWatch && m_CrashWatch.IsEpisodeBlocked(m_iSlotId, blocked))
 		{
-			if (!m_bDisabledNoted)
-				Print(LOG + "WARNING: no new episode: the ego is immobile or burning", LogLevel.WARNING);
+			if (blocked != m_sBlockedNoted)
+				Print(LOG + "WARNING: no new episode: " + blocked, LogLevel.WARNING);
 
-			m_bDisabledNoted = true;
+			m_sBlockedNoted = blocked;
 			return;
 		}
 
-		m_bDisabledNoted = false;
+		m_sBlockedNoted = string.Empty;
 		DC_EpisodeInfo info = new DC_EpisodeInfo();
 		info.m_iSeed = m_Session.GetTrialSeed() + m_iNextEpisodeId;
 		if (!driver.BeginEpisode(m_iNextEpisodeId, physicsStep, info))

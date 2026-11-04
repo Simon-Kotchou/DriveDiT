@@ -183,11 +183,23 @@ nothing is overwritten.
 traffic slots from DD-4/T2): `collision`, `veh_damage`, `veh_fire_start`, `veh_fire_end`, `driver_state`,
 `dismount`, `remount` and `rollover`, and the detector values in `session.json` `events.*`.
 
-- Collisions come from the horizontal world-frame velocity change over 100 ms, measured every physics step. The
-  threshold `m_fCollisionDvMps` 4.0 m/s is **provisional** (TBD-10): it must be measured again by the TBD-10 probe,
-  for every `build_key` and on 1.9. `telemetry.dv_max_mps` keeps the per-row maximum, so a new value can be applied
-  offline.
-- A destroyed ego ends the session with `end_reason` `ego_destroyed`, status `ok`: a crash is data.
+- Collisions come from the horizontal world-frame velocity change over 100 ms of **world time**, interpolated
+  between the samples of the physics callbacks. On 1.8 one callback covers 1 to 3 merged steps of 1/30 s (frame-bound
+  rows, freeze decision D-A), so the window is never a count of callbacks; two samples more than 150 ms apart (a
+  hitch) restart the history instead of counting as a change. `data/dc2/crash_dv.py` is the same rule in Python.
+  The threshold `m_fCollisionDvMps` 4.0 m/s is **provisional** (TBD-10): it must be measured again by the TBD-10
+  probe, for every `build_key` and on 1.9, with 10 Hz images on so that frames merge steps. `telemetry.dv_max_mps`
+  keeps the per-row maximum, so a new value can be applied offline.
+- Crash rows belong to the episode in which they occurred, also when written after its end. After an ego crash no
+  new episode begins for `m_iCrashCooldownMs` (3 s), nor while the ego is tilted, immobile or burning.
+- Whoever moves a vehicle by `SetWorldTransform` calls `DC_CrashWatch.PrepareReposition(slot)` first (the driver:
+  `DC_DriverContext.PrepareReposition()`), then logs the `teleport` row: the pending collision row is finished
+  and the velocity history cleared, so the jump is never measured.
+- The episode end waits at most 250 ms for the ego's collision row. Below about 8 frames per second the vanilla
+  contact (1 to 2 frames after its step) can miss that wait; the row is then written with `src=dv` and without
+  `other`.
+- A destroyed ego ends the session with `end_reason` `ego_destroyed`, status `ok`: a crash is data. The crash rows,
+  the end of the open episode and `session_end.json` share one terminal step, the last step with rows.
 
 `src/enfusion/datacapture/DC_CollisionHook.c` is the **first `modded class` of this addon**:
 `modded class SCR_VehicleDamageManagerComponent` overrides `ProcessCollision`. While the addon is loaded this runs for

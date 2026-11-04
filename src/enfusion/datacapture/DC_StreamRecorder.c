@@ -702,6 +702,15 @@ class DC_DriverContext
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Call before moving the ego by SetWorldTransform (a teleport or respawn; dc-2.0 9.5.1): the crash watch writes
+	//! the pending collision row, clears the velocity history and starts its suppression, then log the teleport row
+	void PrepareReposition()
+	{
+		if (m_Session)
+			DC_CrashWatch.PrepareReposition(m_Session.GetEgoSlotId());
+	}
+
+	//------------------------------------------------------------------------------------------------
 	void Log(string message)
 	{
 		Print("[DC_Driver] " + message, LogLevel.NORMAL);

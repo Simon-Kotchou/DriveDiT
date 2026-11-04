@@ -75,9 +75,11 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
   DC_CrashWatch "{DC4A50B4000000C1}" {
    m_fCollisionDvMps 4
    m_iCollisionWindowMs 100
+   m_iCollisionWindowTolMs 50
    m_iCollisionPeakMs 200
    m_iCollisionRefractoryMs 1000
    m_iEpisodeEndWaitMs 250
+   m_iCrashCooldownMs 3000
    m_fRolloverUpY 0.5
    m_iRolloverHoldMs 500
    m_iStatePollMs 100

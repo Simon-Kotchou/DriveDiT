@@ -50,9 +50,10 @@
 //   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance, the ego's
 //   gearbox) are written to the extra "observed" objects of session.json and session_end.json.
 //
-// EVENTS: LogVehicleEvent writes one events row naming its vehicle slot (LogEvent: the ego's). The crash kinds of
-//   dc-2.0 9.5.1 come from DC_CrashWatch; a teleport or respawn row of a slot suppresses that slot's collision detector
-//   for 500 ms (DC_CrashWatch.NoteRepositioned).
+// EVENTS: LogVehicleEvent writes one events row naming its vehicle slot (LogEvent: the ego's) in the current episode;
+//   LogVehicleEventInEpisode names the episode the event belongs to (dc-2.0 9.5.1 episode ownership: a crash row
+//   written after its episode ended). The crash kinds come from DC_CrashWatch; a teleport or respawn row of a slot
+//   isolates that slot's collision detector (DC_CrashWatch.NoteRepositioned).
 //
 // FAULT CASES (m_sFaultCase, empty in the layer; for the acceptance runbook only, every one ends in an ERROR or a
 //   failed session): readiness_timeout, session_dir_exists, zero_ego, chunk_dir_blocked.
@@ -2455,10 +2456,20 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One events row (dc-2.0 9.5) naming vehicle slot vehSlotId (-1 = none) into the registered events stream; the
-	//! line is always printed. kind must be a contract event kind; payload is 'key=value' pairs joined by ';' (',',
-	//! '"', CR and LF become '_'). A teleport or respawn row suppresses the slot's collision detector
+	//! One events row (dc-2.0 9.5) of vehicle slot vehSlotId (-1 = none) in the current episode: see
+	//! LogVehicleEventInEpisode
 	bool LogVehicleEvent(int vehSlotId, string kind, string payload)
+	{
+		return LogVehicleEventInEpisode(vehSlotId, m_iEpisodeId, kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row (dc-2.0 9.5) naming vehicle slot vehSlotId (-1 = none) and the episode it belongs to (-1 =
+	//! none; dc-2.0 9.5.1: the episode of its occurrence, even after that episode ended) into the registered events
+	//! stream; event_seq, physics_step, render_frame and world_time_ms are those of the writing. The line is always
+	//! printed. kind must be a contract event kind; payload is 'key=value' pairs joined by ';' (',', '"', CR and LF
+	//! become '_'). A teleport or respawn row isolates the slot's collision detector
+	bool LogVehicleEventInEpisode(int vehSlotId, int episodeId, string kind, string payload)
 	{
 		string clean = payload;
 		clean.Replace(",", "_");
@@ -2471,7 +2482,7 @@ class DC_Session : SCR_BaseGameModeComponent
 			return false;
 		}
 
-		Print(string.Format(LOG + "event %1 %2 (slot %3, step %4, episode %5)", kind, clean, vehSlotId, m_iLastPostStep, m_iEpisodeId), LogLevel.NORMAL);
+		Print(string.Format(LOG + "event %1 %2 (slot %3, step %4, episode %5)", kind, clean, vehSlotId, m_iLastPostStep, episodeId), LogLevel.NORMAL);
 		DC_SessionStream events = FindStream("events");
 		if (!events || !m_bHasStartTimestamp)
 			return false;
@@ -2483,7 +2494,7 @@ class DC_Session : SCR_BaseGameModeComponent
 		int worldMs = GetWorldMs();
 		m_EventRow.Clear();
 		m_EventRow.AddInt(m_iEventSeq);
-		m_EventRow.AddInt(m_iEpisodeId);
+		m_EventRow.AddInt(episodeId);
 		m_EventRow.AddInt(m_iLastPostStep);		// the last completed step (dc-2.0 9.5)
 		m_EventRow.AddInt(GetRenderFrame());
 		m_EventRow.AddInt(worldMs);

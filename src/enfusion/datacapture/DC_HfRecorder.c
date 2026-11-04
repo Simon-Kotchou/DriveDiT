@@ -6,14 +6,17 @@
 //
 // RIG R1 (DC_RigR1 of DD-4-probe, reused unchanged, so its E-05 / E-06 / E-06A qualification holds): during
 //   readiness, once DC_EgoSession has spawned the ego, the rig camera is attached to it (mount, pitch, vFOV and clip
-//   planes are this component's attributes, with the DD-4-probe defaults) and made current. An attach failure refuses
+//   planes are this component's attributes, with the DD-4-probe defaults except the near plane: 0.03 m, below the
+//   Shape fiducial at 0.05 m of the dc-2.0 freeze; the probes drew the bands at 1 m with 0.1 m) and made current. An attach failure refuses
 //   readiness (camera init failure fails the session before any directory exists); readiness waits until the
 //   camera is current and attached. While capturing, a frame whose rig camera is not current or not attached ends
 //   the session with camera_lost (DC_ImageScheduler logs cam_current / cam_attached per slot).
 //
 // HF STREAM (dc-2.0 9.3, every render frame from the open to the seal, the drain included, so hf.render_frame of
 //   the last row is session_end end.render_frame): render_frame = BaseWorld.GetFrameNumber(), world_time_ms,
-//   last_physics_step (the most recent OnStepPost, -1 before the first), paused (ChimeraWorld.IsGameTimePaused),
+//   last_physics_step (the physics_step of the most recent callback, always of an earlier frame: the callback of a
+//   frame follows its EOnFrame; the image of frame C shows the state logged in hf row C + 1, dc-2.0 section 6),
+//   paused (ChimeraWorld.IsGameTimePaused),
 //   the camera's world transform (CameraBase.GetWorldCameraTransform), the ego's world transform, fps
 //   (System.GetFPS()). A frame number that does not advance is not written again (counted in session_end
 //   observed.hf_frame_repeats).
@@ -41,7 +44,7 @@ class DC_HfRecorder : DC_SessionModule
 	[Attribute("50", UIWidgets.Slider, "Vertical field of view [deg] (r2 3.4)", "10 120 1", category: "Rig")]
 	protected float m_fVerticalFovDeg;
 
-	[Attribute("0.1", UIWidgets.Slider, "Near clip plane [m]", "0.01 10 0.01", category: "Rig")]
+	[Attribute("0.03", UIWidgets.Slider, "Near clip plane [m]: below the Shape fiducial's depth (DC_ImageScheduler m_fShapeDepthM, 0.05 m at the dc-2.0 freeze), else the bands are clipped (the probes ran 0.1 m with the bands at 1 m)", "0.01 10 0.01", category: "Rig")]
 	protected float m_fNearPlaneM;
 
 	[Attribute("3000", UIWidgets.Slider, "Far clip plane [m]", "100 20000 10", category: "Rig")]

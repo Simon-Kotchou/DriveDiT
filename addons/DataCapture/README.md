@@ -176,6 +176,31 @@ nothing is overwritten.
 - Without `-profile` inside `E:\DriveDiT` (for example Workbench started from Steam), the collector refuses to write
   and logs `ERROR: capture output refused`. Relaunch with `wb_R1.bat`.
 
+## The dc-2.0 capture core at the contract freeze (2026-11-04)
+
+`DC_Session` and its modules on `DC_Arland` write contract dc-2.0 as frozen (decisions D-A, D-B and the folded facts
+of `t0/freeze/DECISIONS_dc2_freeze.md`):
+
+- **Frame-bound rows (D-A).** The game mode gets one `EOnFixedFrame` / `EOnPostFixedFrame` pair per render frame
+  with a fixed step, covering 1 to 3 merged steps of 1/30 s on 1.8. Every callback writes one `ctl` and one
+  `telemetry` row: `physics_step` (the last step it covers), `covered_steps`, `render_frame`, `world_time_ms`. The
+  step dt is measured during readiness (`[DC_Session] clocks: step dt ...` line; `session.json engine.step_dt_s`),
+  never `GetFixedTimeSlice()` (it reports n/30 per frame). Drivers get `timeSlice` = covered steps x step dt.
+- **Decisions and images on one world-time grid.** Every 200 ms at the default 5 Hz from the first callback's world
+  time; a decision is taken in the first callback at or past a grid point and applies from the next callback. 10 Hz
+  only through the trial conf key `"image_hz": 10` (`clocks.image_hz_setting` `trial_conf`); the layer must keep
+  `m_fImageHz 5`, any other value refuses the session.
+- **Images.** The fiducial is the debug-Shape carrier (`m_eFiducialCarrier 1` = SHAPE) 0.05 m in front of the rig
+  camera (`m_fShapeDepthM`), so the rig's near plane is 0.03 m (`DC_HfRecorder m_fNearPlaneM`; the probes drew the
+  bands at 1 m with a 0.1 m near plane). The widget carrier (0) is a diagnostic only: widgets never reach
+  `MakeScreenshot` files. Each `img` row is written when its slot resolves, with `done_render_frame` (the captured
+  frame is `done_render_frame - 1` in Workbench).
+- **Signs.** `DC_StreamRecorder m_iSteerSign 1` (a positive `SetSteering` turns right, E-01 run 3).
+
+What only a Play confirms: the step-dt line (`engine` source, 0.033333 s), rows with `covered_steps` 2-3 on screenshot
+frames, the Shape bands decoded at 0.05 m with the 0.03 m near plane (E-06 tool on a capture session), and C08 / C28
+passing on the first T0a/T0b session.
+
 ## Crash events and the addon's first modded class (dc-2.0 9.5.1)
 
 `DC_CrashWatch` (`src/enfusion/datacapture/DC_CrashWatch.c`, a capture module on `GameMode_DataCapture` in

@@ -33,10 +33,11 @@
 //     veh_fire_start when it burns, the session ends with ego_destroyed (status ok), and the seal ends the open
 //     episode at L (its end_world_ms is the world time of L) with the latched termination (collision). Before the
 //     first ctl row it is still zero_ego;
-//   - episodes: at a decision step (physics_step mod N == 0) after warmup_end, while no episode runs and the session
-//     is not stopping, the driver's BeginEpisode is asked in OnStepPre (so the rows of that step carry the episode;
-//     the null driver never begins one). A termination the driver reports, or the planned end, ends the episode at
-//     the next decision step in OnStepDecide, after that step's rows: DC_DriverInterface.EndEpisode, one episodes
+//   - episodes: in a decision callback (the first callback at or past a grid point of the world-time decision grid,
+//     DC_Session.IsDecisionStep; dc-2.0 section 6, D-A) after warmup_end, while no episode runs and the session is
+//     not stopping, the driver's BeginEpisode is asked in OnStepPre (so the rows of that callback carry the episode;
+//     the null driver never begins one). A termination the driver reports, or the planned end, ends the episode in
+//     the next decision callback in OnStepDecide, after that callback's rows: DC_DriverInterface.EndEpisode, one episodes
 //     row (chunk_max_rows 1, so it is committed at once), events episode_start / episode_end, the ego parked. The
 //     seal ends an episode still open at the last step (session_stop, or script_error after an error);
 //   - crash events (DC_CrashWatch, dc-2.0 9.5.1): the end of an episode waits while the ego's collision row is
@@ -326,13 +327,13 @@ class DC_EgoSession : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Liveness and identity first; then an episode may begin at a decision step
+	//! Liveness and identity first; then an episode may begin in a decision callback (the world-time grid, D-A)
 	override void OnStepPre(int physicsStep, float timeSlice)
 	{
 		if (!CheckEgo(false))
 			return;
 
-		if (m_iEpisodeId >= 0 || physicsStep % m_Session.GetStepsPerDecision() != 0)
+		if (m_iEpisodeId >= 0 || !m_Session.IsDecisionStep())
 			return;
 
 		if (m_Session.IsWarmupOver() && !m_Session.IsStopping())
@@ -362,7 +363,7 @@ class DC_EgoSession : DC_SessionModule
 			return;
 		}
 
-		if (m_iEpisodeId < 0 || physicsStep % m_Session.GetStepsPerDecision() != 0)
+		if (m_iEpisodeId < 0 || !m_Session.IsDecisionStep())
 			return;
 
 		// The first terminal event wins: the reason latched when the planned end began, else the driver's

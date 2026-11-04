@@ -3,25 +3,30 @@
 // (DD-4-min)
 // ============================================================================
 //
-// A DC_SessionModule (dispatch order 20) on the capture game mode. It writes the dc-2.0 streams ctl (every physics
-// step), telemetry (every k-th step, k = clocks.telemetry_every_k, TBD-1) and events (DC_Session.LogEvent), each
-// through a DC_ChunkWriter that DC_Session owns. It also orchestrates the driver of every step.
+// A DC_SessionModule (dispatch order 20) on the capture game mode. It writes the dc-2.0 streams ctl and telemetry,
+// one row of each per fixed-frame callback (frame-bound rows, dc-2.0 freeze decision D-A: a callback covers 1 to 3
+// physics steps of 1/30 s on 1.8, physics_step is the last one, covered_steps and render_frame are columns), and
+// events (DC_Session.LogEvent), each through a DC_ChunkWriter that DC_Session owns. It also orchestrates the driver
+// of every callback.
 //
-// PER PHYSICS STEP P (docs/capture_contract/dc-2.0.md section 6, the R-01 decision boundary; no CallLater clock)
-//   OnStepPre (EOnSimulate): a decision taken at P - 1 becomes the held command (hl_seq + 1, so hl_seq changes only
-//     at P mod N == 1); inside an episode with a held command the driver's ApplyStep runs (llc_v1 calls the setters
-//     through the DC_Actuator); every other step (warm-up, the null driver, the first window of an episode, between
-//     episodes) re-applies the actuator's Park(), so Mode A calls the setters on every step (llc_* stay empty: the
-//     park is the core's, not llc_v1's); then input_pre_* is read back through the actuator.
-//   OnStepPost (EOnPostSimulate): input_post_* read back; inside an episode the driver's PostStep re-evaluates the
-//     expert on the state after P (exp_*_now, lane errors, route progress, termination); the ctl row of P is
-//     buffered, then the telemetry row when P mod k == 0 (dv_max_mps from DC_CrashWatch, order 15, which has seen
-//     P). A crash of the ego latches its termination through LatchTermination before the driver's of the same step,
-//     so the first terminal event wins (dc-2.0 9.5.1).
-//   OnStepDecide (after every module's OnStepPost; DC_EgoSession has begun or ended the episode by then): at a
-//     decision step (P mod N == 0) inside an episode the driver's Decide gives the command applied over
-//     (P, P + N]. A step without a held command writes mode I, driver none and empty hl_*; inside an episode the
-//     episode's mode and driver are written (as the DD-5-min golden fixture).
+// PER CALLBACK C ending at physics step P (docs/capture_contract/dc-2.0.md section 6, the R-01 decision boundary on
+// the world-time grid; no CallLater clock)
+//   OnStepPre (EOnFixedFrame): a decision taken in the previous callback becomes the held command (hl_seq + 1, so
+//     hl_seq changes only on the callback after a decision callback); inside an episode with a held command the
+//     driver's ApplyStep runs once for all covered steps (timeSlice = covered_steps x the measured step dt; llc_v1
+//     calls the setters through the DC_Actuator); every other callback (warm-up, the null driver, the first one of
+//     an episode, between episodes) re-applies the actuator's Park(), so Mode A calls the setters in every callback
+//     (llc_* stay empty: the park is the core's, not llc_v1's); then input_pre_* is read back through the actuator.
+//   OnStepPost (EOnPostFixedFrame): input_post_* read back; inside an episode the driver's PostStep re-evaluates the
+//     expert on the state after the callback (exp_*_now, lane errors, route progress, termination); the ctl row and
+//     the telemetry row of C are buffered (dv_max_mps from DC_CrashWatch, order 15, which has seen C). A crash of the
+//     ego latches its termination through LatchTermination before the driver's of the same callback, so the first
+//     terminal event wins (dc-2.0 9.5.1).
+//   OnStepDecide (after every module's OnStepPost; DC_EgoSession has begun or ended the episode by then): in a
+//     decision callback (DC_Session.IsDecisionStep: the first callback at or past the next grid point of the
+//     world-time grid, every 1000 / decision_hz ms) inside an episode the driver's Decide gives the command applied
+//     from step P + 1 through the next decision callback. A callback without a held command writes mode I, driver
+//     none and empty hl_*; inside an episode the episode's mode and driver are written (as the DD-5-min fixture).
 //
 // DRIVER INTERFACE (shared with DD-7-min, which implements llc_v1 and the expert; keep it stable)
 //   A DC_DriverInterface component on the same game mode entity; without one the null driver applies: no episode,
@@ -37,11 +42,14 @@
 //       void EndEpisode(int episodeId, int lastPhysicsStep, string terminationReason);
 //       void EndDriver(string endReason);
 //
-//   Call order: GetSpawnPose (before the ego is spawned), BeginDriver once (the ego is spawned and its actuator
-//   exists; the session directory does not exist yet), then per episode BeginEpisode at a decision step P_a (in
-//   OnStepPre of P_a, so the rows of P_a carry the episode), ApplyStep in every OnStepPre with a held command,
-//   PostStep in every OnStepPost of the episode, Decide in OnStepDecide of every decision step of the episode,
-//   EndEpisode at the decision step P_b that ends it (after the rows of P_b), EndDriver once at the seal.
+//   Call order: GetSpawnPose (before the ego is spawned), BeginDriver once (the ego is spawned, its actuator exists
+//   and the step dt is measured; the session directory does not exist yet), then per episode BeginEpisode in a
+//   decision callback P_a (in OnStepPre of P_a, so the rows of P_a carry the episode), ApplyStep in every OnStepPre
+//   with a held command, PostStep in every OnStepPost of the episode, Decide in OnStepDecide of every decision
+//   callback of the episode, EndEpisode in the decision callback P_b that ends it (after the rows of P_b), EndDriver
+//   once at the seal. physicsStep is the callback's physics_step (the last step it covers) and timeSlice the physics
+//   time it covers (covered_steps x DC_DriverContext.GetStepDtS()): a driver integrates with timeSlice and never
+//   counts callbacks as steps.
 //   Units and signs: DC_HLCommand is the contract action_cmd (kappa right-positive [1/m], accel [m/s2], dir -1, 0 or
 //   +1); DC_LLCOutput holds exactly what was passed to the setters (engine-native steering sign). A termination
 //   reason in DC_DriverPost (an episodes.termination_reason value) ends the episode at the next decision step.
@@ -579,17 +587,26 @@ class DC_DriverContext
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! BaseWorld.GetFixedTimeSlice() [s]
-	float GetFixedTimeSliceS()
+	//! The measured engine fixed step dt [s] (dc-2.0 section 6, D-A; 1/30 s on 1.8), never GetFixedTimeSlice()
+	float GetStepDtS()
 	{
 		if (!m_Session)
 			return 0;
 
-		return m_Session.GetFixedTimeSliceS();
+		return m_Session.GetStepDtS();
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! N: decision steps are the physics steps with step mod N == 0 (TBD-1)
+	//! Deprecated name kept for the DD-7-min driver: the measured step dt (GetStepDtS). BaseWorld.GetFixedTimeSlice()
+	//! reports n/30 for a frame of n merged steps and is never the step dt (D-A)
+	float GetFixedTimeSliceS()
+	{
+		return GetStepDtS();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! N: the nominal physics steps of a decision interval (clocks.physics_steps_per_decision, TBD-1); decisions lie
+	//! on the world-time grid (IsDecisionStep), never on physics_step mod N
 	int GetStepsPerDecision()
 	{
 		if (!m_Session)
@@ -599,12 +616,30 @@ class DC_DriverContext
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Deprecated: telemetry is one row per callback since the freeze (D-A), so this is always 1
 	int GetTelemetryEveryK()
+	{
+		return 1;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine fixed steps the current callback covers (ctl covered_steps)
+	int GetCoveredSteps()
 	{
 		if (!m_Session)
 			return 1;
 
-		return m_Session.GetTelemetryEveryK();
+		return m_Session.GetCoveredSteps();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true inside a decision callback of the world-time grid (DC_Session.IsDecisionStep)
+	bool IsDecisionStep()
+	{
+		if (!m_Session)
+			return false;
+
+		return m_Session.IsDecisionStep();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -847,7 +882,7 @@ class DC_StreamRecorderClass : DC_SessionModuleClass
 class DC_StreamRecorder : DC_SessionModule
 {
 	// === SIGNS (TBD-5; recorded in session.json control.*, a vehicle card overrides through the driver) ===
-	[Attribute("-1", UIWidgets.Slider, "Engine-to-contract steering sign (TBD-5): CarSteering is +1 for left, the contract is right-positive", "-1 1 2", category: "Streams")]
+	[Attribute("1", UIWidgets.Slider, "Engine-to-contract steering sign (TBD-5 decided: +1, a positive SetSteering turns right on 1.8, E-01 run 3); a vehicle card overrides it through the driver", "-1 1 2", category: "Streams")]
 	protected int m_iSteerSign;
 
 	[Attribute("1", UIWidgets.Slider, "Engine-to-contract yaw-rate sign (TBD-5): yaw_rate_rps = sign x angvel_local_y", "-1 1 2", category: "Streams")]
@@ -951,6 +986,13 @@ class DC_StreamRecorder : DC_SessionModule
 
 		if (m_bDriverBegun)
 			return true;
+
+		// The driver's BeginDriver may read the step dt and N (DC_DriverContext), so it waits for the measurement
+		if (m_Session.GetStepDtS() <= 0)
+		{
+			waitingFor = "the step dt measurement before BeginDriver";
+			return false;
+		}
 
 		m_Context = new DC_DriverContext(m_Session, m_Session.GetEgo(), m_Actuator);
 		DC_DriverInterface driver = GetDriver();
@@ -1079,7 +1121,7 @@ class DC_StreamRecorder : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! input_post_*, the driver's PostStep, then the ctl row and (every k-th step) the telemetry row
+	//! input_post_*, the driver's PostStep, then the ctl row and the telemetry row of the callback
 	override void OnStepPost(int physicsStep, float timeSlice, int worldMs)
 	{
 		IEntity ego = m_Session.GetEgo();
@@ -1123,15 +1165,16 @@ class DC_StreamRecorder : DC_SessionModule
 			return;
 
 		WriteCtlRow(physicsStep, worldMs);
-		if (!m_Session.HasWriteFailure() && physicsStep % m_Session.GetTelemetryEveryK() == 0)
+		if (!m_Session.HasWriteFailure())
 			WriteTelemetryRow(physicsStep, worldMs, ego, simulation);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! At a decision step inside an episode: the driver's command for (P, P + N]
+	//! In a decision callback inside an episode: the driver's command, applied from the next physics step through the
+	//! next decision callback
 	override void OnStepDecide(int physicsStep)
 	{
-		if (physicsStep % m_Session.GetStepsPerDecision() != 0 || m_Session.GetEpisodeId() < 0)
+		if (!m_Session.IsDecisionStep() || m_Session.GetEpisodeId() < 0)
 			return;
 
 		DC_DriverInterface driver = GetDriver();
@@ -1188,7 +1231,7 @@ class DC_StreamRecorder : DC_SessionModule
 	//! Every column of ctl in dc-2.0 9.1 order
 	static void AddCtlColumns(notnull array<string> columns)
 	{
-		array<string> head = {"physics_step", "world_time_ms", "episode_id", "mode", "driver", "hl_seq", "hl_kappa", "hl_accel", "hl_dir", "exp_kappa_now", "exp_accel_now", "exp_dir_now", "llc_steer_raw", "llc_steer_lim", "llc_throttle", "llc_brake", "llc_handbrake", "llc_gear", "llc_clutch"};
+		array<string> head = {"physics_step", "covered_steps", "render_frame", "world_time_ms", "episode_id", "mode", "driver", "hl_seq", "hl_kappa", "hl_accel", "hl_dir", "exp_kappa_now", "exp_accel_now", "exp_dir_now", "llc_steer_raw", "llc_steer_lim", "llc_throttle", "llc_brake", "llc_handbrake", "llc_gear", "llc_clutch"};
 		foreach (string name : head)
 		{
 			columns.Insert(name);
@@ -1219,6 +1262,8 @@ class DC_StreamRecorder : DC_SessionModule
 	static void AddTelemetryColumns(notnull array<string> columns)
 	{
 		columns.Insert("physics_step");
+		columns.Insert("covered_steps");
+		columns.Insert("render_frame");
 		columns.Insert("world_time_ms");
 		columns.Insert("episode_id");
 		columns.Insert("ego_slot_id");
@@ -1275,6 +1320,8 @@ class DC_StreamRecorder : DC_SessionModule
 
 		m_Row.Clear();
 		m_Row.AddInt(physicsStep);
+		m_Row.AddInt(m_Session.GetCoveredSteps());
+		m_Row.AddInt(m_Session.GetCallbackRenderFrame());
 		m_Row.AddInt(worldMs);
 		m_Row.AddInt(episodeId);
 		m_Row.AddString(mode);
@@ -1359,7 +1406,7 @@ class DC_StreamRecorder : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The telemetry row of a k-th step (dc-2.0 9.2)
+	//! The telemetry row of a callback (dc-2.0 9.2)
 	protected void WriteTelemetryRow(int physicsStep, int worldMs, notnull IEntity ego, notnull VehicleWheeledSimulation simulation)
 	{
 		vector transform[4];
@@ -1367,6 +1414,8 @@ class DC_StreamRecorder : DC_SessionModule
 
 		m_Row.Clear();
 		m_Row.AddInt(physicsStep);
+		m_Row.AddInt(m_Session.GetCoveredSteps());
+		m_Row.AddInt(m_Session.GetCallbackRenderFrame());
 		m_Row.AddInt(worldMs);
 		m_Row.AddInt(m_Session.GetEpisodeId());
 		m_Row.AddInt(m_Session.GetEgoSlotId());

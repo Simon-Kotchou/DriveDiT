@@ -207,6 +207,72 @@ class WriterContractTest(unittest.TestCase):
         self.assertIn("m_Session.EndPlanned(DC_Session.END_EGO_DISABLED", begin)
         self.assertIn("BeginEnd(endReason);", body(self.session, "void EndPlanned("))
 
+    def test_freeze_frame_bound_rows(self):
+        """D-A: one ctl and one telemetry row per callback, physics_step + covered_steps, N from the measured step dt
+        (never GetFixedTimeSlice), decisions on the world-time grid, the image grid on the same anchor."""
+        pre = body(self.session, "protected void HandleStepPre(")
+        self.assertIn("m_iPhysicsStep += covered;", pre)
+        self.assertIn("m_iGridAnchorMs = m_iCallbackWorldMs;", pre)
+        self.assertIn("m_bDecisionStep = m_iCallbackWorldMs >= m_iGridAnchorMs + m_iNextDecisionGrid * m_iDecisionPeriodMs;", pre)
+        self.assertIn("module.OnStepPre(m_iPhysicsStep, sliceS);", pre)
+        self.assertIn("int worldMs = m_iCallbackWorldMs;", body(self.session, "protected void HandleStepPost("))
+        clocks = body(self.session, "protected bool ComputeClocks(")
+        self.assertNotIn("GetFixedTimeSlice", clocks)
+        self.assertIn("m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);", clocks)
+        self.assertIn("STEP_DT_TOLERANCE * m_fMeasuredStepS", clocks)
+        self.assertIn("world.GetFixedSteps()", body(self.session, "protected void NoteFrameSteps("))
+        self.assertIn("EntityEvent.POSTFRAME", body(self.session, "protected int GetDispatchEventMask("))
+        for text in (self.session, self.recorder, self.ego):
+            self.assertNotIn("% m_Session.GetStepsPerDecision()", text)
+            self.assertNotIn("GetTelemetryEveryK()", text.replace("int GetTelemetryEveryK()", ""))
+        self.assertIn("!m_Session.IsDecisionStep()", body(self.recorder, "override void OnStepDecide("))
+        self.assertIn("!m_Session.IsDecisionStep()", body(self.ego, "override void OnStepPre("))
+        self.assertIn("!m_Session.IsDecisionStep()", body(self.ego, "override void OnStepDecide("))
+        post = body(self.recorder, "override void OnStepPost(")
+        self.assertIn("WriteTelemetryRow(physicsStep, worldMs, ego, simulation);", post)
+        self.assertNotIn("% ", post)
+        session_json = body(self.session, "protected bool WriteSessionJson(")
+        self.assertIn('json.AddFloat("step_dt_s", m_fStepDtS, 9);', session_json)
+        self.assertIn('json.AddString("image_hz_setting", m_sImageHzSetting);', session_json)
+        self.assertNotIn("telemetry_every_k", session_json)
+        images = source("DC_ImageScheduler.c")
+        self.assertIn("int anchorMs = m_Session.GetGridAnchorWorldMs();", body(images, "override void OnFrame("))
+        cols = strings(re.search(r'array<string> columns = \{(.*?)\};', images).group(1))
+        self.assertEqual(cols, self.fields("img"))
+        self.assertIn("row.m_iDoneFrame = renderFrame;", body(images, "protected void ResolveInFlight("))
+
+    def test_freeze_defaults(self):
+        """D-B 5 Hz (10 Hz only through the trial conf), steer_sign +1, the Shape carrier at 0.05 m with the rig's
+        near plane below it, in code and in the DC_Arland layer."""
+        with open(LAYER, encoding="ascii") as f:
+            layer = f.read()
+
+        def attr(text, name):
+            return re.search(r'\[Attribute\("([^"]*)"[^\n]*\]\s*\n\s*protected \w+ %s;' % name, text).group(1)
+
+        def layer_value(component, name):
+            block = re.search(r'%s "\{[0-9A-F]{16}\}" \{\n(.*?)\n  \}' % component, layer, re.S).group(1)
+            return dict(re.findall(r"^   (m_\w+) (\S+)$", block, re.M)).get(name)
+
+        tbd = {x["id"]: x for x in self.schema["tbd_by_probe"]}
+        self.assertEqual(float(attr(self.session, "m_fImageHz")), tbd["TBD-2"]["decided"]["image_hz"])
+        self.assertEqual(float(layer_value("DC_Session", "m_fImageHz")), 5.0)
+        self.assertIsNone(layer_value("DC_Session", "m_fTelemetryMaxPeriodS"))
+        self.assertIn('ReadNumber(context, "image_hz", imageHz)', self.session)
+        self.assertEqual(int(attr(self.recorder, "m_iSteerSign")), tbd["TBD-5"]["decided"]["steer_sign"])
+        self.assertEqual(int(layer_value("DC_StreamRecorder", "m_iSteerSign")), 1)
+        images = source("DC_ImageScheduler.c")
+        hf = source("DC_HfRecorder.c")
+        self.assertEqual(attr(images, "m_eFiducialCarrier"), "1")            # DC_EFiducialCarrier.SHAPE
+        self.assertEqual(layer_value("DC_ImageScheduler", "m_eFiducialCarrier"), "1")
+        depth = float(attr(images, "m_fShapeDepthM"))
+        self.assertEqual(depth, 0.05)
+        self.assertEqual(float(layer_value("DC_ImageScheduler", "m_fShapeDepthM")), depth)
+        self.assertLess(float(attr(hf, "m_fNearPlaneM")), depth)
+        self.assertLess(float(layer_value("DC_HfRecorder", "m_fNearPlaneM")), depth)
+        enum = re.search(r"enum DC_EFiducialCarrier\s*\{(.*?)\}", source("DC_FiducialShape.c"), re.S).group(1)
+        self.assertEqual(re.findall(r"^\s*(\w+),?", enum, re.M)[:3], ["WIDGET", "SHAPE", "BOTH"])
+
     def test_out_parameters_are_assigned_on_entry(self):
         sig = re.compile(r"^\t(?:[a-z]+ )*[\w<>]+ (\w+)\(([^)]*\bout\b[^)]*)\)\n\t\{", re.M)
         checked = 0

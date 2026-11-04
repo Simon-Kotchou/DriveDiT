@@ -43,8 +43,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_sRequiredProfileRoot "E:/DriveDiT"
    m_bAllowWorkbenchWithoutLaunchId 0
    m_bEscapeBindToProcessStart 1
-   m_fTelemetryMaxPeriodS 0.05
-   m_fImageHz 10
+   m_fImageHz 5
    m_iImgInflightTimeoutMs 2000
    m_iImgLeadMs 0
    m_fChunkMaxS 10
@@ -65,7 +64,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_bForceEnableSimulation 0
   }
   DC_StreamRecorder "{DC4A50B400000003}" {
-   m_iSteerSign -1
+   m_iSteerSign 1
    m_iYawAxisSign 1
    m_sSteeringGeometry "unknown_on_1.8"
    m_iSunElevationSign -1
@@ -90,7 +89,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_vMountPos 0 1.25 0.3
    m_fMountPitchDeg -4
    m_fVerticalFovDeg 50
-   m_fNearPlaneM 0.1
+   m_fNearPlaneM 0.03
    m_fFarPlaneM 3000
   }
   DC_ImageScheduler "{DC4A50B400000005}" {
@@ -99,6 +98,8 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_iGapPx 8
    m_iBandPx 64
    m_sScreenshotSuffixes ".png,.bmp.png,.bmp,.jpg,noext"
+   m_eFiducialCarrier 1
+   m_fShapeDepthM 0.05
   }
  }
  coords 2759.086 80.111 1664.452

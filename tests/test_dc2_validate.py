@@ -416,7 +416,8 @@ class FailLoudTest(unittest.TestCase):
         set_column(session, "img", "done_render_frame", lambda key, v: "")
         code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"), "--vehicle-card",
                              CARD)
-        self.assertEqual((code, failing(rep)), (1, ["C13a"]))
+        # C21 too: without done_render_frame no screenshot row is excluded (C21 decision 2026-11-04)
+        self.assertEqual((code, failing(rep)), (1, ["C13a", "C21"]))
         self.assertIn("a completion the writer dropped", by_id(rep)["C13a"]["detail"])
         c37 = by_id(rep)["C37"]
         self.assertEqual((c37["status"], c37["value"]["without_done_render_frame"]), ("PASS", c37["value"]["issued"]))
@@ -486,7 +487,8 @@ class FailLoudTest(unittest.TestCase):
         session = self.golden()
         render_slot(session, 67, 262296)
         code, rep = self.check(session)
-        self.assertEqual((code, failing(rep)), (1, ["C13a"]))
+        # C21 too: the excluded row (done) is no longer the frame after the decoded capture
+        self.assertEqual((code, failing(rep)), (1, ["C13a", "C21"]))
         c13a = by_id(rep)["C13a"]
         self.assertEqual((c13a["value"]["join_failures"], c13a["value"]["pending_after_seal"]), (1, 0))
 
@@ -627,12 +629,21 @@ class FailLoudTest(unittest.TestCase):
         self.assertIn("inside a decision interval", by_id(rep)["C07"]["detail"])
 
     def test_soft_checks_warn_at_t0_and_fail_from_t1(self):                   # F-6
-        session = self.golden()
+        """C21 on a session whose ordinary frames are slow (36-45 ms): SOFT at T0, HARD from T1. hf.fps
+        (System.GetFPS()) is information only since the C21 decision of 2026-11-04."""
+        routes = os.path.join(self.tmp, "r")
+        with mock.patch.dict(synth.SPECS["golden"], SLOW_FRAMES):
+            out = synth.generate(os.path.join(self.tmp, "slow"), kind="golden", routes_dir=routes)
+        code, rep = run_json("--session", out["session_dir"], "--routes-dir", routes, "--vehicle-card", CARD)
+        self.assertEqual((code, failing(rep), by_id(rep)["C21"]["severity"]), (2, ["C21"], "SOFT"))
+        code, rep = run_json("--session", out["session_dir"], "--routes-dir", routes, "--vehicle-card", CARD,
+                             "--trial", "T1")
+        self.assertEqual((code, failing(rep), by_id(rep)["C21"]["severity"]), (1, ["C21"], "HARD"))
+        session = self.golden("gfps")            # the engine's smoothed hf.fps alone no longer fails C21
         set_column(session, "hf", "fps", lambda key, v: "25.000")
         code, rep = self.check(session)
-        self.assertEqual((code, failing(rep), by_id(rep)["C21"]["severity"]), (2, ["C21"], "SOFT"))
-        code, rep = self.check(session, "--trial", "T1")
-        self.assertEqual((code, failing(rep), by_id(rep)["C21"]["severity"]), (1, ["C21"], "HARD"))
+        self.assertEqual((code, by_id(rep)["C21"]["status"], by_id(rep)["C21"]["value"]["hf_fps_p5"]),
+                         (0, "PASS", 25.0))
 
     def test_img_path_outside_the_session_fails_c11(self):                    # F-7
         session = self.golden()
@@ -728,7 +739,8 @@ class FailLoudTest(unittest.TestCase):
         for column in ("issue_render_frame", "done_render_frame"):           # the request issued after the capture
             set_column(session, "img", column, lambda key, v: str(int(v) + 2) if key == 50 else v)
         code, rep = self.check(session)
-        self.assertEqual((code, failing(rep)), (1, ["C13a"]))
+        # C21 too: the excluded row (done) is no longer the frame after the decoded capture
+        self.assertEqual((code, failing(rep)), (1, ["C13a", "C21"]))
         self.assertIn("captured before their request", by_id(rep)["C13a"]["detail"])
 
     def test_lower_trial_is_refused(self):                                    # F-23
@@ -772,6 +784,103 @@ def render_slot(session, slot, captured):
         f.write(synth.png_bytes(synth.render_image(spec, state, synth.fiducial.code_for(captured))))
 
 
+# C21 fixtures (decision 2026-11-04). RUN_FRAMES follows probe runs 3-4 at 10 Hz on the runway: ordinary frames p5
+# 7.4 / p50 12.6 / p95 15.9 ms, capture stalls p5 67 / p50 80 / p95 91 / max 100 ms (run 3 e05_deep; run 4 per-frame
+# FPS p5 11.7 over all frames, 66.0 without the done rows, 33% of the rows excluded). SLOW_FRAMES: ordinary frames of
+# 36-45 ms (22-28 FPS).
+RUN_FRAMES = {"frame_ms": (12, 13, 8, 15, 12, 14, 11, 16, 13, 10, 12, 7, 13, 14, 12, 16, 11, 13, 9, 12),
+              "stall_ms": (80, 67, 91, 78, 85, 72, 100, 81, 76, 88, 80, 70)}
+SLOW_FRAMES = {"frame_ms": (40, 45, 38, 42, 36)}
+
+
+class C21Test(unittest.TestCase):
+    """C21 per-frame FPS over the non-screenshot frames (the user's decision of 2026-11-04): 1 / frame time from
+    hf.world_time_ms, the rows at done_render_frame (the frame after the captured one) excluded."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_c21_")
+        cls.routes = os.path.join(cls.tmp, "r")
+        with mock.patch.dict(synth.SPECS["golden_10hz"], RUN_FRAMES):
+            cls.run_like = synth.generate(os.path.join(cls.tmp, "run"), kind="golden_10hz", routes_dir=cls.routes)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def check(self, session, *extra):
+        return run_json("--session", session, "--routes-dir", self.routes, "--vehicle-card", CARD, *extra)
+
+    def golden(self, name):
+        return copy_golden(os.path.join(self.tmp, name))
+
+    def test_golden_passes(self):
+        code, rep = run_json("--session", GOLDEN_DIR, "--routes-dir", ROUTES, "--vehicle-card", CARD)
+        c21 = by_id(rep)["C21"]
+        self.assertEqual((code, c21["status"], c21["value"]["excluded_rows"]), (0, "PASS", 68))
+        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 27, places=3)       # 24-27 ms ordinary frames
+        self.assertAlmostEqual(c21["value"]["fps_p5_all"], 12.5)                     # the 80 ms capture stalls
+        self.assertLess(abs(c21["value"]["world_real"] - 1.0), 0.02)
+
+    def test_slow_screenshot_frames_only_pass(self):
+        """The run 3-4 shape: every capture's done row slow, ordinary frames fast; 38% of the rows are excluded at
+        10 Hz (no percentage rule: one excluded row per completed request)."""
+        code, rep = self.check(self.run_like["session_dir"])
+        c21 = by_id(rep)["C21"]
+        self.assertEqual((c21["status"], c21["severity"]), ("PASS", "SOFT"))
+        self.assertGreaterEqual(c21["value"]["fps_p5"], 60.0)
+        self.assertLess(c21["value"]["fps_p5_all"], 12.0)
+        self.assertGreater(c21["value"]["excluded_rows"] / float(c21["value"]["frames"]), 0.3)
+        code, rep = self.check(self.run_like["session_dir"], "--trial", "T1")
+        self.assertEqual((by_id(rep)["C21"]["status"], by_id(rep)["C21"]["severity"]), ("PASS", "HARD"))
+
+    def test_slow_ordinary_frames_fail(self):
+        with mock.patch.dict(synth.SPECS["golden"], SLOW_FRAMES):
+            out = synth.generate(os.path.join(self.tmp, "slow"), kind="golden", routes_dir=self.routes)
+        code, rep = self.check(out["session_dir"])
+        c21 = by_id(rep)["C21"]
+        self.assertEqual((code, failing(rep), c21["severity"]), (2, ["C21"], "SOFT"))
+        self.assertLess(c21["value"]["fps_p5"], 30.0)
+        self.assertIn("non-screenshot frames < 30", c21["detail"])
+
+    def test_world_real_off_is_not_evaluated(self):
+        """Heartbeat wall time 2 s longer than world time over a 5 s span: frames lost world time to the 100 ms
+        clamp, so world-time deltas do not measure frame time (never a PASS)."""
+        session = self.golden("wr")
+        path = os.path.join(session, "heartbeat.csv")
+        lines = read_lines(path)
+        parts = lines[-1].split(",")
+        parts[0] = str(int(parts[0]) + 2)
+        lines[-1] = ",".join(parts)
+        with open(path, "wb") as f:
+            f.write(("\n".join(lines) + "\n").encode("ascii"))
+        code, rep = self.check(session)
+        c21 = by_id(rep)["C21"]
+        self.assertEqual(c21["status"], "NOT_EVALUATED")
+        self.assertIn("world/real", c21["detail"])
+        self.assertLess(c21["value"]["world_real"], 0.98)
+
+    def test_excluded_row_not_after_its_capture_fails(self):
+        """An excluded row must be the frame after its decoded capture (done = C + 1); slot 10's done moved two
+        frames later points at an ordinary frame."""
+        session = self.golden("off")
+        set_column(session, "img", "done_render_frame", lambda key, v: str(int(v) + 2) if key == 10 else v)
+        code, rep = self.check(session)
+        self.assertIn("C21", failing(rep))
+        self.assertIn("not the frame after their decoded capture", by_id(rep)["C21"]["detail"])
+        session = self.golden("dup")             # two completions in one frame: one request in flight at a time
+        done = {}
+        for name in sorted(os.listdir(os.path.join(GOLDEN_DIR, "img"))):
+            if name.startswith("chunk_"):
+                lines = read_lines(os.path.join(GOLDEN_DIR, "img", name))
+                cols = lines[0].split(",")
+                done.update((int(x.split(",")[0]), x.split(",")[cols.index("done_render_frame")]) for x in lines[1:])
+        set_column(session, "img", "done_render_frame", lambda key, v: done[9] if key == 10 else v)
+        code, rep = self.check(session)
+        self.assertIn("C21", failing(rep))
+        self.assertIn("share a done_render_frame", by_id(rep)["C21"]["detail"])
+
+
 class SlowCaptureTest(unittest.TestCase):
     """Review round 2, N2: a 10 Hz session whose captures mix 80 and 90 ms stalls (u95 0.9 > 0.85). Dropping the
     done_render_frame of the slow captures must not turn C37 into a pass."""
@@ -810,7 +919,8 @@ class SlowCaptureTest(unittest.TestCase):
         slow = set(self.slow)
         set_column(session, "img", "done_render_frame", lambda key, v: "" if key in slow else v)
         code, rep = self.check(session)
-        self.assertEqual((code, failing(rep)), (1, ["C13a", "C37"]))
+        # C21 too: without done_render_frame the slow rows are not excluded (C21 decision 2026-11-04)
+        self.assertEqual((code, failing(rep)), (1, ["C13a", "C21", "C37"]))
         self.assertIn("a completion the writer dropped", by_id(rep)["C13a"]["detail"])
         self.assertEqual(by_id(rep)["C13a"]["value"]["dropped_completions"], len(slow))
         self.assertAlmostEqual(by_id(rep)["C37"]["value"]["u95"], 0.9)

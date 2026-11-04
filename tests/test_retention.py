@@ -416,7 +416,8 @@ class SessionRetentionTest(unittest.TestCase):
                 doc = read_json(os.path.join(dest, "_harvest", "RETENTION.json"))    # written before any delete
                 self.assertEqual(doc["status"], "deleting")
                 left = frame_slots(dest)
-                self.assertEqual(len(left), {"after_record": 250, "in_deletes": 249, "before_done": 4}[hook])
+                self.assertEqual(len(left), {"after_record": 250, "in_deletes": 249, "before_unlink": 250,
+                                             "before_done": 4}[hook])
                 ok, detail = harvest.verify_sums(dest)                 # consistent at every point
                 self.assertTrue(ok, detail)
                 code, out = run(root)                                   # the dry run shows what is left
@@ -615,8 +616,8 @@ class ProbeRetentionTest(unittest.TestCase):
         age(pdir, 3)
         code, out = run(self.root, "--probes", "--apply")
         self.assertEqual(code, 2, out)
-        self.assertIn("does not match its recorded sha256", out)
-        self.assertEqual(frame_slots(pdir), [0, 2, 100, 200, 249])
+        self.assertIn("frames/f_00000002.png does not match its sha256 (recorded in RETENTION.json)", out)
+        self.assertEqual(frame_slots(pdir), [0] + list(range(2, 250)))  # the play stops at the first mismatch
         self.assertEqual(read_json(os.path.join(pdir, "RETENTION.json"))["status"], "deleting")
         write(changed, tiny_png(2))
         age(pdir, 3)

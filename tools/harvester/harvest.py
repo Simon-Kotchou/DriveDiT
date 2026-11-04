@@ -50,8 +50,10 @@ _launch/, _engine_logs/, _harvest/, _harvest.partial/ and *.dd6tmp), never throu
 rename. Deleting raw PNGs after derivative + validation + checksums (the retention rule) is tools/harvester/
 retention.py's: it leaves SHA256SUMS as it is and records what it deleted in _harvest/RETENTION.json, so a raw
 screenshot that record lists as deleted (with its SHA256SUMS hash) counts as accounted for in every SHA256SUMS
-verification below (verify_sums), and RETENTION.json itself is not listed. A retained session is never rebuilt or
-re-validated: it lies at its destination, and only an uncatalogued destination is verified again.
+verification below (verify_sums), and RETENTION.json itself is not listed. The record is checked against the
+retention rule (retention_deleted), so a record that lists a protected frame accounts for nothing. A retained
+session is never rebuilt or re-validated: it lies at its destination, and only an uncatalogued destination is
+verified again.
 
 Re-runs and kills. A run that finds nothing to do writes nothing. A session held at admission or by a validator
 refusal is left as it was found; one held later keeps only harvester-owned names, which the next run replaces. A
@@ -169,8 +171,15 @@ SUMS_NAME = "SHA256SUMS"
 # (via RETENTION.json.dd6tmp) by retention.py only; neither name is listed in SHA256SUMS.
 RETENTION_NAME = "RETENTION.json"
 RETENTION_SCHEMA = "drivedit.retention/1"
+RETENTION_RULE_VERSION = "retention/1 (DD-6-min)"
 RETENTION_MAX_BYTES = 64 << 20
-RETAINED_RAW_RE = re.compile(r"^frames/f_[0-9]{8}(\.png|\.bmp\.png|\.bmp)$")    # what a record may list as deleted
+# The retention rule, shared with retention.py so that a record is always checked against the rule and never
+# trusted: the audit sample keeps the first and the last raw slot, every multiple of N, every slot within the event
+# window of an events row of these kinds, and every slot without an img time or a derivative.
+RETENTION_EVENT_KINDS = ("collision", "stuck", "respawn", "teleport", "script_error")
+RETENTION_EVENT_WINDOW_MS = 2000
+RAW_SHOT_SUFFIXES = (".png", ".bmp.png", ".bmp")
+RAW_SHOT_RE = re.compile(r"f_([0-9]{8})(\.png|\.bmp\.png|\.bmp)")     # a raw screenshot file name; fullmatch only
 
 # The derivative of dc-2.0 10.1 (rig.derivative_wh, rig.derivative_codec) and CAPTURE_PROGRAM r2 3.9: 512x288 JPEG
 # q95. A session that states anything else is held; a new value is a contract change.
@@ -968,11 +977,95 @@ def sums_text(files, exclude):
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def raw_shot_slot(name, suffix=None):
+    """The slot of a raw screenshot file name: the whole name is f_<8 digits>.png, .bmp.png or .bmp (with suffix,
+    that one only) and holds no control character. None otherwise."""
+    if not isinstance(name, str) or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return None
+    m = RAW_SHOT_RE.fullmatch(name)
+    if m is None or (suffix is not None and m.group(2) != suffix):
+        return None
+    return int(m.group(1))
+
+
+def retention_sample(slots, every_n, times=None, events=()):
+    """{slot: [reasons]} of the audit sample of these slots: first, last, every_<N> (slot % N == 0) and, with times
+    ({slot: world ms}), event:<kind> for a slot within RETENTION_EVENT_WINDOW_MS of an event [(kind, world ms)] and
+    no_img_time for a slot without a time."""
+    keep = {}
+    if not slots:
+        return keep
+    first, last = min(slots), max(slots)
+    for s in slots:
+        why = []
+        if s == first:
+            why.append("first")
+        if s == last:
+            why.append("last")
+        if s % every_n == 0:
+            why.append("every_%d" % every_n)
+        if times is not None:
+            t = times.get(s)
+            if t is None:
+                why.append("no_img_time")
+            else:
+                for kind in sorted(set(k for k, et in events if abs(t - et) <= RETENTION_EVENT_WINDOW_MS)):
+                    why.append("event:%s" % kind)
+        if why:
+            keep[s] = why
+    return keep
+
+
+def retention_slot_times(session_dir, schema):
+    """({slot: image world ms}, [(kind, event world ms)] of RETENTION_EVENT_KINDS) from the committed img and events
+    rows (img issue_world_ms, else requested_world_ms). Held when either stream does not read cleanly or there is
+    no img stream."""
+    real = os.path.realpath(session_dir)
+    problems = []
+    img = reader.read_stream(real, "img", schema, problems)
+    events = reader.read_stream(real, "events", schema, problems)
+    if problems:
+        p = problems[0]
+        raise Held("the img / events streams do not read cleanly (%s %s: %s), so the event windows are unknown" % (
+            p.check, p.where, p.message))
+    if not img.present:
+        raise Held("no img stream, so the slot times (event windows) are unknown")
+    times = {}
+    for slot, issued, requested in zip(img.data["slot_id"], img.data["issue_world_ms"], img.data["requested_world_ms"]):
+        times.setdefault(slot, issued if issued is not None else requested)
+    ev = [(events.data["kind"][i], events.data["world_time_ms"][i]) for i in range(len(events))
+          if events.data["kind"][i] in RETENTION_EVENT_KINDS]
+    return times, ev
+
+
+def retention_session_rule(session_dir, listed, suffix, every_n, schema):
+    """The retention rule on a harvested session's immutable inventory: ({slot: raw file}, {slot: [reasons]} kept).
+    The raw files are the frames/f_<slot:08d><suffix> SHA256SUMS lists (listed); kept are the audit sample
+    (retention_sample with the img and events times) and every slot whose _harvest/deriv/f_<slot:08d>.jpg SHA256SUMS
+    does not list. Held when the streams cannot be read."""
+    raw = {}
+    for rel in listed:
+        head, _, name = rel.partition("/")
+        slot = raw_shot_slot(name, suffix) if head == "frames" else None
+        if slot is not None:
+            raw[slot] = rel
+    if not raw:
+        return raw, {}
+    times, events = retention_slot_times(session_dir, schema)
+    keep = retention_sample(sorted(raw), every_n, times, events)
+    for slot in sorted(raw):
+        if "%s/deriv/f_%08d.jpg" % (HARVEST_DIR, slot) not in listed:
+            keep.setdefault(slot, []).append("no_derivative")
+    return raw, keep
+
+
 def retention_deleted(session_dir, listed, sums_sha256):
     """({relative path: sha256}, problem) of the raw screenshots _harvest/RETENTION.json records as deleted: ({},
-    None) without a record. A record counts only when it is a regular file that names this session and the sha256 of
-    this SHA256SUMS (sums_sha256) and lists as deleted only frames/f_<slot:08d> raw images (.png, .bmp.png, .bmp)
-    that SHA256SUMS lists with the same sha256; otherwise problem says why and nothing is accounted for."""
+    None) without a record. The record is checked against the rule, never trusted: it must be a regular file of
+    this rule version naming this session, this SHA256SUMS (sums_sha256), a screenshot suffix and N; recomputed on
+    the inventory (retention_session_rule with that N), its kept files must be exactly the audit sample and its
+    deleted files exactly the other raw files, each with its SHA256SUMS sha256. Otherwise problem says why and
+    nothing is accounted for (so a protected frame listed as deleted, gone or not, fails the verification)."""
     path = os.path.join(session_dir, HARVEST_DIR, RETENTION_NAME)
     if not os.path.lexists(path):
         return {}, None
@@ -985,16 +1078,31 @@ def retention_deleted(session_dir, listed, sums_sha256):
         return {}, "does not parse"
     if not isinstance(doc, dict) or doc.get("schema") != RETENTION_SCHEMA or doc.get("kind") != "session" \
             or doc.get("session_id") != os.path.basename(os.path.normpath(session_dir)) \
-            or doc.get("sha256sums_sha256") != sums_sha256 or not isinstance(doc.get("deleted"), list):
+            or doc.get("sha256sums_sha256") != sums_sha256 or not isinstance(doc.get("deleted"), list) \
+            or not isinstance(doc.get("kept"), list):
         return {}, "does not name this session and this %s" % SUMS_NAME
+    every_n, suffix = doc.get("every_n"), doc.get("screenshot_suffix")
+    if doc.get("rule_version") != RETENTION_RULE_VERSION or type(every_n) is not int or every_n < 1 \
+            or suffix not in RAW_SHOT_SUFFIXES:
+        return {}, "is not a record of rule %s (rule_version, every_n, screenshot_suffix)" % RETENTION_RULE_VERSION
+    try:
+        raw, keep = retention_session_rule(session_dir, listed, suffix, every_n, reader.load_schema())
+    except Held as e:
+        return {}, "cannot be checked against the rule: %s" % e
+    want_kept = set(raw[slot] for slot in keep)
+    want_deleted = set(raw.values()) - want_kept
     deleted = {}
     for entry in doc["deleted"]:
         rel = entry.get("file") if isinstance(entry, dict) else None
         digest = entry.get("sha256") if isinstance(entry, dict) else None
-        if not (isinstance(rel, str) and RETAINED_RAW_RE.match(rel)) or listed.get(rel) != digest:
-            return {}, "lists %r as deleted, which is not a raw screenshot %s lists with that sha256" % (
-                rel, SUMS_NAME)
+        if rel not in want_deleted or rel in deleted or listed.get(rel) != digest:
+            return {}, ("lists %r as deleted, which the retention rule keeps, %s does not list with that sha256 or "
+                        "the record lists twice" % (rel, SUMS_NAME))
         deleted[rel] = digest
+    kept = [e.get("file") if isinstance(e, dict) else None for e in doc["kept"]]
+    if set(deleted) != want_deleted or len(kept) != len(set(kept)) or set(kept) != want_kept:
+        return {}, ("does not partition the raw screenshots into the audit sample of every_n %d (kept) and the rest "
+                    "(deleted)" % every_n)
     return deleted, None
 
 

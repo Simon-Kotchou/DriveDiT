@@ -5,7 +5,9 @@
         tests/test_dc2_validate.py
 
 dc_validate runs in-process through its main(argv) (stdout captured). Acceptance of the ticket shown here:
-  * dc_validate exits 0 on the golden fixture (and on the 5 Hz fallback session);
+  * dc_validate exits 0 on the golden fixture (frame-bound rows at 30 Hz, 5 Hz images) and on the 10 Hz trial-conf
+    session with its capture utilisation; the frame-bound rules of the freeze (covered_steps, the callback after
+    its frame's EOnFrame, tick gaps on the measured step dt, the rate settings of D-B) fail on mutations;
   * each negative fixture (tests/fixtures/capture_dc2/negative/*/mutation.json, generated here) fails exactly the
     check it names;
   * C17 passes a synthetic session along a loop route and fails the same session against the mirrored route, and
@@ -47,7 +49,7 @@ PROGRAM_MD = "/mnt/e/drivedit_realign/program/CAPTURE_PROGRAM.md"
 LEGACY_ROOT = "/mnt/e/DriveDiT/captures/_legacy_DrivingData_C"
 NO_SUCH_E_DIR = "/mnt/e/__dd5_no_such_dir__"
 CHECK_IDS = ("C01", "C02", "C05", "C06", "C07", "C08", "C10", "C11", "C12", "C13a", "C13b", "C15", "C17", "C20",
-             "C21", "C28", "C31", "C34", "C35", "C36")
+             "C21", "C28", "C31", "C34", "C35", "C36", "C37")
 
 
 def load(name, rel):
@@ -59,6 +61,7 @@ def load(name, rel):
 
 dc_validate = load("dc_validate", "tools/validator/dc_validate.py")
 synth = load("dc2_make_synthetic_v", "tests/fixtures/capture_dc2/make_synthetic.py")
+reader = load("dc2_reader_v", "data/dc2/reader.py")
 
 
 def temp_dir(prefix):
@@ -171,17 +174,22 @@ class GoldenTest(unittest.TestCase):
                              {"id", "severity", "status", "value", "threshold", "detail", "provisional"})
         checks = by_id(rep)
         self.assertEqual((checks["C17"]["severity"], checks["C31"]["severity"]), ("INFO", "INFO"))   # T0 trial
-        # CAPTURE_PROGRAM 4.4 T0-MIN: C12, C13b and C21 SOFT; the rest HARD (C20, C35 stricter by choice)
-        self.assertEqual([c for c in CHECK_IDS if checks[c]["severity"] == "SOFT"], ["C12", "C13b", "C21"])
+        # CAPTURE_PROGRAM 4.4 T0-MIN: C12, C13b and C21 SOFT; the rest HARD (C20, C35 stricter by choice); C37 is SOFT
+        # by the freeze decision D-B
+        self.assertEqual([c for c in CHECK_IDS if checks[c]["severity"] == "SOFT"], ["C12", "C13b", "C21", "C37"])
         self.assertEqual(rep["thresholds_file"], "thresholds_dc2.1.8.0.13.json")
-        self.assertTrue(checks["C08"]["provisional"])      # TBD-1/TBD-2 while dc-2.0 is a DRAFT
-        self.assertTrue(checks["C34"]["provisional"])      # TBD-3
-        self.assertFalse(checks["C05"]["provisional"])
+        # provisional = a TBD the streams JSON does not mark decided: after the freeze only TBD-10 (C36)
+        self.assertEqual([c for c in CHECK_IDS if checks[c]["provisional"]], ["C36"])
+        self.assertFalse(checks["C08"]["provisional"])     # TBD-1 and TBD-2 decided (D-A, D-B)
         self.assertEqual(checks["C13a"]["value"]["join_failures"], 0)
-        self.assertEqual(checks["C13b"]["value"]["lag_frames"], 0)
+        self.assertEqual(checks["C13a"]["value"]["done_minus_one_agree"], 1.0)
+        self.assertEqual(checks["C13b"]["value"]["lag_frames"], 1)        # the image of frame C shows hf row C + 1
+        self.assertEqual(checks["C37"]["status"], "N/A")                     # the 5 Hz default
+        self.assertEqual(checks["C08"]["value"]["missed_telemetry_rows"], 0)
+        self.assertEqual(checks["C08"]["value"]["N"], 6)
         self.assertEqual(checks["C02"]["value"]["split"], "train")
         self.assertEqual((rep["verdict"], rep["tier"], rep["contract_version"]), ("PASS", "T0", "dc-2.0"))
-        self.assertTrue(rep["contract_status"].startswith("DRAFT"))
+        self.assertEqual(rep["contract_status"], reader.load_schema().status)
 
     def test_negative_fixtures_fail_exactly_their_check(self):
         specs = sorted(glob.glob(os.path.join(FIXTURES, "negative", "*", "mutation.json")))
@@ -329,16 +337,16 @@ class FailLoudTest(unittest.TestCase):
 
     def test_truncated_stream_tails_fail(self):                               # F-2
         session = self.golden()
-        self._drop_last_chunk(session, "telemetry", 597)                       # counts kept honest
+        self._drop_last_chunk(session, "telemetry", 262)                       # counts kept honest
         for trial in ("T0b", "T1"):
             code, rep = self.check(session, "--trial", trial)
             self.assertEqual((code, failing(rep)), (1, ["C06", "C08", "C34"]), trial)   # joins, cadence, tail
-            self.assertIn("missed telemetry", by_id(rep)["C08"]["detail"])
+            self.assertIn("without their telemetry row", by_id(rep)["C08"]["detail"])
         session = self.golden("ctl")
-        self._drop_last_chunk(session, "ctl", 599)
+        self._drop_last_chunk(session, "ctl", 300)
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C34"]))
-        self.assertIn("ctl/: committed rows end at physics_step 599", by_id(rep)["C34"]["detail"])
+        self.assertIn("ctl/: committed rows end at physics_step 300", by_id(rep)["C34"]["detail"])
 
     def test_image_grid_holes_fail_c08(self):                                 # F-3
         session = self.golden()
@@ -366,20 +374,66 @@ class FailLoudTest(unittest.TestCase):
         self.assertIn("C08", failing(rep))
         self.assertIn("grid point(s) without a slot row", by_id(rep)["C08"]["detail"])
 
-    def test_image_rate_rules(self):                                          # F-3
-        for image_hz, why in ((5.0, "differs from image_hz"), (1.0, "is not one of [5.0, 10.0]")):
-            session = self.golden("hz%d" % image_hz)
-            edit_json(os.path.join(session, "session.json"), lambda o: o["clocks"].update({"image_hz": image_hz}))
-            code, rep = self.check(session)
-            self.assertEqual((code, failing(rep)), (1, ["C08"]), image_hz)
-            self.assertIn(why, by_id(rep)["C08"]["detail"])
+    def test_image_rate_rules(self):                                          # F-3, D-B
+        cases = ((10.0, None, "needs clocks.image_hz_setting 'trial_conf'"),
+                 (10.0, "trial_conf", "differs from image_hz"),
+                 (1.0, None, "is not 5 (the default) or 10"))
+        for image_hz, setting, why in cases:
+            session = self.golden("hz%d%s" % (image_hz, setting or ""))
 
-    def test_5hz_fallback_passes(self):                                       # F-3
-        out = synth.generate(os.path.join(self.tmp, "g5"), kind="golden_5hz", routes_dir=os.path.join(self.tmp, "r"))
+            def edit(o):
+                o["clocks"]["image_hz"] = image_hz
+                if setting:
+                    o["clocks"]["image_hz_setting"] = setting
+
+            edit_json(os.path.join(session, "session.json"), edit)
+            code, rep = self.check(session)
+            self.assertEqual((code, failing(rep)), (1, ["C08"]), (image_hz, setting))
+            self.assertIn(why, by_id(rep)["C08"]["detail"])
+        session = self.golden("n7")              # N must follow the measured step dt (D-A), never the raw slice
+        edit_json(os.path.join(session, "session.json"),
+                  lambda o: o["clocks"].update({"physics_steps_per_decision": 2}))
+        code, rep = self.check(session)
+        self.assertIn("C08", failing(rep))
+        self.assertIn("the D-A rule for step dt", by_id(rep)["C08"]["detail"])
+
+    def test_10hz_setting_passes_with_its_evidence(self):                    # D-B
+        out = synth.generate(os.path.join(self.tmp, "g10"), kind="golden_10hz", routes_dir=os.path.join(self.tmp, "r"))
         code, rep = run_json("--session", out["session_dir"], "--routes-dir", os.path.join(self.tmp, "r"),
                              "--vehicle-card", CARD)
         self.assertEqual(code, 0, [(c["id"], c["detail"]) for c in rep["checks"] if c["status"] != "PASS"])
-        self.assertEqual((by_id(rep)["C08"]["value"]["N"], by_id(rep)["C08"]["value"]["decision_hz"]), (12, 5.0))
+        c08, c37 = by_id(rep)["C08"], by_id(rep)["C37"]
+        self.assertEqual((c08["value"]["N"], c08["value"]["decision_hz"], c08["value"]["image_hz_setting"]),
+                         (3, 10.0, "trial_conf"))
+        self.assertEqual((c37["severity"], c37["status"]), ("SOFT", "PASS"))
+        self.assertAlmostEqual(c37["value"]["u95"], 0.8)                  # an 80 ms capture stall per 100 ms slot
+        # without done_render_frame the evidence is missing: a warning, never a failure
+        session = os.path.join(self.tmp, "g10_noev", out["session_id"])
+        shutil.copytree(out["session_dir"], session)
+        set_column(session, "img", "done_render_frame", lambda key, v: "")
+        code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"), "--vehicle-card",
+                             CARD)
+        self.assertEqual((code, failing(rep)), (2, ["C37"]))                  # a SOFT failure: a warning
+        self.assertEqual(by_id(rep)["C37"]["severity"], "SOFT")
+        self.assertIn("without its capture utilisation evidence", by_id(rep)["C37"]["detail"])
+
+    def test_frame_bound_rows_are_checked(self):                              # D-A
+        session = self.golden("cov")
+        set_column(session, "ctl", "covered_steps", lambda key, v: "2" if key == 154 else v)    # 153 -> 154 is 1
+        code, rep = self.check(session)
+        self.assertIn("C06", failing(rep))
+        self.assertIn("covered", by_id(rep)["C06"]["detail"])
+        session = self.golden("frame")              # a callback in the frame of the hf row that names it
+        set_column(session, "ctl", "render_frame", lambda key, v: str(int(v) + 1) if key == 154 else v)
+        set_column(session, "telemetry", "render_frame", lambda key, v: str(int(v) + 1) if key == 154 else v)
+        code, rep = self.check(session)
+        self.assertIn("C07", failing(rep))
+        self.assertIn("the same or a later render frame", by_id(rep)["C07"]["detail"])
+        session = self.golden("tick")               # world time that ran without physics steps: a tick gap
+        set_column(session, "ctl", "world_time_ms", lambda key, v: str(int(v) + 150) if key >= 154 else v)
+        code, rep = self.check(session)
+        self.assertIn("C28", failing(rep))
+        self.assertIn("steps 153..154", by_id(rep)["C28"]["detail"])
 
     def test_writer_r01_off_by_one_fails_c07(self):                           # F-5
         session = self.golden()
@@ -398,10 +452,10 @@ class FailLoudTest(unittest.TestCase):
 
     def test_command_changed_inside_a_window_fails_c07(self):                 # F-5
         session = self.golden()
-        set_column(session, "ctl", "hl_kappa", lambda key, v: "0.012345" if key == 303 else v)
+        set_column(session, "ctl", "hl_kappa", lambda key, v: "0.012345" if key == 154 else v)
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C07"]))
-        self.assertIn("inside a decision window", by_id(rep)["C07"]["detail"])
+        self.assertIn("inside a decision interval", by_id(rep)["C07"]["detail"])
 
     def test_soft_checks_warn_at_t0_and_fail_from_t1(self):                   # F-6
         session = self.golden()
@@ -415,7 +469,7 @@ class FailLoudTest(unittest.TestCase):
         session = self.golden()
         set_column(session, "img", "path", lambda key, v: "../elsewhere/frames/f_00000007" if key == 7 else v)
         code, rep = self.check(session)
-        self.assertEqual((code, failing(rep)), (1, ["C11"]))
+        self.assertEqual((code, failing(rep)), (1, ["C10", "C11"]))        # 1 of 68 slots unread: over 1% at T0
         self.assertIn("not frames/f_<slot_id:08d>", by_id(rep)["C11"]["detail"])
 
     def test_vehicle_card_hash_mismatch_fails_c02(self):                      # F-10
@@ -487,7 +541,7 @@ class FailLoudTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("C05", failing(rep))
         session = self.golden("dup")
-        rewrite_chunk(session, "ctl", 0, lambda cols, rows: rows[:302] + [list(rows[301])] + rows[302:])
+        rewrite_chunk(session, "ctl", 0, lambda cols, rows: rows[:150] + [list(rows[149])] + rows[150:])
         code, rep = self.check(session)
         self.assertIn("C06", failing(rep))
         self.assertIn("C07", failing(rep))
@@ -502,7 +556,8 @@ class FailLoudTest(unittest.TestCase):
 
     def test_negative_capture_offset_fails_c13a(self):                        # F-21
         session = self.golden()
-        set_column(session, "img", "issue_render_frame", lambda key, v: str(int(v) + 2) if key == 50 else v)
+        for column in ("issue_render_frame", "done_render_frame"):           # the request issued after the capture
+            set_column(session, "img", column, lambda key, v: str(int(v) + 2) if key == 50 else v)
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C13a"]))
         self.assertIn("captured before their request", by_id(rep)["C13a"]["detail"])

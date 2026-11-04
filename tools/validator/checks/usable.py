@@ -68,7 +68,7 @@ def check_c31(ctx):
     if masked:
         decisions = [dict(d, masks=dict(d["masks"], wm_valid=0)) if d["decision_step"] in masked else d
                      for d in s.decisions]
-        segments = ctx.reader.segments_of(decisions, s.clocks["N"])
+        segments = ctx.reader.segments_of(decisions)
     valid, cand = window_yield(decisions, segments, length)
     value = {"L": length, "valid_starts": valid, "candidate_starts": cand, "nav_invalid_steps": len(masked)}
     for other in thr.get("report_L", []):

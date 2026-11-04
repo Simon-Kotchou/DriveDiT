@@ -14,10 +14,14 @@ Checks, without touching any session data:
   * the crash-event payload table of section 9.5.1 equals the JSON event_payloads, and the crash events, the
     ego_destroyed end reason, the session.json events.* parameters (TBD-10) and dv_max_mps are where the contract
     puts them;
-  * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md, and the spec's TBD and tensor tables
-    equal the JSON in every column;
-  * the timing rules: the decision boundary on a synthetic timeline whose command changes, the as-of telemetry join,
-    the TBD-1 resolution order and the image grid phase lock;
+  * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md and carry the value decided at the
+    freeze with its status and evidence, and the spec's TBD and tensor tables equal the JSON in every column;
+  * the freeze decisions: frame-bound ctl and telemetry rows (D-A: covered_steps, render_frame, no telemetry_every_k,
+    the measured step dt), 5 Hz images and decisions with the 10 Hz trial-conf override (D-B), the endpoint road
+    join (D-C) and the folded facts (steer_sign +1, the S105 gear map, the Shape fiducial carrier at 0.05 m,
+    img.done_render_frame, the .png name);
+  * the timing rules: the decision boundary on a synthetic frame-bound timeline whose command changes, the exact hf
+    joins, the decision-rate rule and the shared world-time anchor of the decision and image grids;
   * the session id rule and the canonical map ids;
   * the committed contract files are ASCII with LF line ends.
 The checks are plain functions that return a list of violations, so the tests can also show that a broken copy of a
@@ -52,6 +56,9 @@ TERRAINS = ["Arland", "Cain", "Eden"]
 
 # The probe-dependent values the ticket names, with the probe that decides each (TICKETS_UNIFIED DD-11-min).
 BLOCKING_TBD = {"TBD-1": "E-10", "TBD-2": "E-05", "TBD-3": "E-19", "TBD-4": "E-05", "TBD-5": "E-01"}
+TBD_STATUS = ("decided", "provisional")
+# The only TBD still open after the freeze (a value, never a field)
+PROVISIONAL_TBD = ("TBD-10",)
 
 # CAPTURE_PROGRAM r2 3.3, stream table, item by item -> where dc-2.0 carries it ("<group>.<field>", or
 # "<group>.<field>=<enum value>" for an event kind). Groups are streams, derived groups or session files.
@@ -238,9 +245,16 @@ def stream_schema_violations(schema):
     if len(set(tbd_ids)) != len(tbd_ids):
         errors.append("tbd_by_probe: duplicate ids")
     for t in schema["tbd_by_probe"]:
-        for k in ("id", "item", "default_r2", "default", "decided_by", "blocks_freeze", "results", "affects"):
+        for k in ("id", "item", "default_r2", "default", "decided_by", "blocks_freeze", "results", "status",
+                  "decided", "decided_text", "evidence", "affects"):
             if k not in t:
                 errors.append("tbd_by_probe %s: missing %r" % (t.get("id"), k))
+        if t.get("status") not in TBD_STATUS:
+            errors.append("tbd_by_probe %s: status %r" % (t.get("id"), t.get("status")))
+        elif (t["status"] == "provisional") != (t.get("id") in PROVISIONAL_TBD):
+            errors.append("tbd_by_probe %s: only %s may stay provisional" % (t.get("id"), ", ".join(PROVISIONAL_TBD)))
+        if not str(t.get("evidence", "")).strip() or not str(t.get("decided_text", "")).strip():
+            errors.append("tbd_by_probe %s: empty decided_text or evidence" % t.get("id"))
         if t.get("results") != T0ENG:
             errors.append("tbd_by_probe %s: results must cite %s" % (t.get("id"), T0ENG))
     for tid, probe in BLOCKING_TBD.items():
@@ -360,7 +374,8 @@ def md_agreement_violations(schema, text):
         errors.append("spec: the TBD table differs from tbd_by_probe")
     else:
         for r, t in zip(tbd_rows, schema["tbd_by_probe"]):
-            want = [t["id"], t["item"], t["default_r2"], t["decided_by"], "yes" if t["blocks_freeze"] else "no"]
+            want = [t["id"], t["item"], t["default_r2"], t["decided_text"], t["evidence"], t["decided_by"],
+                    "yes" if t["blocks_freeze"] else "no"]
             if r != want:
                 errors.append("spec: TBD row %s differs from tbd_by_probe (item, default, probe or blocking)" % t["id"])
     return errors
@@ -523,8 +538,8 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertEqual(keys["hf"], ["render_frame"])
         self.assertEqual(keys["img"], ["slot_id"])
         self.assertEqual(keys["episodes"], ["episode_id"])
-        self.assertEqual(self.schema["streams"]["ctl"]["key_step"], 1)
-        self.assertEqual(self.schema["streams"]["telemetry"]["key_step"], "k")
+        self.assertEqual(self.schema["streams"]["ctl"]["key_step"], "covered_steps")
+        self.assertEqual(self.schema["streams"]["telemetry"]["key_step"], "covered_steps")
 
     def test_migration_items_present(self):
         missing = []
@@ -563,9 +578,16 @@ class StreamSchemaTest(unittest.TestCase):
             self.assertEqual(f.get("sign"), "engine-native", ref)
             self.assertEqual(f.get("tbd"), "TBD-5", ref)
         steer = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-5"][0]
-        self.assertEqual(steer["default"]["steer_sign"], -1)
+        self.assertEqual(steer["default"]["steer_sign"], -1)         # the r2 default, refuted by E-01 run 3
+        self.assertEqual(steer["decided"]["steer_sign"], 1)
+        self.assertEqual(steer["decided"]["yaw_axis_sign"], 1)
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertIn("+1", session["control.steer_sign"]["desc"])
+        self.assertIn("positive `SetSteering` turns right", self.spec)
+        self.assertNotIn("default -1)", self.spec)
 
     def test_probe_dependent_defaults(self):
+        """The r2 defaults stay as history; the decided values are tested in test_freeze_decisions."""
         tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}
         self.assertEqual(tbd["TBD-1"]["default"]["telemetry_every_k"], 3)
         self.assertEqual(tbd["TBD-1"]["default"]["physics_steps_per_decision"], 6)
@@ -661,7 +683,7 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertIn("ego_destroyed and ego_disabled are not errors", end["status"]["desc"])
         self.assertIn("ego_disabled", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
         self.assertIn("ego_destroyed", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
-        self.assertIn("ego_destroyed", self.spec[self.spec.index("## 15. Open items"):])
+        self.assertIn("ego_destroyed", self.spec[self.spec.index("## 15. Freeze items"):])
 
     def test_crash_parameters_are_session_values(self):
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
@@ -721,113 +743,196 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertEqual(commit, ["chunk_id", "first_key", "last_key", "n_rows", "n_bytes"])
         self.assertEqual(self.schema["session"]["chunk_name"] % 3, "chunk_00003.csv")
 
-    def test_tbd1_resolution_order(self):
-        def resolve(slice_s):
-            n = int(math.floor(0.1 / slice_s + 0.5))
-            k = max([d for d in range(1, n + 1) if n % d == 0 and d * slice_s <= 0.05 + 1e-6] or [1])
-            return n, k
-        expect = {1 / 60.0: (6, 3), 1 / 50.0: (5, 1), 1 / 30.0: (3, 1), 1 / 120.0: (12, 6), 1 / 100.0: (10, 5)}
-        for slice_s, want in expect.items():
-            n, k = resolve(slice_s)
-            self.assertEqual((n, k), want, slice_s)
-            self.assertEqual(n % k, 0, slice_s)
-        tbd1 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-1"][0]
-        self.assertEqual(resolve(tbd1["default"]["fixed_time_slice_s"]),
-                         (tbd1["default"]["physics_steps_per_decision"], tbd1["default"]["telemetry_every_k"]))
-        self.assertIn("decided first", tbd1["default_r2"])
-        self.assertIn("WorldTimestamp", tbd1["default_r2"])
+    def test_steps_per_decision_rule(self):
+        """D-A: N = floor(1000 / decision_hz / step_dt_ms + 0.5) from the measured step dt, never GetFixedTimeSlice."""
+        def steps_per_decision(decision_hz, step_dt_s):
+            return int(math.floor(1000.0 / decision_hz / (step_dt_s * 1000.0) + 0.5))
+        expect = {(5, 1 / 30.0): 6, (10, 1 / 30.0): 3, (5, 1 / 60.0): 12, (10, 1 / 60.0): 6}
+        for (hz, dt), want in expect.items():
+            self.assertEqual(steps_per_decision(hz, dt), want, (hz, dt))
+        tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}
+        d1, d2 = tbd["TBD-1"]["decided"], tbd["TBD-2"]["decided"]
+        self.assertEqual(steps_per_decision(d2["decision_hz"], d1["step_dt_s"]), d1["physics_steps_per_decision"])
+        self.assertEqual(steps_per_decision(d2["override_image_hz"], d1["step_dt_s"]),
+                         d2["override_physics_steps_per_decision"])
+        self.assertIn("never GetFixedTimeSlice", d1["step_dt_rule"])
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertIn("never the step dt", session["engine.fixed_time_slice_s"]["desc"])
+        self.assertIn("step_dt_ms", session["clocks.physics_steps_per_decision"]["desc"])
 
     def test_decision_boundary_on_a_changing_command(self):
-        """Synthetic timeline: the HL decides in EOnPostSimulate of P_t, the command applies from P_t + 1. A builder
-        that follows the JSON timing offsets must give action_cmd_t = decision t, label_t = decision t (mode E),
-        state_t free of decision t, and state_t+1 - state_t = N steps of decision t."""
+        """Synthetic frame-bound timeline (D-A): render frames of varying world time, each with 0 to 3 fixed steps of
+        1/30 s and one callback when it has a step; decisions on the world-time grid of decision_hz, taken after the
+        rows of the first callback at or past the grid point, applied from the next physics step. A builder that
+        follows the JSON timing (row offsets, the covering row of a step) must give action_cmd_t = decision t,
+        label_t = decision t (mode E), state_t free of decision t, the command held over the decision interval
+        (P_t, P_t+1], and the per-step action_exec of decision t."""
         timing = self.schema["timing"]
         sample = timing["sample"]
-        n_dec, k, dt = 6, 3, 1.0 / 60.0
-        self.assertEqual(timing["decision"]["hl_seq_increments_at_step_offset"], 1)
+        self.assertEqual(timing["decision"]["hl_seq_increments_at_row_offset"], 1)
+        self.assertEqual(sample["action_cmd"]["row_offset"], 1)
+        self.assertEqual(sample["state"]["row_offset"], 0)
+        self.assertEqual(sample["action_label"]["row_offset"], 0)
+        self.assertEqual(sample["action_exec"]["last_step_offset"], "physics_steps_per_decision")
+        decision_hz, step_ms = 5, 100.0 / 3.0
+        n_dec = int(math.floor(1000.0 / decision_hz / step_ms + 0.5))
+        self.assertEqual(n_dec, 6)
+        frame_ms = [13, 13, 14, 80, 13, 40, 95, 13, 13, 27, 100, 13, 14, 13, 66, 13] * 12
 
-        def simulate(decision_of, steps=61):
+        def simulate(decision_of):
+            """Rows by callback: physics_step, covered_steps, world_time_ms, hl_*, exp_*; the speed integrates the
+            held acceleration over each covered step."""
+            world, clock3, step = 0, 0, -1
             speed, held, seq, pending = 0.0, None, -1, None
-            ctl, telemetry = {}, {}
-            for step in range(steps):
-                if pending is not None:          # EOnSimulate: a decision taken after the previous step applies
+            anchor, grid = None, 0
+            rows = []
+            for dt in frame_ms:
+                world += dt
+                covered = min(3, (3 * world - clock3) // 100)
+                if covered < 1:
+                    continue
+                clock3 += 100 * covered
+                if pending is not None:          # EOnFixedFrame: a decision of the previous callback applies
                     held, seq = pending
                     pending = None
                 accel = held if held is not None else 0.0
-                speed += accel * dt
+                speed += accel * covered * step_ms / 1000.0
+                step += covered
+                if anchor is None:
+                    anchor = world
                 label = None
-                if step % n_dec == 0:            # EOnPostSimulate: rows first, then the decision on the state after
-                    label = decision_of(step // n_dec, speed)
-                ctl[step] = {"hl_accel": held, "hl_seq": seq, "exp_accel_now": label, "input_post_throttle": accel}
-                if step % k == 0:
-                    telemetry[step] = {"speed": speed}
+                if world >= anchor + grid * 1000 // decision_hz:      # rows first, then the decision
+                    label = decision_of(grid, speed)
+                    while anchor + grid * 1000 // decision_hz <= world:
+                        grid += 1
+                rows.append({"physics_step": step, "covered_steps": covered, "world_time_ms": world,
+                             "hl_accel": held, "hl_seq": seq, "exp_accel_now": label, "speed": speed,
+                             "llc_throttle": accel})
                 if label is not None:
-                    pending = (label, step // n_dec)
-            return ctl, telemetry
-
-        def build(ctl, telemetry):
-            rows = []
-            last = sample["action_exec"]["last_step_offset"]
-            self.assertEqual(last, "physics_steps_per_decision")
-            for p in sorted(s for s in ctl if s % n_dec == 0):
-                end = p + n_dec
-                if end not in ctl:
-                    break
-                rows.append({
-                    "state": telemetry[p + sample["state"]["step_offset"]]["speed"],
-                    "action_cmd": ctl[p + sample["action_cmd"]["step_offset"]]["hl_accel"],
-                    "label": ctl[p + sample["action_label"]["step_offset"]]["exp_accel_now"],
-                    "exec_seq": [ctl[s]["hl_seq"] for s in range(p + sample["action_exec"]["first_step_offset"],
-                                                                  end + 1)],
-                })
+                    pending = (label, len([r for r in rows if r["exp_accel_now"] is not None]) - 1)
             return rows
 
-        plan = [0.5, -1.0, 2.0, 0.0, 1.5, -0.5, 3.0, -2.0, 1.0, 0.25, 0.75]
-        rows = build(*simulate(lambda t, speed: plan[t]))
-        self.assertEqual(len(rows), 10)
-        for t, r in enumerate(rows):
-            self.assertEqual(r["action_cmd"], plan[t], t)
-            self.assertEqual(r["label"], plan[t], t)
-            self.assertEqual(r["exec_seq"], [t] * n_dec, t)
-            if t + 1 < len(rows):
-                self.assertAlmostEqual(rows[t + 1]["state"] - r["state"], n_dec * plan[t] * dt, places=9)
+        def covering(rows, q):
+            for r in rows:
+                if r["physics_step"] - r["covered_steps"] + 1 <= q <= r["physics_step"]:
+                    return r
+            return None
+
+        def build(rows):
+            out = []
+            deciders = [i for i, r in enumerate(rows) if r["exp_accel_now"] is not None]
+            for t, i in enumerate(deciders[:-1]):
+                p, p_next = rows[i]["physics_step"], rows[deciders[t + 1]]["physics_step"]
+                exec_rows = []
+                for q in range(p + sample["action_exec"]["first_step_offset"], p + n_dec + 1):
+                    r = covering(rows, q)
+                    exec_rows.append(None if q > p_next or r is None else r["llc_throttle"])
+                out.append({"state": rows[i + sample["state"]["row_offset"]]["speed"],
+                            "action_cmd": rows[i + sample["action_cmd"]["row_offset"]]["hl_accel"],
+                            "label": rows[i + sample["action_label"]["row_offset"]]["exp_accel_now"],
+                            "interval": [r["hl_seq"] for r in rows if p < r["physics_step"] <= p_next],
+                            "n_t": p_next - p, "exec": exec_rows})
+            return out
+
+        plan = [0.5, -1.0, 2.0, 0.0, 1.5, -0.5, 3.0, -2.0, 1.0, 0.25, 0.75, -0.25, 1.25, 0.6, -0.6]
+        rows = simulate(lambda t, speed: plan[t % len(plan)])
+        self.assertTrue(any(r["covered_steps"] > 1 for r in rows))       # merged steps are exercised
+        self.assertTrue(all(b["physics_step"] - a["physics_step"] == b["covered_steps"]
+                            for a, b in zip(rows, rows[1:])))
+        self.assertEqual(rows[0]["physics_step"], rows[0]["covered_steps"] - 1)
+        built = build(rows)
+        self.assertGreater(len(built), 10)
+        lengths = set()
+        for t, r in enumerate(built):
+            want = plan[t % len(plan)]
+            self.assertEqual(r["action_cmd"], want, t)
+            self.assertEqual(r["label"], want, t)
+            self.assertEqual(r["interval"], [t] * len(r["interval"]), t)    # held over (P_t, P_t+1]
+            inside = [e for e in r["exec"] if e is not None]
+            self.assertEqual(inside, [want] * len(inside), t)
+            self.assertEqual(len(inside), min(n_dec, r["n_t"]), t)
+            lengths.add(r["n_t"])
+        self.assertGreater(len(lengths), 1)            # the interval varies around N with the frame clock
         # state_t never contains a step of decision t: changing decision 4 alone leaves state_4 unchanged
-        changed = list(plan)
+        changed = [plan[t % len(plan)] for t in range(len(built) + 2)]
         changed[4] = -3.0
-        rows2 = build(*simulate(lambda t, speed: changed[t]))
-        self.assertEqual(rows2[4]["state"], rows[4]["state"])
-        self.assertNotEqual(rows2[5]["state"], rows[5]["state"])
-        # the old reading (action_cmd at P_t itself) would label decision t with the command of t - 1
-        ctl, _ = simulate(lambda t, speed: plan[t])
-        self.assertEqual(ctl[4 * n_dec]["hl_accel"], plan[3])
+        built2 = build(simulate(lambda t, speed: changed[t]))
+        self.assertEqual(built2[4]["state"], built[4]["state"])
+        self.assertNotEqual(built2[5]["state"], built[5]["state"])
 
-    def test_telemetry_join_is_as_of(self):
+    def test_hf_joins_are_exact(self):
         joins = self.schema["timing"]["joins"]
-        self.assertTrue(joins["img_to_hf"].startswith("exact"))
-        self.assertTrue(joins["hf_to_ctl"].startswith("exact"))
-        self.assertTrue(joins["hf_to_telemetry"].startswith("as-of"))
-        k = 3
-        telemetry_steps = list(range(0, 60, k))
-        for last_physics_step in range(0, 58):           # frames on steps not divisible by k have no exact match
-            as_of = max(s for s in telemetry_steps if s <= last_physics_step)
-            self.assertLess(last_physics_step - as_of, k)
-        self.assertNotIn(7, telemetry_steps)
+        for key in ("img_to_hf", "hf_to_ctl", "hf_to_telemetry"):
+            self.assertTrue(joins[key].startswith("exact"), key)
+        self.assertIn("captured_render_frame + 1", joins["capture_pose"])
+        self.assertIn("done_render_frame - 1", joins["img_to_hf"])
+        self.assertIn("pose row (hf row captured_render_frame + 1)", self.schema["timing"]["sample"]["obs"]["rule"])
+        self.assertIn("the frame clock", self.schema["timing"]["clock"]["world_time"])
 
-    def test_image_grid_is_phase_locked(self):
+    def test_decision_and_image_grids_share_the_anchor(self):
         grid = self.schema["timing"]["image_grid"]
-        self.assertIn("physics_step 0", grid["anchor"])
+        self.assertIn("first ctl row", grid["anchor"])
+        self.assertIn("first ctl row", self.schema["timing"]["decision"]["grid"])
         self.assertIn("img_lead_ms", grid["due_ms"])
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
-        for name in ("clocks.img_lead_ms", "clocks.img_inflight_timeout_ms"):
+        for name in ("clocks.img_lead_ms", "clocks.img_inflight_timeout_ms", "clocks.image_hz_setting"):
             self.assertTrue(session[name]["required"], name)
             self.assertEqual(session[name]["tbd"], "TBD-2", name)
-        # 60 Hz steps, 10 Hz grid and decisions, lead 0: grid point g is due at decision step g's world time
-        slice_ms, n_dec, image_hz, lead = 1000.0 / 60.0, 6, 10.0, 0.0
+        # 5 Hz images and decisions, lead 0: image grid point g is due at decision grid point g
+        anchor, image_hz, decision_hz, lead = 3111, 5, 5, 0
         for g in range(20):
-            due = 0.0 + g * 1000.0 / image_hz - lead
-            self.assertAlmostEqual(due, g * n_dec * slice_ms, places=6)
+            self.assertEqual(anchor + g * 1000 // image_hz - lead, anchor + g * 1000 // decision_hz)
         derived = {f["name"] for f in self.schema["derived"]["decision_index"]["fields"]}
-        self.assertTrue({"obs_age_steps", "obs_age_ms", "obs_valid"} <= derived)
+        self.assertTrue({"obs_age_steps", "obs_age_ms", "obs_valid", "interval_steps"} <= derived)
+
+    def test_freeze_decisions(self):
+        """D-A, D-B, D-C and the folded facts, where the contract puts them."""
+        tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}
+        self.assertEqual([t for t, v in tbd.items() if v["status"] != "decided"], list(PROVISIONAL_TBD))
+        # D-A
+        for stream in ("ctl", "telemetry"):
+            names = [f["name"] for f in self.schema["streams"][stream]["fields"]]
+            self.assertEqual(names[:4], ["physics_step", "covered_steps", "render_frame", "world_time_ms"], stream)
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        self.assertNotIn("clocks.telemetry_every_k", session)
+        for name in ("engine.step_dt_s", "engine.step_dt_source", "engine.fixed_time_slice_s",
+                     "clocks.physics_steps_per_decision", "clocks.decision_hz"):
+            self.assertTrue(session[name]["required"], name)
+        self.assertEqual(session["engine.step_dt_source"]["enum"], ["engine", "measured"])
+        self.assertNotIn("telemetry_every_k", read_text(FEATURES_JSON))
+        self.assertAlmostEqual(tbd["TBD-1"]["decided"]["step_dt_s"], 1 / 30.0)
+        self.assertEqual(tbd["TBD-1"]["decided"]["rows"], "frame_bound")
+        section6 = self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")]
+        for phrase in ("covered_steps", "EOnFixedFrame", "GetFixedSteps()", "never\n  the step dt", "world-time grid",
+                       "frame clock", "hf row C + 1", "done_render_frame"):
+            self.assertIn(phrase.replace("\\n", "\n"), section6, phrase)
+        self.assertNotIn("mod physics_steps_per_decision", self.spec)
+        # D-B
+        d2 = tbd["TBD-2"]["decided"]
+        self.assertEqual((d2["image_hz"], d2["decision_hz"], d2["physics_steps_per_decision"]), (5, 5, 6))
+        self.assertEqual((d2["override_image_hz"], d2["override_setting"]), (10, "trial_conf"))
+        self.assertEqual(d2["override_utilisation_u95_max"], 0.85)
+        self.assertEqual(session["clocks.image_hz_setting"]["enum"], ["default", "trial_conf"])
+        self.assertEqual(self.schema["enums"]["image_hz_setting"], ["default", "trial_conf"])
+        # D-C
+        d9 = tbd["TBD-9"]["decided"]
+        self.assertEqual((d9["endpoint_tol_m"], d9["n_pts_in_join"]), (2.0, False))
+        self.assertEqual(d9["road_key_format"], tbd["TBD-9"]["default"]["road_key_format"])
+        tel = {f["name"]: f for f in self.schema["streams"]["telemetry"]["fields"]}
+        self.assertIn("unordered endpoint pair within 2 m", tel["road_key"]["desc"])
+        road = {f["name"]: f for f in self.schema["derived"]["road"]["fields"]}
+        self.assertIn("unordered endpoint pair", road["matched_road_id"]["desc"])
+        # folded facts
+        self.assertEqual(tbd["TBD-4"]["decided"]["engine_file"] % 7, "frames/f_00000007.png")
+        d7 = tbd["TBD-7"]["decided"]
+        self.assertEqual((d7["gear_index_reverse"], d7["gear_index_neutral"], d7["gear_indices_forward"]),
+                         (0, 1, [2, 3, 4, 5]))
+        self.assertEqual(d7["gears"] - d7["forward_gears"] - 1, d7["gear_index_neutral"])
+        self.assertTrue(tbd["TBD-6"]["decided"]["launch_id_visible"])
+        img = {f["name"]: f for f in self.schema["streams"]["img"]["fields"]}
+        self.assertEqual((img["done_render_frame"]["type"], img["done_render_frame"]["required"]), ("int", False))
+        self.assertIn("carrier: shape, depth_m: 0.05", session["rig.fiducial"]["desc"])
+        self.assertIn("diagnostic only", session["rig.fiducial"]["desc"])
 
     def test_launch_guard_modes(self):
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
@@ -896,8 +1001,8 @@ class StreamSchemaTest(unittest.TestCase):
             self.assertTrue(f.get("reserved"), name)
 
     def test_open_items_list_every_proposal(self):
-        section15 = self.spec[self.spec.index("## 15. Open items"):]
-        for phrase in ("decision boundary", "decision phase lock", "obs_t rule", "ego frame", "`end_reason` values",
+        section15 = self.spec[self.spec.index("## 15. Freeze items"):]
+        for phrase in ("decision boundary", "world-time decision grid", "obs_t rule", "ego frame", "`end_reason` values",
                        "chunk rules", "nav_v1 rules", "route schema", "`wb_escape`", "DC_Sessions/",
                        "forward-only", "crash events", "modded class"):
             self.assertIn(phrase, section15, phrase)
@@ -1161,8 +1266,9 @@ class FeaturesRegistryTest(unittest.TestCase):
 
     def test_offsets_block(self):
         off = self.reg["offsets"]
-        self.assertEqual(off["decision_hz"], 10)
+        self.assertEqual(off["decision_hz"], 5)
         self.assertEqual(off["physics_steps_per_decision"], 6)
+        self.assertAlmostEqual(off["step_dt_s"], 1 / 30.0)
         self.assertEqual(off["tbd"], "TBD-1")
         self.assertEqual(self.reg["contract_version"], self.schema["contract_version"])
         self.assertEqual(self.reg["status"], self.schema["status"])
@@ -1184,21 +1290,24 @@ class FeaturesRegistryTest(unittest.TestCase):
         drifted = self.spec.replace("| TBD-7 | gearbox and gear index semantics |", "| TBD-7 | gear map |", 1)
         self.assertTrue(md_agreement_violations(self.schema, drifted))
 
-    def test_5hz_fallback_shapes(self):
-        fallback = self.reg["offsets"]["fallback_5hz"]
-        self.assertEqual(fallback["decision_hz"], 5)
-        self.assertEqual(fallback["shapes"]["action_exec"], ["T", fallback["physics_steps_per_decision"], 4])
+    def test_10hz_override_shapes(self):
+        override = self.reg["offsets"]["override_10hz"]
+        self.assertNotIn("fallback_5hz", self.reg["offsets"])
+        self.assertEqual(override["decision_hz"], 10)
+        self.assertEqual(override["shapes"]["action_exec"], ["T", override["physics_steps_per_decision"], 4])
         self.assertEqual(self.tensors["action_exec"]["shape"][1], self.reg["offsets"]["physics_steps_per_decision"])
         tbd2 = [t for t in self.schema["tbd_by_probe"] if t["id"] == "TBD-2"][0]
-        self.assertEqual(tbd2["default"]["fallback_physics_steps_per_decision"], fallback["physics_steps_per_decision"])
+        self.assertEqual(tbd2["decided"]["override_physics_steps_per_decision"], override["physics_steps_per_decision"])
+        self.assertEqual(tbd2["decided"]["physics_steps_per_decision"],
+                         self.reg["offsets"]["physics_steps_per_decision"])
         self.assertEqual(self.tensors["action_cmd"]["shape"], ["T", 3])
 
     def test_policy_valid_has_a_recorded_source(self):
         pv = self.channels["policy_valid"][1]
         self.assertEqual(pv["source"], "ctl.react_visible")
         self.assertTrue(resolve_ref(self.schema, pv["source"]).get("reserved"))
-        self.assertIn("P_t + 1", self.tensors["action_cmd"]["rule"])
-        self.assertIn("exp_*_now at P_t", self.tensors["action_label"]["rule"])
+        self.assertIn("(P_t, P_t+1]", self.tensors["action_cmd"]["rule"])
+        self.assertIn("exp_*_now of C_t", self.tensors["action_label"]["rule"])
 
 
 if __name__ == "__main__":

@@ -2,5 +2,5 @@
   "variant": "gap",
   "fails": ["C06"],
   "generate": "python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out <dir under /mnt/e or /dev/shm> --variant gap",
-  "description": "ctl rows of physics steps 304 and 305 are missing (not telemetry steps, no captured image frame); commit lines and session_end counts stay consistent, so only the ctl counter gap shows"
+  "description": "two consecutive ctl rows inside an episode-0 decision interval (physics steps 64 and 65; neither a decision callback, the row after one, nor the callback of a captured frame) are missing while their telemetry rows stay; commit lines and session_end counts stay consistent, so only the ctl counter gap and the ctl/telemetry key mismatch show"
 }

@@ -2,6 +2,7 @@
 
     C01 C02 (files)  C05 C06 C07 C34 C35 (streams)  C08 C28 (timing)  C10 C11 C12 C13a C13b (images)
     C15 (dynamics)  C17 (behaviour, SOFT at T1)  C20 C21 (health)  C31 (usable yield)  C36 (crash events)
+    C37 (10 Hz image-rate evidence, SOFT; freeze decision D-B)
 
 Each module documents its checks; base.py holds the result record, the severities and the run context.
 """
@@ -30,6 +31,7 @@ REGISTRY = (
     ("C34", streams.check_c34),
     ("C35", streams.check_c35),
     ("C36", crash.check_c36),
+    ("C37", timing.check_c37),
 )
 CHECK_IDS = tuple(cid for cid, _ in REGISTRY)
 

@@ -1051,8 +1051,21 @@ def _image_files(s):
         s.image_files.append((rel, None))
 
 
+def pending_at_end(s):
+    """(count, ok) of session_end.json images.pending_at_end as the contract allows it: the JSON integer 0 or 1, one
+    request being in flight at a time (section 6). Any other value or type (a bool, a float such as 1.0, a string,
+    null, a missing key) is not ok and counts as 0, so it never grants the seal exemption. The reader's exemption and
+    C13a share this predicate. Without session_end.json (an unsealed session, C01's) the count is 0 and ok."""
+    if s.end is None:
+        return 0, True
+    value = s.end_get("images.pending_at_end")
+    ok = type(value) is int and value in (0, 1)
+    return (value if ok else 0), ok
+
+
 def timed_out_slots(s):
-    """slot_ids named by events rows img_timeout (payload img_slot_id=<n>): requests that stopped blocking (section 6)."""
+    """slot_ids named by events rows img_timeout (payload img_slot_id=<n>): requests that stopped blocking
+    (section 6)."""
     events = s.streams.get("events")
     out = set()
     if events is None or not events.present:
@@ -1072,12 +1085,12 @@ def _resolve_images(s, decode, visitor):
     img = s.streams["img"]
     hf_index = s.streams["hf"].index()
     end_frame = s.end_get("end.render_frame") if s.end is not None else None
-    pending_end = s.end_get("images.pending_at_end") if s.end is not None else None
+    pending_end, _ = pending_at_end(s)
     timed_out = timed_out_slots(s)
     # one request is in flight at a time: the only request a seal can catch is the newest issued slot, and only when
     # session_end.json declares exactly one pending (0 or 1; more fails C13a)
     issued = [img.data["slot_id"][i] for i in range(len(img)) if img.data["issue_status"][i] == "issued"]
-    in_flight_slot = issued[-1] if issued and pending_end == 1 and not isinstance(pending_end, bool) else None
+    in_flight_slot = issued[-1] if issued and pending_end == 1 else None
     s.images = []
     for i in range(len(img)):
         slot = img.data["slot_id"][i]

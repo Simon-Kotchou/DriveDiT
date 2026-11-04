@@ -30,6 +30,7 @@ import os
 import shutil
 import struct
 import tempfile
+import types
 import unittest
 import warnings
 import zlib
@@ -1027,6 +1028,27 @@ class CrashTest(unittest.TestCase):
         self.assertNotIn(last["slot_id"], [d["obs_slot_id"] for d in s.decisions])
         with open(os.path.join(s.path, "_engine_logs", "console.log"), encoding="ascii") as f:
             self.assertIn("f_%08d" % last["slot_id"], f.read())
+
+    def test_pending_at_end_must_be_the_integer_0_or_1(self):
+        """Review round 4: images.pending_at_end is the JSON integer 0 or 1; a bool, float, string or null never grants
+        the exemption (the predicate C13a shares)."""
+        for value, want in ((0, (0, True)), (1, (1, True)), (1.0, (0, False)), ("1", (0, False)), (True, (0, False)),
+                            (False, (0, False)), (None, (0, False)), (3.0, (0, False)), (2, (0, False)),
+                            (-1, (0, False))):
+            end = {"images.pending_at_end": value}
+            fake = types.SimpleNamespace(end=end, end_get=lambda k, d=None, end=end: end.get(k, d))
+            self.assertEqual(reader.pending_at_end(fake), want, repr(value))
+        tmp = temp_dir("dc2_reader_pending_type_")
+        try:
+            for name, value in (("float", 1.0), ("str", "1"), ("bool", True), ("int", 1)):
+                dst = os.path.join(tmp, name, self.out["session_id"])
+                shutil.copytree(self.out["session_dir"], dst)
+                edit_json(os.path.join(dst, "session_end.json"),
+                          lambda o, value=value: o["images"].update({"pending_at_end": value}))
+                s = reader.open_session(dst, vehicle_card=CARD)
+                self.assertEqual(sum(r["pose_after_seal"] for r in s.images), int(type(value) is int), name)
+        finally:
+            shutil.rmtree(tmp)
 
     def test_the_exemption_needs_exactly_one_pending(self):
         """Review round 3, N6: the exemption is the unique newest issued slot with images.pending_at_end 1; a session

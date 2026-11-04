@@ -13,7 +13,7 @@ import re
 
 import numpy
 
-from .base import FAIL, HARD, INFO, NA, NOT_EVALUATED, PASS, first, percentile, result, unreadable
+from .base import FAIL, HARD, INFO, NA, NOT_EVALUATED, PASS, first, load_reader, percentile, result, unreadable
 
 LUMA = numpy.array([0.299, 0.587, 0.114], dtype=numpy.float32)
 UPPER_FRAC = 0.4            # C13b: the upper part of the core (horizon and above) carries the yaw flow
@@ -283,16 +283,17 @@ def check_c12(ctx):
     return result(ctx, "C12", severity, FAIL if issues else PASS, value, thr, detail, not_evaluated=skipped)
 
 
-def _pending_integrity(s):
+def _pending_integrity(s, reader=None):
     """Writer integrity of the completions (review rounds 2 and 3, N1, N2, N6): images.pending_at_end is 0 or 1; the
     issued rows with done_render_frame empty and no img_timeout event (pending_at_seal) are that many, the newest
     issued slot when it is 1; every other such row is a dropped completion. {"issues": [...], "dropped": [slots]}."""
     issues = []
     declared = s.end_get("images.pending_at_end") if s.end is not None else None
-    pending_end = declared if isinstance(declared, int) and not isinstance(declared, bool) else 0
-    if pending_end not in (0, 1):
-        issues.append("images.pending_at_end %r: one request is in flight at a time, so at most 1 can be pending at "
-                      "the seal" % (declared,))
+    pending_end, ok = (reader or load_reader()).pending_at_end(s)       # the reader's exemption uses the same
+    if not ok:
+        issues.append("images.pending_at_end %r is not the JSON integer 0 or 1: one request is in flight at a time, "
+                      "so at most 1 can be pending at the seal (a bool, float, string or null is refused)"
+                      % (declared,))
     issued_slots = [r["slot_id"] for r in s.images if r["issue_status"] == "issued"]
     pending = [r["slot_id"] for r in s.images if r.get("pending_at_seal")]
     newest = issued_slots[-1:] if pending_end == 1 else []
@@ -327,7 +328,7 @@ def check_c13a(ctx):
     s = ctx.session
     thr = ctx.thr("C13a")
     fid = ctx.reader.fiducial
-    integrity = _pending_integrity(s)
+    integrity = _pending_integrity(s, ctx.reader)
     readable = [r for r in s.images if r["png_w"] is not None]
     if not readable:
         if integrity["issues"]:

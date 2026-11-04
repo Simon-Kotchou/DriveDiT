@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 and 2 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
+Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review rounds 1 to 3 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -1324,8 +1324,8 @@ dc-2.0 was frozen on 2026-11-04 after the user adopted the freeze decisions D-A 
 (`t0/freeze/DECISIONS_dc2_freeze.md`); the reader, validator and capture core that follow it are DD-5-min and
 DD-4-min (`t0/freeze/FREEZE_IMPL.md`). Each row is one decision or folded fact, the date it was decided and its
 evidence; both JSON twins carry the same rows (`changelog` in `dc-2.0.streams.json` and `features_v1.json`). The
-rows R1-* and R2-* are the pre-capture corrections of the freeze review rounds 1 (Codex and Claude) and 2 (Codex),
-both 2026-11-04: no dc-2.0 session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of
+rows R1-*, R2-* and R3-* are the pre-capture corrections of the freeze review rounds 1 (Codex and Claude), 2 and 3
+(Codex), all 2026-11-04: no dc-2.0 session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of
 a dc-2.x.
 
 <!-- dc2:changelog -->
@@ -1366,3 +1366,6 @@ a dc-2.x.
 | R2-HLSEQ | 2026-11-04 | hl_seq -1 is the no-command sentinel (hl_* empty) and may advance only on the row after a decision callback of a starting or continuing episode (section 6, ctl.hl_seq; C07) | Codex N5: adding 1 to every golden hl_seq after step 0 (0 during the warm-up) passed C07; validator test |
 | R2-ADMIT | 2026-11-04 | Episode admission handshake: an episode starts at a decision callback only when the driver confirms it will decide in that callback or supplies an initial command; a driver that cannot decide yet defers to the next grid point and nothing is committed; a kept command is numbered again; only a first Decide without a command after an admission without an initial command fails the session (section 6) | coordinator decision on Codex round 2 recommendation 3(a): renumbered holds give 68 distinct samples for 68 decisions; DD-7's DC_ExpertHL.Decide returns false when its PostStep skipped the step, which must defer, not end the session; writer model tests |
 | R2-REFREEZE | 2026-11-04 | Review round 2 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 2 fixes) |
+| R3-PENDING | 2026-11-04 | images.pending_at_end is 0 or 1 (one request in flight at a time; more fails C13a, HARD); the seal exemption, and the only slot C37 may leave out, is the unique newest issued slot when it is 1, with skipped_busy or make_failed rows after it still allowed; any other issued row without done_render_frame and img_timeout is a dropped completion (section 6, session_end.json images, timing.joins.capture_pose) | Codex review round 3 N6 (t0/freeze/review/CODEX3.md): 20 slow captures with cleared completions, pending_at_end 20 and fiducials re-encoded to the terminal frame passed the full validator (u95 0.8 without them); the last 3 golden completions cleared with pending_at_end 3 passed without an image edit; reader and validator tests |
+| R3-STEPDT-LOG | 2026-11-04 | The readiness log names the step dt's own reason once when its estimators first disagree, and the readiness timeout's refusal leads with it even while a module waits for the step dt too (section 6 Step dt: refused with the reason) | Codex round 3 LOW: UpdateReadiness let the recorder's generic wait mask the reason (DC_Session.c UpdateReadiness); writer test |
+| R3-REFREEZE | 2026-11-04 | Review round 3 corrections folded into dc-2.0 itself before any capture (no dc-2.x); the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 3 fixes) |

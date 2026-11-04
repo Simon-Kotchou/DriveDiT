@@ -28,9 +28,10 @@ whose slot has no img row, or no derivative, is kept.
 Probe plays (--probes). <profile>/profile/DC_Probes/<probe>/<launch_id>/play_NN/frames/f_<n:08d>.png (.bmp.png,
 .bmp) of wb_profile, wb_profile_x19 and client_profiles/iNN: diagnostic screenshots, not training data. A play's
 frames may be deleted only when its run_footer.txt exists (schema dc-probe-run/1: the play ended and closed its
-files), its run_header.txt names world.map_id=arland, and no file of the play (its own files and frames/; not
-RETENTION.json) was modified in the last --min-age-days (default 1). Kept: the first and the last frame and every
-frame whose number is a multiple of --every-n.
+files) and says status=complete, its run_header.txt names world.map_id=arland, and no file of the play (its own
+files and frames/; not RETENTION.json) was modified in the last --min-age-days (default 1). A play with frames whose
+footer says stopped, failed or anything else is held with every frame kept: it is evidence of a problem. Kept: the
+first and the last frame and every frame whose number is a multiple of --every-n.
 
 The record. Before the first delete, RETENTION.json is written atomically (RETENTION.json.dd6tmp, fsync, rename,
 fsync of the directory): in _harvest/ of a session, in the play directory of a probe play. It holds the rule
@@ -55,8 +56,9 @@ directory opened with O_NOFOLLOW, of a regular file named f_<8 digits>.png / .bm
 holds catalog/harvest.lock (the harvester's), so it never runs beside the harvester or another retention run.
 
 Exit codes: 0 done or nothing to do (skips are normal: unsealed, too new, not PASS, not catalogued); 2 a session or
-play was held or refused (checksum mismatch, symlink, bad record, not Arland, dc-1.0) and nothing of it deleted; 3
-the run was refused (arguments, roots, --under outside the root, the lock); 4 an unexpected error.
+play was held or refused (checksum mismatch, symlink, bad record, a play whose footer is not status=complete, not
+Arland, dc-1.0) and nothing of it deleted; 3 the run was refused (arguments, roots, --under outside the root, the
+lock); 4 an unexpected error.
 
 --test-root DIR (tests only) replaces /mnt/e/DriveDiT by DIR, as in harvest.py; only then does
 DD6_RETENTION_KILL_AT=<hook> (HOOKS) kill the run at that hook, for the kill-mid-run test.
@@ -104,6 +106,7 @@ PROBE_RE = re.compile(r"^[a-z][a-z0-9]{0,31}$")
 PLAY_RE = re.compile(r"^play_[0-9]{2,4}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PROBE_SCHEMA = "dc-probe-run/1"
+COMPLETE_STATUS = "complete"        # run_footer.txt status of a play that ran to its end; any other keeps every frame
 PROBES_DIR = "DC_Probes"
 LEGACY_DIR = "DrivingData"
 FRAMES = "frames"
@@ -488,6 +491,11 @@ class Retention:
             raise Skip("held", "frames/ is a symlink; never followed")
         if not os.path.isdir(frames):
             raise Skip("skipped", "no frames/ (nothing to delete)")
+        status = footer.get("status")
+        if status != COMPLETE_STATUS:
+            raise Skip("held", "run_footer.txt status=%s (reason=%s), not %s: a play that did not complete is "
+                       "evidence of a problem, so every frame is kept" % (
+                           status if status else "<none>", footer.get("reason") or "<none>", COMPLETE_STATUS))
         plan = Plan("probe_play", path, rel, path)
         plan.ident = {"path": rel, "probe": rel.split("/")[-3], "launch_id": rel.split("/")[-2],
                       "play": rel.split("/")[-1], "footer_status": footer.get("status")}

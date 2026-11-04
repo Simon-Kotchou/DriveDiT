@@ -156,15 +156,18 @@ def make_captured(root, tag="5e01", slots=range(250), events=(), verdict="PASS",
     return sid, dest
 
 
-def make_play(root, probe="e05", launch=LAUNCH, play="play_01", frames=range(250), footer=True, map_id="arland",
-              age_days=3.0, profile="wb_profile"):
-    """A probe play <profile>/profile/DC_Probes/<probe>/<launch>/<play>/ with run_header.txt, run_footer.txt (when
-    footer), a CSV and frames/f_<n:08d>.png, every file last written age_days ago. Returns the play directory."""
+def make_play(root, probe="e05", launch=LAUNCH, play="play_01", frames=range(250), footer="complete",
+              map_id="arland", age_days=3.0, profile="wb_profile", reason="done"):
+    """A probe play <profile>/profile/DC_Probes/<probe>/<launch>/<play>/ with run_header.txt, run_footer.txt (unless
+    footer is None; footer is its status, "" for a footer without a status line), a CSV and frames/f_<n:08d>.png,
+    every file last written age_days ago. Returns the play directory."""
     pdir = os.path.join(root, profile, "profile", "DC_Probes", probe, launch, play)
     write(os.path.join(pdir, "run_header.txt"), ("schema=dc-probe-run/1\nprobe=%s\nlaunch.id=%s\n"
                                                  "world.map_id=%s\n" % (probe, launch, map_id)).encode("ascii"))
-    if footer:
-        write(os.path.join(pdir, "run_footer.txt"), b"schema=dc-probe-run/1\nstatus=complete\nreason=done\n")
+    if footer is not None:
+        status = "status=%s\n" % footer if footer else ""
+        write(os.path.join(pdir, "run_footer.txt"), ("schema=dc-probe-run/1\n%sreason=%s\n" % (
+            status, reason)).encode("ascii"))
     write(os.path.join(pdir, "%s_frames.csv" % probe), b"slot,frame\n0,1\n")
     for n in frames:
         write(os.path.join(pdir, "frames", "f_%08d.png" % n), tiny_png(n))
@@ -524,7 +527,7 @@ class ProbeRetentionTest(unittest.TestCase):
         self.assertEqual(th.snapshot(self.root), after)
 
     def test_incomplete_new_or_foreign_plays_lose_nothing(self):
-        incomplete = make_play(self.root, launch="20261024T000000Z-wb-0001", footer=False)
+        incomplete = make_play(self.root, launch="20261024T000000Z-wb-0001", footer=None)
         new = make_play(self.root, launch="20261024T000000Z-wb-0002", age_days=0.2)
         everon = make_play(self.root, launch="20261024T000000Z-wb-0003", map_id="everon")
         before = th.snapshot(self.root)
@@ -537,6 +540,39 @@ class ProbeRetentionTest(unittest.TestCase):
         code, out = run(self.root, "--probes", "--min-age-days", "0.1")  # old enough for a smaller threshold
         self.assertIn("would-delete %s" % self.rel(new), out)
         self.assertEqual(th.snapshot(self.root), before)
+
+    def test_only_a_complete_footer_lets_frames_go(self):
+        """A play whose footer says stopped, failed or has no status is held with every frame kept (evidence of a
+        problem), even when it is old; a stopped play without frames has nothing to keep and is only skipped."""
+        complete = make_play(self.root, launch="20261024T000000Z-wb-0010")
+        plays = {"stopped": make_play(self.root, launch="20261024T000000Z-wb-0011", footer="stopped",
+                                      reason="play_end"),
+                 "failed": make_play(self.root, launch="20261024T000000Z-wb-0012", footer="failed",
+                                     reason="script_error"),
+                 "<none>": make_play(self.root, launch="20261024T000000Z-wb-0013", footer="")}
+        empty = make_play(self.root, launch="20261024T000000Z-wb-0014", footer="failed", frames=())
+        before = dict((k, th.snapshot(p)) for k, p in plays.items())
+        code, out = run(self.root, "--probes")                          # the dry run says why
+        self.assertEqual(code, 2, out)
+        for status, pdir in plays.items():
+            line = line_of(out, "held", self.rel(pdir))
+            self.assertIsNotNone(line, out)
+            self.assertIn("run_footer.txt status=%s (reason=" % status, line)
+            self.assertIn("not complete: a play that did not complete is evidence of a problem, so every frame is "
+                          "kept", line)
+        self.assertIn("held %s: run_footer.txt status=stopped (reason=play_end), not complete" % self.rel(
+            plays["stopped"]), out)
+        self.assertIn("would-delete %s" % self.rel(complete), out)
+        self.assertIn("skipped %s: no frames/" % self.rel(empty), out)
+        self.assertIn("total: 1 probe play(s), 246 raw screenshot(s) to delete", out)
+        self.assertIn("3 held", out)
+        code, out = run(self.root, "--probes", "--apply", "--min-age-days", "0")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(frame_slots(complete), [0, 100, 200, 249])
+        for status, pdir in plays.items():
+            self.assertEqual(th.snapshot(pdir), before[status], status)     # every frame kept, nothing written
+            self.assertEqual(len(frame_slots(pdir)), 250)
+            self.assertFalse(os.path.exists(os.path.join(pdir, "RETENTION.json")))
 
     def test_symlinks_and_other_entries_are_never_followed_or_deleted(self):
         pdir = make_play(self.root, frames=range(20))
@@ -658,7 +694,7 @@ class ScopeTest(unittest.TestCase):
         self.assertEqual(th.snapshot(self.root), before)
 
     def test_apply_with_nothing_to_do_writes_nothing(self):
-        make_play(self.root, footer=False)
+        make_play(self.root, footer=None)
         before = th.snapshot(self.root)
         code, out = run(self.root, "--probes", "--apply")
         self.assertEqual((code, th.snapshot(self.root)), (0, before), out)

@@ -32,27 +32,109 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_SpawnLogic SCR_SpawnLogic "{5D36888CC966608A}" {
    }
   }
-  SCR_MLDataCollector "{AAAABBBBCCCCDDDD}" {
-   m_bEnableDataCapture 1
-   m_iCaptureIntervalMs 200
-   m_bCaptureScreenshots 1
-   m_bVerboseLogging 1
-   m_bEnableAnchorSelection 1
+  DC_Session "{DC4A50B400000001}" {
+   m_sMapId "arland"
+   m_sTerrain "Arland"
+   m_sRootWorld "{A9806AF617972E97}worlds/Arland/Arland.ent"
+   m_fMapSizeM 4096
+   m_fMapSizeTolM 256
+   m_fLatitudeDeg 47.411
+   m_fLatitudeTolDeg 0.05
+   m_sRequiredProfileRoot "E:/DriveDiT"
+   m_bAllowWorkbenchWithoutLaunchId 0
+   m_bEscapeBindToProcessStart 1
+   m_fImageHz 5
+   m_iImgInflightTimeoutMs 2000
+   m_iImgLeadMs 0
+   m_fChunkMaxS 10
+   m_fReadinessTimeoutS 30
+   m_fHeartbeatPeriodS 5
+   m_bCloseOnDcStop 1
+   m_bKeepLogsOpen 0
+   m_bVerifyChunkLength 0
+   m_sRenderSettingsModules "VideoUserSettings,DisplayUserSettings"
   }
-  SCR_MLScreenshotCapture "{BBBBCCCCDDDDEEEE}" {
-   m_bEnableCapture 1
-   m_eCameraPosition 0
-   m_iCaptureWidth 320
-   m_iCaptureHeight 180
-   m_fCameraFOV 90
-   m_vHoodOffset 2.2 0.95 0
+  DC_EgoSession "{DC4A50B400000002}" {
+   m_sEgoPrefab "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et"
+   m_vSpawnPos 1495.41 0 2626
+   m_fSpawnHeadingDeg 0.11
+   m_fSpawnLiftM 0.3
+   m_fSettleS 3
+   m_fSettleMaxKmh 1
+   m_bForceEnableSimulation 0
   }
-  SCR_MLDataCaptureDirector "{6D1A2B3C4D5E6F70}" {
-   m_iMaxAIGroups 5
-   m_fWaypointRadius 30
-   m_iWaypointDelay 3000
-   m_sInitialWeather "Overcast"
-   m_iInitialHour 10
+  DC_StreamRecorder "{DC4A50B400000003}" {
+   m_iSteerSign 1
+   m_iYawAxisSign 1
+   m_sSteeringGeometry "unknown_on_1.8"
+   m_iSunElevationSign -1
+   m_bRoadContext 1
+   m_bForwardOnly 1
+  }
+  DC_CrashWatch "{DC4A50B4000000C1}" {
+   m_fCollisionDvMps 4
+   m_iCollisionWindowMs 100
+   m_iCollisionWindowTolMs 50
+   m_iCollisionPeakMs 200
+   m_iCollisionRefractoryMs 1000
+   m_iEpisodeEndWaitMs 250
+   m_iCrashCooldownMs 3000
+   m_iEpisodeBlockMaxMs 60000
+   m_fRolloverUpY 0.5
+   m_iRolloverHoldMs 500
+   m_iStatePollMs 100
+   m_bUseContactHook 1
+  }
+  DC_HfRecorder "{DC4A50B400000004}" {
+   m_vMountPos 0 1.25 0.3
+   m_fMountPitchDeg -4
+   m_fVerticalFovDeg 50
+   m_fNearPlaneM 0.03
+   m_fFarPlaneM 3000
+  }
+  DC_ImageScheduler "{DC4A50B400000005}" {
+   m_iPatchPx 32
+   m_iMarginPx 16
+   m_iGapPx 8
+   m_iBandPx 64
+   m_sScreenshotSuffixes ".png,.bmp.png,.bmp,.jpg,noext"
+   m_eFiducialCarrier 1
+   m_fShapeDepthM 0.05
+  }
+  DC_ExpertDriver "{DC4A50B400000006}" {
+   m_sCardId "S105"
+   m_sCardRoots "$DataCapture:Configs/ident/cards/,Configs/ident/cards/"
+   m_sSourceRoots "$DataCapture:Scripts/Game/DataCapture/,Scripts/Game/DataCapture/"
+   m_sDefaultRouteId "arland_t0_loop"
+   m_sRouteRoots "$DataCapture:Configs/routes/,Configs/routes/"
+   m_sAllowedSplits "train"
+   m_fCruiseKmh 40
+   m_fAlatMaxMps2 2.75
+   m_fAccelMaxMps2 1.5
+   m_fBrakeMaxMps2 4
+   m_fProfileDecelMps2 2
+   m_fSpeedGain 1
+   m_fSpeedPreviewS 1
+   m_fLookaheadS 0.9
+   m_fLookaheadMinM 6
+   m_fLookaheadMaxM 15
+   m_fKappaMax 0.2
+   m_fEndToleranceM 5
+   m_fStopKmh 1
+   m_fDeviationM 30
+   m_fCorridorHalfWidthM 2
+   m_fOffroadMarginM 0.5
+   m_fOffroadS 3
+   m_fStuckS 20
+   m_fStuckKmh 1
+   m_fEpisodeTimeoutS 480
+   m_fEngineOffS 2
+   m_iMaxEpisodes 0
+   m_fEpisodeGapS 3
+   m_fStartMaxDistM 8
+   m_fStartMaxHeadingDeg 30
+   m_fStartMaxKmh 1
+   m_bOpenGatesAtStart 1
   }
  }
  coords 2759.086 80.111 1664.452
@@ -152,7 +234,7 @@ $grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Compon
   coords 620.086 39 2566.323
  }
  AI_Drive_Target_11 {
-  coords 1403.365 36.25 2314.117
+  coords 1459.607 36.34 2341.833
  }
  AI_Drive_Target_12 {
   coords 2209.135 57.973 2091.847
@@ -176,9 +258,9 @@ $grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Compon
   coords 1829.025 15.109 3444.452
  }
  AI_Drive_Target_19 {
-  coords 2555.162 19.076 3086.956
+  coords 2651.838 19.708 3100.644
  }
  AI_Drive_Target_20 {
-  coords 2635.36 98.781 2653.366
+  coords 2563.558 77.714 2750.052
  }
 }

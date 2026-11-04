@@ -1,0 +1,76 @@
+--- a/src/workbench/client.ts
++++ b/src/workbench/client.ts
+@@ -34,6 +34,27 @@
+ /** Interval between polls while waiting for handler script recompilation. */
+ const HANDLER_RECOMPILE_POLL_MS = 2_000;
+ 
++/**
++ * DriveDiT local WSL patch: Workbench is a Windows process, so absolute paths the server computed
++ * in WSL form ("/mnt/c/Users/...") must reach it as drive paths ("C:/Users/..."), e.g. the
++ * absDestPath that game_duplicate / wb_entity_duplicate pass to ResourceManager.RegisterResourceFile
++ * (documented as `string absFilePath`). Only whole-string values that start with /mnt/<letter>/ are
++ * rewritten; resource paths ("Prefabs/...", "{GUID}...") are untouched.
++ */
++function toWindowsDrivePaths<T>(value: T): T {
++  if (typeof value === "string") {
++    const m = /^\/mnt\/([a-zA-Z])(\/.*)?$/.exec(value);
++    return (m ? `${m[1].toUpperCase()}:${m[2] ?? "/"}` : value) as unknown as T;
++  }
++  if (Array.isArray(value)) return value.map((v) => toWindowsDrivePaths(v)) as unknown as T;
++  if (value && typeof value === "object") {
++    const out: Record<string, unknown> = {};
++    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = toWindowsDrivePaths(v);
++    return out as T;
++  }
++  return value;
++}
++
+ export type WorkbenchMode = "edit" | "play" | "unknown";
+ 
+ export interface DiagnosticReport {
+@@ -223,6 +244,15 @@
+     if (!this.config) {
+       throw new WorkbenchError("No config provided — cannot auto-launch Workbench.", "LAUNCH_FAILED");
+     }
++    if (process.env.ENFUSION_MCP_NO_AUTO_LAUNCH === "1") {
++      // DriveDiT local guard: from WSL, launchWorkbench() would copy handler scripts into
++      // ENFUSION_PROJECT_PATH and spawn the Windows exe with Linux (/mnt/...) paths.
++      throw new WorkbenchError(
++        `Workbench NET API not reachable at ${this.host}:${this.port} and auto-launch is disabled ` +
++          `(ENFUSION_MCP_NO_AUTO_LAUNCH=1). Start Workbench from Windows (or launch-workbench.sh), then retry.`,
++        "LAUNCH_FAILED"
++      );
++    }
+ 
+     // Deduplicate concurrent calls — all callers await the same promise
+     if (this.launchPromise) {
+@@ -459,6 +489,16 @@
+     if (!this.config) {
+       throw new WorkbenchError("No config provided — cannot recover handlers.", "LAUNCH_FAILED");
+     }
++    if (process.env.ENFUSION_MCP_NO_AUTO_INSTALL === "1") {
++      // DriveDiT local guard: never copy handler scripts implicitly (ENFUSION_PROJECT_PATH is on C:,
++      // and findFallbackGproj() picks the alphabetically-first addon when ENFUSION_DEFAULT_MOD is unset).
++      throw new WorkbenchError(
++        `Workbench is running but the EnfusionMCP handler scripts are not loaded, and automatic ` +
++          `handler installation is disabled (ENFUSION_MCP_NO_AUTO_INSTALL=1). Load the DriveDiT_EMCP ` +
++          `handler addon (see /mnt/e/drivedit_realign/enfusion/mcp-setup.md) and restart Workbench.`,
++        "LAUNCH_FAILED"
++      );
++    }
+ 
+     // Inject into the currently-open mod (same logic as launchWorkbench).
+     const recoveryGproj = this.findFallbackGproj();
+@@ -745,7 +785,11 @@
+     options: WorkbenchCallOptions = {}
+   ): Promise<T> {
+     const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
+-    const requestBuf = encodeRequest(this.clientId, apiFunc, params);
++    const requestBuf = encodeRequest(
++      this.clientId,
++      apiFunc,
++      process.env.ENFUSION_MCP_WSL_PATHS === "1" ? toWindowsDrivePaths(params) : params
++    );
+ 
+     return new Promise<T>((resolve, reject) => {
+       const chunks: Buffer[] = [];

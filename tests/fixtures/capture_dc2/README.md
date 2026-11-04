@@ -22,7 +22,9 @@ python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out tests/fixtures/
 `tests/test_dc2_reader.py` checks that the committed files equal a fresh generation, so a generator change must come
 with the regenerated fixture. `--kind golden_10hz` writes the same session at the non-default 10 Hz setting (TBD-2:
 image_hz = decision_hz = 10, N = 3, `clocks.image_hz_setting` `trial_conf`); the tests generate it, it is not
-committed.
+committed. `--kind client_1408` (DD-6-min) writes the golden drive as a packaged client captures it: exe `cl`,
+instance `i01`, source class `client_1408x720`, 1408x720 images (a 1280x720 core between two 64 px bands) and a
+dd-launch/1 record of exe `client`; `tests/test_harvest.py` generates it, it is not committed.
 
 The clock model is the dc-2.0 freeze's (decision D-A, probe runs 3-4): render frames of about 39 FPS whose world time
 is the frame clock, a capture stall of 80 ms in the frame a screenshot is taken in, engine fixed steps of 1/30 s run

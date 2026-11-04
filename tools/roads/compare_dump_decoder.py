@@ -4,8 +4,8 @@
 Run it with the isolated interpreter (stdlib only):
 
     python3 -I -B tools/roads/compare_dump_decoder.py <e08a play_dir> \\
-        --decoder /mnt/e/drivedit_realign/program/evidence/maps/Arland_road_polylines.tsv \\
-        [--match-m 2.0] [--expect-km 46.4] [--tol 0.05] [--sample-m 1.0] [--list 20]
+        --decoder /mnt/e/drivedit_realign/program/evidence/maps/Arland_road_polylines_v2.tsv \\
+        [--match-m 2.0] [--expect-km 34.5] [--tol 0.05] [--sample-m 1.0] [--list 20] [--join-play <other play_dir>]
 
 Inputs (read only): <play_dir>/run_header.txt, run_footer.txt, <map_id>_roads.csv, <map_id>_road_points.csv,
 <map_id>_tiles.csv, <map_id>_roads_footer.txt (map_id from the run header, world.map_id), and the decoder TSV
@@ -28,10 +28,21 @@ Prints the r2 4.4 E-08a criterion ("count, km and width histogram vs decoder; un
                   tiles are expected: n_tiles_seen, roads_dup_identity, reported only)
   no_cap          cap_confirmed 0 and every subdivided tile's sub-tile union <= its own result
   drivable_km     km of unique engine road on decoder drivable classes (dirt_road, trail, asphalt_E02_E03_secondary,
-                  decal generators excluded) within --tol of --expect-km [design tolerance; r2 says "vs decoder"]
+                  decal generators excluded) within --tol of --expect-km [design tolerance; r2 says "vs decoder"].
+                  The default 34.5 km is Arland's engine-network drivable road (dirt 25.9 + asphalt 8.6, E-08b, plan
+                  decision D-D of 2026-11-03): the 4.7 km of runway, taxiway and concrete panels are in the engine
+                  network but not a drivable class, and the 11.1 km of trails (Type Path) are not in the engine
+                  network at all, so they add nothing here (the pre-E-08b 46.4 km counted both)
   INFO            count, km and width histogram (0-2, 2-4, 4-6, 6-8, 8-10, 10-20, >20 m) per class for the engine and
                   the decoder; flagged roads (class unparented_road_entity, decal_or_other or runway_concrete_panel,
                   or width < 2 m or > 20 m); unmatched engine roads; decoder drivable km covered by the engine dump.
+  cross_session   with --join-play: the roads of this dump joined to those of another session's dump by the rule of
+                  contract dc-2.0 TBD-9 (freeze decision D-C): the road_key text holds only within a session (n_pts
+                  changes by +-1 and endpoints move up to 0.9 m between launches), so two keys join when their
+                  unordered endpoint pairs lie within ENDPOINT_JOIN_M (2 m; n_pts excluded), one-to-one, the
+                  smallest segment Hausdorff distance of the two polylines deciding between candidates (Arland has 4
+                  twin pairs of roads within 2 m of each other; INFO: counts, keys whose text differs, ambiguous
+                  keys, unmatched). join_keys() is the function a harvester or builder reuses.
 
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error (and every sealed-map path).
 """
@@ -59,6 +70,10 @@ GRID_CELL_M = 16.0
 ROADS_COLUMNS = ("road_idx", "road_key", "width_m", "n_pts", "length_m", "n_tiles_seen", "dup_content_of")
 POINT_COLUMNS = ("road_idx", "pt_idx", "x", "z")
 TILE_COLUMNS = ("tile_ix", "tile_iz", "n_returned", "subdivided", "n_sub_union")
+# Contract dc-2.0 TBD-9 (freeze decision D-C, 2026-11-03): cross-session road join by the unordered endpoint pair
+ENDPOINT_JOIN_M = 2.0
+ROAD_KEY_RE = re.compile(r"^([0-9]+)/(-?[0-9]+\.[0-9]+):(-?[0-9]+\.[0-9]+)/(-?[0-9]+\.[0-9]+):(-?[0-9]+\.[0-9]+)$")
+DEFAULT_EXPECT_KM = 34.5    # Arland engine-network drivable km (E-08b; runway/taxiway 4.7 km and trails excluded, D-D)
 
 
 class Polyline:
@@ -189,6 +204,97 @@ def load_engine(play, map_id):
     return roads, shapes
 
 
+def parse_road_key(key):
+    """(n_pts, (x0, z0), (x1, z1)) of a road_key '<n_pts>/<x0>:<z0>/<x1>:<z1>' (DC_RoadDump.MakeKey); None for '0'
+    (a road without points) or any other text."""
+    m = ROAD_KEY_RE.match(key or "")
+    if not m:
+        return None
+    n, x0, z0, x1, z1 = m.groups()
+    return int(n), (float(x0), float(z0)), (float(x1), float(z1))
+
+
+def endpoint_distance(key_a, key_b):
+    """Largest endpoint distance [m] of the better pairing of the two keys' unordered endpoint pairs (n_pts ignored),
+    or None when a key does not parse."""
+    a, b = parse_road_key(key_a), parse_road_key(key_b)
+    if a is None or b is None:
+        return None
+
+    def d(p, q):
+        return math.hypot(p[0] - q[0], p[1] - q[1])
+
+    same = max(d(a[1], b[1]), d(a[2], b[2]))
+    swapped = max(d(a[1], b[2]), d(a[2], b[1]))
+    return min(same, swapped)
+
+
+def endpoint_match(key_a, key_b, tol_m=ENDPOINT_JOIN_M):
+    """True when two road keys of different sessions name the same road (contract dc-2.0 TBD-9, D-C): both endpoints
+    of the unordered pairs within tol_m; n_pts is never compared."""
+    dist = endpoint_distance(key_a, key_b)
+    return dist is not None and dist <= tol_m
+
+
+def segment_hausdorff(points_a, points_b, sample_m=1.0):
+    """Symmetric Hausdorff distance [m] of two polylines, measured from the samples of each (resample, every <= sample_m
+    metres, vertices kept) to the segments of the other (point_segment_distance, as directed_hausdorff does through a
+    SegmentGrid), so a vertex the other polyline lacks costs nothing: sample-to-sample distances would prefer a parallel
+    road 0.1 m away to the same road with one more vertex (review round 1). inf when either polyline is empty."""
+    def directed(samples, points):
+        if len(points) == 1:
+            return max(math.hypot(p[0] - points[0][0], p[1] - points[0][1]) for p in samples)
+        return max(min(point_segment_distance(p, a, b) for a, b in zip(points, points[1:])) for p in samples)
+
+    if not points_a or not points_b:
+        return float("inf")
+    return max(directed(resample(points_a, sample_m)[0], points_b), directed(resample(points_b, sample_m)[0], points_a))
+
+
+def join_keys(keys_a, keys_b, shapes_a=None, shapes_b=None, tol_m=ENDPOINT_JOIN_M, sample_m=1.0):
+    """{key of A: key of B or None}: every road key of one session joined one-to-one to the other session's (D-C).
+    Candidates are the keys of B whose unordered endpoint pair lies within tol_m. All candidate pairs are ranked by
+    the segment Hausdorff distance of their polylines (shapes_a / shapes_b: key -> [(x, z)]; a pair without both
+    shapes ranks after every pair with them), then the endpoint distance, then the key texts, and assigned greedily
+    in that order, each key of A and of B at most once: a twin road (Arland has 4 pairs of roads within 2 m of each
+    other) never takes another's partner.
+    Returns (joins, ties): ties = the keys of A that are ambiguous, with more than one candidate or with their only
+    candidate taken by a better pair (reported, never silently joined twice)."""
+    buckets = {}
+    for kb in keys_b:
+        parsed = parse_road_key(kb)
+        if parsed is None:
+            continue
+        for _, (x, z) in ((0, parsed[1]), (1, parsed[2])):
+            buckets.setdefault((int(x // tol_m), int(z // tol_m)), set()).add(kb)
+    joins, cands = {}, {}
+    for ka in keys_a:
+        joins[ka] = None
+        parsed = parse_road_key(ka)
+        if parsed is None:
+            continue
+        x, z = parsed[1]
+        near = set()
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                near |= buckets.get((int(x // tol_m) + dx, int(z // tol_m) + dz), set())
+        cands[ka] = sorted(kb for kb in near if endpoint_match(ka, kb, tol_m))
+    pairs = []
+    for ka, kbs in cands.items():
+        for kb in kbs:
+            shape_a = (shapes_a or {}).get(ka)
+            shape_b = (shapes_b or {}).get(kb)
+            h = segment_hausdorff(shape_a, shape_b, sample_m) if shape_a and shape_b else float("inf")
+            pairs.append((h, endpoint_distance(ka, kb), ka, kb))
+    taken = set()
+    for _, _, ka, kb in sorted(pairs):
+        if joins[ka] is None and kb not in taken:
+            joins[ka] = kb
+            taken.add(kb)
+    ties = sorted(ka for ka, kbs in cands.items() if len(kbs) > 1 or (kbs and joins[ka] is None))
+    return joins, ties
+
+
 def width_histogram(items):
     """items: [(width, km)] -> "0-2:n/km ..." text."""
     parts = []
@@ -268,7 +374,7 @@ def decoder_coverage(decoder, engine, match_m, sample_m):
     return covered / 1000.0, total / 1000.0
 
 
-def analyse(play_dir, decoder_path, match_m, expect_km, tol, sample_m, list_max):
+def analyse(play_dir, decoder_path, match_m, expect_km, tol, sample_m, list_max, join_play=None):
     play = probe_common.Play(play_dir)
     map_id = play.header.get("world.map_id") or "arland"
     verdict = probe_common.Verdict("E-08a road dump vs decoder", play.dir)
@@ -359,6 +465,24 @@ def analyse(play_dir, decoder_path, match_m, expect_km, tol, sample_m, list_max)
     covered, total = decoder_coverage(decoder, engine, match_m, sample_m)
     verdict.info("decoder_coverage", "%.2f of %.2f km of drivable decoder road lie within %.1f m of an engine road" % (
         covered, total, match_m))
+    if join_play is not None:
+        other = probe_common.Play(join_play)
+        other_roads, other_shapes = load_engine(other, other.header.get("world.map_id") or "arland")
+        keys_a = sorted(set(r["road_key"] for r in unique))
+        keys_b = sorted(set(r["road_key"] for r in other_roads if int(r["dup_content_of"]) == -1))
+        shape_a = {r["road_key"]: shapes.get(int(r["road_idx"]), []) for r in unique}
+        shape_b = {r["road_key"]: other_shapes.get(int(r["road_idx"]), []) for r in other_roads}
+        joins, ties = join_keys(keys_a, keys_b, shape_a, shape_b, ENDPOINT_JOIN_M, sample_m)
+        matched = [k for k, v in joins.items() if v is not None]
+        retexted = [k for k in matched if joins[k] != k]
+        lost = [k for k, v in joins.items() if v is None]
+        verdict.info("cross_session", "%d of %d road keys join %s by the unordered endpoint pair within %.1f m "
+                     "(contract dc-2.0 TBD-9, D-C); %d of them by a different key text (n_pts or a moved endpoint), "
+                     "%d ambiguous (twins within the tolerance, decided one-to-one by the segment Hausdorff "
+                     "distance%s), %d unmatched%s" % (
+                         len(matched), len(keys_a), other.dir, ENDPOINT_JOIN_M, len(retexted), len(ties),
+                         (": " + "; ".join("%s -> %s" % (k, joins[k]) for k in ties[:list_max])) if ties else "",
+                         len(lost), (": " + "; ".join(lost[:list_max])) if lost else ""))
     return verdict
 
 
@@ -379,12 +503,18 @@ def main(argv=None):
     parser.add_argument("play_dir", help="the e08a play_NN directory")
     parser.add_argument("--decoder", required=True, help="decoder <Map>_road_polylines.tsv")
     parser.add_argument("--match-m", type=float, default=2.0, help="symmetric Hausdorff match distance [m]")
-    parser.add_argument("--expect-km", type=float, default=46.4, help="expected drivable km (Arland: ~46.4)")
+    parser.add_argument("--expect-km", type=float, default=DEFAULT_EXPECT_KM,
+                        help="expected drivable km (Arland: 34.5 engine-network km; runway and taxiway 4.7 km and the "
+                             "11.1 km of trails are not counted, E-08b and D-D)")
+    parser.add_argument("--join-play", default=None,
+                        help="another session's e08a play_NN: join its road keys by the endpoint rule (D-C, INFO)")
     parser.add_argument("--tol", type=float, default=0.05, help="relative km tolerance (default 0.05)")
     parser.add_argument("--sample-m", type=float, default=1.0, help="resampling step [m]")
     parser.add_argument("--list", type=int, default=20, help="roads listed per INFO line")
     args = parser.parse_args(argv)
-    for path in (args.play_dir, args.decoder):
+    for path in (args.play_dir, args.decoder, args.join_play):
+        if path is None:
+            continue
         reason = sealed_reason(path)
         if reason:
             print("ERROR: " + reason, file=sys.stderr)
@@ -396,7 +526,7 @@ def main(argv=None):
         if not os.path.isfile(args.decoder):
             raise probe_common.InputError("no decoder file %s" % args.decoder)
         verdict = analyse(args.play_dir, args.decoder, args.match_m, args.expect_km, args.tol, args.sample_m,
-                          args.list)
+                          args.list, args.join_play)
     except probe_common.InputError as exc:
         print("input error: %s" % exc)
         return probe_common.EXIT_INPUT_ERROR

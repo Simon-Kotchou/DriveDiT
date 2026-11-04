@@ -6,6 +6,9 @@
 #           deployed to the same path relative to the addon root
 #   script  an Enforce script at the top level of src/enfusion/datacapture/,
 #           deployed to Scripts/Game/DataCapture/
+#   config  a .json file under addons/DataCapture/Configs/ (deployed to the same path, e.g. Configs/routes/), or a
+#           vehicle card tools/ident/cards/<pin_id>/<id>.json (deployed to Configs/ident/cards/<pin_id>/<id>.json);
+#           copied byte for byte (llc_v1 and the expert hash what they load)
 #
 # The tool refuses these even if they are listed here:
 #   - core/, modules/ and every other subfolder of src/enfusion/datacapture/
@@ -20,12 +23,14 @@ addon  addons/DataCapture/addon.gproj
 addon  addons/DataCapture/worlds/DataCapture/DC_Arland.ent
 addon  addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer
 
-script src/enfusion/datacapture/SCR_MLDataCollector.c
-script src/enfusion/datacapture/SCR_MLScreenshotCapture.c
-script src/enfusion/datacapture/SCR_AnchorFrameSelector.c
-script src/enfusion/datacapture/SCR_MLDataCaptureDirector.c
+# The dc-1.0 producers (SCR_MLDataCollector, SCR_MLScreenshotCapture, SCR_AnchorFrameSelector and the
+# SCR_MLDataCaptureDirector that starts the collector) are no longer deployed: DC_Arland runs the dc-2.0 capture
+# stack below (DD-4-min, R38). Their sources stay in src/ until DD-12 retires them.
+# The director's gate opener (DD-1) is deployed on its own: it needs no director, and a capture session start opens
+# the vehicle gates with it (DC_Gates.OpenVehicleGates).
+script src/enfusion/datacapture/DC_Gates.c
 
-# DC_Probes_Arland: the T0-ENG probe world (DD-4-probe). One deploy carries both worlds; DC_Arland is unchanged.
+# DC_Probes_Arland: the T0-ENG probe world (DD-4-probe). One deploy carries both worlds.
 addon  addons/DataCapture/worlds/DataCapture/DC_Probes_Arland.ent
 addon  addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.layer
 script src/enfusion/datacapture/DC_LaunchGuard.c
@@ -35,6 +40,31 @@ script src/enfusion/datacapture/DC_ProbeEngine.c
 script src/enfusion/datacapture/DC_ProbeSequences.c
 script src/enfusion/datacapture/DC_RigR1.c
 script src/enfusion/datacapture/DC_Fiducial.c
+script src/enfusion/datacapture/DC_FiducialShape.c
+script src/enfusion/datacapture/DC_ProbeFiducial.c
 script src/enfusion/datacapture/DC_ProbeImages.c
 script src/enfusion/datacapture/DC_ProbeMarkers.c
 script src/enfusion/datacapture/DC_RoadDump.c
+
+# DC_Arland: the dc-2.0 capture session (DD-4-min). It reuses DC_LaunchGuard, DC_ProbeCsv, DC_RigR1 and DC_Fiducial
+# of the probe kit above.
+script src/enfusion/datacapture/DC_Session.c
+script src/enfusion/datacapture/DC_ChunkWriter.c
+script src/enfusion/datacapture/DC_StreamRecorder.c
+script src/enfusion/datacapture/DC_VehicleRegistry.c
+script src/enfusion/datacapture/DC_EgoSession.c
+script src/enfusion/datacapture/DC_CrashWatch.c
+# The first modded class of the addon: SCR_VehicleDamageManagerComponent.ProcessCollision forwards contacts to
+# DC_CrashWatch (vanilla runs first and unchanged; a no-op unless a dc-2.0 session watches the vehicle)
+script src/enfusion/datacapture/DC_CollisionHook.c
+script src/enfusion/datacapture/DC_HfRecorder.c
+script src/enfusion/datacapture/DC_ImageScheduler.c
+
+# The dc-2.0 driver (DD-7-min): llc_v1, the minimal expert with its driver component DC_ExpertDriver, and the T0 loop
+# route (Arland TRAIN).
+script src/enfusion/datacapture/DC_LLCv1.c
+script src/enfusion/datacapture/DC_ExpertHL.c
+config addons/DataCapture/Configs/routes/arland_t0_loop.json
+# The vehicle card llc_v1 loads for the session's pin (Configs/ident/cards/<pin_id>/S105.json). PLACEHOLDER until the
+# E-01 / E-02a fit (qualification use only); DC_ExpertDriver is attached to GameMode_DataCapture on DC_Arland with it.
+config tools/ident/cards/1.8.0.13/S105.json

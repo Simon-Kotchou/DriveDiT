@@ -83,6 +83,17 @@ minimum, it logs an ERROR and starts no session.
 60 s after the session start, the director checks that every car in the session has moved at least 20 m. Each car
 that has not is logged as `ERROR: group k: AI_Car_k is in the collector session but not driving`.
 
+After the boarding window the director also watches the driver seats. The vanilla AI sometimes brakes mid-route, sets
+the handbrake and orders the driver out, then usually walks it back in 10-45 s later. With an obstructed door the
+driver never gets back in. The most likely trigger, still unconfirmed, is a failed group move in the car (for example
+`UNREACHABLE`); a car that cannot move or is on fire is another. The director logs each failed group move, each
+dismount (with the last move failure and the car's movement damage and fire state) and each return. After
+`m_fReseatAfterS` (30 s) with no living driver in the seat, it teleports the driver back in, or seats a new one if the
+old driver is gone or dead. A dead driver is moved out of the seat first, and the group is kept when it becomes empty.
+It does not reseat into a car that cannot move or is on fire, and it stops after 3 reseats in a row that did not get
+the car moving 5 m. While the driver is out, the stuck clock pauses; it restarts when the vanilla AI gets back in by
+itself. The statistics line counts `dismounts=`, `reseats=` and `move_failures=` per group.
+
 Vehicles are registered in group order right before the session starts, so `vehicle_id` is k-1 when all 5 are
 ready. Otherwise the ids are listed in the `starting the collector session with N vehicles: V0=AI_Car_1 ...` line and
 in `session_info.txt`. A car whose driver becomes ready later keeps driving but is not captured in that session.
@@ -103,6 +114,7 @@ Director attributes in the layer (the defaults need no layer change):
 | `m_iBoardingWindowMs` | 60000 | Window after `Spawned N/M groups`. The session starts when all are ready, or when the window ends |
 | `m_iMinSeatedGroups` | 1 | Ready cars needed when the window ends (limited to 1..`m_iMaxAIGroups`, with a WARNING). Set it to `m_iMaxAIGroups` for the old all-or-nothing gate |
 | `m_iDrivingCheckMs` / `m_fDrivingCheckMinDistanceM` | 60000 / 20 | When the "is every car driving" check runs after the session start, and the distance each car must have moved. 0 turns the check off |
+| `m_fReseatAfterS` | 30 | Seat watchdog: seconds without a living driver in the driver seat before the director puts one back, repeated while the seat stays empty. Never into a car that cannot move or is on fire, and at most 3 times in a row without the car moving `m_fStuckDistanceM` (5 m). 0 turns the reseat off; dismounts are still logged |
 
 Collector attribute: `m_sRequiredProfileRoot` (default `E:/DriveDiT`). Sessions are written only when `-profile` lies
 inside it. Empty turns the guard off; use that only deliberately.
@@ -139,7 +151,11 @@ Booleans may print as `1`/`0` or as `true`/`false`.
    - `falling back to walk-in boarding`;
    - `driver=dead` in a group line;
    - `ERROR: group k: AI_Car_k is in the collector session but not driving`;
-   - `ERROR: boarding window of 60 s ended with no ready driver ... - collector session NOT started`.
+   - `ERROR: boarding window of 60 s ended with no ready driver ... - collector session NOT started`;
+   - `WARNING: group k: no living driver in the pilot seat of AI_Car_k (dismount n ...)` with no
+     `Group k: driver back in the pilot seat of AI_Car_k after X s` line within about 30 s;
+   - `reseating the driver ... failed`, `cannot reseat the driver`, `not reseating the driver` or
+     `ERROR: group k: no more reseats into AI_Car_k`.
 
 ### Where the captures are
 
@@ -159,6 +175,86 @@ nothing is overwritten.
 - No session means no `DrivingData` folder at all.
 - Without `-profile` inside `E:\DriveDiT` (for example Workbench started from Steam), the collector refuses to write
   and logs `ERROR: capture output refused`. Relaunch with `wb_R1.bat`.
+
+## The dc-2.0 capture core at the contract freeze (2026-11-04)
+
+`DC_Session` and its modules on `DC_Arland` write contract dc-2.0 as frozen (decisions D-A, D-B and the folded facts
+of `t0/freeze/DECISIONS_dc2_freeze.md`):
+
+- **Frame-bound rows (D-A).** The game mode gets one `EOnFixedFrame` / `EOnPostFixedFrame` pair per render frame
+  with a fixed step, covering 1 to 3 merged steps of 1/30 s on 1.8. Every callback writes one `ctl` and one
+  `telemetry` row: `physics_step` (the last step it covers), `covered_steps`, `render_frame`, `world_time_ms`. The
+  step dt is measured during readiness (`[DC_Session] clocks: step dt ...` line; `session.json engine.step_dt_s`):
+  the median of the step callbacks' time slice / covered steps (`engine`, exact also in merged frames, once 90% of
+  at least 30 ratios agree within 0.5%); when they disagree the measurement goes on, and the measured span is taken
+  only once it is long (90 steps), its halves agree within 0.5% and it confirms the median within 0.5% (`measured`).
+  Without a trustworthy value by the readiness timeout readiness is refused with the reason. All values go to
+  `session.json observed.readiness_*`. Never `GetFixedTimeSlice()` alone (it reports n/30 per frame). Drivers get
+  `timeSlice` = covered steps x step dt.
+- **Numbered decisions and admission.** `hl_seq` advances on the callback after every decision callback of an
+  episode; a driver whose `Decide` returns false keeps the held command, which the core numbers again (C07). An
+  episode is admitted only after the handshake `CanDecide(physicsStep)` (base default true): a driver that cannot
+  give the first command in this callback returns false and is asked again at the next grid point, or it fills
+  `DC_EpisodeInfo.m_InitialCommand` in `BeginEpisode`. Only a first `Decide` false after an admission without an
+  initial command fails the session.
+- **Decisions and images on one world-time grid.** Every 200 ms at the default 5 Hz from the first callback's world
+  time; a decision is taken in the first callback at or past a grid point and applies from the next callback. 10 Hz
+  only through the trial conf key `"image_hz": 10` (`clocks.image_hz_setting` `trial_conf`; a trial conf with
+  `"image_hz": 5` runs the default and is stamped `default`); the layer must keep `m_fImageHz 5`, any other value
+  refuses the session.
+- **Images.** The fiducial is the debug-Shape carrier (`m_eFiducialCarrier 1` = SHAPE) 0.05 m in front of the rig
+  camera (`m_fShapeDepthM`), so the rig's near plane is 0.03 m (`DC_HfRecorder m_fNearPlaneM`; the probes drew the
+  bands at 1 m with a 0.1 m near plane, the documented fallback). The near plane is written to `session.json
+  rig.near_plane_m` and is part of `rig_id`. The widget carrier (0) is a diagnostic only: widgets never reach
+  `MakeScreenshot` files. Each `img` row is written when its slot resolves, with `done_render_frame` (the captured
+  frame is `done_render_frame - 1` in Workbench); the held rows belong to the session, so a world-teardown seal
+  writes them too (a request in flight with `done_render_frame` empty). The Shape carrier's relayouts and layout
+  failures go to `session_end.json observed.fiducial_shape_*`.
+- **Signs.** `DC_StreamRecorder m_iSteerSign 1` (a positive `SetSteering` turns right, E-01 run 3).
+
+What only a Play confirms: the step-dt line (`engine` source, 0.033333 s), rows with `covered_steps` 2-3 on screenshot
+frames, the Shape bands decoded at 0.05 m with the 0.03 m near plane (E-06 tool on a capture session), and C08 / C28
+passing on the first T0a/T0b session.
+
+## Crash events and the addon's first modded class (dc-2.0 9.5.1)
+
+`DC_CrashWatch` (`src/enfusion/datacapture/DC_CrashWatch.c`, a capture module on `GameMode_DataCapture` in
+`DC_Arland`) writes the crash events of contract dc-2.0 section 9.5.1 for every watched vehicle slot (the ego now,
+traffic slots from DD-4/T2): `collision`, `veh_damage`, `veh_fire_start`, `veh_fire_end`, `driver_state`,
+`dismount`, `remount` and `rollover`, and the detector values in `session.json` `events.*`.
+
+- Collisions come from the horizontal world-frame velocity change over 100 ms of **world time**, interpolated
+  between the samples of the physics callbacks. On 1.8 one callback covers 1 to 3 merged steps of 1/30 s (frame-bound
+  rows, freeze decision D-A), so the window is never a count of callbacks; two samples more than 150 ms apart (a
+  hitch) restart the history instead of counting as a change. `data/dc2/crash_dv.py` is the same rule in Python.
+  The threshold `m_fCollisionDvMps` 4.0 m/s is **provisional** (TBD-10): it must be measured again by the TBD-10
+  probe, for every `build_key` and on 1.9, with 10 Hz images on so that frames merge steps. `telemetry.dv_max_mps`
+  keeps the per-row maximum, so a new value can be applied offline.
+- Crash rows belong to the episode in which they occurred, also when written after its end. After an ego crash no
+  new episode begins for `m_iCrashCooldownMs` (3 s), nor while the ego is tilted, immobile or burning.
+- Whoever moves a vehicle by `SetWorldTransform` calls `DC_CrashWatch.PrepareReposition(slot)` first (the driver:
+  `DC_DriverContext.PrepareReposition()`), then logs the `teleport` row: the pending collision row is finished
+  and the velocity history cleared, so the jump is never measured.
+- The episode end waits at most 250 ms for the ego's collision row. Below about 8 frames per second the vanilla
+  contact (1 to 2 frames after its step) can miss that wait; the row is then written with `src=dv` and without
+  `other`.
+- A destroyed ego ends the session with `end_reason` `ego_destroyed`, status `ok`: a crash is data. The crash rows,
+  the end of the open episode and `session_end.json` share one terminal step, the last step with rows.
+
+`src/enfusion/datacapture/DC_CollisionHook.c` is the **first `modded class` of this addon**:
+`modded class SCR_VehicleDamageManagerComponent` overrides `ProcessCollision`. While the addon is loaded this runs for
+every vehicle in every world, so:
+
+- it calls `super.ProcessCollision` first and changes nothing: vanilla's damage, instigators and ejections stay as
+  they are;
+- it then hands the contact to `DC_CrashWatch.NoteContact`, which returns at once unless a dc-2.0 session is
+  capturing and watches that vehicle (no allocation, no string);
+- it is a manifest entry like every other script. To switch the contacts off, set `m_bUseContactHook 0` on
+  `DC_CrashWatch` in the layer; the session then records `events.contact_source` `none` and names `other` from the
+  registry only. To remove the hook completely, drop the manifest line as well.
+
+The hook's signature is the same in the 1.9 index. The 1.9 method bodies around it (the impulse gates, the
+continued-contact filter) must be checked again once the 1.9 scripts are extracted.
 
 ## Probe world DC_Probes_Arland (DD-4-probe)
 
@@ -232,14 +328,27 @@ A visible command line without `-dcLaunchId` always refuses: Workbench was then 
 3. `[DC_Probe] plan from m_sPlan: '...' -> N probe(s) with a component: ...`, with a WARNING for every plan id that
    has no probe component in this deploy.
 4. `[DC_Probe] run started (OnGameModeStart): plan=..., warm-up 3.0 s, gap 1.0 s`.
-5. After the warm-up `[DC_Probe] step source: simulate (...)`. A WARNING `step source: fixedframe` or an ERROR
-   `step source: none` means that the game mode entity gets no EOnSimulate.
-6. For each probe: `[DC_Probe <id>] START play_dir=$profile:DC_Probes/<id>/<launch id>/play_NN`, the probe's own
-   `[DC_Probe <id>]` lines, then `[DC_Probe <id>] END reason=done status=complete`. Other ends:
+5. `[DC_Probe] runner heartbeat #<n> via=frame: world_ms=... step_source=undecided ...` about once per world second
+   until the step source is decided, then every 30 world seconds while the plan runs. `via=fixedframe` or
+   `via=watchdog` means that EOnFrame missed the heartbeat; `plan_calls` greater than `plan_entries` means that EOnFrame
+   calls the sequencer (AdvancePlan) but the call does not reach it. The heartbeat runs on world time: while the world
+   is paused it is silent, and after about 10 s the WARNING `runner: world time has not advanced for 10 watchdog
+   ticks ...` appears instead (and `runner: world time advances again ...` once it moves). A WARNING `watchdog:
+   AdvancePlan has not run for <s> world s (...): it stops <id> (timeout|write_fail)` means that a probe callback fails
+   on every frame: send the log folder.
+6. After the warm-up `[DC_Probe] step source: simulate (...)`, or on the probe world in 1.8 the WARNING
+   `step source: fixedframe - no EOnSimulate on the game mode entity ...`, each with `decided by frame at world <ms> ms;
+   step dt <s> s (<engine|measured>) ...`. An ERROR `step source: none` means that neither EOnSimulate nor
+   EOnFixedFrame arrived. A WARNING `decision path: the frame path (EOnFrame -> AdvancePlan) did not decide the step
+   source; the fixedframe|watchdog path decides it ...` means that the sequencer did not run: send the log folder.
+7. For each exclusive probe: `[DC_Probe] plan: starting exclusive <i>/<n> <id> ...`, then
+   `[DC_Probe <id>] START play_dir=$profile:DC_Probes/<id>/<launch id>/play_NN`, the probe's own `[DC_Probe <id>]`
+   lines, `[DC_Probe <id>] END reason=done status=complete` and `[DC_Probe] plan: <id> ended (done, complete) after
+   <s> world s; next exclusive ...`. Other ends:
    - `reason=timeout`;
    - `reason=write_fail`, with the requested and the returned byte counts of the failed write;
-   - `reason=start_failed`, for example without `DC_Ego`.
-7. `[DC_Probe] plan complete: ...`. Stop the Play after this line. A Stop before it ends the running probes with
+   - `reason=start_failed`, for example without `DC_Ego`, followed by `[DC_Probe] plan: <id> did not start ...`.
+8. `[DC_Probe] plan complete: ...`. Stop the Play after this line. A Stop before it ends the running probes with
    `reason=play_end`.
 
 ### Where the probe files are
@@ -250,10 +359,12 @@ every Play of one Workbench start shares the launch id.
   `/mnt/e/DriveDiT/wb_profile/profile/DC_Probes/` in WSL.
 - Each play folder holds:
   - `run_header.txt`: build stamp (git sha, dirty flag), launch id and pin, build version, fixed time slice,
-    world, clocks, and every probe parameter as `params.*`;
+    world, clocks (including the run's fixed and merged step counts at the probe start), and every probe parameter
+    as `params.*`;
   - the probe's CSV files, each with one header row;
-  - `run_footer.txt`, written when the probe ends: status, reason, rows and bytes per file. A play folder without
-    it was ended by a crash, a kill or a Stop that tore the world down.
+  - `run_footer.txt`, written when the probe ends: status, reason, rows and bytes per file, and the run's step
+    timing (`clock.step_source`, `clock.step_dt_s` and the engine's raw values, see the DC_ProbeRunner header). A play
+    folder without it was ended by a crash, a kill or a Stop that tore the world down.
 - A refused Play creates no `DC_Probes` folder at all.
 
 ### Choosing the probes
@@ -283,11 +394,33 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e20 | render-settings dump | < 1 s | `e20_settings.py <play_dir> [--compare <client play_dir>] [--profile-dir <dir>]` |
 | e19 | writer return values | < 5 s | `e19_write.py <play_dir>` |
 | e19kill | taskkill consistency (opt-in) | until killed, max 300 s | `e19_write.py [<e19 play_dir>] --kill <play_dir>` |
-| e08a | engine road dump | ~10-60 s | `tools/roads/compare_dump_decoder.py <play_dir> --decoder <Arland_road_polylines.tsv>` |
+| e08a | engine road dump | ~10-60 s | `tools/roads/compare_dump_decoder.py <play_dir> --decoder <Arland_road_polylines_v2.tsv>` |
 | e01 | Mode A actuation identification | ~6 min | `e01_actuation.py e01 <play_dir>` |
 | e02a | first-pass steer -> kappa | ~10-15 min | `e01_actuation.py e02a <play_dir>` |
 | e05 | R1 camera, 10 Hz screenshots (E-05, E-06) | 10 min | `e05_images.py <play_dir> --log <console.log>`, `e06_fiducial.py <play_dir>` |
 | e06a | marker reprojection alignment (60 and 30 FPS, backlog) | ~3-5 min | `tools/validator/e06a_reproject.py <play_dir> [--header-geometry]` |
+
+Notes on the driving probes (e01, e02a, e05, e06a; all drive `DC_Ego` through `DC_ProbeActuator`):
+- The S105 has a manual gearbox (`HasAutomaticGearbox` 0, 6 gear indices, 4 forward). Probe run 2 left it in
+  neutral, so the throttle only revved the engine. The actuator now derives the indices once per probe start as
+  vanilla does (`neutral = gears - forward - 1`, `first = gears - forward`, `top = gears - 1`; S105: 0 reverse,
+  1 neutral, 2..5 first..fourth) and writes them to the run header (`vehicle.gearbox`, `vehicle.gear_index_*`).
+- Without an explicit phase gear its shift policy picks the gear: neutral while the handbrake is on, first gear when
+  it is released (before the throttle), then up at >= 4500 rpm and down at <= 1800 rpm, at least 1.5 s apart, first
+  gear below 8 km/h, never neutral or reverse while driving (`DC_ProbeSequences` category Gearbox; e05 and e06a
+  use the same values as defaults). `cmd_gear` in the step CSVs is the gear the policy chose. The move checks hold
+  first gear, `gear_scripted` still calls `SetGear` every step, and `gear_observe` is skipped with the note
+  `manual_gearbox`. The park/drive choice is the probe's own: vanilla `SCR_ToggleHandbrakeAction` releases into
+  neutral and parks in first gear. After an explicit gear the policy continues from that gear, and every probe stop
+  sets neutral on a manual gearbox.
+- Each release of the handbrake also wakes the car's physics as vanilla does (`Physics.SetActive(ActiveState.ACTIVE)`),
+  and every later step with the handbrake released wakes a body it finds asleep (`Physics.IsActive` false), as
+  DD-4-min Mode A does. The phase notes (`wakes`, `asleep_at_wake`, `shifts`, `sleep_wakes`) and the run header lines
+  appended at the stop (`gear_policy.*`, `physics_wake.*`) count these wakes and the gear changes. E-01's
+  ForceEnableSimulation answer holds with both wakes; `e01_actuation.py` prints that condition after the answer.
+- e05 and e06a latch `ForceEnableSimulation` unless e01 of the same Play found it not needed (`drive.force_sim`,
+  `drive.force_sim_e01` in their run headers). If e01 found it not needed and a drive start stays below 3 km/h for
+  10 s, the actuator's stuck guard latches it anyway and logs a WARNING (`drive.stuck_forces` at the stop).
 
 Notes on the image probes:
 - e05 and e06a drive from 2 x `m_fAreaMarginM` along the test area (6 m with the layer's margin), inside the area
@@ -300,3 +433,24 @@ Notes on the image probes:
   is INCOMPLETE when slalom, backlog or brake has no counted marker or its `e06a_phases.csv` row is not `ok`.
 - The fiducial is laid out on `WorkspaceWidget.GetWidth() x GetHeight()`, which is the window's render target in
   physical pixels; the run header logs `fiducial.dpi_scale`.
+- Fiducial carriers (`m_eFiducialCarrier`, e05 and e06a, default BOTH): WIDGET is the r2 3.4 ImageWidget bands,
+  SHAPE draws the same code as debug Shapes 1 m (`m_fShapeDepthM`) in front of the rig camera at their own margin
+  (`m_iShapeMarginPx`, 64 px: beside the widget bands), BOTH draws both. Probe runs 1 and 2 found no widget patch in
+  any Workbench `MakeScreenshot` file, while debug shapes keep their exact colour there. The shapes are placed in
+  EOnFrame, after the physics step and in EOnPostFrame (the last placement of a frame wins; the camera applies its
+  transform in EOnPostFrame); the residual against the camera the frame was rendered with is logged once per second
+  (`fiducial shapes:` lines) and summed up at the stop (`fiducial.shape.*` in the run header, `clock.postframe_calls`
+  in the footer). The run header records `rig.fiducial.carrier` and `rig.fiducial.depth_m`. A shuttle or reset
+  teleport places the shapes once more at once; teleport frames are counted apart (`fiducial.shape.teleport_*`). A
+  canvas too small for the bands stops the drawing until the next size change (`fiducial.shape.layout_failures`,
+  `drawing_at_stop`). `m_bShapeDepthTest` (default 0) drops `NOZBUFFER`/`NOZWRITE` for a Play that found the shapes
+  absent; use it with `m_fShapeDepthM` just beyond the near plane (e.g. 0.11 m), since at 1 m the car body hides
+  the bands.
+- With the widget carrier, `m_bWidgetDiagnostics` reads the patch widgets back once per second (`fiducial widgets:`
+  lines: workspace size and DPI, `IsVisibleInHierarchy`, `GetScreenPos` / `GetScreenSize`) and adds three orange
+  control widgets at the top centre (a text, a textured and a flat image), so a Play tells "never drawn" from
+  "drawn but not captured".
+- `data/dc2/fiducial.py` gates every decode: a band of scene texture is `absent` (run 1 read dark bark as code 0
+  `ok`), and a code outside [issue, min(issue + 2, done - 1)] is `implausible`. `e06_fiducial.py` and `e05_images.py`
+  report each carrier on its own; E-06 selects the carrier with the highest decode rate and passes when it decodes
+  >= 99.5% with no implausible decode (the other carriers' implausible decodes are listed, not judged).

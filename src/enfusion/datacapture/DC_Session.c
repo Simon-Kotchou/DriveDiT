@@ -1,0 +1,3422 @@
+// ============================================================================
+// DC_Session - guarded dc-2.0 capture session: lifecycle, provenance and heartbeat (DD-4-min)
+// ============================================================================
+//
+// One component on the capture game mode (GameMode_DataCapture in worlds/DataCapture/DC_Arland). It owns the
+// session lifecycle of docs/capture_contract/dc-2.0.md section 5.3 and drives the capture modules: the other
+// DC_SessionModule components on the same entity (ego, streams, hf, images). A module never sets its own event mask:
+// the session receives every engine event and dispatches it, in the modules' GetDispatchOrder order.
+//
+// LIFECYCLE (authority only, play mode only; nothing at all in edit mode)
+//   1. Guards: edit mode, play mode, server; DC_LaunchGuard.Evaluate (DD-4-probe, reused unchanged). A refusal logs
+//      one ERROR line and writes nothing, not even a directory.
+//   2. Trial: -dcTrial <id>, else the one-line pointer $profile:dc_trials/ACTIVE; the conf
+//      $profile:dc_trials/<id>.json is read with JsonLoadContext (the loader DC_LaunchGuard already uses on 1.8).
+//   3. Build and map: GetBuildVersion() must equal the launch record's engine_version_expected once a record carries
+//      one (MIGRATION_1_9 8.3); the L8 fingerprint (world size from GetBoundBox, latitude from the weather manager)
+//      must match the map card of m_sMapId. Everon is never captured here (sealed test map).
+//   4. Readiness: the event mask is set, every module prepares (the ego is spawned and settles, rig R1 attaches, the
+//      fiducial bands appear) and is polled once per frame. Meanwhile the physics-step source is counted as in
+//      DC_ProbeRunner: "simulate" if any EOnSimulate arrived, else "fixedframe" (WARNING), else none (refusal), and
+//      the engine fixed step dt is measured (STEP TIMING below); the clocks follow from it. A readiness timeout or a
+//      module refusal is an ERROR and creates no directory.
+//   5. Open: session id <map>_<trial>_<UTC>_<exe>_<inst>_<rand4> (UTC wall clock, rand4 seeded with GetTickCount,
+//      never world time); an existing directory is refused (ERROR, nothing written). Then session.json (written once),
+//      heartbeat.csv (header), the modules open their streams, events session_start.
+//   6. Running (frame-bound rows, dc-2.0 freeze decision D-A): one dispatched callback per EOnFixedFrame /
+//      EOnPostFixedFrame pair (or per EOnSimulate / EOnPostSimulate when the engine delivers them), which covers
+//      covered_steps engine fixed steps (BaseWorld.GetFixedSteps() of the frame, read in its EOnFrame; 1 per
+//      EOnSimulate); physics_step is -1 at open and advances by covered_steps at the top of every callback, so it is
+//      the index of the last step the callback covers. OnStepPre (held command), OnStepPost (rows), OnStepDecide
+//      (episodes, HL decisions) per callback, with timeSlice = covered_steps x the measured step dt; OnFrameStart,
+//      OnFrame per render frame and OnPostFrame after its physics update. world_time_ms is
+//      WorldTimestamp.DiffMilliseconds against the open, read once at the top of each callback (the frame clock).
+//      Decisions lie on a world-time grid every 1000 / decision_hz ms from the first callback's world time: a
+//      callback at or past the next grid point is a decision callback (IsDecisionStep), and grid points a hitch
+//      skipped are counted. warmup_end and the planned end are checked on every callback; heartbeat.csv gets a row
+//      every m_fHeartbeatPeriodS of world time, and $profile:DC_STOP is checked at each heartbeat.
+//   7. End: duration, dc_stop, ego_disabled (EndPlanned): the modules stop (no new episode or image request) and drain (hf and ctl rows go on
+//      until no image request is in flight or the in-flight timeout passed). Play stop, every failure and a destroyed
+//      ego (EndAtOnce: ego_destroyed, not an error, status ok; dc-2.0 5.3) seal at once. Sealing commits every registered stream and writes session_end.json last; status ok only when every
+//      commit succeeded and the reason is not an error. Shutdown is idempotent: the event mask is cleared and the
+//      only queued call (FallbackStart) is removed, so ScriptCallQueue.Dump() shows no DC_* entry afterwards.
+//
+// WRITES (all under $profile:DC_Sessions/<session_id>/, never anywhere else; dc-2.0 section 4)
+//   session.json and session_end.json are new files written by ONE FileHandle.Write each, with no final LF, so the
+//   closing brace is the last byte and a short write never leaves a file that parses. heartbeat.csv rows go through
+//   DC_ProbeCsv.WriteLines (DD-4-probe) or the handle kept open. Every Write return must equal the byte count
+//   (TBD-3); files are never rewritten in place. With the TBD-3 fallback m_bVerifyChunkLength the length of every
+//   file is also read back after each write (chunks, commit.csv, heartbeat.csv, both JSON files), and a heartbeat.csv
+//   kept open is closed and checked before session_end.json, which stays the last write. The stream chunks belong to
+//   the modules' DC_SessionStream writers, which the session owns (RegisterStream) so that it can still commit them
+//   on world teardown without calling another component.
+//
+// STEP TIMING (dc-2.0 section 6, D-A; probe runs 3-4 on 1.8: fixed steps of 1/30 s, 1 to 3 merged into one
+//   EOnFixedFrame while capturing): BaseWorld.GetFixedTimeSlice() reports n/30 for a frame of n steps and is never
+//   the step dt (session.json engine.fixed_time_slice_s keeps its value at the open for provenance only). During
+//   readiness every unpaused step callback gives one ratio, its time slice / the fixed steps of its frame (the
+//   EOnFixedFrame slice is covered_steps x the step: covered / 30 on 21296 of 21296 rows of run 3, so the ratio is
+//   the step even in merged frames; 1 step per EOnSimulate); BaseWorld.GetFixedTimeSlice() / GetFixedSteps() read in
+//   the same callback is kept as a cross-check. After every readiness frame (once STEP_DT_MIN_STEPS steps and
+//   STEP_DT_MIN_RATIOS ratios were seen) TryChooseStepDt decides, never locking in a guess:
+//     - engine: at least STEP_DT_AGREE_FRAC of the ratios lie within STEP_DT_AGREEMENT of their median -> the median;
+//     - measured: else the measured span (the EOnFrame time slices after the first frame with a step through the
+//       last one, over the steps run in them) once it is long (STEP_DT_SPAN_MIN_STEPS), stable (its two halves, split
+//       at half its steps, agree within STEP_DT_AGREEMENT) and confirms the ratio median within STEP_DT_AGREEMENT.
+//       The span's endpoint error (the accumulator remainder and backlog at both ends) is not bounded by itself;
+//       these conditions keep it within half of C28's 1% tolerance of the median;
+//     - neither: the measurement goes on; at the readiness timeout readiness is refused with the reason
+//       (m_sStepDtWaiting), so no session opens with an untrustworthy step dt.
+//   All values go to session.json observed.
+//   physics_steps_per_decision N = floor(1000 / decision_hz / step_dt_ms + 0.5) (6 at the 5 Hz default).
+//
+// TBD PARAMETERS (dc-2.0 section 1; [Attribute]s with the value decided at the freeze, recorded in session.json):
+//   TBD-1 frame-bound rows and the measured step dt (above), TBD-2 image rate (5 Hz default; 10 Hz only through the
+//   trial conf key image_hz, clocks.image_hz_setting trial_conf, D-B), in-flight timeout and lead, TBD-3 writer
+//   semantics (keep logs open, re-check file lengths; both off),
+//   TBD-6 Workbench escape (off on DC_Arland; the probe layer alone has it on), TBD-8 render-settings modules. Facts
+//   the engine reveals at run time (step source, the screenshot name, steps without a world-time advance, the ego's
+//   gearbox) are written to the extra "observed" objects of session.json and session_end.json.
+//
+// EVENTS: LogVehicleEvent writes one events row naming its vehicle slot (LogEvent: the ego's) in the current episode;
+//   LogVehicleEventInEpisode names the episode the event belongs to (dc-2.0 9.5.1 episode ownership: a crash row
+//   written after its episode ended). The crash kinds come from DC_CrashWatch; a teleport or respawn row of a slot
+//   isolates that slot's collision detector (DC_CrashWatch.NoteRepositioned).
+//
+// FAULT CASES (m_sFaultCase, empty in the layer; for the acceptance runbook only, every one ends in an ERROR or a
+//   failed session): readiness_timeout, session_dir_exists, zero_ego, chunk_dir_blocked.
+// ============================================================================
+
+//------------------------------------------------------------------------------------------------
+//! Ordered JSON text, one member per line, two spaces per level. Strings are escaped; floats are fixed point.
+class DC_JsonWriter
+{
+	//! Both braces in one literal: a lone brace inside a string would unbalance the brace count of the static API
+	//! indexer (enfusion/tools/index_api.py keeps string contents)
+	static const string BRACES = "{}";
+
+	protected ref array<string> m_aLines = {};
+	protected ref array<bool> m_aHasMember = {};	//!< per open container: a member was written already
+
+	//------------------------------------------------------------------------------------------------
+	//! Opens an object; key is empty for the root object and for array elements
+	void BeginObject(string key)
+	{
+		AddLine(KeyText(key) + BRACES.Substring(0, 1));
+		m_aHasMember.Insert(false);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void EndObject()
+	{
+		CloseContainer(BRACES.Substring(1, 1));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void AddString(string key, string value)
+	{
+		AddLine(KeyText(key) + "\"" + Escape(value) + "\"");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A string, or null when value is empty
+	void AddStringOrNull(string key, string value)
+	{
+		if (value.IsEmpty())
+		{
+			AddNull(key);
+			return;
+		}
+
+		AddString(key, value);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void AddInt(string key, int value)
+	{
+		AddLine(KeyText(key) + value.ToString());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! value.ToString(-1, decimals): fixed point, never an exponent
+	void AddFloat(string key, float value, int decimals)
+	{
+		AddLine(KeyText(key) + value.ToString(-1, decimals));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void AddBool(string key, bool value)
+	{
+		if (value)
+			AddLine(KeyText(key) + "true");
+		else
+			AddLine(KeyText(key) + "false");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void AddNull(string key)
+	{
+		AddLine(KeyText(key) + "null");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! [a, b, ...] on one line
+	void AddIntArray(string key, notnull array<int> values)
+	{
+		string text = "[";
+		for (int i = 0, count = values.Count(); i < count; i++)
+		{
+			if (i > 0)
+				text += ", ";
+
+			int value = values[i];
+			text += value.ToString();
+		}
+
+		AddLine(KeyText(key) + text + "]");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The lines written so far (complete JSON once every object is closed)
+	array<string> GetLines()
+	{
+		return m_aLines;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! JSON string escape: backslash, quote, CR, LF, TAB
+	static string Escape(string value)
+	{
+		string text = value;
+		text.Replace("\\", "\\\\");
+		text.Replace("\"", "\\\"");
+		text.Replace("\r", "\\r");
+		text.Replace("\n", "\\n");
+		text.Replace("\t", "\\t");
+		return text;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected string KeyText(string key)
+	{
+		if (key.IsEmpty())
+			return string.Empty;
+
+		return "\"" + Escape(key) + "\": ";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Appends one member line at the current depth, with the comma on the previous member
+	protected void AddLine(string text)
+	{
+		int depth = m_aHasMember.Count();
+		if (depth > 0)
+		{
+			if (m_aHasMember[depth - 1])
+				m_aLines[m_aLines.Count() - 1] = m_aLines[m_aLines.Count() - 1] + ",";
+
+			m_aHasMember[depth - 1] = true;
+		}
+
+		m_aLines.Insert(Indent(depth) + text);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void CloseContainer(string closing)
+	{
+		int depth = m_aHasMember.Count();
+		if (depth == 0)
+			return;
+
+		m_aHasMember.Remove(depth - 1);
+		m_aLines.Insert(Indent(depth - 1) + closing);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected static string Indent(int depth)
+	{
+		string text;
+		for (int i = 0; i < depth; i++)
+		{
+			text += "  ";
+		}
+
+		return text;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+//! A stream the session commits, counts and closes. DC_ChunkWriter implements it; a module creates its writers and
+//! hands them to DC_Session.RegisterStream, which keeps the only strong reference.
+class DC_SessionStream
+{
+	//------------------------------------------------------------------------------------------------
+	//! Stream name of the contract (ctl, telemetry, hf, img, events, episodes)
+	string GetName()
+	{
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Buffers one row with its key; false on a failed write (HasFailed)
+	bool AddRow(notnull DC_ProbeRow row, int key, int worldMs)
+	{
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Commits the buffered chunk once it is clocks.chunk_max_s old; false on a failed write
+	bool FlushIfDue(int worldMs)
+	{
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Commits what is buffered and closes the stream. Idempotent; false when any write of the stream failed
+	bool Close()
+	{
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Drops what is buffered without writing it (never acknowledged) and closes. Idempotent
+	void Abandon()
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Drops what is buffered without writing it (never acknowledged); the stream stays open
+	void DiscardBuffered()
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool HasFailed()
+	{
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetFailure()
+	{
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Rows acknowledged by a commit line
+	int GetCommittedRows()
+	{
+		return 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetCommittedChunks()
+	{
+		return 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Key of the last acknowledged row, -1 without one
+	int GetLastCommittedKey()
+	{
+		return -1;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+//! Base of every capture module on the capture game mode. DC_Session discovers them with
+//! FindComponents(DC_SessionModule, ...) and calls the hooks below; a module never sets its own event mask.
+class DC_SessionModuleClass : ScriptComponentClass
+{
+}
+
+//------------------------------------------------------------------------------------------------
+class DC_SessionModule : ScriptComponent
+{
+	//------------------------------------------------------------------------------------------------
+	//! Modules are called in ascending order (ego 10, crash events 15, streams 20, hf 30, images 40)
+	int GetDispatchOrder()
+	{
+		return 100;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Readiness starts (no directory yet). false = refused (the module logs why through the session)
+	bool OnSessionPrepare(notnull DC_Session session)
+	{
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Polled once per frame until every module is ready. waitingFor names what is missing (for the timeout ERROR)
+	bool IsSessionReady(out string waitingFor)
+	{
+		waitingFor = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Writes this module's keys into the session.json object named section ("rig", "control", "events", "observed")
+	void WriteSessionJson(string section, notnull DC_JsonWriter json)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! This module's part of rig.rig_id (empty = none)
+	string GetRigIdPart()
+	{
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The directory and session.json exist: create the stream directories and writers (DC_Session.RegisterStream).
+	//! false = the session fails (script_error, or write_fail when a write failure was reported)
+	bool OnSessionOpen(notnull DC_Session session)
+	{
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Top of a callback (EOnFixedFrame, or EOnSimulate when the engine delivers it): the held command is applied here
+	//! for all its covered steps; physicsStep is the last step it covers, timeSlice = covered_steps x the step dt
+	void OnStepPre(int physicsStep, float timeSlice)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Same callback after its covered steps: the rows of the callback (worldMs = its world time, the frame clock)
+	void OnStepPost(int physicsStep, float timeSlice, int worldMs)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! After every module's OnStepPost of the step: episode boundaries and HL decisions (dc-2.0 section 6)
+	void OnStepDecide(int physicsStep)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! First call of every render frame, before any row of it (the fiducial is drawn here)
+	void OnFrameStart(int renderFrame)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every render frame after OnFrameStart
+	void OnFrame(int renderFrame, float timeSlice, int worldMs)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! EOnPostFrame of every render frame while capturing, after its physics update (the camera has its transform)
+	void OnPostFrame(int renderFrame)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The planned end began (duration, dc_stop): no new episode or image request from now on
+	void OnSessionStopping(string endReason)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Polled every frame while the session drains; true when nothing of this module is in flight any more
+	bool IsDrained()
+	{
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Before the streams are committed: the last rows (the episodes row of an episode still open)
+	void OnSessionClosing(string endReason)
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! After session_end.json, or after a refusal: give the camera back, remove widgets, park the ego. teardown =
+	//! world deletion: drop references only and touch no other entity, camera or widget. Idempotent
+	void OnSessionRelease(bool teardown)
+	{
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+enum DC_ESessionPhase
+{
+	IDLE,			//!< nothing started (or not the authority)
+	PREPARING,		//!< readiness: no directory yet
+	CAPTURING,		//!< directory open, rows written
+	DRAINING,		//!< planned end: no new image request, rows go on until the modules are drained
+	CLOSED			//!< sealed, refused or stopped; nothing is captured any more
+}
+
+//------------------------------------------------------------------------------------------------
+[ComponentEditorProps(category: "GameScripted/DataCapture", description: "dc-2.0 capture session: launch guard, trial, provenance, readiness, physics-step and frame dispatch to the capture modules, heartbeat and seal")]
+class DC_SessionClass : SCR_BaseGameModeComponentClass
+{
+}
+
+//------------------------------------------------------------------------------------------------
+class DC_Session : SCR_BaseGameModeComponent
+{
+	// === MAP (declared by the capture world, verified by the L8 fingerprint) ===
+	[Attribute("arland", UIWidgets.EditBox, "Canonical map id of this capture world (arland or kolguyev; everon is never captured by this component)", category: "Map")]
+	protected string m_sMapId;
+
+	[Attribute("Arland", UIWidgets.EditBox, "Engine terrain name of the root world (session.json map.terrain)", category: "Map")]
+	protected string m_sTerrain;
+
+	[Attribute("{A9806AF617972E97}worlds/Arland/Arland.ent", UIWidgets.EditBox, "Root world resource of the terrain (dc-2.0 section 3 table)", category: "Map")]
+	protected string m_sRootWorld;
+
+	[Attribute("4096", UIWidgets.Slider, "L8 fingerprint: expected world size in x [m] (program/maps/map_cards_v1.json)", "100 50000 1", category: "Map")]
+	protected float m_fMapSizeM;
+
+	[Attribute("256", UIWidgets.Slider, "L8 fingerprint: allowed difference of the GetBoundBox x extent from the expected size [m]", "0 10000 1", category: "Map")]
+	protected float m_fMapSizeTolM;
+
+	[Attribute("47.411", UIWidgets.Slider, "L8 fingerprint: expected latitude of the weather manager [deg] (map card default_latitude)", "-90 90 0.001", category: "Map")]
+	protected float m_fLatitudeDeg;
+
+	[Attribute("0.05", UIWidgets.Slider, "L8 fingerprint: allowed latitude difference [deg]", "0 10 0.001", category: "Map")]
+	protected float m_fLatitudeTolDeg;
+
+	// === LAUNCH GUARD (DC_LaunchGuard of DD-4-probe) ===
+	[Attribute("E:/DriveDiT", UIWidgets.EditBox, "Launch guard: -profile and $profile must lie inside this folder (case-insensitive, either slash). Empty refuses: the guard has no off switch", category: "Launch")]
+	protected string m_sRequiredProfileRoot;
+
+	[Attribute("0", UIWidgets.CheckBox, "Launch guard: Workbench-only escape for a Play that cannot see the command line (TBD-6 / E-11). Off on DC_Arland (the probe layer alone has it on); escape sessions are dev data, marked launch_guard.launch_mode wb_escape", category: "Launch")]
+	protected bool m_bAllowWorkbenchWithoutLaunchId;
+
+	[Attribute("1", UIWidgets.CheckBox, "Launch guard escape only: the newest -wb- record must be this Workbench start's own record (DC_LaunchGuard G15)", category: "Launch")]
+	protected bool m_bEscapeBindToProcessStart;
+
+	// === CLOCKS (TBD-1, TBD-2) ===
+	[Attribute("5", UIWidgets.Slider, "Image slot rate [Hz] (TBD-2 decided: the production default 5; 10 only through the trial conf key image_hz, never here). The HL decision rate equals it; physics_steps_per_decision follows from the measured step dt (TBD-1)", "5 10 5", category: "Clocks")]
+	protected float m_fImageHz;
+
+	[Attribute("2000", UIWidgets.Slider, "A screenshot request not seen on disk after this long [ms of real time] stops blocking the next slot (TBD-2)", "100 60000 100", category: "Clocks")]
+	protected int m_iImgInflightTimeoutMs;
+
+	[Attribute("0", UIWidgets.Slider, "Image grid lead [ms]: grid point g is due this long before decision step g (TBD-2, from the E-05/E-06 offsets)", "0 1000 1", category: "Clocks")]
+	protected int m_iImgLeadMs;
+
+	[Attribute("10", UIWidgets.Slider, "A chunk is committed at the latest after this much world time [s] (clocks.chunk_max_s)", "1 60 1", category: "Clocks")]
+	protected float m_fChunkMaxS;
+
+	// === LIFECYCLE ===
+	[Attribute("30", UIWidgets.Slider, "Readiness must complete within this much world time [s], else ERROR and no directory", "5 300 1", category: "Lifecycle")]
+	protected float m_fReadinessTimeoutS;
+
+	[Attribute("5", UIWidgets.Slider, "Heartbeat period [s of world time] (heartbeat.csv, DC_STOP check)", "1 60 1", category: "Lifecycle")]
+	protected float m_fHeartbeatPeriodS;
+
+	[Attribute("10000", UIWidgets.Slider, "Start this long after OnPostInit if OnGameModeStart never arrived [ms], 0 = no fallback", "0 60000 500", category: "Lifecycle")]
+	protected int m_iFallbackStartMs;
+
+	[Attribute("1", UIWidgets.CheckBox, "After a DC_STOP seal, request the game to close (never in Workbench)", category: "Lifecycle")]
+	protected bool m_bCloseOnDcStop;
+
+	// === WRITER (TBD-3) ===
+	[Attribute("0", UIWidgets.CheckBox, "TBD-3 fallback: keep commit.csv and heartbeat.csv open for the session instead of one open-APPEND-write-close cycle per line (the e19kill e19_commit.csv pattern)", category: "Writer")]
+	protected bool m_bKeepLogsOpen;
+
+	[Attribute("0", UIWidgets.CheckBox, "TBD-3 fallback (when E-19 shows that Write does not report short writes): read the length of every file back after each write before its rows count as acknowledged: a chunk before its commit line, commit.csv and heartbeat.csv after each line (through the handle when kept open), session.json and session_end.json", category: "Writer")]
+	protected bool m_bVerifyChunkLength;
+
+	// === PROVENANCE (TBD-8) ===
+	[Attribute("VideoUserSettings,DisplayUserSettings", UIWidgets.EditBox, "Engine user-settings modules dumped into rig.render_settings and hashed (TBD-8, as E-20)", category: "Provenance")]
+	protected string m_sRenderSettingsModules;
+
+	// === FAULT CASES (acceptance runbook only) ===
+	[Attribute("", UIWidgets.EditBox, "Fault case for the acceptance runbook, empty in the layer: readiness_timeout, session_dir_exists, zero_ego or chunk_dir_blocked. Every case ends in an ERROR or a failed session", category: "Faults")]
+	protected string m_sFaultCase;
+
+	// === CONSTANTS ===
+	static const string CONTRACT_VERSION = "dc-2.0";
+	static const string FEATURES_VERSION = "features_v1";
+	static const string NAV_VERSION = "nav_v1";
+	static const string SESSION_ROOT = "$profile:DC_Sessions";
+	static const string TRIAL_DIR = "$profile:dc_trials";
+	static const string TRIAL_ACTIVE = "$profile:dc_trials/ACTIVE";
+	static const string STOP_FILE = "$profile:DC_STOP";
+	static const string SESSION_JSON = "session.json";
+	static const string SESSION_END_JSON = "session_end.json";
+	static const string HEARTBEAT_CSV = "heartbeat.csv";
+	static const string HEARTBEAT_HEADER = "unix_s,world_ms,physics_step,render_frame,fps,mem_kb,img_ok,img_fail";
+	static const string CLI_TRIAL = "dcTrial";
+	static const string CLI_INSTANCE = "dcInstance";
+	static const string LOG = "[DC_Session] ";
+
+	//! dc-2.0 section 6 / schema: sessions are at most 30 min (the fiducial code is unique for 73 min at 60 FPS)
+	static const float MAX_SESSION_S = 1800;
+	//! TBD-2 (D-B): the production image rate, and the only other rate a trial conf may set
+	static const float DEFAULT_IMAGE_HZ = 5;
+	static const float OVERRIDE_IMAGE_HZ = 10;
+	static const string IMAGE_HZ_DEFAULT = "default";
+	static const string IMAGE_HZ_TRIAL_CONF = "trial_conf";
+	//! STEP TIMING: fixed steps and step-callback ratios seen in readiness before the step dt is chosen
+	static const int STEP_DT_MIN_STEPS = 30;
+	static const int STEP_DT_MIN_RATIOS = 30;
+	//! STEP TIMING: a ratio agrees within this relative distance of the median; this fraction of them must agree.
+	//! The same distance bounds the measured span's halves and its distance to the median (half of C28's 1%)
+	static const float STEP_DT_AGREEMENT = 0.005;
+	static const float STEP_DT_AGREE_FRAC = 0.9;
+	//! STEP TIMING: the measured span counts only from this many steps (3 s at 1/30 s)
+	static const int STEP_DT_SPAN_MIN_STEPS = 90;
+	static const string STEP_DT_ENGINE = "engine";
+	static const string STEP_DT_MEASURED = "measured";
+	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
+	static const int TRIAL_CONF_MAX_BYTES = 4096;
+
+	static const string STEP_SIMULATE = "simulate";
+	static const string STEP_FIXEDFRAME = "fixedframe";
+	static const string STEP_NONE = "none";
+
+	static const string END_DURATION = "duration";
+	static const string END_STOP = "stop";
+	static const string END_DC_STOP = "dc_stop";
+	static const string END_WRITE_FAIL = "script_error:write_fail";
+	static const string END_SCRIPT_ERROR = "script_error:other";
+	static const string END_ZERO_EGO = "zero_ego";
+	static const string END_EGO_LOST = "ego_lost";
+	static const string END_CAMERA_LOST = "camera_lost";
+	static const string END_EGO_DESTROYED = "ego_destroyed";		//!< not an error: a crash is valid data (dc-2.0 5.3)
+	static const string END_EGO_DISABLED = "ego_disabled";		//!< not an error: tilted, immobile or burning between episodes too long (5.3)
+
+	static const string FAULT_READINESS_TIMEOUT = "readiness_timeout";
+	static const string FAULT_SESSION_DIR_EXISTS = "session_dir_exists";
+	static const string FAULT_ZERO_EGO = "zero_ego";
+	static const string FAULT_CHUNK_DIR_BLOCKED = "chunk_dir_blocked";
+
+	//! events.kind values of dc-2.0 section 9.5 (the crash kinds of 9.5.1 after collision)
+	protected static ref array<string> s_aEventKinds = {"session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"};
+
+	// === STATE ===
+	protected bool m_bStarted;					//!< StartRun ran (any machine), never cleared
+	protected bool m_bMaskSet;
+	protected float m_fFallbackArmedMs;
+	protected DC_ESessionPhase m_ePhase = DC_ESessionPhase.IDLE;
+	protected ref DC_LaunchInfo m_LaunchInfo;
+	protected ref array<DC_SessionModule> m_aModules = {};		//!< sorted by GetDispatchOrder
+	protected ref array<ref DC_SessionStream> m_aStreams = {};	//!< the only strong references to the writers
+	protected ref DC_ImageRowQueue m_ImageQueue;	//!< the held img rows (DC_ImageScheduler), written at any seal
+
+	// trial
+	protected string m_sTrialId;
+	protected string m_sTrialSource;
+	protected string m_sCliTrial;
+	protected string m_sTrialRoute;
+	protected float m_fWarmupS;
+	protected float m_fDurationS;
+	protected int m_iTrialSeed;
+	protected bool m_bTrialImages = true;
+	protected bool m_bTrialRouteRead;			//!< the conf has a "route" (trial.conf holds only the keys present)
+	protected bool m_bTrialImagesRead;			//!< the conf has an "images"
+	protected string m_sTrialConfRaw;			//!< the conf file's text (observed.trial_conf_raw), empty when not copied
+	protected string m_sTrialConfRawNote;		//!< why it was not copied
+
+	// build and map
+	protected string m_sBuildVersion;
+	protected string m_sEngineVersionExpected;
+	protected float m_fMeasuredSizeM;
+	protected float m_fMeasuredLatitudeDeg;
+	protected float m_fFixedTimeSliceS;			//!< GetFixedTimeSlice() at the open: provenance only, never the step dt
+	protected int m_iStepsPerDecision = 1;
+	protected string m_sImageHzSetting = IMAGE_HZ_DEFAULT;
+	protected bool m_bTrialImageHzRead;			//!< the conf has an "image_hz" (trial.conf holds only the keys present)
+	protected int m_iDecisionPeriodMs = 200;
+	protected int m_iImagePeriodMs = 200;
+
+	// step timing (STEP TIMING): measured in readiness
+	protected float m_fStepDtS;					//!< 0 until measured
+	protected string m_sStepDtSource;
+	protected float m_fMeasuredStepS;			//!< m_fSpanS / m_iSpanSteps (the measured fixed step)
+	protected int m_iReadinessFixedSteps;		//!< sum of GetFixedSteps() over the unpaused readiness frames
+	protected bool m_bReadinessStepSeen;		//!< the first readiness frame with a fixed step has passed
+	protected float m_fReadinessFrameS;			//!< Kahan sum of the EOnFrame time slices after that frame
+	protected float m_fReadinessFrameCompS;
+	protected int m_iReadinessStepsAfter;		//!< fixed steps of the frames after it
+	protected float m_fSpanS;					//!< m_fReadinessFrameS at the last frame with a fixed step
+	protected int m_iSpanSteps;					//!< m_iReadinessStepsAfter at that frame
+	protected ref array<float> m_aSpanTimesS = {};	//!< m_fSpanS after each frame with a fixed step
+	protected ref array<int> m_aSpanStepCounts = {};	//!< m_iSpanSteps after each frame with a fixed step
+	protected float m_fSpanHalfAS;				//!< the measured span's first half [s per step], 0 until measured
+	protected float m_fSpanHalfBS;				//!< its second half
+	protected string m_sStepDtWaiting;			//!< why no step dt was chosen yet (the readiness timeout's reason)
+	protected ref array<float> m_aStepRatios = {};	//!< per step callback: time slice / fixed steps of its frame
+	protected ref array<float> m_aSliceRatios = {};	//!< per step callback: GetFixedTimeSlice() / GetFixedSteps()
+	protected float m_fStepRatioMedianS;
+	protected float m_fStepRatioAgreeFrac;
+	protected float m_fSliceRatioMedianS;
+	protected int m_iFrameFixedSteps;			//!< GetFixedSteps() as this frame's EOnFrame read it
+	protected int m_iFrameFixedStepsFrame = -1;
+
+	// readiness
+	protected float m_fPrepareStartMs;
+	protected string m_sReadinessRefusal;
+	protected string m_sStepSource;
+	protected int m_iSimulateCount;
+	protected int m_iPostSimulateCount;
+	protected int m_iFixedFrameCount;
+	protected int m_iPostFixedFrameCount;
+	protected int m_iFrameCount;
+
+	// session
+	protected string m_sSessionId;
+	protected string m_sSessionDir;
+	protected string m_sCreatedUtc;
+	protected string m_sExeKind;
+	protected string m_sInstance;
+	protected WorldTimestamp m_StartTimestamp;
+	protected bool m_bHasStartTimestamp;
+	protected int m_iStartUnix;
+	protected int m_iPhysicsStep = -1;			//!< -1 at open, + covered_steps at the top of every callback
+	protected int m_iLastPostStep = -1;			//!< last step whose OnStepPost was dispatched
+	protected int m_iLastStepEpisodeId = -1;	//!< the episode that owns m_iLastPostStep (its ctl episode_id)
+	protected int m_iGridAnchorMs = -1;			//!< world_time_ms of the first callback (decision and image grid anchor)
+	protected int m_iCoveredSteps;				//!< engine fixed steps the current callback covers
+	protected int m_iCallbackRenderFrame;		//!< render frame of the current callback
+	protected int m_iCallbackWorldMs;			//!< world_time_ms of the current callback (read at its top)
+	protected int m_iNextDecisionGrid;			//!< next decision grid point
+	protected bool m_bDecisionStep;				//!< the current callback is a decision callback
+	protected int m_iDecisionGridSkipped;		//!< grid points reached by a callback that had passed an earlier one
+	protected int m_iMergedSteps;				//!< engine steps beyond the first of one callback
+	protected int m_iMaxCoveredSteps;
+	protected int m_iZeroStepCallbacks;			//!< fixed-frame callbacks whose frame reported 0 fixed steps (counted as 1)
+	protected int m_iLastStepWorldMs = -1;
+	protected int m_iEpisodeId = -1;
+	protected bool m_bWarmupOver;
+	protected bool m_bStopping;
+	protected string m_sEndReason;
+	protected string m_sFailureReason;			//!< first failure (an error end reason) or an immediate end (ego_destroyed)
+	protected string m_sFailureDetail;
+	protected bool m_bWriteFailed;
+	protected int m_iDrainStartTickMs;
+	protected int m_iDrainStartWorldMs;
+	protected int m_iNextHeartbeatMs;
+	protected int m_iHeartbeats;
+	protected int m_iHeartbeatBytes;			//!< heartbeat.csv bytes written so far (TBD-3 length check)
+	protected ref FileHandle m_HeartbeatFile;	//!< only with m_bKeepLogsOpen
+	protected int m_iEventSeq;
+	protected ref DC_ProbeRow m_EventRow = new DC_ProbeRow();
+	protected int m_iPostWithoutPre;
+	protected int m_iPreWithoutPost;
+	protected int m_iStepsWithoutWorldAdvance;
+
+	// ego (set by the ego module)
+	protected IEntity m_Ego;
+	protected int m_iEgoSlotId = -1;
+	protected string m_sEgoEntityId;
+	protected string m_sEgoPrefab;
+
+	// image counts (set by the image module; session_end.json images and heartbeat img_ok / img_fail)
+	protected int m_iImagesRequested;
+	protected int m_iImagesIssued;
+	protected int m_iImagesSkippedBusy;
+	protected int m_iImagesMakeFailed;
+	protected int m_iImagesTimedOut;
+	protected int m_iImagesPending;
+	protected int m_iImagesOk;
+	protected int m_iImagesFailed;
+
+	// facts seen at run time (session_end.json observed)
+	protected ref array<string> m_aObservedKeys = {};
+	protected ref array<string> m_aObservedValues = {};
+
+	//------------------------------------------------------------------------------------------------
+	override void OnPostInit(IEntity owner)
+	{
+		super.OnPostInit(owner);
+
+		// OnPostInit also runs when the World Editor loads the layer: nothing at all in edit mode (CR-012)
+		if (SCR_Global.IsEditMode(owner) || SCR_Global.IsEditMode())
+			return;
+
+		if (m_iFallbackStartMs > 0)
+		{
+			BaseWorld world = owner.GetWorld();
+			if (world)
+				m_fFallbackArmedMs = world.GetWorldTime();
+
+			GetGame().GetCallqueue().CallLater(FallbackStart, m_iFallbackStartMs, false);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Called from SCR_BaseGameMode.OnGameStateChanged() when the state becomes GAME (on every machine)
+	override void OnGameModeStart()
+	{
+		super.OnGameModeStart();
+		StartRun("OnGameModeStart");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! As DC_ProbeRunner.FallbackStart: only once m_iFallbackStartMs of world time passed since OnPostInit
+	protected void FallbackStart()
+	{
+		if (m_bStarted)
+			return;
+
+		BaseWorld world = GetGame().GetWorld();
+		if (world)
+		{
+			int remainingMs = m_iFallbackStartMs - (world.GetWorldTime() - m_fFallbackArmedMs);
+			if (remainingMs > 0)
+			{
+				if (remainingMs < 100)
+					remainingMs = 100;
+
+				GetGame().GetCallqueue().CallLater(FallbackStart, remainingMs, false);
+				return;
+			}
+		}
+
+		Print(string.Format(LOG + "WARNING: OnGameModeStart not received within %1 ms", m_iFallbackStartMs), LogLevel.WARNING);
+		StartRun("FallbackStart");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Steps 1-4 of the lifecycle. Idempotent: only the first call does anything.
+	protected void StartRun(string reason)
+	{
+		if (m_bStarted)
+			return;
+
+		if (SCR_Global.IsEditMode() || !GetGame().InPlayMode())
+			return;
+
+		m_bStarted = true;
+		GetGame().GetCallqueue().Remove(FallbackStart);
+
+		if (!Replication.IsServer())
+		{
+			Print(LOG + "not the server, nothing to do on this machine", LogLevel.NORMAL);
+			return;
+		}
+
+		// The guard never prints, so the E-11 facts come first. The line shows $profile: never paste it into a report
+		m_LaunchInfo = DC_LaunchGuard.Evaluate(m_sRequiredProfileRoot, m_bAllowWorkbenchWithoutLaunchId, m_bEscapeBindToProcessStart);
+		string profileAbs = m_LaunchInfo.m_sProfileAbs;
+		if (profileAbs.IsEmpty())
+			profileAbs = "n/a";
+
+		Print(string.Format(LOG + "E-11: -profile visible=%1 -dcLaunchId visible=%2 $profile=%3 exe=%4 uptime_s=%5 (%6)", DC_LaunchGuard.BoolText(m_LaunchInfo.m_bCliProfile), DC_LaunchGuard.BoolText(m_LaunchInfo.m_bCliLaunchId), profileAbs, GetExeKind(), m_LaunchInfo.m_iUptimeS, reason), LogLevel.NORMAL);
+		if (!m_LaunchInfo.m_bAllowed)
+		{
+			Refuse("launch guard refused: " + m_LaunchInfo.m_sReason);
+			return;
+		}
+
+		string guardLine = string.Format(LOG + "launch guard: mode=%1 id=%2 pin=%3 use_class=%4", m_LaunchInfo.m_sMode, m_LaunchInfo.m_sLaunchId, m_LaunchInfo.m_sPinId, m_LaunchInfo.m_sUseClass);
+		if (m_LaunchInfo.m_sMode == DC_LaunchGuard.MODE_ESCAPE)
+			Print(guardLine + " (Workbench escape, binding " + m_LaunchInfo.m_sEscapeBinding + ": dev data only)", LogLevel.WARNING);
+		else
+			Print(guardLine, LogLevel.NORMAL);
+
+		string failure;
+		if (!ResolveTrial(failure))
+		{
+			Refuse("trial: " + failure);
+			return;
+		}
+
+		if (!CheckBuild(failure))
+		{
+			Refuse("build: " + failure);
+			return;
+		}
+
+		if (!CheckFingerprint(failure))
+		{
+			Refuse("L8 map fingerprint: " + failure);
+			return;
+		}
+
+		if (!CheckRates(failure))
+		{
+			Refuse("clocks: " + failure);
+			return;
+		}
+
+		CollectModules();
+		if (m_aModules.IsEmpty())
+		{
+			Refuse("no DC_SessionModule component on " + GetOwner().GetName());
+			return;
+		}
+
+		BeginReadiness();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! -dcTrial <id>, else the ACTIVE pointer; then $profile:dc_trials/<id>.json (dc-2.0 section 5.2)
+	protected bool ResolveTrial(out string failure)
+	{
+		failure = string.Empty;
+		string cliTrial;
+		if (System.GetCLIParam(CLI_TRIAL, cliTrial) && !cliTrial.Trim().IsEmpty())
+		{
+			m_sTrialId = cliTrial.Trim();
+			m_sCliTrial = m_sTrialId;
+			m_sTrialSource = "cli";
+		}
+		else
+		{
+			if (!FileIO.FileExists(TRIAL_ACTIVE))
+			{
+				failure = "no -dcTrial and no " + TRIAL_ACTIVE + " pointer";
+				return false;
+			}
+
+			FileHandle activeFile = FileIO.OpenFile(TRIAL_ACTIVE, FileMode.READ);
+			if (!activeFile)
+			{
+				failure = "cannot open " + TRIAL_ACTIVE;
+				return false;
+			}
+
+			string line;
+			activeFile.ReadLine(line);
+			activeFile.Close();
+			m_sTrialId = line.Trim();
+			m_sTrialSource = "active_pointer";
+		}
+
+		if (!IsValidTrialId(m_sTrialId))
+		{
+			failure = "trial id '" + m_sTrialId + "' is not 1-16 characters of [A-Za-z0-9-]";
+			return false;
+		}
+
+		string confPath = TRIAL_DIR + "/" + m_sTrialId + ".json";
+		if (!FileIO.FileExists(confPath))
+		{
+			failure = "no trial conf " + confPath;
+			return false;
+		}
+
+		JsonLoadContext context = new JsonLoadContext(false);
+		if (!context.LoadFromFile(confPath))
+		{
+			failure = "trial conf " + confPath + " does not parse";
+			return false;
+		}
+
+		string confTrialId;
+		if (!context.ReadValue("trial_id", confTrialId) || confTrialId != m_sTrialId)
+		{
+			failure = "trial conf " + confPath + " names trial '" + confTrialId + "'";
+			return false;
+		}
+
+		float durationS;
+		float warmupS;
+		if (!ReadNumber(context, "duration_s", durationS) || !ReadNumber(context, "warmup_s", warmupS))
+		{
+			failure = "trial conf " + confPath + " misses duration_s or warmup_s";
+			return false;
+		}
+
+		int seed;
+		if (!context.ReadValue("seed", seed))
+		{
+			failure = "trial conf " + confPath + " misses the integer seed";
+			return false;
+		}
+
+		m_fDurationS = durationS;
+		m_fWarmupS = warmupS;
+		m_iTrialSeed = seed;
+
+		string route;
+		if (context.DoesKeyExist("route") && context.ReadValue("route", route))
+		{
+			m_sTrialRoute = route;
+			m_bTrialRouteRead = true;
+		}
+
+		bool images;
+		if (context.DoesKeyExist("images") && context.ReadValue("images", images))
+		{
+			m_bTrialImages = images;
+			m_bTrialImagesRead = true;
+		}
+
+		// TBD-2 (D-B): 10 Hz only as this explicit session setting, recorded as clocks.image_hz_setting trial_conf
+		float imageHz;
+		if (ReadNumber(context, "image_hz", imageHz))
+		{
+			m_fImageHz = imageHz;
+			m_sImageHzSetting = IMAGE_HZ_TRIAL_CONF;
+			m_bTrialImageHzRead = true;
+		}
+
+		if (m_fDurationS <= 0 || m_fWarmupS < 0 || m_fWarmupS + m_fDurationS > MAX_SESSION_S)
+		{
+			failure = string.Format("warmup_s %1 + duration_s %2 must be positive and at most %3 s", m_fWarmupS, m_fDurationS, MAX_SESSION_S);
+			return false;
+		}
+
+		ReadTrialConfText(confPath);
+		if (!m_sTrialConfRawNote.IsEmpty())
+			Print(LOG + "WARNING: trial conf text not copied into session.json observed.trial_conf_raw: " + m_sTrialConfRawNote, LogLevel.WARNING);
+
+		Print(string.Format(LOG + "trial %1 (%2): warm-up %3 s, duration %4 s, seed %5, route '%6', images %7", m_sTrialId, m_sTrialSource, m_fWarmupS.ToString(-1, 1), m_fDurationS.ToString(-1, 1), m_iTrialSeed, m_sTrialRoute, DC_LaunchGuard.BoolText(m_bTrialImages)), LogLevel.NORMAL);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The conf file's text for session.json observed.trial_conf_raw (dc-2.0 10.1 asks for the conf as parsed; the 1.8
+	//! JsonLoadContext cannot list a file's keys, so trial.conf holds only the keys this component reads). Copied only
+	//! when the whole file was read back (FileHandle.Read count = GetLength), is at most TRIAL_CONF_MAX_BYTES long and
+	//! holds printable ASCII, TAB, CR and LF only (session.json stays ASCII); otherwise m_sTrialConfRawNote says why
+	protected void ReadTrialConfText(string confPath)
+	{
+		m_sTrialConfRaw = string.Empty;
+		m_sTrialConfRawNote = string.Empty;
+		FileHandle file = FileIO.OpenFile(confPath, FileMode.READ);
+		if (!file)
+		{
+			m_sTrialConfRawNote = "FileIO.OpenFile(" + confPath + ", READ) returned null";
+			return;
+		}
+
+		int length = file.GetLength();
+		string text;
+		int read = -1;
+		if (length > 0 && length <= TRIAL_CONF_MAX_BYTES)
+			read = file.Read(text, length);
+
+		file.Close();
+		if (length <= 0 || length > TRIAL_CONF_MAX_BYTES)
+		{
+			m_sTrialConfRawNote = string.Format("the conf has %1 bytes (copied when 1 to %2)", length, TRIAL_CONF_MAX_BYTES);
+			return;
+		}
+
+		if (read != length || text.Length() != length)
+		{
+			m_sTrialConfRawNote = string.Format("FileHandle.Read returned %1 bytes (%2 characters) of %3", read, text.Length(), length);
+			return;
+		}
+
+		for (int i = 0; i < length; i++)
+		{
+			int c = text.ToAscii(i);
+			bool printable = c >= 32 && c <= 126;
+			if (!printable && c != 9 && c != 10 && c != 13)	// 9 TAB, 10 LF, 13 CR
+			{
+				m_sTrialConfRawNote = string.Format("byte %1 at offset %2 is not printable ASCII", c, i);
+				return;
+			}
+		}
+
+		m_sTrialConfRaw = text;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A JSON number as float: written as a decimal or as an integer
+	protected bool ReadNumber(notnull JsonLoadContext context, string key, out float value)
+	{
+		value = 0;
+		if (!context.DoesKeyExist(key))
+			return false;
+
+		if (context.ReadValue(key, value))
+			return true;
+
+		int integer;
+		if (!context.ReadValue(key, integer))
+			return false;
+
+		value = integer;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GetBuildVersion() against the launch record's engine_version_expected, once a record carries one (top level or
+	//! pin.engine_version_expected; DD-14a). Without it the check is recorded as not done.
+	protected bool CheckBuild(out string failure)
+	{
+		failure = string.Empty;
+		m_sBuildVersion = GetGame().GetBuildVersion();
+		JsonLoadContext context = new JsonLoadContext(false);
+		if (!context.LoadFromFile(m_LaunchInfo.m_sRecordPath))
+		{
+			failure = "launch record " + m_LaunchInfo.m_sRecordPath + " no longer parses";
+			return false;
+		}
+
+		string expected;
+		if (context.DoesKeyExist("engine_version_expected") && context.ReadValue("engine_version_expected", expected))
+			m_sEngineVersionExpected = expected;
+
+		if (m_sEngineVersionExpected.IsEmpty() && context.DoesKeyExist("pin") && context.StartObject("pin"))
+		{
+			if (context.DoesKeyExist("engine_version_expected") && context.ReadValue("engine_version_expected", expected))
+				m_sEngineVersionExpected = expected;
+
+			context.EndObject();
+		}
+
+		if (m_sEngineVersionExpected.IsEmpty())
+		{
+			Print(LOG + "build " + m_sBuildVersion + " (pin " + m_LaunchInfo.m_sPinId + " records no engine_version_expected yet: not compared)", LogLevel.NORMAL);
+			return true;
+		}
+
+		if (m_sBuildVersion != m_sEngineVersionExpected)
+		{
+			failure = "GetBuildVersion() is " + m_sBuildVersion + ", pin " + m_LaunchInfo.m_sPinId + " expects " + m_sEngineVersionExpected;
+			return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! L8 (dc-2.0 3.1): map_id is declared by the capture world and checked against the world size (GetBoundBox x
+	//! extent) and the weather manager's latitude; never parsed from GetWorldFile() (CR-100)
+	protected bool CheckFingerprint(out string failure)
+	{
+		failure = string.Empty;
+		if (m_sMapId != "arland" && m_sMapId != "kolguyev")
+		{
+			failure = "map id '" + m_sMapId + "' is not a capture map of this component (arland, kolguyev)";
+			return false;
+		}
+
+		BaseWorld world = GetGame().GetWorld();
+		ChimeraWorld chimeraWorld = ChimeraWorld.CastFrom(world);
+		if (!world || !chimeraWorld)
+		{
+			failure = "no world";
+			return false;
+		}
+
+		vector boundsMin;
+		vector boundsMax;
+		world.GetBoundBox(boundsMin, boundsMax);
+		m_fMeasuredSizeM = boundsMax[0] - boundsMin[0];
+
+		TimeAndWeatherManagerEntity weather = chimeraWorld.GetTimeAndWeatherManager();
+		if (!weather)
+		{
+			failure = "no TimeAndWeatherManagerEntity: the latitude cannot be checked";
+			return false;
+		}
+
+		m_fMeasuredLatitudeDeg = weather.GetCurrentLatitude();
+		string facts = string.Format("size %1 m (expected %2 +- %3), latitude %4 deg (expected %5 +- %6)", m_fMeasuredSizeM.ToString(-1, 1), m_fMapSizeM.ToString(-1, 1), m_fMapSizeTolM.ToString(-1, 1), m_fMeasuredLatitudeDeg.ToString(-1, 4), m_fLatitudeDeg.ToString(-1, 4), m_fLatitudeTolDeg.ToString(-1, 4));
+		if (Math.AbsFloat(m_fMeasuredSizeM - m_fMapSizeM) > m_fMapSizeTolM || Math.AbsFloat(m_fMeasuredLatitudeDeg - m_fLatitudeDeg) > m_fLatitudeTolDeg)
+		{
+			failure = "world " + GetGame().GetWorldFile() + " is not map " + m_sMapId + ": " + facts;
+			return false;
+		}
+
+		Print(LOG + "L8 fingerprint ok for " + m_sMapId + ": " + facts, LogLevel.NORMAL);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! TBD-2 (D-B): the layer's rate is the production default 5 Hz; a trial conf may set 10 Hz (image_hz_setting
+	//! trial_conf) or 5 Hz; any other rate refuses (no directory)
+	protected bool CheckRates(out string failure)
+	{
+		failure = string.Empty;
+		bool isDefault = Math.AbsFloat(m_fImageHz - DEFAULT_IMAGE_HZ) < 0.001;
+		bool isOverride = Math.AbsFloat(m_fImageHz - OVERRIDE_IMAGE_HZ) < 0.001;
+		if (m_sImageHzSetting == IMAGE_HZ_DEFAULT && !isDefault)
+		{
+			failure = string.Format("image rate %1 Hz on the layer: the production default is %2 Hz, and %3 Hz only through the trial conf key image_hz (dc-2.0 TBD-2, D-B)", m_fImageHz.ToString(-1, 3), DEFAULT_IMAGE_HZ, OVERRIDE_IMAGE_HZ);
+			return false;
+		}
+
+		if (!isDefault && !isOverride)
+		{
+			failure = string.Format("trial conf image_hz %1: only %2 (the default) or %3 Hz (dc-2.0 TBD-2, D-B)", m_fImageHz.ToString(-1, 3), DEFAULT_IMAGE_HZ, OVERRIDE_IMAGE_HZ);
+			return false;
+		}
+
+		// D-B: the setting names the rate, not where it came from: a trial conf that sets 5 Hz still runs the default
+		if (isDefault)
+		{
+			m_fImageHz = DEFAULT_IMAGE_HZ;
+			m_sImageHzSetting = IMAGE_HZ_DEFAULT;
+		}
+		else
+		{
+			m_fImageHz = OVERRIDE_IMAGE_HZ;
+			m_sImageHzSetting = IMAGE_HZ_TRIAL_CONF;
+		}
+
+		m_iDecisionPeriodMs = Math.Round(1000 / m_fImageHz);
+		m_iImagePeriodMs = m_iDecisionPeriodMs;
+		Print(string.Format(LOG + "clocks: images and decisions at %1 Hz (%2), a %3 ms world-time grid", m_fImageHz.ToString(-1, 1), m_sImageHzSetting, m_iDecisionPeriodMs), LogLevel.NORMAL);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: chooses the step dt from what readiness has seen so far, then N = floor(1000 / decision_hz /
+	//! step_dt_ms + 0.5). Never fails and never locks in a guess: without a trustworthy estimate it returns false,
+	//! m_sStepDtWaiting says why, and the measurement goes on (the readiness timeout refuses with that reason)
+	protected bool TryChooseStepDt()
+	{
+		int ratios = m_aStepRatios.Count();
+		m_fStepRatioMedianS = MedianOf(m_aStepRatios);
+		m_fSliceRatioMedianS = MedianOf(m_aSliceRatios);
+		m_fStepRatioAgreeFrac = AgreeFraction(m_aStepRatios, m_fStepRatioMedianS);
+		MeasureSpan();
+		if (ratios >= STEP_DT_MIN_RATIOS && m_fStepRatioMedianS > 0 && m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC)
+		{
+			SetStepDt(m_fStepRatioMedianS, STEP_DT_ENGINE);
+			return true;
+		}
+
+		// the ratios disagree: the measured span only when it is long, stable and confirms their median
+		float tolS = STEP_DT_AGREEMENT * m_fStepRatioMedianS;
+		bool longSpan = m_iSpanSteps >= STEP_DT_SPAN_MIN_STEPS && m_fSpanHalfAS > 0 && m_fSpanHalfBS > 0;
+		bool stable = longSpan && Math.AbsFloat(m_fSpanHalfAS - m_fSpanHalfBS) <= tolS;
+		bool confirmed = m_fStepRatioMedianS > 0 && Math.AbsFloat(m_fMeasuredStepS - m_fStepRatioMedianS) <= tolS;
+		if (ratios >= STEP_DT_MIN_RATIOS && stable && confirmed)
+		{
+			SetStepDt(m_fMeasuredStepS, STEP_DT_MEASURED);
+			return true;
+		}
+
+		string halves = m_fSpanHalfAS.ToString(-1, 6) + " / " + m_fSpanHalfBS.ToString(-1, 6);
+		bool firstWait = m_sStepDtWaiting.IsEmpty();
+		m_sStepDtWaiting = string.Format("a trustworthy step dt: %1 step-callback ratios, a fraction %2 of them within 0.5 percent of their median %3 s (needs %4 ratios and %5); measured span %6 s over %7 steps, halves %8 s (needs %9 steps, halves and median within 0.5 percent)", ratios, m_fStepRatioAgreeFrac.ToString(-1, 3), m_fStepRatioMedianS.ToString(-1, 6), STEP_DT_MIN_RATIOS, STEP_DT_AGREE_FRAC, m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, halves, STEP_DT_SPAN_MIN_STEPS);
+		// the readiness log names the reason once, when the estimators first disagree (the refusal repeats it)
+		if (firstWait)
+			Print(LOG + "WARNING: readiness: no trustworthy step dt yet, measuring on (refused at the readiness timeout if it stays so): waiting for " + m_sStepDtWaiting, LogLevel.WARNING);
+
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the chosen step dt and N
+	protected void SetStepDt(float stepDtS, string source)
+	{
+		m_fStepDtS = stepDtS;
+		m_sStepDtSource = source;
+		m_sStepDtWaiting = string.Empty;
+		m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);
+		if (m_iStepsPerDecision < 1)
+			m_iStepsPerDecision = 1;
+
+		Print(string.Format(LOG + "clocks: step dt %1 s (%2; callback ratio median %3 s over %4 callbacks, %5 of them within 0.5 percent; GetFixedTimeSlice / GetFixedSteps median %6 s; measured %7 s over %8 fixed steps), N=%9 steps per decision", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fStepRatioMedianS.ToString(-1, 6), m_aStepRatios.Count(), m_fStepRatioAgreeFrac.ToString(-1, 3), m_fSliceRatioMedianS.ToString(-1, 6), m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, m_iStepsPerDecision), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the measured span (m_fSpanS / m_iSpanSteps) and its two halves, split at the first frame with at
+	//! least half of its steps (0 while there is no such split)
+	protected void MeasureSpan()
+	{
+		m_fMeasuredStepS = 0;
+		m_fSpanHalfAS = 0;
+		m_fSpanHalfBS = 0;
+		if (m_iSpanSteps <= 0)
+			return;
+
+		m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;
+		int half = m_iSpanSteps / 2;
+		for (int i = 0, count = m_aSpanStepCounts.Count(); i < count; i++)
+		{
+			int stepsBefore = m_aSpanStepCounts[i];
+			if (stepsBefore < half)
+				continue;
+
+			if (stepsBefore <= 0 || stepsBefore >= m_iSpanSteps)
+				return;
+
+			m_fSpanHalfAS = m_aSpanTimesS[i] / stepsBefore;
+			m_fSpanHalfBS = (m_fSpanS - m_aSpanTimesS[i]) / (m_iSpanSteps - stepsBefore);
+			return;
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the fraction of the values within STEP_DT_AGREEMENT of the median, 0 when empty
+	protected float AgreeFraction(notnull array<float> values, float median)
+	{
+		int n = values.Count();
+		if (n == 0 || median <= 0)
+			return 0;
+
+		float agree = 0;		// float: an int quotient would truncate
+		foreach (float value : values)
+		{
+			if (Math.AbsFloat(value - median) <= STEP_DT_AGREEMENT * median)
+				agree += 1;
+		}
+
+		return agree / n;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the median of the values (sorted in place; the mean of the two middle values of an even count), 0
+	//! when empty
+	protected float MedianOf(notnull array<float> values)
+	{
+		int n = values.Count();
+		if (n == 0)
+			return 0;
+
+		values.Sort();
+		int mid = n / 2;
+		if (n % 2 == 1)
+			return values[mid];
+
+		return 0.5 * (values[mid - 1] + values[mid]);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: one ratio per unpaused readiness step callback (coveredSteps = the fixed steps of its frame)
+	protected void NoteStepRatio(float timeSlice, int coveredSteps)
+	{
+		if (m_ePhase != DC_ESessionPhase.PREPARING || m_fStepDtS > 0 || IsPaused() || coveredSteps <= 0)
+			return;
+
+		m_aStepRatios.Insert(timeSlice / coveredSteps);
+		BaseWorld world = GetGame().GetWorld();
+		if (world && world.GetFixedSteps() > 0)
+			m_aSliceRatios.Insert(world.GetFixedTimeSlice() / world.GetFixedSteps());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every DC_SessionModule on the game mode, sorted by GetDispatchOrder (insertion sort, stable)
+	protected void CollectModules()
+	{
+		array<Managed> found = {};
+		GetOwner().FindComponents(DC_SessionModule, found);
+		foreach (Managed managed : found)
+		{
+			DC_SessionModule module = DC_SessionModule.Cast(managed);
+			if (!module)
+				continue;
+
+			int index = m_aModules.Count();
+			while (index > 0 && m_aModules[index - 1].GetDispatchOrder() > module.GetDispatchOrder())
+			{
+				index--;
+			}
+
+			m_aModules.InsertAt(module, index);
+		}
+
+		string names;
+		foreach (DC_SessionModule listed : m_aModules)
+		{
+			if (!names.IsEmpty())
+				names += ", ";
+
+			names += listed.ClassName();
+		}
+
+		Print(string.Format(LOG + "%1 capture module(s): %2", m_aModules.Count(), names), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Step 4: event mask on, modules prepare; UpdateReadiness polls them once per frame
+	protected void BeginReadiness()
+	{
+		m_ePhase = DC_ESessionPhase.PREPARING;
+		m_fPrepareStartMs = GetGame().GetWorld().GetWorldTime();
+		SetEventMask(GetOwner(), GetDispatchEventMask());
+		m_bMaskSet = true;
+
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			if (!module.OnSessionPrepare(this))
+			{
+				string reason = m_sReadinessRefusal;
+				if (reason.IsEmpty())
+					reason = module.ClassName() + " refused to prepare";
+
+				Refuse("readiness: " + reason);
+				return;
+			}
+		}
+
+		Print(string.Format(LOG + "readiness: waiting up to %1 s for the ego, the camera and the step source", m_fReadinessTimeoutS.ToString(-1, 0)), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Once per frame while PREPARING: open the session when every module is ready and a step source exists
+	protected void UpdateReadiness()
+	{
+		if (!m_sReadinessRefusal.IsEmpty())
+		{
+			Refuse("readiness: " + m_sReadinessRefusal);
+			return;
+		}
+
+		string waiting;
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			string waitingFor;
+			if (module.IsSessionReady(waitingFor))
+				continue;
+
+			if (!waiting.IsEmpty())
+				waiting += "; ";
+
+			waiting += module.ClassName() + ": " + waitingFor;
+		}
+
+		if (!m_sReadinessRefusal.IsEmpty())
+		{
+			Refuse("readiness: " + m_sReadinessRefusal);
+			return;
+		}
+
+		float elapsedS = (GetGame().GetWorld().GetWorldTime() - m_fPrepareStartMs) / 1000;
+		// The step dt's own reason comes first, also when a module (the recorder's BeginDriver) waits for it too, so
+		// the readiness timeout's refusal names it (review round 3)
+		if (m_fStepDtS <= 0)
+		{
+			string stepDtWaiting = m_sStepDtWaiting;
+			int ratioCount = m_aStepRatios.Count();
+			if (stepDtWaiting.IsEmpty())
+				stepDtWaiting = "the step dt measurement (" + m_iReadinessFixedSteps.ToString() + " of " + STEP_DT_MIN_STEPS.ToString() + " fixed steps, " + ratioCount.ToString() + " of " + STEP_DT_MIN_RATIOS.ToString() + " step-callback ratios)";
+
+			if (waiting.IsEmpty())
+				waiting = "DC_Session: " + stepDtWaiting;
+			else
+				waiting = "DC_Session: " + stepDtWaiting + "; " + waiting;
+		}
+
+		if (waiting.IsEmpty())
+		{
+			if (DecideStepSource(elapsedS))
+				OpenSession();
+			else
+				Refuse("readiness: no physics step source (neither EOnSimulate nor EOnFixedFrame arrived on the game mode)");
+
+			return;
+		}
+
+		if (elapsedS >= m_fReadinessTimeoutS)
+			Refuse(string.Format("readiness timeout after %1 s, waiting for %2", elapsedS.ToString(-1, 1), waiting));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! As DC_ProbeRunner.DecideStepSource: simulate if any EOnSimulate arrived, else fixedframe, else none
+	protected bool DecideStepSource(float elapsedS)
+	{
+		string counts = string.Format("EOnSimulate %1, EOnPostSimulate %2, EOnFixedFrame %3, EOnPostFixedFrame %4, EOnFrame %5 in %6 s", m_iSimulateCount, m_iPostSimulateCount, m_iFixedFrameCount, m_iPostFixedFrameCount, m_iFrameCount, elapsedS.ToString(-1, 2));
+		if (m_iSimulateCount > 0)
+		{
+			m_sStepSource = STEP_SIMULATE;
+			Print(LOG + "step source: simulate (" + counts + ")", LogLevel.NORMAL);
+			return true;
+		}
+
+		if (m_iFixedFrameCount > 0)
+		{
+			m_sStepSource = STEP_FIXEDFRAME;
+			Print(LOG + "WARNING: step source: fixedframe - no EOnSimulate on the game mode entity, physics steps come from EOnFixedFrame (" + counts + ")", LogLevel.WARNING);
+			return true;
+		}
+
+		m_sStepSource = STEP_NONE;
+		Print(LOG + "ERROR: step source: none (" + counts + ")", LogLevel.ERROR);
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Step 5: directory, session.json, heartbeat.csv, module streams, session_start
+	protected void OpenSession()
+	{
+		string failure;
+		if (!MakeSessionDir(failure))
+		{
+			Refuse(failure);
+			return;
+		}
+
+		BaseWorld world = GetGame().GetWorld();
+		m_StartTimestamp = world.GetTimestamp();
+		m_bHasStartTimestamp = true;
+		m_iStartUnix = System.GetUnixTime();
+		m_fFixedTimeSliceS = world.GetFixedTimeSlice();		// provenance only (n/30 of this frame on 1.8)
+		m_iPhysicsStep = -1;
+		m_iGridAnchorMs = -1;
+		m_iNextDecisionGrid = 0;
+		m_iNextHeartbeatMs = HeartbeatPeriodMs();
+		m_ePhase = DC_ESessionPhase.CAPTURING;
+
+		Print(LOG + "START session " + m_sSessionId + " dir=" + m_sSessionDir, LogLevel.NORMAL);
+		if (!WriteSessionJson(world))
+		{
+			Seal(m_sFailureReason, false);
+			return;
+		}
+
+		if (!WriteHeartbeatHeader())
+		{
+			Seal(m_sFailureReason, false);
+			return;
+		}
+
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			if (!module.OnSessionOpen(this))
+			{
+				Fail(END_SCRIPT_ERROR, module.ClassName() + " could not open its streams");
+				break;
+			}
+		}
+
+		if (!m_sFailureReason.IsEmpty())
+		{
+			Seal(m_sFailureReason, false);
+			return;
+		}
+
+		// Fault case: a directory where the second ctl chunk must go, so that chunk's OpenFile or Write fails
+		if (m_sFaultCase == FAULT_CHUNK_DIR_BLOCKED)
+		{
+			FileIO.MakeDirectory(m_sSessionDir + "/ctl/chunk_00001.csv");
+			Print(LOG + "WARNING: fault case chunk_dir_blocked: ctl/chunk_00001.csv is a directory, the second ctl chunk must fail with write_fail", LogLevel.WARNING);
+		}
+
+		LogEvent("session_start", "trial=" + m_sTrialId);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Builds the session id and creates the directory; refuses an existing one (nothing written)
+	protected bool MakeSessionDir(out string failure)
+	{
+		failure = string.Empty;
+		m_sExeKind = GetExeKind();
+		m_sInstance = GetInstanceTag();
+		string utcCompact;
+		m_sCreatedUtc = FormatUtc(utcCompact);
+
+		RandomGenerator generator = new RandomGenerator();
+		generator.SetSeed(System.GetTickCount());
+		int randomValue = generator.RandInt(0, 65536);
+		string rand4 = randomValue.ToString(4, true);
+		rand4.ToLower();
+
+		m_sSessionId = m_sMapId + "_" + m_sTrialId + "_" + utcCompact + "_" + m_sExeKind + "_" + m_sInstance + "_" + rand4;
+		m_sSessionDir = SESSION_ROOT + "/" + m_sSessionId;
+
+		// Fault case: the directory exists before the check, as after an id collision
+		if (m_sFaultCase == FAULT_SESSION_DIR_EXISTS)
+		{
+			FileIO.MakeDirectory(SESSION_ROOT);
+			FileIO.MakeDirectory(m_sSessionDir);
+			Print(LOG + "WARNING: fault case session_dir_exists: created " + m_sSessionDir + " before the check", LogLevel.WARNING);
+		}
+
+		if (FileIO.FileExists(m_sSessionDir))
+		{
+			failure = "session directory " + m_sSessionDir + " already exists: nothing written";
+			return false;
+		}
+
+		if (!FileIO.FileExists(SESSION_ROOT))
+			FileIO.MakeDirectory(SESSION_ROOT);
+
+		if (!FileIO.MakeDirectory(m_sSessionDir) || !FileIO.FileExists(m_sSessionDir))
+		{
+			failure = "cannot create the session directory " + m_sSessionDir;
+			return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! session.json (dc-2.0 section 10.1), written once; the modules fill rig.* and control.*
+	protected bool WriteSessionJson(notnull BaseWorld world)
+	{
+		ArmaReforgerScripted game = GetGame();
+		DC_JsonWriter json = new DC_JsonWriter();
+		json.BeginObject(string.Empty);
+		json.AddString("contract_version", CONTRACT_VERSION);
+		json.AddString("session_id", m_sSessionId);
+		json.AddString("created_utc", m_sCreatedUtc);
+
+		json.BeginObject("start");
+		json.AddInt("unix_s", m_iStartUnix);
+		json.AddString("local_hms", FormatLocalHms());
+		int engineWorldMs = world.GetWorldTime();
+		json.AddInt("engine_world_ms", engineWorldMs);
+		json.AddInt("render_frame", world.GetFrameNumber());
+		json.EndObject();
+
+		json.BeginObject("map");
+		json.AddString("map_id", m_sMapId);
+		json.AddString("terrain", m_sTerrain);
+		json.AddString("world_file", game.GetWorldFile());
+		json.AddString("root_world", m_sRootWorld);
+		json.BeginObject("fingerprint");
+		json.AddFloat("size_m", m_fMeasuredSizeM, 3);
+		json.AddFloat("latitude_deg", m_fMeasuredLatitudeDeg, 6);
+		json.AddBool("ok", true);
+		json.EndObject();
+		json.EndObject();
+
+		json.BeginObject("trial");
+		json.AddString("trial_id", m_sTrialId);
+		json.AddString("source", m_sTrialSource);
+		// The keys present in the conf as parsed (observed.trial_conf_raw holds the file's text)
+		json.BeginObject("conf");
+		json.AddString("trial_id", m_sTrialId);
+		json.AddFloat("duration_s", m_fDurationS, 6);
+		json.AddFloat("warmup_s", m_fWarmupS, 6);
+		json.AddInt("seed", m_iTrialSeed);
+		if (m_bTrialRouteRead)
+			json.AddString("route", m_sTrialRoute);
+
+		if (m_bTrialImagesRead)
+			json.AddBool("images", m_bTrialImages);
+
+		if (m_bTrialImageHzRead)
+			json.AddFloat("image_hz", m_fImageHz, 3);
+
+		json.EndObject();
+		json.AddInt("seed", m_iTrialSeed);
+		json.AddFloat("warmup_s", m_fWarmupS, 3);
+		json.AddFloat("duration_s", m_fDurationS, 3);
+		json.EndObject();
+
+		json.BeginObject("exe");
+		json.AddString("kind", m_sExeKind);
+		json.AddString("instance", m_sInstance);
+		json.BeginObject("cli");
+		if (m_LaunchInfo.m_bCliLaunchId)
+			json.AddString("dcLaunchId", m_LaunchInfo.m_sLaunchId);
+
+		if (!m_sCliTrial.IsEmpty())
+			json.AddString("dcTrial", m_sCliTrial);
+
+		string cliInstance;
+		if (System.GetCLIParam(CLI_INSTANCE, cliInstance))
+			json.AddString("dcInstance", cliInstance.Trim());
+
+		json.EndObject();
+		json.EndObject();
+
+		json.BeginObject("engine");
+		json.AddString("build_version", m_sBuildVersion);
+		json.AddString("build_time", game.GetBuildTime());
+		json.AddFloat("fixed_time_slice_s", m_fFixedTimeSliceS, 9);
+		json.AddFloat("step_dt_s", m_fStepDtS, 9);
+		json.AddString("step_dt_source", m_sStepDtSource);
+		json.EndObject();
+
+		json.BeginObject("pin");
+		json.AddString("pin_id", m_LaunchInfo.m_sPinId);
+		json.AddString("pin_sha256", m_LaunchInfo.m_sPinSha256);
+		json.AddStringOrNull("build_key", m_LaunchInfo.m_sBuildKey);
+		json.AddString("channel", m_LaunchInfo.m_sChannel);
+		json.AddString("launch_id", m_LaunchInfo.m_sLaunchId);
+		json.AddString("launch_schema", m_LaunchInfo.m_sRecordSchema);
+		json.AddInt("game_buildid", m_LaunchInfo.m_iGameBuildId);
+		json.AddInt("tools_buildid", m_LaunchInfo.m_iToolsBuildId);
+		json.EndObject();
+		json.AddString("use_class", m_LaunchInfo.m_sUseClass);
+
+		json.BeginObject("addon");
+		json.AddString("addon_id", DC_BuildInfo.ADDON_ID);
+		json.AddString("addon_guid", DC_BuildInfo.ADDON_GUID);
+		json.AddString("git_sha", DC_BuildInfo.GIT_SHA);
+		json.AddString("git_branch", DC_BuildInfo.GIT_BRANCH);
+		json.AddBool("git_dirty", DC_BuildInfo.GIT_DIRTY);
+		json.AddString("content_sha256", DC_BuildInfo.CONTENT_SHA256);
+		json.AddString("manifest_sha256", DC_BuildInfo.MANIFEST_SHA256);
+		json.AddString("deploy_utc", DC_BuildInfo.DEPLOY_UTC);
+		json.AddNull("target_pin");
+		json.EndObject();
+
+		json.BeginObject("control");
+		foreach (DC_SessionModule controlModule : m_aModules)
+		{
+			controlModule.WriteSessionJson("control", json);
+		}
+
+		json.EndObject();
+
+		json.BeginObject("authority");
+		json.AddBool("standalone", RplSession.Mode() == RplMode.None);
+		json.AddBool("rpl_ok", Replication.IsServer());
+		json.EndObject();
+
+		json.BeginObject("versions");
+		json.AddString("features_version", FEATURES_VERSION);
+		json.AddString("nav_version", NAV_VERSION);
+		json.EndObject();
+
+		json.BeginObject("clocks");
+		json.AddInt("physics_steps_per_decision", m_iStepsPerDecision);
+		json.AddFloat("decision_hz", m_fImageHz, 3);
+		json.AddFloat("image_hz", m_fImageHz, 3);
+		json.AddString("image_hz_setting", m_sImageHzSetting);
+		json.AddInt("img_inflight_timeout_ms", m_iImgInflightTimeoutMs);
+		json.AddInt("img_lead_ms", m_iImgLeadMs);
+		json.AddFloat("chunk_max_s", m_fChunkMaxS, 3);
+		json.EndObject();
+
+		// dc-2.0 10.1 events.*: the crash-event parameters (DC_CrashWatch; TBD-10)
+		json.BeginObject("events");
+		foreach (DC_SessionModule eventsModule : m_aModules)
+		{
+			eventsModule.WriteSessionJson("events", json);
+		}
+
+		json.EndObject();
+
+		json.BeginObject("rig");
+		string rigId;
+		foreach (DC_SessionModule rigModule : m_aModules)
+		{
+			rigModule.WriteSessionJson("rig", json);
+			string part = rigModule.GetRigIdPart();
+			if (part.IsEmpty())
+				continue;
+
+			if (!rigId.IsEmpty())
+				rigId += "|";
+
+			rigId += part;
+		}
+
+		string settingsHash = WriteRenderSettings(json);
+		json.AddString("render_settings_hash", settingsHash);
+		json.AddString("rig_id", rigId + "|rs" + settingsHash);
+		json.EndObject();
+
+		WriteEnvironment(json, ChimeraWorld.CastFrom(world));
+
+		json.BeginObject("launch_guard");
+		json.AddString("launch_mode", m_LaunchInfo.m_sMode);
+		json.AddString("record_path", m_LaunchInfo.m_sRecordPath);
+		json.AddString("record_launch_id", m_LaunchInfo.m_sRecordLaunchId);
+		json.AddBool("cli_seen", m_LaunchInfo.m_bCliVisible);
+		json.AddBool("profile_root_ok", true);
+		json.AddStringOrNull("escape_binding", m_LaunchInfo.m_sEscapeBinding);
+		json.EndObject();
+
+		// Not in the dc-2.0 field table: run-time facts behind the TBD tolerances (proposed for the freeze)
+		json.BeginObject("observed");
+		json.AddString("step_source", m_sStepSource);
+		json.AddFloat("readiness_step_ratio_median_s", m_fStepRatioMedianS, 9);
+		json.AddInt("readiness_step_ratios", m_aStepRatios.Count());
+		json.AddFloat("readiness_step_ratio_agree_frac", m_fStepRatioAgreeFrac, 4);
+		json.AddFloat("readiness_slice_ratio_median_s", m_fSliceRatioMedianS, 9);
+		json.AddFloat("readiness_measured_step_s", m_fMeasuredStepS, 9);
+		json.AddFloat("readiness_measured_half_a_s", m_fSpanHalfAS, 9);
+		json.AddFloat("readiness_measured_half_b_s", m_fSpanHalfBS, 9);
+		json.AddInt("readiness_measured_span_steps", m_iSpanSteps);
+		json.AddInt("readiness_fixed_steps", m_iReadinessFixedSteps);
+		json.AddInt("readiness_simulate_events", m_iSimulateCount);
+		json.AddInt("readiness_fixedframe_events", m_iFixedFrameCount);
+		json.AddString("engine_version_expected", m_sEngineVersionExpected);
+		json.AddBool("keep_logs_open", m_bKeepLogsOpen);
+		json.AddBool("verify_chunk_length", m_bVerifyChunkLength);
+		json.AddString("fault_case", m_sFaultCase);
+		json.AddStringOrNull("trial_conf_raw", m_sTrialConfRaw);
+		json.AddStringOrNull("trial_conf_raw_note", m_sTrialConfRawNote);
+		foreach (DC_SessionModule observedModule : m_aModules)
+		{
+			observedModule.WriteSessionJson("observed", json);
+		}
+
+		json.EndObject();
+
+		json.EndObject();
+
+		string failure;
+		if (WriteJsonFile(SESSION_JSON, json.GetLines(), failure))
+			return true;
+
+		FailWrite("session.json: " + failure);
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A new JSON file of the session (an existing one is refused) written by ONE FileHandle.Write: the lines joined
+	//! with LF and no final LF, so the closing brace is the last byte and any short write leaves text that does not
+	//! parse. With the TBD-3 fallback the closed file's length is read back too.
+	//! \param[out] failure one line, empty on success
+	protected bool WriteJsonFile(string name, notnull array<string> lines, out string failure)
+	{
+		failure = string.Empty;
+		string path = m_sSessionDir + "/" + name;
+		if (FileIO.FileExists(path))
+		{
+			failure = "refusing to overwrite the existing file " + path;
+			return false;
+		}
+
+		string text;
+		for (int i = 0, count = lines.Count(); i < count; i++)
+		{
+			if (i > 0)
+				text += "\n";
+
+			text += lines[i];
+		}
+
+		FileHandle file = FileIO.OpenFile(path, FileMode.WRITE);
+		if (!file)
+		{
+			failure = "FileIO.OpenFile(" + path + ", WRITE) returned null";
+			return false;
+		}
+
+		int expected = text.Length();
+		int written = file.Write(text);
+		file.Close();
+		if (written != expected)
+		{
+			failure = string.Format("short or failed write of %1: FileHandle.Write returned %2 of %3 bytes", path, written, expected);
+			return false;
+		}
+
+		if (!m_bVerifyChunkLength)
+			return true;
+
+		int lengthClosed = ReadFileLength(path);
+		if (lengthClosed == expected)
+			return true;
+
+		failure = string.Format("%1 has %2 bytes after the close, %3 were written (TBD-3 length check)", path, lengthClosed, expected);
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! rig.render_settings: every SCALAR, INTEGER, FLAGS, BOOLEAN and STRING variable of the listed engine user-settings
+	//! modules (generic, as E-20). \return the hash of the dump (8 hex digits of string.Hash over its canonical text)
+	protected string WriteRenderSettings(notnull DC_JsonWriter json)
+	{
+		string canonical;
+		UserSettings settings = GetGame().GetEngineUserSettings();
+		json.BeginObject("render_settings");
+		array<string> names = {};
+		m_sRenderSettingsModules.Split(",", names, true);
+		foreach (string rawName : names)
+		{
+			string moduleName = rawName.Trim();
+			if (moduleName.IsEmpty())
+				continue;
+
+			BaseContainer module;
+			if (settings)
+				module = settings.GetModule(moduleName);
+
+			if (!module)
+			{
+				json.AddNull(moduleName);
+				canonical += moduleName + "=missing;";
+				continue;
+			}
+
+			json.BeginObject(moduleName);
+			for (int i = 0, count = module.GetNumVars(); i < count; i++)
+			{
+				string varName = module.GetVarName(i);
+				string text = AddSettingValue(json, module, varName, module.GetDataVarType(i));
+				if (!text.IsEmpty())
+					canonical += moduleName + "." + varName + "=" + text + ";";
+			}
+
+			json.EndObject();
+		}
+
+		json.EndObject();
+		return HashText(canonical);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One typed member; \return its text for the hash, empty when the type is not dumped
+	protected string AddSettingValue(notnull DC_JsonWriter json, notnull BaseContainer module, string varName, DataVarType varType)
+	{
+		if (varType == DataVarType.SCALAR)
+		{
+			float scalar;
+			if (!module.Get(varName, scalar))
+				return string.Empty;
+
+			json.AddFloat(varName, scalar, 6);
+			return scalar.ToString(-1, 6);
+		}
+
+		if (varType == DataVarType.INTEGER || varType == DataVarType.FLAGS)
+		{
+			int integer;
+			if (!module.Get(varName, integer))
+				return string.Empty;
+
+			json.AddInt(varName, integer);
+			return integer.ToString();
+		}
+
+		if (varType == DataVarType.BOOLEAN)
+		{
+			bool flag;
+			if (!module.Get(varName, flag))
+				return string.Empty;
+
+			json.AddBool(varName, flag);
+			return DC_LaunchGuard.BoolText(flag);
+		}
+
+		if (varType == DataVarType.STRING)
+		{
+			string text;
+			if (!module.Get(varName, text))
+				return string.Empty;
+
+			json.AddString(varName, text);
+			return text;
+		}
+
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! env_initial: weather state, rain, fog, wetness, time of day, date and day advance at the open
+	protected void WriteEnvironment(notnull DC_JsonWriter json, ChimeraWorld world)
+	{
+		TimeAndWeatherManagerEntity weather;
+		if (world)
+			weather = world.GetTimeAndWeatherManager();
+
+		json.BeginObject("env_initial");
+		if (!weather)
+		{
+			json.AddString("weather_state", "unknown");
+			json.EndObject();
+			return;
+		}
+
+		string stateName = "unknown";
+		WeatherState state = weather.GetCurrentWeatherState();
+		if (state)
+			stateName = state.GetStateName();
+
+		int year;
+		int month;
+		int day;
+		weather.GetDate(year, month, day);
+		json.AddString("weather_state", stateName);
+		json.AddFloat("rain", weather.GetRainIntensity(), 4);
+		json.AddFloat("fog", weather.GetFogAmount(), 4);
+		json.AddFloat("wetness", weather.GetCurrentWetness(), 4);
+		json.AddFloat("tod_h", weather.GetTimeOfTheDay(), 4);
+		json.AddString("date", string.Format("%1-%2-%3", year.ToString(4), month.ToString(2), day.ToString(2)));
+		json.AddBool("day_auto_advance", weather.GetIsDayAutoAdvanced());
+		json.EndObject();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected bool WriteHeartbeatHeader()
+	{
+		string path = m_sSessionDir + "/" + HEARTBEAT_CSV;
+		array<string> header = {HEARTBEAT_HEADER};
+		string failure;
+		if (!m_bKeepLogsOpen)
+		{
+			if (!DC_ProbeCsv.WriteLines(path, header, false, failure))
+			{
+				FailWrite("heartbeat.csv: " + failure);
+				return false;
+			}
+
+			m_iHeartbeatBytes = HEARTBEAT_HEADER.Length() + 1;
+			return VerifyHeartbeatLength();
+		}
+
+		m_HeartbeatFile = FileIO.OpenFile(path, FileMode.WRITE);
+		if (!m_HeartbeatFile)
+		{
+			FailWrite("heartbeat.csv: FileIO.OpenFile(" + path + ", WRITE) returned null");
+			return false;
+		}
+
+		return WriteHeartbeatLine(HEARTBEAT_HEADER);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One heartbeat row (dc-2.0 section 8): appended by one open-APPEND-write-close cycle, or through the handle kept
+	//! open (TBD-3 fallback); counted once written (and, with the TBD-3 length check, read back). Then the DC_STOP check
+	protected void WriteHeartbeat(int worldMs)
+	{
+		int unixTime = System.GetUnixTime();
+		int memKb = System.MemoryAllocationKB();
+		float fps = System.GetFPS();
+		string line = string.Format("%1,%2,%3,%4,%5,%6,%7,%8", unixTime, worldMs, m_iLastPostStep, GetRenderFrame(), fps.ToString(-1, 3), memKb, m_iImagesOk, m_iImagesFailed);
+		bool written;
+		if (m_bKeepLogsOpen)
+		{
+			written = WriteHeartbeatLine(line);
+		}
+		else
+		{
+			array<string> lines = {line};
+			string failure;
+			written = DC_ProbeCsv.WriteLines(m_sSessionDir + "/" + HEARTBEAT_CSV, lines, true, failure);
+			if (!written)
+			{
+				FailWrite("heartbeat.csv: " + failure);
+			}
+			else
+			{
+				m_iHeartbeatBytes += line.Length() + 1;
+				written = VerifyHeartbeatLength();
+			}
+		}
+
+		if (written)
+			m_iHeartbeats++;
+
+		if (m_ePhase == DC_ESessionPhase.CAPTURING && FileIO.FileExists(STOP_FILE))
+		{
+			LogEvent("dc_stop", "file=DC_STOP");
+			BeginEnd(END_DC_STOP);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected bool WriteHeartbeatLine(string line)
+	{
+		string data = line + "\n";
+		int expected = data.Length();
+		int written = m_HeartbeatFile.Write(data);
+		if (written != expected)
+		{
+			FailWrite(string.Format("heartbeat.csv: short or failed write: FileHandle.Write returned %1 of %2 bytes", written, expected));
+			return false;
+		}
+
+		m_iHeartbeatBytes += expected;
+		return VerifyHeartbeatLength();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! TBD-3 fallback (m_bVerifyChunkLength): heartbeat.csv must hold exactly the bytes written so far, read back through
+	//! the handle kept open (its GetLength; E-19 c03 records what it reports) or a READ handle on the closed file
+	protected bool VerifyHeartbeatLength()
+	{
+		if (!m_bVerifyChunkLength)
+			return true;
+
+		int length;
+		if (m_HeartbeatFile)
+			length = m_HeartbeatFile.GetLength();
+		else
+			length = ReadFileLength(m_sSessionDir + "/" + HEARTBEAT_CSV);
+
+		if (length == m_iHeartbeatBytes)
+			return true;
+
+		FailWrite(string.Format("heartbeat.csv: %1 bytes on disk, %2 were written (TBD-3 length check)", length, m_iHeartbeatBytes));
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Closes a heartbeat.csv kept open, before session_end.json (which stays the last write); with the TBD-3 fallback
+	//! its closed length is read back, and a difference is a write failure of the seal
+	protected void CloseHeartbeat()
+	{
+		if (!m_HeartbeatFile)
+			return;
+
+		m_HeartbeatFile.Close();
+		m_HeartbeatFile = null;
+		if (!m_bVerifyChunkLength || m_bWriteFailed)
+			return;
+
+		int length = ReadFileLength(m_sSessionDir + "/" + HEARTBEAT_CSV);
+		if (length == m_iHeartbeatBytes)
+			return;
+
+		m_bWriteFailed = true;
+		string detail = string.Format("heartbeat.csv: %1 bytes after the close, %2 were written (TBD-3 length check)", length, m_iHeartbeatBytes);
+		if (m_sFailureDetail.IsEmpty())
+			m_sFailureDetail = detail;
+
+		Print(LOG + "ERROR: write_fail at the seal: " + detail, LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Length of a closed file read back through a READ handle (TBD-3 fallback check), -1 when it cannot be opened
+	static int ReadFileLength(string path)
+	{
+		FileHandle file = FileIO.OpenFile(path, FileMode.READ);
+		if (!file)
+			return -1;
+
+		int length = file.GetLength();
+		file.Close();
+		return length;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected int HeartbeatPeriodMs()
+	{
+		int periodMs = m_fHeartbeatPeriodS * 1000;
+		if (periodMs < 1000)
+			periodMs = 1000;
+
+		return periodMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected int GetDispatchEventMask()
+	{
+		return EntityEvent.FRAME | EntityEvent.POSTFRAME | EntityEvent.SIMULATE | EntityEvent.POSTSIMULATE | EntityEvent.FIXEDFRAME | EntityEvent.POSTFIXEDFRAME;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void EOnSimulate(IEntity owner, float timeSlice)
+	{
+		m_iSimulateCount++;
+		NoteStepRatio(timeSlice, 1);		// one call per fixed step
+		if (m_sStepSource == STEP_SIMULATE)
+			HandleStepPre(timeSlice);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void EOnPostSimulate(IEntity owner, float timeSlice)
+	{
+		m_iPostSimulateCount++;
+		if (m_sStepSource == STEP_SIMULATE)
+			HandleStepPost(timeSlice);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void EOnFixedFrame(IEntity owner, float timeSlice)
+	{
+		m_iFixedFrameCount++;
+		NoteStepRatio(timeSlice, GetFrameFixedSteps());		// STEP TIMING: the slice covers the frame's steps
+
+		if (m_sStepSource == STEP_FIXEDFRAME)
+			HandleStepPre(timeSlice);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void EOnPostFixedFrame(IEntity owner, float timeSlice)
+	{
+		m_iPostFixedFrameCount++;
+		if (m_sStepSource == STEP_FIXEDFRAME)
+			HandleStepPost(timeSlice);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void EOnFrame(IEntity owner, float timeSlice)
+	{
+		m_iFrameCount++;
+		NoteFrameSteps(timeSlice);
+		if (m_ePhase == DC_ESessionPhase.PREPARING)
+		{
+			UpdateReadiness();
+			return;
+		}
+
+		if (IsCapturing())
+			HandleFrame(timeSlice);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! After the frame's physics update (the camera applies its transform here, CameraBase.c:18): OnPostFrame
+	override void EOnPostFrame(IEntity owner, float timeSlice)
+	{
+		if (!IsCapturing())
+			return;
+
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			module.OnPostFrame(GetRenderFrame());
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: GetFixedSteps() of this frame for its callback; in readiness the unpaused frames' fixed steps are
+	//! counted and, after the first frame with a step, their time slices summed (the measured span); from
+	//! STEP_DT_MIN_STEPS steps and STEP_DT_MIN_RATIOS step-callback ratios on, every frame tries to choose the step dt
+	protected void NoteFrameSteps(float timeSlice)
+	{
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+			return;
+
+		m_iFrameFixedSteps = world.GetFixedSteps();
+		m_iFrameFixedStepsFrame = world.GetFrameNumber();
+		if (m_ePhase != DC_ESessionPhase.PREPARING || m_fStepDtS > 0 || IsPaused())
+			return;
+
+		m_iReadinessFixedSteps += m_iFrameFixedSteps;
+		if (!m_bReadinessStepSeen)
+		{
+			// the accumulator's remainder before the first step is not a step: the span starts after this frame
+			m_bReadinessStepSeen = m_iFrameFixedSteps > 0;
+		}
+		else
+		{
+			// Kahan summation (as DC_ProbeRunner.MeasureFrame)
+			float addS = timeSlice - m_fReadinessFrameCompS;
+			float sumS = m_fReadinessFrameS + addS;
+			m_fReadinessFrameCompS = (sumS - m_fReadinessFrameS) - addS;
+			m_fReadinessFrameS = sumS;
+			m_iReadinessStepsAfter += m_iFrameFixedSteps;
+			if (m_iFrameFixedSteps > 0)
+			{
+				m_fSpanS = m_fReadinessFrameS;
+				m_iSpanSteps = m_iReadinessStepsAfter;
+				m_aSpanTimesS.Insert(m_fSpanS);
+				m_aSpanStepCounts.Insert(m_iSpanSteps);
+			}
+		}
+
+		// the ratios of this frame's callbacks follow its EOnFrame: those of the earlier frames count. A step dt that is
+		// not trustworthy yet is chosen in a later frame or never (the readiness timeout refuses with the reason)
+		if (m_iReadinessFixedSteps < STEP_DT_MIN_STEPS || m_aStepRatios.Count() < STEP_DT_MIN_RATIOS)
+			return;
+
+		TryChooseStepDt();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fixed steps of the current frame: the value its EOnFrame read (the callbacks follow it under the same frame
+	//! number: run 4, 0 mismatches in 10215 calls), else BaseWorld.GetFixedSteps() now; -1 without a world
+	protected int GetFrameFixedSteps()
+	{
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+			return -1;
+
+		if (world.GetFrameNumber() == m_iFrameFixedStepsFrame)
+			return m_iFrameFixedSteps;
+
+		return world.GetFixedSteps();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine fixed steps the callback covers: 1 per EOnSimulate; the frame's GetFixedSteps() in the fixedframe
+	//! source, counted as 1 (and noted) when the frame reports none
+	protected int GetCallbackCoveredSteps()
+	{
+		if (m_sStepSource != STEP_FIXEDFRAME)
+			return 1;
+
+		int steps = GetFrameFixedSteps();
+		if (steps < 1)
+		{
+			m_iZeroStepCallbacks++;
+			return 1;
+		}
+
+		return steps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Top of a callback: physics_step + covered_steps, its render frame and world time, whether it is a decision
+	//! callback (the first at or past the next world-time grid point), then OnStepPre with timeSlice = covered_steps x
+	//! the step dt (the engine's raw argument is not used: GetFixedTimeSlice reports n/30, D-A)
+	protected void HandleStepPre(float timeSlice)
+	{
+		if (!IsCapturing())
+			return;
+
+		if (m_iPhysicsStep >= 0 && m_iLastPostStep < m_iPhysicsStep)
+			m_iPreWithoutPost++;
+
+		int covered = GetCallbackCoveredSteps();
+		m_iCoveredSteps = covered;
+		m_iPhysicsStep += covered;
+		if (covered > 1)
+			m_iMergedSteps += covered - 1;
+
+		if (covered > m_iMaxCoveredSteps)
+			m_iMaxCoveredSteps = covered;
+
+		m_iCallbackRenderFrame = GetRenderFrame();
+		m_iCallbackWorldMs = GetWorldMs();
+		if (m_iGridAnchorMs < 0)
+			m_iGridAnchorMs = m_iCallbackWorldMs;
+
+		m_bDecisionStep = m_iCallbackWorldMs >= m_iGridAnchorMs + m_iNextDecisionGrid * m_iDecisionPeriodMs;
+		float sliceS = covered * m_fStepDtS;
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			if (!m_sFailureReason.IsEmpty())
+				break;
+
+			module.OnStepPre(m_iPhysicsStep, sliceS);
+		}
+
+		SealOnFailure();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Same step after the simulation: OnStepPost (rows), warm-up and planned end, OnStepDecide. A post without its
+	//! own pre call is not dispatched (a second ctl row of one step would break the key) and is counted
+	protected void HandleStepPost(float timeSlice)
+	{
+		if (!IsCapturing())
+			return;
+
+		if (m_iPhysicsStep < 0 || m_iLastPostStep == m_iPhysicsStep)
+		{
+			m_iPostWithoutPre++;
+			return;
+		}
+
+		int worldMs = m_iCallbackWorldMs;		// the callback's world time, read at its top (the frame clock)
+		if (worldMs <= m_iLastStepWorldMs)
+			m_iStepsWithoutWorldAdvance++;
+
+		m_iLastStepWorldMs = worldMs;
+		m_iLastPostStep = m_iPhysicsStep;
+		m_iLastStepEpisodeId = m_iEpisodeId;		// begun in OnStepPre of this step, ended only after its rows
+		float sliceS = m_iCoveredSteps * m_fStepDtS;
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			if (!m_sFailureReason.IsEmpty())
+				break;
+
+			module.OnStepPost(m_iPhysicsStep, sliceS, worldMs);
+		}
+
+		if (m_sFailureReason.IsEmpty() && !m_bWarmupOver && worldMs >= m_fWarmupS * 1000)
+		{
+			m_bWarmupOver = true;
+			LogEvent("warmup_end", string.Empty);
+		}
+
+		if (m_sFailureReason.IsEmpty() && m_ePhase == DC_ESessionPhase.CAPTURING && worldMs >= (m_fWarmupS + m_fDurationS) * 1000)
+			BeginEnd(END_DURATION);
+
+		foreach (DC_SessionModule decider : m_aModules)
+		{
+			if (!m_sFailureReason.IsEmpty())
+				break;
+
+			decider.OnStepDecide(m_iPhysicsStep);
+		}
+
+		// The grid moves on past this callback's world time; grid points it passed in one go are skipped (a hitch)
+		if (m_bDecisionStep)
+		{
+			int reached = (worldMs - m_iGridAnchorMs) / m_iDecisionPeriodMs;
+			m_iDecisionGridSkipped += reached - m_iNextDecisionGrid;
+			m_iNextDecisionGrid = reached + 1;
+			m_bDecisionStep = false;
+		}
+
+		SealOnFailure();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One render frame while capturing or draining
+	protected void HandleFrame(float timeSlice)
+	{
+		int renderFrame = GetRenderFrame();
+		int worldMs = GetWorldMs();
+		foreach (DC_SessionModule starter : m_aModules)
+		{
+			if (!m_sFailureReason.IsEmpty())
+				break;
+
+			starter.OnFrameStart(renderFrame);
+		}
+
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			if (!m_sFailureReason.IsEmpty())
+				break;
+
+			module.OnFrame(renderFrame, timeSlice, worldMs);
+		}
+
+		if (SealOnFailure())
+			return;
+
+		// The first failed commit stops the loop: no further chunk is acknowledged after it
+		foreach (DC_SessionStream stream : m_aStreams)
+		{
+			if (!stream.FlushIfDue(worldMs))
+			{
+				FailWrite(stream.GetName() + ": " + stream.GetFailure());
+				break;
+			}
+		}
+
+		if (SealOnFailure())
+			return;
+
+		if (worldMs >= m_iNextHeartbeatMs)
+		{
+			m_iNextHeartbeatMs = worldMs - worldMs % HeartbeatPeriodMs() + HeartbeatPeriodMs();
+			WriteHeartbeat(worldMs);
+			if (SealOnFailure())
+				return;
+		}
+
+		if (m_ePhase == DC_ESessionPhase.DRAINING && IsDrainDone(worldMs))
+			Seal(m_sEndReason, false);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true when every module is drained, or when the in-flight timeout passed in real or in world time
+	protected bool IsDrainDone(int worldMs)
+	{
+		if (System.GetTickCount() - m_iDrainStartTickMs >= m_iImgInflightTimeoutMs || worldMs - m_iDrainStartWorldMs >= m_iImgInflightTimeoutMs)
+			return true;
+
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			if (!module.IsDrained())
+				return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Planned end (duration, dc_stop): the modules stop and drain. Idempotent
+	protected void BeginEnd(string endReason)
+	{
+		if (m_ePhase != DC_ESessionPhase.CAPTURING)
+			return;
+
+		m_ePhase = DC_ESessionPhase.DRAINING;
+		m_bStopping = true;
+		m_sEndReason = endReason;
+		m_iDrainStartTickMs = System.GetTickCount();
+		m_iDrainStartWorldMs = GetWorldMs();
+		Print(string.Format(LOG + "session end (%1) at physics step %2: draining", endReason, m_iLastPostStep), LogLevel.NORMAL);
+		foreach (DC_SessionModule module : m_aModules)
+		{
+			module.OnSessionStopping(endReason);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return true when a failure was reported and the session is now sealed
+	protected bool SealOnFailure()
+	{
+		if (m_sFailureReason.IsEmpty() || m_ePhase == DC_ESessionPhase.CLOSED)
+			return false;
+
+		Seal(m_sFailureReason, false);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Step 7: last module rows, the streams committed (or, after a write failure, abandoned: no further row is
+	//! acknowledged; only the events row script_error is attempted), session_end.json last, then the release.
+	//! teardown = world deletion: no module is called. Idempotent
+	protected void Seal(string endReason, bool teardown)
+	{
+		if (m_ePhase == DC_ESessionPhase.CLOSED || m_ePhase == DC_ESessionPhase.IDLE)
+			return;
+
+		if (m_ePhase == DC_ESessionPhase.PREPARING)
+		{
+			Refuse("stopped during readiness (" + endReason + ")");
+			return;
+		}
+
+		m_ePhase = DC_ESessionPhase.CLOSED;
+		m_bStopping = true;
+
+		// World teardown calls no module, so an open episode cannot get its episodes row: never a successful stop
+		if (teardown && m_iEpisodeId >= 0 && !IsErrorEndReason(endReason))
+		{
+			endReason = END_SCRIPT_ERROR;
+			if (m_sFailureDetail.IsEmpty())
+				m_sFailureDetail = string.Format("world deleted with episode %1 open: its episodes row is missing", m_iEpisodeId);
+		}
+
+		// After a write failure no further row is acknowledged: every stream but events is dropped before the modules
+		// write their last rows
+		if (m_bWriteFailed)
+		{
+			foreach (DC_SessionStream droppedStream : m_aStreams)
+			{
+				if (droppedStream.GetName() != "events" || droppedStream.HasFailed())
+					droppedStream.Abandon();
+			}
+		}
+
+		if (!teardown)
+		{
+			foreach (DC_SessionModule module : m_aModules)
+			{
+				module.OnSessionClosing(endReason);
+			}
+		}
+		else if (m_ImageQueue && endReason != END_ZERO_EGO)
+		{
+			// World teardown calls no module: the held img rows are written here (the image scheduler's
+			// OnSessionClosing does it otherwise), a request in flight with done_render_frame empty
+			m_iImagesPending = m_ImageQueue.CloseAll(GetWorldMs());
+		}
+
+		if (endReason == END_ZERO_EGO)
+		{
+			// A session without an ego acknowledges no row at all (dc-2.0 5.3: zero_ego, 0 rows, 0 images)
+			foreach (DC_SessionStream emptyStream : m_aStreams)
+			{
+				emptyStream.Abandon();
+			}
+		}
+		else
+		{
+			CloseStreams(endReason);
+		}
+
+		// session_end.json is the last write: a heartbeat.csv kept open is closed (and checked) before it
+		CloseHeartbeat();
+		if (m_bWriteFailed)
+			endReason = END_WRITE_FAIL;
+
+		string status = "ok";
+		if (IsErrorEndReason(endReason))
+			status = "failed";
+
+		bool endWritten = WriteSessionEnd(status, endReason);
+		string line = string.Format(LOG + "END session %1 status=%2 end_reason=%3 physics_steps=%4 frames=%5 heartbeats=%6 images issued %7 ok %8 failed %9", m_sSessionId, status, endReason, m_iLastPostStep + 1, m_iFrameCount, m_iHeartbeats, m_iImagesIssued, m_iImagesOk, m_iImagesFailed);
+		if (!m_sFailureDetail.IsEmpty())
+			line += " (" + m_sFailureDetail + ")";
+
+		if (!endWritten)
+			line += " - session_end.json could NOT be written: the session is unsealed";
+
+		if (status == "ok" && endWritten)
+			Print(line, LogLevel.NORMAL);
+		else
+			Print(line, LogLevel.ERROR);
+
+		Release(teardown);
+
+#ifndef WORKBENCH
+		if (!teardown && endReason == END_DC_STOP && m_bCloseOnDcStop)
+			GetGame().RequestClose();
+#endif
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Commits every stream, the events stream last: a commit that fails stops the acknowledgement (the later streams
+	//! are dropped) and the events row script_error is still attempted before events is closed
+	protected void CloseStreams(string endReason)
+	{
+		if (!m_bWriteFailed && endReason == END_SCRIPT_ERROR)
+			LogEvent("script_error", "reason=other");
+
+		foreach (DC_SessionStream stream : m_aStreams)
+		{
+			if (stream.GetName() == "events")
+				continue;
+
+			if (m_bWriteFailed)
+			{
+				stream.Abandon();
+				continue;
+			}
+
+			if (!stream.Close())
+				NoteCloseFailure(stream);
+		}
+
+		DC_SessionStream events = FindStream("events");
+		if (!events)
+			return;
+
+		if (events.HasFailed())
+		{
+			events.Abandon();
+			return;
+		}
+
+		// After a failure the buffered ordinary events are never acknowledged: only the script_error row is written,
+		// keyed right after the last committed event so event_seq stays contiguous
+		if (m_bWriteFailed)
+		{
+			events.DiscardBuffered();
+			m_iEventSeq = events.GetLastCommittedKey() + 1;
+			LogEvent("script_error", "reason=write_fail");
+		}
+
+		if (!events.Close())
+			NoteCloseFailure(events);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void NoteCloseFailure(notnull DC_SessionStream stream)
+	{
+		m_bWriteFailed = true;
+		if (m_sFailureDetail.IsEmpty())
+			m_sFailureDetail = stream.GetName() + ": " + stream.GetFailure();
+
+		Print(LOG + "ERROR: write_fail at the seal: " + stream.GetName() + ": " + stream.GetFailure(), LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! session_end.json (dc-2.0 section 10.2), written last by one Write that ends with the closing brace (a short write
+	//! leaves no parseable seal). \return false when it could not be written
+	protected bool WriteSessionEnd(string status, string endReason)
+	{
+		DC_JsonWriter json = new DC_JsonWriter();
+		json.BeginObject(string.Empty);
+		json.AddString("contract_version", CONTRACT_VERSION);
+		json.AddString("session_id", m_sSessionId);
+		json.AddString("status", status);
+		json.AddString("end_reason", endReason);
+
+		string utcCompact;
+		json.BeginObject("end");
+		json.AddInt("unix_s", System.GetUnixTime());
+		json.AddString("utc", FormatUtc(utcCompact));
+		json.AddInt("world_ms", GetWorldMs());
+		json.AddInt("physics_step", GetStreamLastKey("ctl", m_iLastPostStep));
+		json.AddInt("render_frame", GetStreamLastKey("hf", GetRenderFrame()));
+		json.EndObject();
+
+		json.BeginObject("pin");
+		json.AddString("pin_id", m_LaunchInfo.m_sPinId);
+		json.AddStringOrNull("build_key", m_LaunchInfo.m_sBuildKey);
+		json.EndObject();
+
+		json.BeginObject("engine");
+		json.AddString("build_version", GetGame().GetBuildVersion());
+		json.EndObject();
+
+		json.BeginObject("counts");
+		int episodes;
+		foreach (DC_SessionStream stream : m_aStreams)
+		{
+			json.BeginObject(stream.GetName());
+			json.AddInt("rows", stream.GetCommittedRows());
+			json.AddInt("chunks", stream.GetCommittedChunks());
+			if (stream.GetCommittedRows() > 0)
+				json.AddInt("last_key", stream.GetLastCommittedKey());
+			else
+				json.AddNull("last_key");
+
+			json.EndObject();
+			if (stream.GetName() == "episodes")
+				episodes = stream.GetCommittedRows();
+		}
+
+		json.EndObject();
+
+		json.BeginObject("images");
+		json.AddInt("requested", m_iImagesRequested);
+		json.AddInt("issued", m_iImagesIssued);
+		json.AddInt("skipped_busy", m_iImagesSkippedBusy);
+		json.AddInt("make_failed", m_iImagesMakeFailed);
+		json.AddInt("timed_out", m_iImagesTimedOut);
+		json.AddInt("pending_at_end", m_iImagesPending);
+		json.EndObject();
+
+		json.AddInt("episodes", episodes);
+		json.AddInt("heartbeats", m_iHeartbeats);
+
+		// Not in the dc-2.0 field table: run-time facts behind the TBD tolerances (proposed for the freeze)
+		NoteObserved("post_without_pre", m_iPostWithoutPre.ToString());
+		NoteObserved("pre_without_post", m_iPreWithoutPost.ToString());
+		NoteObserved("steps_without_world_advance", m_iStepsWithoutWorldAdvance.ToString());
+		NoteObserved("merged_fixed_steps", m_iMergedSteps.ToString());
+		NoteObserved("max_covered_steps", m_iMaxCoveredSteps.ToString());
+		NoteObserved("zero_step_callbacks", m_iZeroStepCallbacks.ToString());
+		NoteObserved("failure", m_sFailureDetail);
+		json.BeginObject("observed");
+		// the one contract field of the object (dc-2.0 10.2, int; C08 compares it with its rebuild of the grid)
+		json.AddInt("decision_grid_points_skipped", m_iDecisionGridSkipped);
+		for (int i = 0, count = m_aObservedKeys.Count(); i < count; i++)
+		{
+			json.AddString(m_aObservedKeys[i], m_aObservedValues[i]);
+		}
+
+		json.EndObject();
+		json.EndObject();
+
+		string failure;
+		if (WriteJsonFile(SESSION_END_JSON, json.GetLines(), failure))
+			return true;
+
+		Print(LOG + "ERROR: session_end.json: " + failure, LogLevel.ERROR);
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Last committed key of a registered stream (ctl, hf), else fallback
+	protected int GetStreamLastKey(string name, int fallback)
+	{
+		DC_SessionStream stream = FindStream(name);
+		if (!stream)
+			return fallback;
+
+		if (stream.GetCommittedRows() == 0)
+			return -1;
+
+		return stream.GetLastCommittedKey();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true for every end reason but duration, stop, dc_stop, ego_destroyed and ego_disabled (the session_end.json
+	//! status is then failed)
+	static bool IsErrorEndReason(string endReason)
+	{
+		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP && endReason != END_EGO_DESTROYED && endReason != END_EGO_DISABLED;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A refusal before the directory exists: one ERROR line, nothing written, modules released
+	protected void Refuse(string reason)
+	{
+		Print(LOG + "ERROR: " + reason + " - no session, nothing written", LogLevel.ERROR);
+		m_ePhase = DC_ESessionPhase.CLOSED;
+		Release(false);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Modules released (not on world teardown: no other component is called during deletion, so a module keeps what
+	//! it holds, e.g. the fiducial widgets; a normal Play stop releases them through OnGameEnd before the deletion),
+	//! event mask cleared, FallbackStart removed. Idempotent
+	protected void Release(bool teardown)
+	{
+		if (!teardown)
+		{
+			foreach (DC_SessionModule module : m_aModules)
+			{
+				if (module)
+					module.OnSessionRelease(false);
+			}
+		}
+
+		m_aModules.Clear();
+		if (m_ImageQueue)
+			m_ImageQueue.Clear();
+
+		m_ImageQueue = null;
+		ArmaReforgerScripted game = GetGame();
+		if (game)
+		{
+			ScriptCallQueue queue = game.GetCallqueue();
+			if (queue)
+				queue.Remove(FallbackStart);
+		}
+
+		if (!m_bMaskSet)
+			return;
+
+		m_bMaskSet = false;
+		IEntity owner = GetOwner();
+		if (owner)
+			ClearEventMask(owner, GetDispatchEventMask());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Called on every machine when the game mode ends (SCR_BaseGameMode.OnGameStateChanged, POSTGAME)
+	override void OnGameModeEnd(SCR_GameModeEndData data)
+	{
+		super.OnGameModeEnd(data);
+		StopRun();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Called on every machine when the world ends, before the entities are deleted
+	override void OnGameEnd()
+	{
+		super.OnGameEnd();
+		StopRun();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void OnDelete(IEntity owner)
+	{
+		// World teardown: no other component is called (the DD-1 rule); the streams the session owns are committed
+		if (IsCapturing())
+			Seal(GetStopReason(), true);
+		else
+			Release(true);
+
+		super.OnDelete(owner);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Play stopped: seal at once (no frame follows to drain in), or end the readiness. Idempotent
+	protected void StopRun()
+	{
+		if (m_ePhase == DC_ESessionPhase.PREPARING)
+		{
+			Refuse("Play stopped during readiness");
+			return;
+		}
+
+		if (IsCapturing())
+		{
+			Seal(GetStopReason(), false);
+			return;
+		}
+
+		Release(false);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! stop, or the planned end reason when the Play stops while the session drains
+	protected string GetStopReason()
+	{
+		if (m_sEndReason.IsEmpty())
+			return END_STOP;
+
+		return m_sEndReason;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	// Module API
+	//------------------------------------------------------------------------------------------------
+	//! A module refuses readiness (before the directory exists): ERROR, no session
+	void RefuseReadiness(string reason)
+	{
+		if (m_sReadinessRefusal.IsEmpty())
+			m_sReadinessRefusal = reason;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Ends the session with an error end reason (zero_ego, ego_lost, camera_lost, script_error:other) after the
+	//! current dispatch. The first failure is kept
+	void Fail(string endReason, string detail)
+	{
+		if (!m_sFailureReason.IsEmpty() || !IsCapturing())
+			return;
+
+		m_sFailureReason = endReason;
+		m_sFailureDetail = detail;
+		Print(LOG + "ERROR: " + endReason + ": " + detail, LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Ends the session after the current dispatch with a non-error end reason (ego_destroyed, dc-2.0 5.3): no module
+	//! is called for the rest of the step or frame, the seal follows at once (no drain), status ok when every commit
+	//! succeeded. The first failure or end is kept
+	void EndAtOnce(string endReason, string detail)
+	{
+		if (!m_sFailureReason.IsEmpty() || !IsCapturing())
+			return;
+
+		m_sFailureReason = endReason;
+		m_sFailureDetail = detail;
+		Print(LOG + "session ends at once: " + endReason + ": " + detail, LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A planned end requested by a module with a non-error end reason (ego_disabled, dc-2.0 5.3): the same path as
+	//! duration and dc_stop (no new episode or image request, drain, seal). Ignored unless capturing; logs one WARNING
+	void EndPlanned(string endReason, string detail)
+	{
+		if (m_ePhase != DC_ESessionPhase.CAPTURING)
+			return;
+
+		Print(LOG + "WARNING: planned end " + endReason + ": " + detail, LogLevel.WARNING);
+		NoteObserved("planned_end_detail", detail);
+		BeginEnd(endReason);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A short or failed write (chunk, commit line, heartbeat row, session.json): the session stops with
+	//! script_error:write_fail and acknowledges no further row (dc-2.0 section 8)
+	void FailWrite(string detail)
+	{
+		m_bWriteFailed = true;
+		if (m_sFailureReason.IsEmpty())
+		{
+			m_sFailureReason = END_WRITE_FAIL;
+			m_sFailureDetail = detail;
+		}
+
+		Print(LOG + "ERROR: write_fail: " + detail, LogLevel.ERROR);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once a write failed: modules write no further row
+	bool HasWriteFailure()
+	{
+		return m_bWriteFailed;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The session owns stream writers: it commits them at the seal, counts them in session_end.json and checks them
+	//! for failed writes every frame
+	void RegisterStream(notnull DC_SessionStream stream)
+	{
+		m_aStreams.Insert(stream);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The held img rows: the session keeps the only strong reference so that a world-teardown seal, which calls no
+	//! module, still writes them (dc-2.0 section 6: a seal without drain writes the row of a request in flight)
+	void RegisterImageQueue(notnull DC_ImageRowQueue rowQueue)
+	{
+		m_ImageQueue = rowQueue;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	DC_SessionStream FindStream(string name)
+	{
+		foreach (DC_SessionStream stream : m_aStreams)
+		{
+			if (stream.GetName() == name)
+				return stream;
+		}
+
+		return null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row of the ego (veh_slot_id = the ego slot): see LogVehicleEvent
+	bool LogEvent(string kind, string payload)
+	{
+		return LogVehicleEvent(m_iEgoSlotId, kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row (dc-2.0 9.5) of vehicle slot vehSlotId (-1 = none) in the current episode: see
+	//! LogVehicleEventInEpisode
+	bool LogVehicleEvent(int vehSlotId, string kind, string payload)
+	{
+		return LogVehicleEventInEpisode(vehSlotId, m_iEpisodeId, kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One events row (dc-2.0 9.5) naming vehicle slot vehSlotId (-1 = none) and the episode it belongs to (-1 =
+	//! none; dc-2.0 9.5.1: the episode of its occurrence, even after that episode ended) into the registered events
+	//! stream; event_seq, physics_step, render_frame and world_time_ms are those of the writing. The line is always
+	//! printed. kind must be a contract event kind; payload is 'key=value' pairs joined by ';' (',', '"', CR and LF
+	//! become '_'). A teleport or respawn row isolates the slot's collision detector
+	bool LogVehicleEventInEpisode(int vehSlotId, int episodeId, string kind, string payload)
+	{
+		string clean = payload;
+		clean.Replace(",", "_");
+		clean.Replace("\"", "_");
+		clean.Replace("\r", "_");
+		clean.Replace("\n", "_");
+		if (s_aEventKinds.Find(kind) < 0)
+		{
+			Print(LOG + "ERROR: event kind '" + kind + "' is not a dc-2.0 event kind - not recorded", LogLevel.ERROR);
+			return false;
+		}
+
+		Print(string.Format(LOG + "event %1 %2 (slot %3, step %4, episode %5)", kind, clean, vehSlotId, m_iLastPostStep, episodeId), LogLevel.NORMAL);
+		DC_SessionStream events = FindStream("events");
+		if (!events || !m_bHasStartTimestamp)
+			return false;
+
+		// After a write failure only the script_error row is still attempted (no further row is acknowledged)
+		if (m_bWriteFailed && kind != "script_error")
+			return false;
+
+		int worldMs = GetWorldMs();
+		m_EventRow.Clear();
+		m_EventRow.AddInt(m_iEventSeq);
+		m_EventRow.AddInt(episodeId);
+		m_EventRow.AddInt(m_iLastPostStep);		// the last completed step (dc-2.0 9.5)
+		m_EventRow.AddInt(GetRenderFrame());
+		m_EventRow.AddInt(worldMs);
+		m_EventRow.AddString(kind);
+		m_EventRow.AddInt(vehSlotId);
+		m_EventRow.AddString(clean);
+		if (!events.AddRow(m_EventRow, m_iEventSeq, worldMs))
+		{
+			FailWrite("events: " + events.GetFailure());
+			return false;
+		}
+
+		m_iEventSeq++;
+		if (kind == "teleport" || kind == "respawn")
+			DC_CrashWatch.NoteRepositioned(vehSlotId);
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The events columns of dc-2.0 9.5, in order
+	static void AddEventColumns(notnull array<string> columns)
+	{
+		columns.Insert("event_seq");
+		columns.Insert("episode_id");
+		columns.Insert("physics_step");
+		columns.Insert("render_frame");
+		columns.Insert("world_time_ms");
+		columns.Insert("kind");
+		columns.Insert("veh_slot_id");
+		columns.Insert("payload");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A run-time fact for session_end.json observed (the last value of a key wins)
+	void NoteObserved(string key, string value)
+	{
+		int index = m_aObservedKeys.Find(key);
+		if (index >= 0)
+		{
+			m_aObservedValues[index] = value;
+			return;
+		}
+
+		m_aObservedKeys.Insert(key);
+		m_aObservedValues.Insert(value);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The ego of the session (one for its whole life): entity, slot id, IEntity.GetID() token, prefab
+	void SetEgo(IEntity ego, int slotId, string entityId, string prefab)
+	{
+		m_Ego = ego;
+		m_iEgoSlotId = slotId;
+		m_sEgoEntityId = entityId;
+		m_sEgoPrefab = prefab;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Image slot counts (session_end.json images): issued, skipped_busy or make_failed
+	void CountImageSlot(string issueStatus)
+	{
+		m_iImagesRequested++;
+		if (issueStatus == "issued")
+			m_iImagesIssued++;
+		else if (issueStatus == "skipped_busy")
+			m_iImagesSkippedBusy++;
+		else if (issueStatus == "make_failed")
+			m_iImagesMakeFailed++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A request resolved: its file was seen (img_ok) or it timed out (img_fail, timed_out)
+	void CountImageResolved(bool fileSeen)
+	{
+		if (fileSeen)
+		{
+			m_iImagesOk++;
+			return;
+		}
+
+		m_iImagesFailed++;
+		m_iImagesTimedOut++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Requests in flight now (images.pending_at_end when the session seals; kept current by the image module, so a
+	//! teardown seal that calls no module still has it)
+	void SetImagesPending(int pending)
+	{
+		m_iImagesPending = pending;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void SetEpisodeId(int episodeId)
+	{
+		m_iEpisodeId = episodeId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetEpisodeId()
+	{
+		return m_iEpisodeId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	IEntity GetEgo()
+	{
+		return m_Ego;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetEgoSlotId()
+	{
+		return m_iEgoSlotId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetEgoEntityId()
+	{
+		return m_sEgoEntityId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetEgoPrefab()
+	{
+		return m_sEgoPrefab;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true while rows are written (capturing or draining)
+	bool IsCapturing()
+	{
+		return m_ePhase == DC_ESessionPhase.CAPTURING || m_ePhase == DC_ESessionPhase.DRAINING;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once the planned end began or the session is sealed: no new episode or image request
+	bool IsStopping()
+	{
+		return m_bStopping;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool IsWarmupOver()
+	{
+		return m_bWarmupOver;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! world_time_ms: WorldTimestamp.DiffMilliseconds against the open, whole ms; 0 before the open
+	int GetWorldMs()
+	{
+		if (!m_bHasStartTimestamp)
+			return 0;
+
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+			return m_iLastStepWorldMs;
+
+		WorldTimestamp now = world.GetTimestamp();
+		int worldMs = Math.Floor(now.DiffMilliseconds(m_StartTimestamp));
+		return worldMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! BaseWorld.GetFrameNumber(), -1 without a world
+	int GetRenderFrame()
+	{
+		ArmaReforgerScripted game = GetGame();
+		if (!game)
+			return -1;
+
+		BaseWorld world = game.GetWorld();
+		if (!world)
+			return -1;
+
+		return world.GetFrameNumber();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! ChimeraWorld.IsGameTimePaused()
+	bool IsPaused()
+	{
+		ChimeraWorld world = ChimeraWorld.CastFrom(GetGame().GetWorld());
+		if (!world)
+			return false;
+
+		return world.IsGameTimePaused();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The step being dispatched (or the last one), -1 before step 0
+	int GetPhysicsStep()
+	{
+		return m_iPhysicsStep;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! hf.last_physics_step: the step of the most recent OnStepPost, -1 before the first
+	int GetLastPostStep()
+	{
+		return m_iLastPostStep;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The episode that owns GetLastPostStep() (its ctl episode_id), -1 for none: the episode of a report between
+	//! callbacks (dc-2.0 9.5.1), also right after EndEpisode cleared the current one
+	int GetLastStepEpisodeId()
+	{
+		return m_iLastStepEpisodeId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! world_time_ms of the first callback, the anchor of the decision and image grids (dc-2.0 section 6), -1 before
+	int GetGridAnchorWorldMs()
+	{
+		return m_iGridAnchorMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true inside a decision callback (OnStepPre to OnStepDecide): the first callback at or past the next grid point
+	bool IsDecisionStep()
+	{
+		return m_bDecisionStep;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine fixed steps the current (or last) callback covers (ctl and telemetry covered_steps)
+	int GetCoveredSteps()
+	{
+		return m_iCoveredSteps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! render_frame of the current (or last) callback (ctl and telemetry render_frame)
+	int GetCallbackRenderFrame()
+	{
+		return m_iCallbackRenderFrame;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Decision grid period [ms] (1000 / decision_hz)
+	int GetDecisionPeriodMs()
+	{
+		return m_iDecisionPeriodMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Image grid period [ms] (1000 / image_hz)
+	int GetImagePeriodMs()
+	{
+		return m_iImagePeriodMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The measured engine fixed step dt [s] (STEP TIMING), 0 before it is measured
+	float GetStepDtS()
+	{
+		return m_fStepDtS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetSessionId()
+	{
+		return m_sSessionId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! $profile:DC_Sessions/<session_id>
+	string GetSessionDir()
+	{
+		return m_sSessionDir;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GetFixedTimeSlice() at the open (session.json engine.fixed_time_slice_s): provenance only, never the step dt
+	float GetFixedTimeSliceS()
+	{
+		return m_fFixedTimeSliceS;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! clocks.physics_steps_per_decision (TBD-1): the nominal steps of a decision interval
+	int GetStepsPerDecision()
+	{
+		return m_iStepsPerDecision;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	float GetImageHz()
+	{
+		return m_fImageHz;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetImgInflightTimeoutMs()
+	{
+		return m_iImgInflightTimeoutMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetImgLeadMs()
+	{
+		return m_iImgLeadMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! clocks.chunk_max_s in ms
+	int GetChunkMaxMs()
+	{
+		int chunkMs = m_fChunkMaxS * 1000;
+		return chunkMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool GetKeepLogsOpen()
+	{
+		return m_bKeepLogsOpen;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool GetVerifyChunkLength()
+	{
+		return m_bVerifyChunkLength;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetTrialId()
+	{
+		return m_sTrialId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The trial conf's route (empty without one); DD-7-min's driver reads its route file from it
+	string GetTrialRoute()
+	{
+		return m_sTrialRoute;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetTrialSeed()
+	{
+		return m_iTrialSeed;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! false for a telemetry-only trial (T0a: "images": false in the conf)
+	bool GetTrialImages()
+	{
+		return m_bTrialImages;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetMapId()
+	{
+		return m_sMapId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetPinId()
+	{
+		if (!m_LaunchInfo)
+			return string.Empty;
+
+		return m_LaunchInfo.m_sPinId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! pin.build_key (empty with a dd-launch/1 record)
+	string GetBuildKey()
+	{
+		if (!m_LaunchInfo)
+			return string.Empty;
+
+		return m_LaunchInfo.m_sBuildKey;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetFaultCase()
+	{
+		return m_sFaultCase;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! "wb" in Workbench; outside, "cld" in a diag build (ENABLE_DIAG) and "cl" otherwise
+	static string GetExeKind()
+	{
+		string kind = "cl";
+#ifdef ENABLE_DIAG
+		kind = "cld";
+#endif
+#ifdef WORKBENCH
+		kind = "wb";
+#endif
+		return kind;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! "i00" in Workbench; outside, "i" + the two digits of -dcInstance (i00 without it)
+	static string GetInstanceTag()
+	{
+#ifdef WORKBENCH
+		return "i00";
+#else
+		string value;
+		if (!System.GetCLIParam(CLI_INSTANCE, value))
+			return "i00";
+
+		value = value.Trim();
+		if (value.Length() != 2 || !value.IsDigitAt(0) || !value.IsDigitAt(1))
+		{
+			Print(LOG + "WARNING: -dcInstance '" + value + "' is not two digits - using i00", LogLevel.WARNING);
+			return "i00";
+		}
+
+		return "i" + value;
+#endif
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Trial ids are 1-16 characters of [A-Za-z0-9-] (the session id rule: no underscore)
+	static bool IsValidTrialId(string trialId)
+	{
+		int length = trialId.Length();
+		if (length < 1 || length > 16)
+			return false;
+
+		for (int i = 0; i < length; i++)
+		{
+			int c = trialId.ToAscii(i);
+			bool digit = c >= 48 && c <= 57;		// 0-9
+			bool upper = c >= 65 && c <= 90;		// A-Z
+			bool lower = c >= 97 && c <= 122;		// a-z
+			if (!digit && !upper && !lower && c != 45)	// 45 = '-'
+				return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! "YYYY-MM-DDTHH:MM:SSZ" from the UTC wall clock; compact gets "YYYYMMDDTHHMMSSZ" of the same reading. The date
+	//! is read on both sides of the time, so a read across midnight takes the time again with the later date
+	static string FormatUtc(out string compact)
+	{
+		compact = string.Empty;
+		int year;
+		int month;
+		int day;
+		int hour;
+		int minute;
+		int second;
+		System.GetYearMonthDayUTC(year, month, day);
+		System.GetHourMinuteSecondUTC(hour, minute, second);
+
+		int yearAfter;
+		int monthAfter;
+		int dayAfter;
+		System.GetYearMonthDayUTC(yearAfter, monthAfter, dayAfter);
+		if (yearAfter != year || monthAfter != month || dayAfter != day)
+		{
+			year = yearAfter;
+			month = monthAfter;
+			day = dayAfter;
+			System.GetHourMinuteSecondUTC(hour, minute, second);
+		}
+
+		compact = year.ToString(4) + month.ToString(2) + day.ToString(2) + "T" + hour.ToString(2) + minute.ToString(2) + second.ToString(2) + "Z";
+		return string.Format("%1-%2-%3T%4:%5:%6Z", year.ToString(4), month.ToString(2), day.ToString(2), hour.ToString(2), minute.ToString(2), second.ToString(2));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Local "hh:mm:ss" (session.json start.local_hms, for console.log slicing)
+	static string FormatLocalHms()
+	{
+		int hour;
+		int minute;
+		int second;
+		System.GetHourMinuteSecond(hour, minute, second);
+		return hour.ToString(2) + ":" + minute.ToString(2) + ":" + second.ToString(2);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! 8 lower-case hex digits of string.Hash(), byte by byte (no sign issue)
+	static string HashText(string text)
+	{
+		int hash = text.Hash();
+		string hex;
+		for (int shift = 24; shift >= 0; shift -= 8)
+		{
+			int byteValue = (hash >> shift) & 255;
+			hex += byteValue.ToString(2, true);
+		}
+
+		hex.ToLower();
+		return hex;
+	}
+}

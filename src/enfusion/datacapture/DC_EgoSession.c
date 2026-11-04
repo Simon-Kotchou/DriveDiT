@@ -1,0 +1,732 @@
+// ============================================================================
+// DC_EgoSession - the ego of a dc-2.0 session: spawn, Mode A settle, liveness, slot identity, episodes (DD-4-min)
+// ============================================================================
+//
+// A DC_SessionModule (dispatch order 10: it runs before the streams in every hook) on the capture game mode.
+//
+// READINESS (before the session directory exists)
+//   - spawns the ego driverless from m_sEgoPrefab (GetGame().SpawnEntityPrefab with a world transform, the vanilla
+//     pattern of game.c:93-104) at the driver's spawn pose (DC_DriverInterface.GetSpawnPose), else at the attribute
+//     pose: the Arland main runway of the DD-4-probe test area. Nothing is looked up by name;
+//   - registers it in the slot registry (DC_VehicleRegistry: slot id + IEntity.GetID() token; the ego slot is fixed
+//     for the whole session and every episode);
+//   - Mode A as in DD-4-probe: DC_ActuatorModeA (persistent handbrake off, engine started), parked (brake 1 and
+//     handbrake, plus neutral on a manual gearbox: the S105's is manual, T0-ENG run 2) and parked again on every
+//     readiness poll of the settle, handed to DC_StreamRecorder (the one actuation path, r3 P1), which re-applies the
+//     park on every physics step without a held command; the driver selects the forward gear and the actuator wakes
+//     the body at drive start (DC_StreamRecorder.c, DC_ACTUATOR);
+//   - session.json observed.ego_gearbox* / ego_gear_index_* / ego_park_gear / ego_gear_at_open: the gearbox kind
+//     (HasAutomaticGearbox), its counts and the vanilla gear indices (neutral, first, top); session_end.json
+//     observed.ego_*: the drive-start and sleep wakes, the persistent handbrake resets and the driving steps on a
+//     manual gearbox without a gear;
+//   - ready after m_fSettleS of world time with the ego alive and slower than m_fSettleMaxKmh. A spawn failure or an
+//     ego lost during the settle refuses readiness; DC_Session's timeout refuses it too (ERROR, no directory).
+//
+// CAPTURE
+//   - liveness and identity at the top of every frame and before and after the simulation of every physics step
+//     (before any row of it): the entity exists, is not deleted, and still carries the registered GetID token. A loss
+//     before the first ctl row ends the session with zero_ego (0 rows, 0 images), later with ego_lost;
+//   - a destroyed ego (DamageManagerComponent.IsDestroyed) after the first ctl row is a crash, which is data (dc-2.0
+//     5.3), ended at one terminal step L, the last step whose rows are written: seen in OnStepPost, that step's rows
+//     are still written and the end follows in OnStepDecide (L = that step); seen at a frame start or before a step,
+//     L is the previous step. At L DC_CrashWatch writes the pending collision row, veh_damage state=destroyed and
+//     veh_fire_start when it burns, the session ends with ego_destroyed (status ok), and the seal ends the open
+//     episode at L (its end_world_ms is the world time of L) with the latched termination (collision). Before the
+//     first ctl row it is still zero_ego;
+//   - episodes: in a decision callback (the first callback at or past a grid point of the world-time decision grid,
+//     DC_Session.IsDecisionStep; dc-2.0 section 6, D-A) after warmup_end, while no episode runs and the session is
+//     not stopping, the driver's admission handshake (CanDecide: will this callback's Decide give the first command?)
+//     and then BeginEpisode are asked in OnStepPre (so the rows of that callback carry the episode; the null driver
+//     never begins one). A driver that cannot decide yet defers the admission to the next grid point: nothing is
+//     committed, so a driver that is not ready never fails the session (session_end.json observed key
+//     episode_admissions_deferred counts the deferrals). A termination the driver reports, or the planned end, ends the episode in
+//     the next decision callback in OnStepDecide, after that callback's rows: DC_DriverInterface.EndEpisode, one episodes
+//     row (chunk_max_rows 1, so it is committed at once), events episode_start / episode_end, the ego parked. The
+//     seal ends an episode still open at the last step (session_stop, or script_error after an error);
+//   - crash events (DC_CrashWatch, dc-2.0 9.5.1): the end of an episode waits while the ego's collision row is
+//     pending (at most events.episode_end_wait_ms after its onset), so the row carries the episode id and precedes
+//     episode_end; no episode begins while DC_CrashWatch.IsEpisodeBlocked (a pending collision row, the
+//     events.crash_cooldown_ms cool-down after the ego's last terminal crash event, tilted, immobile, burning).
+//
+// Release: the ego is parked and kept (it dies with the world); on world teardown only references are dropped.
+// ============================================================================
+
+[ComponentEditorProps(category: "GameScripted/DataCapture", description: "dc-2.0 ego: driverless spawn, Mode A settle, liveness and slot identity, episode lifecycle and the episodes stream")]
+class DC_EgoSessionClass : DC_SessionModuleClass
+{
+}
+
+//------------------------------------------------------------------------------------------------
+class DC_EgoSession : DC_SessionModule
+{
+	// === EGO ===
+	[Attribute("{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et", UIWidgets.ResourcePickerThumbnail, "Ego vehicle prefab, spawned driverless (the S105 of DD-4-probe)", "et", category: "Ego")]
+	protected ResourceName m_sEgoPrefab;
+
+	[Attribute("1495.41 0 2626", UIWidgets.Coords, "Spawn position when the driver gives none (x, z used; y from GetSurfaceY): 6 m along the DD-4-probe runway test area [decoder-derived, unverified in the engine]", category: "Ego")]
+	protected vector m_vSpawnPos;
+
+	[Attribute("0.11", UIWidgets.Slider, "Spawn heading when the driver gives none [deg], 0 = +Z, clockwise seen from above (the runway centre line)", "-180 180 0.01", category: "Ego")]
+	protected float m_fSpawnHeadingDeg;
+
+	[Attribute("0.3", UIWidgets.Slider, "Spawn height above GetSurfaceY [m]", "0 5 0.05", category: "Ego")]
+	protected float m_fSpawnLiftM;
+
+	[Attribute("3", UIWidgets.Slider, "Settle after the spawn, brake and handbrake on [s of world time] (r2: capture starts only after the 3 s settle)", "0 30 0.5", category: "Ego")]
+	protected float m_fSettleS;
+
+	[Attribute("1", UIWidgets.Slider, "The ego counts as settled below this speed [km/h]", "0 20 0.1", category: "Ego")]
+	protected float m_fSettleMaxKmh;
+
+	[Attribute("0", UIWidgets.CheckBox, "Mode A: ForceEnableSimulation on every actuation (set only if E-01 shows the driverless S105 does not move without it)", category: "Ego")]
+	protected bool m_bForceEnableSimulation;
+
+	// === CONSTANTS ===
+	static const int EPISODES_CHUNK_ROWS = 1;		//!< dc-2.0.streams.json episodes chunk_max_rows
+	static const string TERMINATION_SESSION_STOP = "session_stop";
+	static const string TERMINATION_SCRIPT_ERROR = "script_error";
+	static const string LOG = "[DC_Ego] ";
+
+	//! Episode modes the core can record: N, R and X need disturbance, recovery and exploration support (not in T0-MIN)
+	protected static ref array<string> s_aEpisodeModes = {"E", "D", "H", "A"};
+	protected static ref array<string> s_aDrivers = {"expert", "policy", "human", "ai", "none"};
+
+	// === STATE ===
+	protected DC_Session m_Session;
+	protected DC_StreamRecorder m_Recorder;
+	protected DC_CrashWatch m_CrashWatch;
+	protected ref DC_VehicleRegistry m_Registry;
+	protected ref DC_ActuatorModeA m_Actuator;
+	protected IEntity m_Ego;
+	protected DamageManagerComponent m_Damage;
+	protected int m_iSlotId = -1;
+	protected string m_sPrefab;
+	protected float m_fSpawnWorldMs;
+	protected bool m_bFaultEgoLost;
+	protected DC_ChunkWriter m_Episodes;
+	protected ref DC_ProbeRow m_Row = new DC_ProbeRow();
+
+	// episode
+	protected ref DC_EpisodeInfo m_EpisodeInfo;
+	protected int m_iNextEpisodeId;
+	protected int m_iEpisodeId = -1;
+	protected int m_iEpisodeStartStep;
+	protected int m_iEpisodeStartWorldMs;
+	protected int m_iLastWorldMs;
+	protected string m_sStopTermination;		//!< latched when the planned end begins during an episode
+	protected string m_sBlockedNoted;			//!< the reason of the last "no new episode" line printed (once per reason)
+	protected int m_iAdmissionsDeferred;		//!< decision callbacks whose driver could not decide yet (CanDecide false)
+	protected bool m_bDestroyedAfterStep;		//!< destruction seen in OnStepPost: the session ends after this step's rows
+	protected bool m_bDisabledTiming;			//!< the ego blocks episodes as tilted, immobile or burning since m_iDisabledSinceMs
+	protected int m_iDisabledSinceMs;
+	protected string m_sEpisodeWeather;
+	protected float m_fEpisodeTodH;
+	protected float m_fEpisodeRain;
+	protected float m_fEpisodeFog;
+	protected float m_fEpisodeWetness;
+
+	//------------------------------------------------------------------------------------------------
+	override int GetDispatchOrder()
+	{
+		return 10;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Spawn, register, Mode A start and park, hand the actuator to the streams
+	override bool OnSessionPrepare(notnull DC_Session session)
+	{
+		if (SCR_Global.IsEditMode())
+			return false;
+
+		m_Session = session;
+		m_Recorder = DC_StreamRecorder.Cast(GetOwner().FindComponent(DC_StreamRecorder));
+		if (!m_Recorder)
+		{
+			session.RefuseReadiness("no DC_StreamRecorder on the game mode (the ego actuator has no user)");
+			return false;
+		}
+
+		// The crash events and session.json events.* of dc-2.0 9.5.1 / 10.1 are part of every session
+		m_CrashWatch = DC_CrashWatch.Cast(GetOwner().FindComponent(DC_CrashWatch));
+		if (!m_CrashWatch)
+		{
+			session.RefuseReadiness("no DC_CrashWatch on the game mode (crash events and session.json events.*)");
+			return false;
+		}
+
+		vector position = m_vSpawnPos;
+		float headingDeg = m_fSpawnHeadingDeg;
+		string poseSource = "attributes";
+		DC_DriverInterface driver = m_Recorder.GetDriver();
+		vector driverPosition;
+		float driverHeadingDeg;
+		if (driver && driver.GetSpawnPose(driverPosition, driverHeadingDeg))
+		{
+			position = driverPosition;
+			headingDeg = driverHeadingDeg;
+			poseSource = driver.ClassName();
+		}
+
+		string failure;
+		if (!SpawnEgo(position, headingDeg, failure))
+		{
+			session.RefuseReadiness("ego: " + failure);
+			return false;
+		}
+
+		m_Registry = new DC_VehicleRegistry();
+		m_iSlotId = m_Registry.Register(m_Ego);
+		m_Damage = DamageManagerComponent.Cast(m_Ego.FindComponent(DamageManagerComponent));
+
+		m_Actuator = new DC_ActuatorModeA();
+		if (!m_Actuator.Init(m_Ego))
+		{
+			session.RefuseReadiness("ego actuator: " + m_Actuator.GetFailure());
+			return false;
+		}
+
+		m_Actuator.SetForceSimulation(m_bForceEnableSimulation);
+		m_Actuator.Start();
+		m_Actuator.Park();
+		m_Recorder.SetActuator(m_Actuator);
+		session.SetEgo(m_Ego, m_iSlotId, m_Registry.GetEntityId(m_iSlotId), m_sPrefab);
+		m_fSpawnWorldMs = GetGame().GetWorld().GetWorldTime();
+
+		Print(string.Format(LOG + "ego %1 spawned at %2 heading %3 deg (pose from %4): slot %5, entity %6; settling %7 s", m_sPrefab, DC_RigR1.FormatVector(m_Ego.GetOrigin(), 2), headingDeg.ToString(-1, 2), poseSource, m_iSlotId, m_Registry.GetEntityId(m_iSlotId), m_fSettleS.ToString(-1, 1)), LogLevel.NORMAL);
+		Print(string.Format(LOG + "gearbox %1: %2 gears, %3 forward; vanilla indices neutral %4, first %5, top %6; park gear %7 (-1 = no SetGear)", m_Actuator.GetGearboxKind(), m_Actuator.GetGearCount(), m_Actuator.GetForwardGearCount(), m_Actuator.GetNeutralGear(), m_Actuator.GetFirstGear(), m_Actuator.GetTopGear(), m_Actuator.GetParkGear()), LogLevel.NORMAL);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GetGame().SpawnEntityPrefab at (x, GetSurfaceY + lift, z) facing headingDeg (rows right, up, forward as
+	//! DC_ProbeActuator.Teleport)
+	protected bool SpawnEgo(vector position, float headingDeg, out string failure)
+	{
+		failure = string.Empty;
+		Resource resource = Resource.Load(m_sEgoPrefab);
+		if (!resource || !resource.IsValid())
+		{
+			failure = "prefab " + m_sEgoPrefab + " cannot be loaded";
+			return false;
+		}
+
+		BaseWorld world = GetGame().GetWorld();
+		float rad = headingDeg * Math.DEG2RAD;
+		float sinH = Math.Sin(rad);
+		float cosH = Math.Cos(rad);
+		EntitySpawnParams params = new EntitySpawnParams();
+		params.TransformMode = ETransformMode.WORLD;
+		params.Transform[0] = Vector(cosH, 0, -sinH);
+		params.Transform[1] = Vector(0, 1, 0);
+		params.Transform[2] = Vector(sinH, 0, cosH);
+		params.Transform[3] = Vector(position[0], world.GetSurfaceY(position[0], position[2]) + m_fSpawnLiftM, position[2]);
+
+		m_Ego = GetGame().SpawnEntityPrefab(resource, world, params);
+		if (!m_Ego)
+		{
+			failure = "SpawnEntityPrefab(" + m_sEgoPrefab + ") returned null";
+			return false;
+		}
+
+		m_sPrefab = DC_VehicleRegistry.PrefabOf(m_Ego);
+		if (m_sPrefab.IsEmpty())
+			m_sPrefab = m_sEgoPrefab;
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Ready after the settle with the ego alive and slow
+	override bool IsSessionReady(out string waitingFor)
+	{
+		waitingFor = string.Empty;
+		if (m_Session.GetFaultCase() == DC_Session.FAULT_READINESS_TIMEOUT)
+		{
+			waitingFor = "fault case readiness_timeout (never ready)";
+			return false;
+		}
+
+		string failure;
+		if (!IsEgoAlive(failure))
+		{
+			m_Session.RefuseReadiness("ego lost during the settle: " + failure);
+			waitingFor = "the ego";
+			return false;
+		}
+
+		// Mode A: the park is applied again on every poll (no physics step is dispatched before the open)
+		m_Actuator.Park();
+		float settledS = (GetGame().GetWorld().GetWorldTime() - m_fSpawnWorldMs) / 1000;
+		if (settledS < m_fSettleS)
+		{
+			waitingFor = string.Format("the settle (%1 of %2 s)", settledS.ToString(-1, 1), m_fSettleS.ToString(-1, 1));
+			return false;
+		}
+
+		float speedKmh = m_Actuator.GetSimulation().GetSpeedKmh();
+		if (speedKmh > m_fSettleMaxKmh)
+		{
+			waitingFor = string.Format("the ego to stop (%1 km/h)", speedKmh.ToString(-1, 2));
+			return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void WriteSessionJson(string section, notnull DC_JsonWriter json)
+	{
+		if (section == "rig")
+			json.AddString("ego_prefab", m_sPrefab);
+
+		if (section != "observed" || !m_Actuator)
+			return;
+
+		// The ego's gearbox (E-04's keys) and the gear indices of the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108):
+		// what the vehicle card's gear indices are checked against; the gear read back after the settle's park
+		json.AddString("ego_gearbox", m_Actuator.GetGearboxKind());
+		json.AddInt("ego_gearbox_gears", m_Actuator.GetGearCount());
+		json.AddInt("ego_gearbox_forward_gears", m_Actuator.GetForwardGearCount());
+		json.AddInt("ego_gear_index_neutral", m_Actuator.GetNeutralGear());
+		json.AddInt("ego_gear_index_first", m_Actuator.GetFirstGear());
+		json.AddInt("ego_gear_index_top", m_Actuator.GetTopGear());
+		json.AddInt("ego_park_gear", m_Actuator.GetParkGear());
+		VehicleWheeledSimulation simulation = m_Actuator.GetSimulation();
+		string failure;
+		if (simulation && IsEgoAlive(failure))
+			json.AddInt("ego_gear_at_open", simulation.GetGear());
+		else
+			json.AddNull("ego_gear_at_open");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The episodes stream (owned by the session)
+	override bool OnSessionOpen(notnull DC_Session session)
+	{
+		if (session.GetFaultCase() == DC_Session.FAULT_ZERO_EGO)
+		{
+			m_bFaultEgoLost = true;
+			Print(LOG + "WARNING: fault case zero_ego: the ego counts as lost from the first check on", LogLevel.WARNING);
+		}
+
+		array<string> columns = {};
+		AddEpisodeColumns(columns);
+		// The session keeps the only strong reference (RegisterStream); a new object assigned straight to the weak
+		// member would be released at once
+		DC_ChunkWriter writer = new DC_ChunkWriter();
+		bool opened = writer.Open(session.GetSessionDir(), "episodes", columns, EPISODES_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
+		session.RegisterStream(writer);
+		m_Episodes = writer;
+		if (opened)
+			return true;
+
+		session.FailWrite("episodes: " + writer.GetFailure());
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void OnFrameStart(int renderFrame)
+	{
+		CheckEgo(false);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Liveness and identity first; then an episode may begin in a decision callback (the world-time grid, D-A)
+	override void OnStepPre(int physicsStep, float timeSlice)
+	{
+		if (!CheckEgo(false))
+			return;
+
+		if (m_iEpisodeId >= 0 || !m_Session.IsDecisionStep())
+			return;
+
+		if (m_Session.IsWarmupOver() && !m_Session.IsStopping())
+			TryBeginEpisode(physicsStep);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Liveness and identity again after the simulation, before any row of the step (order 10: before the streams)
+	override void OnStepPost(int physicsStep, float timeSlice, int worldMs)
+	{
+		if (!CheckEgo(true))
+			return;
+
+		m_iLastWorldMs = worldMs;
+		if (m_iEpisodeId >= 0 && physicsStep == m_iEpisodeStartStep)
+			m_iEpisodeStartWorldMs = worldMs;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! At a decision step, after its rows: the planned end or the driver's termination ends the episode here
+	override void OnStepDecide(int physicsStep)
+	{
+		// Destruction seen after this step's simulation: its rows are written, the session ends now (step L)
+		if (m_bDestroyedAfterStep)
+		{
+			EndDestroyed();
+			return;
+		}
+
+		if (m_iEpisodeId < 0 || !m_Session.IsDecisionStep())
+			return;
+
+		// The first terminal event wins: the reason latched when the planned end began, else the driver's
+		string reason = m_sStopTermination;
+		if (reason.IsEmpty())
+			reason = m_Recorder.GetTermination();
+
+		if (reason.IsEmpty())
+			return;
+
+		// The ego's collision row still pending (at most events.episode_end_wait_ms after its onset): the end waits
+		if (m_CrashWatch && m_CrashWatch.HoldEpisodeEnd(m_iSlotId))
+			return;
+
+		EndEpisode(physicsStep, reason);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The planned end begins: the episode's terminal reason is latched now (a termination the driver already
+	//! reported, else session_stop), so a later driver report cannot replace the earlier event
+	override void OnSessionStopping(string endReason)
+	{
+		if (m_iEpisodeId < 0 || !m_sStopTermination.IsEmpty())
+			return;
+
+		m_sStopTermination = m_Recorder.GetTermination();
+		if (m_sStopTermination.IsEmpty())
+			m_sStopTermination = TERMINATION_SESSION_STOP;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override bool IsDrained()
+	{
+		return m_iEpisodeId < 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The actuator's counters (session_end.json observed); an episode still open at the seal ends at the last step:
+	//! session_stop, or script_error after an error
+	override void OnSessionClosing(string endReason)
+	{
+		if (m_Actuator)
+		{
+			int driveStartWakes = m_Actuator.GetDriveStartWakes();
+			int sleepWakes = m_Actuator.GetSleepWakes();
+			int handbrakeResets = m_Actuator.GetPersistentHandbrakeResets();
+			int stepsWithoutGear = m_Actuator.GetManualStepsWithoutGear();
+			m_Session.NoteObserved("ego_drive_start_wakes", driveStartWakes.ToString());
+			m_Session.NoteObserved("ego_sleep_wakes", sleepWakes.ToString());
+			m_Session.NoteObserved("ego_persistent_handbrake_resets", handbrakeResets.ToString());
+			m_Session.NoteObserved("ego_manual_steps_without_gear", stepsWithoutGear.ToString());
+		}
+
+		// Pending crash rows first, so they precede episode_end and carry the episode id
+		if (m_CrashWatch)
+			m_CrashWatch.FlushPendingRows();
+
+		if (m_iEpisodeId < 0)
+			return;
+
+		// The first terminal event wins: the reason latched at the planned end, else a termination the driver already
+		// reported, else the session's
+		string reason = m_sStopTermination;
+		if (reason.IsEmpty())
+			reason = m_Recorder.GetTermination();
+
+		if (reason.IsEmpty())
+		{
+			reason = TERMINATION_SESSION_STOP;
+			if (DC_Session.IsErrorEndReason(endReason))
+				reason = TERMINATION_SCRIPT_ERROR;
+		}
+
+		EndEpisode(m_Session.GetLastPostStep(), reason);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The ego is parked and kept; on teardown only references are dropped
+	override void OnSessionRelease(bool teardown)
+	{
+		string failure;
+		if (!teardown && m_Actuator && IsEgoAlive(failure))
+			m_Actuator.Park();
+
+		m_Actuator = null;
+		m_Recorder = null;
+		m_CrashWatch = null;
+		m_Episodes = null;
+		m_Damage = null;
+		m_Ego = null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fails the session when the ego is lost: zero_ego before the first ctl row (DC_StreamRecorder.HasCtlRow), ego_lost
+	//! after it. A destroyed ego after the first ctl row ends it with ego_destroyed (not an error, dc-2.0 5.3) at the
+	//! terminal step L: afterStep (OnStepPost) lets this step's rows be written and ends in OnStepDecide; otherwise it
+	//! ends now
+	protected bool CheckEgo(bool afterStep)
+	{
+		string failure;
+		if (!IsEgoPresent(failure))
+		{
+			string reason = DC_Session.END_EGO_LOST;
+			if (!m_Recorder || !m_Recorder.HasCtlRow())
+				reason = DC_Session.END_ZERO_EGO;
+
+			m_Session.Fail(reason, failure);
+			return false;
+		}
+
+		if (!m_Damage || !m_Damage.IsDestroyed())
+			return true;
+
+		if (!m_Recorder || !m_Recorder.HasCtlRow())
+		{
+			m_Session.Fail(DC_Session.END_ZERO_EGO, "the ego is destroyed before the first ctl row");
+			return false;
+		}
+
+		if (afterStep)
+		{
+			m_bDestroyedAfterStep = true;
+			return true;
+		}
+
+		EndDestroyed();
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The crash rows at the terminal step L, then the end with ego_destroyed (the seal closes the episode at L)
+	protected void EndDestroyed()
+	{
+		if (m_CrashWatch)
+			m_CrashWatch.FinishDestroyedSlot(m_iSlotId);
+
+		m_Session.EndAtOnce(DC_Session.END_EGO_DESTROYED, "the ego is destroyed");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The ego exists, is not deleted and still carries its registered GetID token (C35); it may be destroyed
+	protected bool IsEgoPresent(out string failure)
+	{
+		failure = string.Empty;
+		if (m_bFaultEgoLost)
+		{
+			failure = "fault case zero_ego";
+			return false;
+		}
+
+		if (!m_Ego || m_Ego.IsDeleted())
+		{
+			failure = "the ego entity is gone";
+			return false;
+		}
+
+		return m_Registry.CheckIdentity(m_iSlotId, m_Ego, failure);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The ego is present (IsEgoPresent) and not destroyed
+	protected bool IsEgoAlive(out string failure)
+	{
+		failure = string.Empty;
+		if (!IsEgoPresent(failure))
+			return false;
+
+		if (m_Damage && m_Damage.IsDestroyed())
+		{
+			failure = "the ego is destroyed";
+			return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Asks the driver for an episode starting at this decision step
+	protected void TryBeginEpisode(int physicsStep)
+	{
+		DC_DriverInterface driver = m_Recorder.GetDriver();
+		if (!driver)
+			return;
+
+		// No episode after a crash until the cool-down passed and the ego can drive (dc-2.0 9.5.1). Tilted, immobile
+		// or burning can last forever: after events.episode_block_max_ms of it the session ends with ego_disabled (5.3)
+		string blocked;
+		bool disabled;
+		if (m_CrashWatch && m_CrashWatch.IsEpisodeBlocked(m_iSlotId, blocked, disabled))
+		{
+			if (blocked != m_sBlockedNoted)
+				Print(LOG + "WARNING: no new episode: " + blocked, LogLevel.WARNING);
+
+			m_sBlockedNoted = blocked;
+			int now = m_Session.GetWorldMs();
+			if (!disabled)
+			{
+				m_bDisabledTiming = false;
+				return;
+			}
+
+			if (!m_bDisabledTiming)
+			{
+				m_bDisabledTiming = true;
+				m_iDisabledSinceMs = now;
+				return;
+			}
+
+			int blockedMs = now - m_iDisabledSinceMs;
+			if (blockedMs >= m_CrashWatch.GetEpisodeBlockMaxMs())
+				m_Session.EndPlanned(DC_Session.END_EGO_DISABLED, "the ego stayed " + blocked + " between episodes for " + blockedMs.ToString() + " ms");
+
+			return;
+		}
+
+		m_sBlockedNoted = string.Empty;
+		m_bDisabledTiming = false;
+		// Admission handshake (dc-2.0 section 6): only a driver that will give the first command in this callback's
+		// Decide (or an initial command in BeginEpisode) is admitted; else nothing is committed and the next grid
+		// point asks again
+		if (!driver.CanDecide(physicsStep))
+		{
+			m_iAdmissionsDeferred++;
+			m_Session.NoteObserved("episode_admissions_deferred", m_iAdmissionsDeferred.ToString());
+			return;
+		}
+
+		DC_EpisodeInfo info = new DC_EpisodeInfo();
+		info.m_iSeed = m_Session.GetTrialSeed() + m_iNextEpisodeId;
+		if (!driver.BeginEpisode(m_iNextEpisodeId, physicsStep, info))
+			return;
+
+		if (s_aEpisodeModes.Find(info.m_sMode) < 0 || s_aDrivers.Find(info.m_sDriver) < 0)
+		{
+			m_Session.Fail(DC_Session.END_SCRIPT_ERROR, "driver episode mode '" + info.m_sMode + "' / driver '" + info.m_sDriver + "' cannot be recorded (modes E, D, H, A; drivers expert, policy, human, ai, none)");
+			return;
+		}
+
+		if (info.m_sVehicleCardId.IsEmpty())
+			info.m_sVehicleCardId = "none";
+
+		m_EpisodeInfo = info;
+		m_iEpisodeId = m_iNextEpisodeId;
+		m_iNextEpisodeId++;
+		m_iEpisodeStartStep = physicsStep;
+		m_iEpisodeStartWorldMs = m_Session.GetWorldMs();
+		ReadEpisodeEnvironment();
+		m_Session.SetEpisodeId(m_iEpisodeId);
+		m_Recorder.SetEpisode(info);
+		m_Session.LogEvent("episode_start", "route_id=" + DC_ProbeCsv.CleanField(info.m_sRouteId) + ";mode=" + info.m_sMode);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Weather and time at the episode start (fixed within the episode, dc-2.0 9.6)
+	protected void ReadEpisodeEnvironment()
+	{
+		m_sEpisodeWeather = "unknown";
+		ChimeraWorld world = ChimeraWorld.CastFrom(GetGame().GetWorld());
+		TimeAndWeatherManagerEntity weather;
+		if (world)
+			weather = world.GetTimeAndWeatherManager();
+
+		if (!weather)
+			return;
+
+		WeatherState state = weather.GetCurrentWeatherState();
+		if (state)
+			m_sEpisodeWeather = DC_ProbeCsv.CleanField(state.GetStateName());
+
+		m_fEpisodeTodH = weather.GetTimeOfTheDay();
+		m_fEpisodeRain = weather.GetRainIntensity();
+		m_fEpisodeFog = weather.GetFogAmount();
+		m_fEpisodeWetness = weather.GetCurrentWetness();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Driver notified, events episode_end, the episodes row, the episode cleared, the ego parked
+	protected void EndEpisode(int lastPhysicsStep, string terminationReason)
+	{
+		DC_DriverInterface driver = m_Recorder.GetDriver();
+		if (driver)
+			driver.EndEpisode(m_iEpisodeId, lastPhysicsStep, terminationReason);
+
+		m_Session.LogEvent("episode_end", "termination_reason=" + terminationReason);
+		WriteEpisodeRow(lastPhysicsStep, terminationReason);
+		Print(string.Format(LOG + "episode %1 ended at physics step %2: %3", m_iEpisodeId, lastPhysicsStep, terminationReason), LogLevel.NORMAL);
+
+		m_iEpisodeId = -1;
+		m_EpisodeInfo = null;
+		m_sStopTermination = string.Empty;
+		m_Session.SetEpisodeId(-1);
+		m_Recorder.ClearEpisode();
+		string failure;
+		if (IsEgoAlive(failure))
+			m_Actuator.Park();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One episodes row (dc-2.0 9.6)
+	protected void WriteEpisodeRow(int lastPhysicsStep, string terminationReason)
+	{
+		DC_EpisodeInfo info = m_EpisodeInfo;
+		VehicleWheeledSimulation simulation;
+		string failure;
+		if (m_Actuator && IsEgoPresent(failure))
+			simulation = m_Actuator.GetSimulation();
+
+		m_Row.Clear();
+		m_Row.AddInt(m_iEpisodeId);
+		m_Row.AddInt(m_iEpisodeStartStep);
+		m_Row.AddInt(lastPhysicsStep);
+		m_Row.AddInt(m_iEpisodeStartWorldMs);
+		m_Row.AddInt(m_iLastWorldMs);
+		m_Row.AddInt(m_iSlotId);
+		m_Row.AddString(DC_ProbeCsv.CleanField(m_Registry.GetEntityId(m_iSlotId)));
+		m_Row.AddString(DC_ProbeCsv.CleanField(m_sPrefab));
+		m_Row.AddString(DC_ProbeCsv.CleanField(info.m_sVehicleCardId));
+		m_Row.AddString(DC_ProbeCsv.CleanField(info.m_sRouteId));
+		m_Row.AddString(DC_ProbeCsv.CleanField(info.m_sRouteSha256));
+		m_Row.AddString(info.m_sMode);
+		m_Row.AddString(info.m_sDriver);
+		m_Row.AddFloat(info.m_fStyleSpeedFactor, 4);
+		m_Row.AddFloat(info.m_fStyleLaneOffsetM, 4);
+		m_Row.AddFloat(info.m_fStyleAlatMaxMps2, 4);
+		m_Row.AddString(m_sEpisodeWeather);
+		m_Row.AddFloat(m_fEpisodeTodH, 6);
+		m_Row.AddFloat(m_fEpisodeRain, 6);
+		m_Row.AddFloat(m_fEpisodeFog, 6);
+		m_Row.AddFloat(m_fEpisodeWetness, 6);
+		m_Row.AddInt(info.m_iSeed);
+		m_Row.AddString(terminationReason);
+		m_Row.AddString(DC_ProbeCsv.CleanField(info.m_sExpertSha));
+		m_Row.AddString(DC_ProbeCsv.CleanField(info.m_sLlcSha));
+		m_Row.AddString(DC_Session.NAV_VERSION);
+		if (simulation)
+		{
+			m_Row.AddFloat(simulation.GetNoiseSteerSensitivity(), 6);
+			m_Row.AddFloat(simulation.GetRoughnessSensitivity(), 6);
+		}
+		else
+		{
+			m_Row.AddFloat(-1, 6);
+			m_Row.AddFloat(-1, 6);
+		}
+
+		m_Row.AddEmpty();		// veh_dirt_body: reserved
+		m_Row.AddEmpty();		// veh_dirt_glass: reserved
+		if (m_Episodes && !m_Session.HasWriteFailure() && !m_Episodes.AddRow(m_Row, m_iEpisodeId, m_iLastWorldMs))
+			m_Session.FailWrite("episodes: " + m_Episodes.GetFailure());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every column of episodes in dc-2.0 9.6 order
+	static void AddEpisodeColumns(notnull array<string> columns)
+	{
+		array<string> names = {"episode_id", "start_physics_step", "end_physics_step", "start_world_ms", "end_world_ms", "ego_slot_id", "ego_entity_id", "ego_prefab", "vehicle_card_id", "route_id", "route_sha256", "mode", "driver", "style_speed_factor", "style_lane_offset_m", "style_alat_max_mps2", "env_weather_state", "env_tod_h_start", "env_rain", "env_fog", "env_wetness", "seed", "termination_reason", "expert_sha", "llc_sha", "nav_version", "noise_steer_sensitivity", "roughness_sensitivity", "veh_dirt_body", "veh_dirt_glass"};
+		foreach (string name : names)
+		{
+			columns.Insert(name);
+		}
+	}
+}

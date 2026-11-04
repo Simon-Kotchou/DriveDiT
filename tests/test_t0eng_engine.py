@@ -12,6 +12,7 @@ Every fixture is generated here, in the file layout DC_ProbeEngine writes, into 
 import contextlib
 import io
 import os
+import re
 import shutil
 import sys
 import unittest
@@ -28,6 +29,30 @@ import e20_settings  # noqa: E402
 LAUNCH = "20261022T010203Z-wb-abcd"
 DT = 1.0 / 60.0
 COMPLETE = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done", "note": ""}
+ENFORCE_ENGINE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_ProbeEngine.c")
+# e10_steps.csv as DC_ProbeEngine.StartE10 writes it: the columns of the plays written before 2026-10-22 evening, then
+# the engine's raw step-callback argument and the steps the dispatched step covers (DC_ProbeRunner STEP TIMING)
+E10_FIXTURE_STEP_COLUMNS = ("physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre",
+                            "world_time_ms_post", "timeslice_post_s", "render_frame_post", "world_ts_ms_post")
+E10_RAW_STEP_COLUMNS = ("engine_timeslice_pre_s", "engine_timeslice_post_s", "covered_steps")
+
+
+def enforce_e10_step_row():
+    """(columns, value counts) of the e10_steps.csv row in DC_ProbeEngine.c: the literal stepColumns list of StartE10
+    and the number of m_Row.Add* calls on the path that takes every 'if' and on the one that takes every 'else' of the
+    row block in OnProbePostSimulate (DC_ProbeCsv.WriteRow fails the probe on any other count)."""
+    with open(ENFORCE_ENGINE, "r", encoding="ascii") as handle:
+        source = handle.read()
+    columns = re.search(r"array<string> stepColumns = \{([^}]*)\};", source)
+    block = re.search(r"if \(m_E10Steps\)\s*\{(.*?)m_E10Steps\.WriteRow\(m_Row\);", source, re.S)
+    if not columns or not block:
+        raise AssertionError("stepColumns or the e10_steps row block not found in %s" % ENFORCE_ENGINE)
+    body = block.group(1)
+    branch = r"(?:\{[^{}]*\}|[^;{}]*;)"
+    if_path = re.sub(r"\belse\s*" + branch, "", body)
+    else_path = re.sub(r"\belse\b", "", re.sub(r"\bif\s*\([^()]*\)\s*" + branch, "", body))
+    adds = re.compile(r"m_Row\.Add\w+\(")
+    return re.findall(r'"([^"]+)"', columns.group(1)), (len(adds.findall(if_path)), len(adds.findall(else_path)))
 
 
 def header(probe, **extra):
@@ -55,37 +80,53 @@ class EngineAnalysisTest(unittest.TestCase):
     # --------------------------------------------------------------------------------------------
     # E-10
     # --------------------------------------------------------------------------------------------
-    def e10_play(self, seconds=10, k=3, drop_step=None, drop_telemetry=None, n=1, step_rows=True):
+    def e10_play(self, seconds=10, k=3, drop_step=None, drop_telemetry=None, n=1, step_rows=True, dt=DT,
+                 source="simulate", fixed_slice=None, raw_columns=False, covered=None, footer_extra=None):
+        """raw_columns: the engine_timeslice_* / covered_steps columns of DC_ProbeEngine (covered: {step: n});
+        source fixedframe counts EOnFixedFrame / EOnPostFixedFrame instead of EOnSimulate / EOnPostSimulate;
+        fixed_slice: engine.fixed_time_slice_s of the header (default dt)."""
         t0 = 5000.5
-        n_steps = int(round(seconds / DT))
+        n_steps = int(round(seconds / dt))
         steps, frames, telemetry = [], [], []
         totals = [0, 0]
+        fallback = source == "fixedframe"
         for i in range(1, n_steps + 1):
-            t = t0 + i * DT * 1000.0
+            t = t0 + i * dt * 1000.0
             frame = 100 + i
             posted = i != drop_step
             totals[0] += 1
             totals[1] += 1 if posted else 0
             if posted:
-                steps.append([i, "%.3f" % t, "%.6f" % DT, frame, "%.3f" % t, "%.6f" % DT, frame,
-                              "%.3f" % (t - t0)])
-            frames.append([frame, "%.3f" % t, 1000 + i * 17, "%.6f" % DT, 1, 1, 1 if posted else 0, 0, 0,
-                           totals[0], totals[1], 0, 0, "60.000", 0, "simulate"])
+                row = [i, "%.3f" % t, "%.6f" % dt, frame, "%.3f" % t, "%.6f" % dt, frame, "%.3f" % (t - t0)]
+                if raw_columns:
+                    steps_covered = (covered or {}).get(i, 1)
+                    row += ["%.6f" % (dt * steps_covered), "%.6f" % (dt * steps_covered), steps_covered]
+                steps.append(row)
+            counts = [0, 0, 1, 1 if posted else 0] if fallback else [1, 1 if posted else 0, 0, 0]
+            running = [0, 0, totals[0], totals[1]] if fallback else [totals[0], totals[1], 0, 0]
+            frames.append([frame, "%.3f" % t, 1000 + i * 17, "%.6f" % dt, 1] + counts + running
+                          + ["60.000", 0, source])
             if posted and i % k == 0 and i != drop_telemetry:
                 telemetry.append([i, "%.3f" % t, k, "-1.000", "%.3f" % (t - t0)])
+        step_columns = list(E10_FIXTURE_STEP_COLUMNS)
+        if raw_columns:
+            step_columns += list(E10_RAW_STEP_COLUMNS)
         csvs = {
             "e10_frames": (["render_frame", "world_time_ms", "tick_ms", "frame_timeslice_s", "fixed_steps",
                             "n_simulate", "n_postsimulate", "n_fixedframe", "n_postfixedframe", "simulate_total",
                             "postsimulate_total", "fixedframe_total", "postfixedframe_total", "fps_avg", "paused",
                             "step_source"], frames),
-            "e10_steps": (["physics_step", "world_time_ms_pre", "timeslice_pre_s", "render_frame_pre",
-                           "world_time_ms_post", "timeslice_post_s", "render_frame_post", "world_ts_ms_post"], steps),
+            "e10_steps": (step_columns, steps),
             "e10_telemetry": (["physics_step", "world_time_ms", "k", "speed_kmh", "world_ts_ms"], telemetry),
         }
         if not step_rows:
             del csvs["e10_steps"]
-        h = header("e10", **{"params.k": str(k), "params.dt_s": "%.6f" % DT, "params.m_fE10TelemetryPeriodS": "0.05"})
-        return pc.write_synthetic_play(self.play("e10", n), h, csvs, footer=COMPLETE)
+        slice_s = dt if fixed_slice is None else fixed_slice
+        h = header("e10", **{"params.k": str(k), "params.dt_s": "%.6f" % slice_s,
+                             "params.m_fE10TelemetryPeriodS": "0.05", "engine.fixed_time_slice_s": "%.6f" % slice_s})
+        footer = dict(COMPLETE)
+        footer.update(footer_extra or {})
+        return pc.write_synthetic_play(self.play("e10", n), h, csvs, footer=footer)
 
     def test_e10_sixty_steps_per_second_pass(self):
         code, out = run(e10_ticks, [self.e10_play()])
@@ -95,6 +136,75 @@ class EngineAnalysisTest(unittest.TestCase):
         self.assertIn("[INFO] world_time_resolution: undetermined", out)
         self.assertIn("[INFO] world_timestamp: WorldTimestamp", out)
         self.assertTrue(out.rstrip().endswith("RESULT E-10: PASS"), out)
+
+    def test_e10_runner_step_timing_is_info_only(self):
+        d = self.e10_play()
+        footer = dict(COMPLETE)
+        footer.update({"clock.step_source": "fixedframe", "clock.step_decided_by": "frame",
+                       "clock.step_dt_s": "0.033333", "clock.step_dt_source": "engine",
+                       "clock.measured_fixed_step_s": "0.033357", "clock.engine_fixed_steps": "1069",
+                       "clock.merged_fixed_steps": "3", "clock.fixed_time_slice_min_s": "0.100000",
+                       "clock.fixed_time_slice_max_s": "0.100000", "clock.fixedframe_timeslice_min_s": "0.033333",
+                       "clock.fixedframe_timeslice_max_s": "0.100000",
+                       "clock.fixedframe_timeslice_one_step_s": "0.033333",
+                       "clock.fixedframe_frame_mismatches": "0"})
+        with open(os.path.join(d, pc.RUN_FOOTER), "w", encoding="ascii", newline="") as f:
+            f.write("".join("%s=%s\n" % kv for kv in footer.items()))
+        code, out = run(e10_ticks, [d])
+        self.assertEqual(code, 0, out)
+        self.assertIn("[INFO] runner_step_timing: step source fixedframe decided by frame; step dt 0.033333 s "
+                      "(engine, 30.00 steps/s); measured fixed step 0.033357 s over 1069 engine fixed steps, 3 merged",
+                      out)
+        self.assertIn("GetFixedTimeSlice 0.100000..0.100000 s", out)
+        self.assertIn("under another frame number than the last EOnFrame 0", out)
+        self.assertTrue(out.rstrip().endswith("RESULT E-10: PASS"), out)
+
+    def test_e10_without_runner_step_timing_has_no_info(self):
+        code, out = run(e10_ticks, [self.e10_play()])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("runner_step_timing", out)
+        self.assertNotIn("steps_per_second_vs_step_dt", out)
+        self.assertIn("[INFO] engine_timeslice: no engine_timeslice_post_s values", out)
+
+    def test_e10_fallback_fail_against_a_constant_fixed_time_slice_is_marked(self):
+        # 1.8.0.13 fallback (stall-fix review R-4): 30 dispatched steps per world second, GetFixedTimeSlice 0.1, step
+        # dt 1/30. The r2 rule 1/dt +-1 still FAILs; the detail says why, and the INFO line holds the count against
+        # 1/step dt.
+        d = self.e10_play(dt=1.0 / 30.0, source="fixedframe", fixed_slice=0.1, k=1,
+                          footer_extra={"clock.step_source": "fixedframe", "clock.step_dt_s": "0.033333"})
+        code, out = run(e10_ticks, [d])
+        self.assertEqual(code, 1, out)
+        self.assertIn("[FAIL] steps_per_world_second: 10.00 +-1 in 0/9 full seconds", out)
+        self.assertIn("expected in the fixedframe fallback: GetFixedTimeSlice 0.100000 s is not the runner's step dt "
+                      "0.033333 s", out)
+        self.assertIn("[INFO] steps_per_second_vs_step_dt: 30.00 +-1 (1/clock.step_dt_s 0.033333 s) in 9/9 full "
+                      "seconds", out)
+        self.assertIn("[PASS] post_simulate_every_step:", out)
+        self.assertIn("[PASS] telemetry_every_k:", out)
+
+    def test_e10_a_real_rate_failure_is_not_marked_as_expected(self):
+        # Fallback with GetFixedTimeSlice = step dt = 1/30 s, but the steps come at 20/s: a real FAIL, no "expected"
+        d = self.e10_play(dt=0.05, source="fixedframe", fixed_slice=1.0 / 30.0, k=1,
+                          footer_extra={"clock.step_source": "fixedframe", "clock.step_dt_s": "0.033333"})
+        code, out = run(e10_ticks, [d])
+        self.assertEqual(code, 1, out)
+        self.assertIn("[FAIL] steps_per_world_second: 30.00 +-1 in 0/9 full seconds", out)
+        self.assertIn("[INFO] steps_per_second_vs_step_dt: 30.00 +-1 (1/clock.step_dt_s 0.033333 s) in 0/9", out)
+        self.assertNotIn("expected in the fixedframe fallback", out)
+
+    def test_e10_engine_timeslice_and_covered_steps_are_info(self):
+        d = self.e10_play(dt=1.0 / 30.0, source="fixedframe", k=1, raw_columns=True, covered={100: 2, 200: 3})
+        code, out = run(e10_ticks, [d])
+        self.assertEqual(code, 0, out)
+        self.assertIn("[INFO] engine_timeslice: raw time slice 0.033333..0.100000 s (p50 0.033333) over 300 step rows; "
+                      "covered_steps > 1 on 2 row(s), 3 merged engine step(s)", out)
+
+    def test_e10_step_columns_come_from_the_enforce_producer(self):
+        columns, adds = enforce_e10_step_row()
+        self.assertEqual(columns, list(E10_FIXTURE_STEP_COLUMNS + E10_RAW_STEP_COLUMNS))
+        self.assertEqual(adds, (len(columns), len(columns)), "values per e10_steps row (if path, else path)")
+        missing = [name for name in e10_ticks.STEP_COLUMNS if name not in columns]
+        self.assertEqual(missing, [], "e10_ticks.STEP_COLUMNS names the producer does not write")
 
     def test_e10_without_step_rows_is_incomplete(self):
         code, out = run(e10_ticks, [self.e10_play(step_rows=False)])

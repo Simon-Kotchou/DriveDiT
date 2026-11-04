@@ -30,12 +30,27 @@ measured. Auto-gear works or a scripted gearbox is needed. Recorded whether it w
                            v x heading rate) on the steering excite steps (centripetal acceleration points into a
                            right turn); PASS when both are measured, the detail says whether they match
   gearbox                  "automatic works" when cur_gear rises in gear_observe (cmd_gear -1) while speed rises,
-                           else "scripted gearbox needed"; INFO gear_scripted honoured or overridden, shift loops
-  force_enable_simulation  "not needed" (move_check ok), "needed" (only move_check_forced moved), "does not help"
+                           else "scripted gearbox needed"; a manual gearbox (run header vehicle.gearbox=manual, or
+                           vehicle.has_automatic_gearbox=0 in a play before the gearbox fix) answers "scripted gearbox
+                           needed" without gear_observe (the probe skips it there, note manual_gearbox); INFO
+                           gear_scripted honoured or overridden, shift loops
+  force_enable_simulation  "not needed" (move_check ok), "needed" (only move_check_forced moved), "does not help";
+                           the detail names the physics wake the answer was taken with (wake_condition: the
+                           Physics.SetActive at each handbrake release, plus the sleep re-wake on driving steps since
+                           the review fix, or none in a play before the wake), so a consumer that drops the wake
+                           knows the answer does not carry over
   INFO                     engine_on 0 steps while driving (stall watch, expected 0 on 1.8), persistent-handbrake
                            re-releases, the level-correlation peak (dead time plus lag), the rerun19.* checklist,
-                           gear_indices (cur_gear at standstill and while moving forward; TBD-7: no phase drives in
-                           reverse, so the reverse and neutral indices stay unmeasured)
+                           gear_indices (the indices the probe derived from the gear counts with the vanilla rule,
+                           vehicle.gear_index_*, TBD-7, then cur_gear at standstill and while moving forward; no phase
+                           drives in reverse), gear_policy (manual gearbox: the actuator's shift policy, cmd_gear on
+                           the driving steps outside gear_scripted, readback share, shifts, SetGear calls),
+                           physics_wake (Physics.SetActive calls at handbrake releases and how many found the body
+                           asleep, and the sleep re-wakes on later driving steps), shift_loops (windows in world time:
+                           world_time_ms, else the running sum of timeslice_s), merged_fixed_steps (also for e02a: the
+                           probe's engine fixed steps that the 1.8 fixedframe fallback merged into one call, footer
+                           minus header; above 1% the step-based timing results need review). e02a also prints
+                           gear_policy and physics_wake.
   RESULT PASS when the car moved and every identification has a value.
 
 E-02a (r2 4.4: "fit usable by llc_v1"): per cell the steady window is the last half of excite, steps within
@@ -66,6 +81,7 @@ SHIFT_LOOP_WINDOW_S = 2.0
 SHIFT_LOOP_MAX_CHANGES = 2
 SHIFT_LOOP_SPEED_KMH = 5.0
 GEAR_HONOURED_SHARE = 0.9
+MERGED_SHARE_LIMIT = 0.01
 
 CHANNELS = (
     ("steer", "cmd_steer", "input_pre_steer", "input_post_steer"),
@@ -377,7 +393,15 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
     # gearbox
     observe = steps.by_phase.get("gear_observe", [])
     observe = [r for r in observe if r["segment"] == "excite"]
-    if not observe:
+    manual, manual_source = gearbox_is_manual(play)
+    if not observe and manual:
+        observe_row = next((r for r in phases if r["phase"] == "gear_observe"), None)
+        observe_text = "not in e01_phases.csv"
+        if observe_row is not None:
+            observe_text = "%s (%s)" % (observe_row["result"], observe_row.get("note") or "-")
+        verdict.check("gearbox", True, "scripted gearbox needed: manual gearbox (%s); gear_observe %s; the probe's "
+                      "shift policy selects the gears (INFO gear_policy)" % (manual_source, observe_text))
+    elif not observe:
         verdict.check("gearbox", None, "no gear_observe excite steps")
     else:
         gears = [int(float(r["cur_gear"])) for r in observe]
@@ -437,12 +461,15 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
             decision = None
         else:
             decision = "does not help"
-        verdict.check("force_enable_simulation", decision is not None, "%s (move_check %s, move_check_forced %s)" % (
-            decision or "undecided", checks["move_check"]["result"],
-            checks["move_check_forced"]["result"] if "move_check_forced" in checks else "-"))
+        forced_result = checks["move_check_forced"]["result"] if "move_check_forced" in checks else "-"
+        verdict.check("force_enable_simulation", decision is not None,
+                      "%s (move_check %s, move_check_forced %s); %s" % (
+                          decision or "undecided", checks["move_check"]["result"], forced_result,
+                          wake_condition(play, phases)))
 
     # INFO
-    verdict.info("gear_indices", gear_indices(steps))
+    verdict.info("gear_indices", gear_indices(steps, play.header))
+    drive_infos(verdict, play, steps, phases)
     stalled = sum(1 for r in steps.rows if r["segment"] in DRIVING and num(r["engine_on"]) == 0)
     verdict.info("engine_off_steps", "%d driving steps with engine_on 0 (stall watch; expected 0 on 1.8)" % stalled)
     resets = 0
@@ -452,6 +479,9 @@ def analyse_e01(play, max_lag=30, max_long_lag=120):
                 resets += int(float(token.split(":", 1)[1] or 0))
     verdict.info("persistent_handbrake_resets", "%d steps on which the controller had set it again" % resets)
     verdict.info("phases", " ".join("%s=%s" % (r["phase"], r["result"]) for r in phases))
+    merged = merged_steps_text(play)
+    if merged:
+        verdict.info("merged_fixed_steps", merged)
     for key in sorted(k for k in play.header if k.split("params.", 1)[-1].startswith("rerun19.")):
         verdict.info(key.split("params.", 1)[-1], play.header[key])
     return verdict
@@ -510,9 +540,143 @@ def local_axes(verdict, steps, steer_phases):
                           matches if measured else "undecided"))
 
 
-def gear_indices(steps):
-    """cur_gear values at standstill (settle, < 0.5 km/h) and while moving forward (driving, >= 5 km/h, vel_l_z > 0).
-    Reverse and neutral cannot be told from these: no E-01 phase drives in reverse (TBD-7)."""
+def merged_steps_text(play):
+    """The probe's own merged fixed steps (DC_ProbeRunner fixedframe fallback): run_footer.txt clock.engine_fixed_steps
+    and clock.merged_fixed_steps minus the run header's clock.start_* values. None for a play written before those
+    keys existed. The phases count covered engine steps, so their lengths hold in world time, but a dispatched step
+    that covers n merged engine steps holds its command for all n and is one row: above MERGED_SHARE_LIMIT the
+    step-based results (delays in steps, PRBS bit edges, kappa windows) need review."""
+    footer = play.footer or {}
+    names = ("engine_fixed_steps", "merged_fixed_steps")
+    start = [probe_common.to_int(play.header.get("clock.start_" + name)) for name in names]
+    end = [probe_common.to_int(footer.get("clock." + name)) for name in names]
+    if None in start or None in end:
+        return None
+    engine = end[0] - start[0]
+    merged = end[1] - start[1]
+    share = float(merged) / engine if engine > 0 else 0.0
+    text = "%d of %d engine fixed steps during the probe were merged into a fallback call (%.2f%%)" % (
+        merged, engine, 100.0 * share)
+    if share > MERGED_SHARE_LIMIT:
+        text += "; above %.0f%%: the step-based timing results need review" % (100.0 * MERGED_SHARE_LIMIT)
+    return text
+
+
+def gearbox_is_manual(play):
+    """(True|False|None, source text): run header vehicle.gearbox (DC_ProbeActuator.AppendGearboxLines), else
+    vehicle.has_automatic_gearbox (plays before the gearbox fix, e.g. probe run 2 of 2026-10-22)."""
+    kind = play.header.get("vehicle.gearbox")
+    if kind in ("manual", "automatic"):
+        return kind == "manual", "vehicle.gearbox=%s" % kind
+    automatic = play.header.get("vehicle.has_automatic_gearbox")
+    if automatic in ("0", "1"):
+        return automatic == "0", "vehicle.has_automatic_gearbox=%s" % automatic
+    return None, "gearbox kind not in the run header"
+
+
+def gear_policy_text(play, steps):
+    """INFO gear_policy: the shift policy of a manual gearbox (run header gear_policy.*) and what the driving steps
+    outside gear_scripted show: cmd_gear (the policy gear), the share of steps whose readback (cur_gear or
+    input_post_gear) equals it, the gears used and the cmd_gear changes. None when the play has neither."""
+    rows = []
+    for row in steps.rows:
+        cmd = num(row["cmd_gear"])
+        if row["segment"] in DRIVING and row["phase"] != "gear_scripted" and cmd is not None and cmd >= 0:
+            rows.append(row)
+    header = play.header
+    if not rows and "gear_policy.active" not in header:
+        return None
+    shown = 0
+    used = {}
+    changes = 0
+    previous = None
+    for row in rows:
+        cmd = int(num(row["cmd_gear"]))
+        used[cmd] = used.get(cmd, 0) + 1
+        if num(row["cur_gear"]) == cmd or num(row["input_post_gear"]) == cmd:
+            shown += 1
+        if previous is not None and previous[0] == row["phase"] and previous[1] != cmd:
+            changes += 1
+        previous = (row["phase"], cmd)
+    share = "%.0f%%" % (100.0 * shown / len(rows)) if rows else "n/a"
+    return ("active %s (up >= %s rpm, down <= %s rpm, >= %s s apart, first below %s km/h, clutch dip %s s); %d driving "
+            "steps with a policy gear, readback = cmd_gear on %s; gears used %s; %d changes on driving steps "
+            "(header: shifts %s, SetGear calls %s, re-asserts %s)" % (
+                header.get("gear_policy.active", "n/a"), header.get("gear_policy.upshift_rpm", "?"),
+                header.get("gear_policy.downshift_rpm", "?"), header.get("gear_policy.min_shift_s", "?"),
+                header.get("gear_policy.first_below_kmh", "?"), header.get("gear_policy.clutch_dip_s", "?"),
+                len(rows), share, ", ".join("%d (%d steps)" % item for item in sorted(used.items())) or "none",
+                changes, header.get("gear_policy.shifts", "n/a"), header.get("gear_policy.setgear_calls", "n/a"),
+                header.get("gear_policy.reasserts", "n/a")))
+
+
+def note_totals(rows, keys):
+    """Sums of the integer note tokens <key>:<n> over the phase/cell rows; None for a key no row carries."""
+    totals = {}
+    for row in rows:
+        for token in (row.get("note") or "").split("/"):
+            key, _, value = token.partition(":")
+            if key in keys:
+                totals[key] = totals.get(key, 0) + int(num(value) or 0)
+    return {key: totals.get(key) for key in keys}
+
+
+def physics_wake_text(play, rows):
+    """INFO physics_wake: Physics.SetActive(ActiveState.ACTIVE) at the handbrake releases, from the run header
+    (physics_wake.*, appended at the probe stop) or else the sum of the phase/cell notes wakes:/asleep_at_wake:; then
+    the sleep re-wakes on the later driving steps (physics_wake.sleep_wakes / note sleep_wakes:) when recorded."""
+    header = play.header
+    totals = note_totals(rows, ("wakes", "asleep_at_wake", "sleep_wakes"))
+    if "physics_wake.calls" in header:
+        text = "%s calls at handbrake releases, %s with the body asleep before (Physics.IsActive 0), %s without " \
+               "physics" % (header["physics_wake.calls"], header.get("physics_wake.asleep_before", "?"),
+                            header.get("physics_wake.no_physics", "?"))
+        sleep = header.get("physics_wake.sleep_wakes")
+        if sleep is not None:
+            text += "; %s sleep re-wakes on driving steps" % sleep
+        return text + " (run header)"
+    if totals["wakes"] is None and totals["asleep_at_wake"] is None:
+        return "not recorded (a play before the physics wake)"
+    text = "%d calls at handbrake releases, %d with the body asleep before" % (
+        totals["wakes"] or 0, totals["asleep_at_wake"] or 0)
+    if totals["sleep_wakes"] is not None:
+        text += "; %d sleep re-wakes on driving steps" % totals["sleep_wakes"]
+    return text + " (phase notes)"
+
+
+def wake_condition(play, rows):
+    """The physics wake the move checks ran with (review R-3): the ForceEnableSimulation answer holds only for a driver
+    that wakes the body the same way (DD-4-min Mode A does both)."""
+    header = play.header
+    totals = note_totals(rows, ("wakes", "sleep_wakes"))
+    rewake = "physics_wake.sleep_wakes" in header or "IsActive false" in header.get("physics_wake.rule", "")
+    if rewake or totals["sleep_wakes"] is not None:
+        return "with Physics.SetActive at each handbrake release and on every driving step that found the body asleep"
+    if any(key in header for key in ("physics_wake.rule", "physics_wake.calls")) or totals["wakes"] is not None:
+        return "with Physics.SetActive at each handbrake release"
+    return "without a physics wake (a play before the wake)"
+
+
+def drive_infos(verdict, play, steps, rows):
+    """INFO gear_policy (when the play has a policy) and physics_wake, for e01 (rows: e01_phases) and e02a (rows:
+    e02a_cells)."""
+    policy = gear_policy_text(play, steps)
+    if policy is not None:
+        verdict.info("gear_policy", policy)
+    verdict.info("physics_wake", physics_wake_text(play, rows))
+
+
+def gear_indices(steps, header=None):
+    """The indices DC_ProbeActuator derived from the gear counts with the vanilla rule (run header
+    vehicle.gear_index_*, TBD-7), then the cur_gear values at standstill (settle, < 0.5 km/h) and while moving forward
+    (driving, >= 5 km/h, vel_l_z > 0). No E-01 phase drives in reverse."""
+    header = header or {}
+    derived = ""
+    if header.get("vehicle.gear_index_neutral") is not None:
+        derived = "TBD-7 from the gear counts (vanilla rule): reverse below %s, neutral %s, first %s, top %s (gearbox " \
+                  "%s); " % (header["vehicle.gear_index_neutral"], header["vehicle.gear_index_neutral"],
+                             header.get("vehicle.gear_index_first", "?"), header.get("vehicle.gear_index_top", "?"),
+                             header.get("vehicle.gearbox", "?"))
     standstill, forward = {}, {}
     for row in steps.rows:
         gear = num(row["cur_gear"])
@@ -527,29 +691,46 @@ def gear_indices(steps):
     def text(counts):
         return ", ".join("%d (%d steps)" % item for item in sorted(counts.items())) or "none"
 
+    if derived:
+        return derived + "standstill cur_gear %s; moving forward cur_gear %s; reverse not driven" % (
+            text(standstill), text(forward))
     return "standstill cur_gear %s; moving forward cur_gear %s; reverse and neutral not measured (TBD-7)" % (
         text(standstill), text(forward))
 
 
+def row_seconds(rows):
+    """World seconds of each step row of one phase (rows in step order): world_time_ms / 1000 when every row has it,
+    else the running sum of timeslice_s. Never physics_step x timeslice_s: on a merged fallback step timeslice_s is
+    n x dt (DC_ProbeRunner STEP TIMING), so that product jumps to n times the row's real time."""
+    world = [num(row.get("world_time_ms")) for row in rows]
+    if rows and None not in world:
+        return [w / 1000.0 for w in world]
+    out, total = [], 0.0
+    for row in rows:
+        total += num(row["timeslice_s"]) or 0.0
+        out.append(total)
+    return out
+
+
 def count_shift_loops(steps):
-    """Windows of SHIFT_LOOP_WINDOW_S with more than SHIFT_LOOP_MAX_CHANGES cur_gear changes while the speed changed
-    by less than SHIFT_LOOP_SPEED_KMH (counted once per window start, windows do not overlap)."""
+    """Windows of SHIFT_LOOP_WINDOW_S world seconds (row_seconds) with more than SHIFT_LOOP_MAX_CHANGES cur_gear changes
+    while the speed changed by less than SHIFT_LOOP_SPEED_KMH (counted once per window start, windows do not
+    overlap)."""
     loops = 0
     for rows in steps.by_phase.values():
         changes = []
         previous = None
-        for row in rows:
+        for row, t in zip(rows, row_seconds(rows)):
             if row["segment"] not in DRIVING:
                 previous = None
                 continue
             gear = int(float(row["cur_gear"]))
-            t = int(row["physics_step"]) * (num(row["timeslice_s"]) or 0.0)
             if previous is not None and gear != previous:
                 changes.append((t, num(row["speed_kmh"]) or 0.0))
             previous = gear
         i = 0
         while i < len(changes):
-            window = [c for c in changes[i:] if c[0] - changes[i][0] <= SHIFT_LOOP_WINDOW_S]
+            window = [c for c in changes[i:] if 0.0 <= c[0] - changes[i][0] <= SHIFT_LOOP_WINDOW_S]
             speeds = [c[1] for c in window]
             if len(window) > SHIFT_LOOP_MAX_CHANGES and max(speeds) - min(speeds) < SHIFT_LOOP_SPEED_KMH:
                 loops += 1
@@ -656,6 +837,10 @@ def analyse_e02a(play, min_cells=3, min_r2=0.9, max_alat=4.0, steady_kmh=1.0, mi
         verdict.info("flagged", line)
     verdict.info("usable", "fit usable by llc_v1: %s [design target; E-02Q at T3 qualifies]" % (
         "yes" if usable else "no"))
+    drive_infos(verdict, play, steps, cells)
+    merged = merged_steps_text(play)
+    if merged:
+        verdict.info("merged_fixed_steps", merged)
     return verdict
 
 

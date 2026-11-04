@@ -14,7 +14,8 @@
 //   BeginDriver    sha256 self-test; the route as loaded (a refused route refuses readiness); vehicle card for the
 //                  session's pin, accepted by llc_v1's card rules (use_class from the launch record); llc_sha and
 //                  expert_sha = sha256 of DC_LLCv1.c and DC_ExpertHL.c as deployed; stamps and signs to session.json
-//                  control.*;
+//                  control.*; then every vehicle gate of the world is opened (DC_Gates, m_bOpenGatesAtStart) and
+//                  checked GATE_CHECK_AFTER_S later;
 //   CanDecide      the admission handshake before BeginEpisode: true only in a decision callback whose PostStep can
 //                  evaluate the expert (CanEvaluate), so an admitted episode's first Decide never returns false;
 //   BeginEpisode   in a decision callback after the warm-up, when the ego stands at the route start (distance,
@@ -826,8 +827,13 @@ class DC_ExpertDriver : DC_DriverInterface
 	[Attribute("1", UIWidgets.Slider, "... and below this speed [km/h]", "0.1 10 0.1", category: "Episodes")]
 	protected float m_fStartMaxKmh;
 
+	// === WORLD ===
+	[Attribute("1", UIWidgets.CheckBox, "Open every vehicle gate of the world once at the driver's start (DC_Gates, the DD-1 director's opener: bar gates and wide metal gates by their vehicle navmesh link, building doors skipped); two closed BarGate_01 lie on the T0 loop (s about 1026 m and 2470 m) and the expert would hit them. Every leaf is checked GATE_CHECK_AFTER_S later", category: "World")]
+	protected bool m_bOpenGatesAtStart;
+
 	// === CONSTANTS ===
 	static const string TERMINATION_STUCK = "stuck";	//!< episodes.termination_reason and events kind (dc-2.0 9.5, 9.6)
+	static const int GATE_CHECK_AFTER_S = 10;			//!< the gate check after the opening [s of world time], as the director's
 
 	// === STATE ===
 	protected DC_DriverContext m_Context;
@@ -858,6 +864,11 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected int m_iSamples;
 	protected float m_fSumAbsLateral;
 	protected float m_fMaxAbsLateral;
+
+	// vehicle gates
+	protected ref DC_Gates m_Gates;			//!< the opener (its door leaves) until the check
+	protected float m_fGatesOpenedWorldMs;	//!< BaseWorld.GetWorldTime() at the opening [ms]
+	protected bool m_bGatesChecked;
 
 	//------------------------------------------------------------------------------------------------
 	//! The route start facing along the route (y from the surface, by DC_EgoSession)
@@ -954,6 +965,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		ctx.Log(string.Format("route %1 (%2, split %3, %4 m, %5 points) sha256 %6; speed profile %7..%8 km/h", m_Route.m_sRouteId, m_Route.m_sPath, m_Route.m_sSplit, lengthM.ToString(-1, 1), m_Route.GetPointCount(), m_Route.m_sSha256, lowestKmh.ToString(-1, 1), highestKmh.ToString(-1, 1)));
 		ctx.Log(string.Format("%1 llc_sha %2, %3 expert_sha %4", DC_LLCv1.VERSION, m_sLlcSha, DC_ExpertHL.VERSION, m_sExpertSha));
 		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, engine_off after %8 s, timeout %9 s; collision and rollover only from the core's crash watch", m_fEndToleranceM, m_fDeviationM, corridorText, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fEngineOffS, m_fEpisodeTimeoutS));
+		OpenGates(ctx);
 		m_bReady = true;
 		return true;
 	}
@@ -975,6 +987,7 @@ class DC_ExpertDriver : DC_DriverInterface
 	//! A new episode when the ego stands at the route start (see the header)
 	override bool BeginEpisode(int episodeId, int firstPhysicsStep, notnull DC_EpisodeInfo info)
 	{
+		CheckGates(false);
 		if (!m_bReady || m_bInEpisode)
 			return false;
 
@@ -1039,6 +1052,7 @@ class DC_ExpertDriver : DC_DriverInterface
 	//! in a decision callback of the world-time grid (ctx.IsDecisionStep) that evaluation is the decision Decide returns
 	override void PostStep(int physicsStep, float timeSlice, notnull DC_DriverPost post)
 	{
+		CheckGates(false);
 		if (!m_bInEpisode || !CanEvaluate())
 			return;
 
@@ -1119,9 +1133,60 @@ class DC_ExpertDriver : DC_DriverInterface
 		if (m_Context)
 			m_Context.Log(string.Format("driver ends (%1) after %2 episode(s)", endReason, m_iEpisodes));
 
+		CheckGates(true);
+		m_Gates = null;
 		m_bReady = false;
 		m_bInEpisode = false;
 		m_Context = null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Opens every vehicle gate of the world once (DC_Gates.OpenVehicleGates: every door leaf with a vehicle navmesh
+	//! link and its sibling leaves, set open by control value without a performer; building doors skipped; one log
+	//! line per gate and a summary, prefixed [DC_Driver]). BeginDriver runs on the authority only (DC_Session works on
+	//! the server), once per session, after readiness: before the first episode, so the expert never meets a closed
+	//! gate on the route. CheckGates reports every leaf that is not open GATE_CHECK_AFTER_S later
+	protected void OpenGates(notnull DC_DriverContext ctx)
+	{
+		if (!m_bOpenGatesAtStart)
+		{
+			ctx.Warn("vehicle gates not opened (m_bOpenGatesAtStart 0): a closed gate on the route stops the ego (two bar gates lie on the T0 loop)");
+			return;
+		}
+
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+		{
+			ctx.Warn("vehicle gates not opened: no world");
+			return;
+		}
+
+		m_Gates = DC_Gates.OpenVehicleGates(world, "[DC_Driver]");
+		m_fGatesOpenedWorldMs = world.GetWorldTime();
+		m_bGatesChecked = false;
+		ctx.Log(string.Format("vehicle gates: %1 gates with %2 door leaves, %3 set open; checked %4 s later", m_Gates.GetGateCount(), m_Gates.GetDoorCount(), m_Gates.GetOpeningCount(), GATE_CHECK_AFTER_S));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The gate check (DC_Gates.CheckOpen, diagnostic only: it commands no door), once: from BeginEpisode and PostStep
+	//! (the driver's calls between episodes and during one) when GATE_CHECK_AFTER_S of world time have passed since the
+	//! opening, or at the driver's end (atEnd) when it has not run yet
+	protected void CheckGates(bool atEnd)
+	{
+		if (!m_Gates || m_bGatesChecked)
+			return;
+
+		BaseWorld world = GetGame().GetWorld();
+		if (!world)
+			return;
+
+		float elapsedMs = world.GetWorldTime() - m_fGatesOpenedWorldMs;
+		if (!atEnd && elapsedMs < GATE_CHECK_AFTER_S * 1000)
+			return;
+
+		m_bGatesChecked = true;
+		int afterS = Math.Round(elapsedMs / 1000);
+		m_Gates.CheckOpen(afterS);
 	}
 
 	//------------------------------------------------------------------------------------------------

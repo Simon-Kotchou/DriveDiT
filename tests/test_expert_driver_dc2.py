@@ -12,7 +12,9 @@ sources (the statements the Python models mirror) and check, per adaptation of t
     CanEvaluate test both make), so an admitted episode's first Decide never returns false (which ends the session);
   - crash events: no expert rollover (or collision) termination, the stuck event carries stuck_s (the DD-5-min reader's
     check_payload accepts it against the contract's event_payloads), no ego SetWorldTransform without PrepareReposition
-    and no spawned vehicle without DC_CrashWatch.WatchSlot.
+    and no spawned vehicle without DC_CrashWatch.WatchSlot;
+  - vehicle gates: the driver opens every vehicle gate of the world at its start with the DD-1 director's DC_Gates
+    (deployed by the manifest) and checks them once, 10 s of world time later or at its end.
 """
 
 import importlib.util
@@ -31,6 +33,8 @@ RECORDER_SOURCE = os.path.join(SOURCES, "DC_StreamRecorder.c")
 DECISION_PERIOD_MS = 200                # 1000 / decision_hz at the frozen 5 Hz
 LAYER = os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC_Arland_Layers", "default.layer")
 DD7_SOURCES = (LLC_SOURCE, EXPERT_SOURCE)  # the Enforce files of DD-7-min
+GATES_SOURCE = os.path.join(SOURCES, "DC_Gates.c")
+MANIFEST = os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt")
 STEP_DT = 1.0 / 30.0                    # the measured step dt on 1.8 (dc-2.0 section 6, D-A)
 RUN4_STEPS, RUN4_CALLBACKS = 18113, 10215   # T0-ENG run 4 E-10: steps and fixed-frame callbacks of one Play
 
@@ -461,6 +465,74 @@ class CrashEventsTest(unittest.TestCase):
         for path in DD7_SOURCES:
             self.assertIsNone(re.search(r"SetWorldTransform|SetOrigin\(|SpawnEntityPrefab|SpawnEntity\(",
                                         code_only(read(path))))
+
+
+class GateCheckMirror:
+    """DC_ExpertDriver.CheckGates: once, GATE_CHECK_AFTER_S after the opening or at the driver's end."""
+
+    def __init__(self, opened_ms, after_s=10):
+        self.opened_ms, self.after_s, self.checked = opened_ms, after_s, []
+
+    def check(self, world_ms, at_end):
+        if self.checked:
+            return
+        elapsed = world_ms - self.opened_ms
+        if not at_end and elapsed < self.after_s * 1000:
+            return
+        self.checked.append(int(math.floor(elapsed / 1000.0 + 0.5)))
+
+
+class VehicleGatesTest(unittest.TestCase):
+    """(f) the capture world's vehicle gates are opened at the driver's start, as the director opens them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.expert = read(EXPERT_SOURCE)
+
+    def test_driver_start_opens_the_gates(self):
+        begin = enforce_body(self.expert, "DC_ExpertDriver", "BeginDriver")
+        self.assertTrue(begin.endswith("OpenGates(ctx); m_bReady = true; return true;"), begin[-80:])
+        opener = enforce_body(self.expert, "DC_ExpertDriver", "OpenGates")
+        for statement in ("if (!m_bOpenGatesAtStart) {", "BaseWorld world = GetGame().GetWorld();",
+                          'm_Gates = DC_Gates.OpenVehicleGates(world, "[DC_Driver]");',
+                          "m_fGatesOpenedWorldMs = world.GetWorldTime();", "m_bGatesChecked = false;"):
+            self.assertIn(statement, opener)
+        check = enforce_body(self.expert, "DC_ExpertDriver", "CheckGates")
+        self.assertIn("if (!m_Gates || m_bGatesChecked) return;", check)
+        self.assertIn("if (!atEnd && elapsedMs < GATE_CHECK_AFTER_S * 1000) return; m_bGatesChecked = true; int afterS "
+                      "= Math.Round(elapsedMs / 1000); m_Gates.CheckOpen(afterS);", check)
+        self.assertIn("static const int GATE_CHECK_AFTER_S = 10;", code_only(self.expert))
+        for method in ("BeginEpisode", "PostStep"):
+            body = enforce_body(self.expert, "DC_ExpertDriver", method)
+            self.assertIn(") { CheckGates(false);", body[:200], method)
+        self.assertIn("CheckGates(true); m_Gates = null;", enforce_body(self.expert, "DC_ExpertDriver", "EndDriver"))
+
+    def test_the_opener_is_deployed_and_switched_on(self):
+        gates = code_only(read(GATES_SOURCE))
+        for signature in ("static DC_Gates OpenVehicleGates(notnull BaseWorld world, string logPrefix)",
+                          "int CheckOpen(int afterS)", "int GetGateCount()", "int GetDoorCount()",
+                          "int GetOpeningCount()"):
+            self.assertIn(signature, gates)
+        with open(MANIFEST, "r", encoding="ascii") as f:
+            entries = [line.split() for line in f if line.strip() and not line.startswith("#")]
+        self.assertIn(["script", "src/enfusion/datacapture/DC_Gates.c"], entries)
+        self.assertIn('[Attribute("1", UIWidgets.CheckBox, "Open every vehicle gate of the world once at the '
+                      "driver's start", self.expert)
+        driver = read(LAYER).split('DC_ExpertDriver "{DC4A50B400000006}" {', 1)[1].split("\n  }", 1)[0]
+        self.assertIn("\n   m_bOpenGatesAtStart 1", driver)
+
+    def test_the_check_runs_once(self):
+        mirror = GateCheckMirror(opened_ms=4000.0)
+        for world_ms in (5000.0, 9000.0, 13999.0):
+            mirror.check(world_ms, False)
+        self.assertEqual(mirror.checked, [])
+        mirror.check(14100.0, False)
+        mirror.check(20000.0, False)
+        mirror.check(30000.0, True)
+        self.assertEqual(mirror.checked, [10])
+        early = GateCheckMirror(opened_ms=4000.0)        # a session that ends before 10 s still gets its check
+        early.check(7000.0, True)
+        self.assertEqual(early.checked, [3])
 
 
 if __name__ == "__main__":

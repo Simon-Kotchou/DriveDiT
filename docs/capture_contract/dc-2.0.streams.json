@@ -288,7 +288,7 @@
       "img_to_hf": "exact: img_resolved.captured_render_frame = hf.render_frame; in Workbench 1.8 captured_render_frame = img.done_render_frame - 1 (the cross-check)",
       "hf_to_ctl": "exact: hf.last_physics_step = ctl.physics_step",
       "hf_to_telemetry": "exact: hf.last_physics_step = telemetry.physics_step (a telemetry row per callback)",
-      "capture_pose": "hf.cam_* and hf.veh_* of hf row captured_render_frame + 1 (the image of frame C shows the state of hf row C + 1); the pose belongs to the world time of hf row C; the one exemption is the request a seal without drain caught in flight (issued, done_render_frame empty, no img_timeout, counted in images.pending_at_end) whose image is of end.render_frame with that hf row present: only its pose row is missing, it is not joined; every other capture without its hf rows is a join failure",
+      "capture_pose": "hf.cam_* and hf.veh_* of hf row captured_render_frame + 1 (the image of frame C shows the state of hf row C + 1); the pose belongs to the world time of hf row C; the one exemption is the request a seal without drain caught in flight (the unique newest issued slot, done_render_frame empty, no img_timeout, images.pending_at_end 1, never more) whose image is of end.render_frame with that hf row present: only its pose row is missing, it is not joined; every other capture without its hf rows is a join failure",
       "frame_clock": "ctl and telemetry rows of one key share render_frame and world_time_ms; ctl world_time_ms = hf world_time_ms of the same render frame; hf.last_physics_step = the newest ctl key with a smaller render_frame"
     },
     "image_grid": {
@@ -968,7 +968,7 @@
         {"name": "pin.build_key", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "Repeated from session.json (same null rule; the harvester's harvest.json then carries it)."},
         {"name": "engine.build_version", "type": "str", "unit": "-", "required": true, "desc": "GetBuildVersion() read again at the end; C02 requires it to equal the start value."},
         {"name": "counts", "type": "object", "unit": "-", "required": true, "desc": "Per stream: {rows, chunks, last_key} of committed data."},
-        {"name": "images", "type": "object", "unit": "-", "required": true, "desc": "{requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3)."},
+        {"name": "images", "type": "object", "unit": "-", "required": true, "desc": "{requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3): 0 or 1, as one request is in flight at a time (C13a fails more)."},
         {"name": "episodes", "type": "int", "unit": "-", "required": true, "desc": "Number of episode rows committed."},
         {"name": "heartbeats", "type": "int", "unit": "-", "required": true, "desc": "Number of heartbeat rows appended."},
         {"name": "observed.decision_grid_points_skipped", "type": "int", "unit": "-", "required": false, "desc": "Decision grid points a hitch skipped, as the writer counted them (section 6); C08 compares it with its own rebuild of the grid. The observed object holds further run-time facts that are not contract fields."}

@@ -684,6 +684,18 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertIn("no-command sentinel", timing["decision"]["hl_seq"])
         self.assertIn("every other capture without its hf rows is a join failure", timing["joins"]["capture_pose"])
 
+    def test_review_round3_rules(self):
+        """Review round 3 (Codex N6): images.pending_at_end is 0 or 1 and the seal exemption belongs to the unique
+        newest issued request; the step-dt reason is the readiness refusal's reason."""
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("`images.pending_at_end` is 0 or 1; more fails C13a (HARD)",
+                       "the unique newest issued slot", "only the one request the seal caught in flight (below) is "
+                       "left out", "rows after it may be `skipped_busy` or `make_failed`"):
+            self.assertIn(phrase, section6, phrase)
+        self.assertIn("images.pending_at_end 1, never more", self.schema["timing"]["joins"]["capture_pose"])
+        end = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}
+        self.assertIn("0 or 1, as one request is in flight at a time", end["images"]["desc"])
+
     def test_description_drift_is_caught(self):
         drifted = self.spec.replace("Joins ctl and telemetry exactly; the image of render frame C", "Joins ctl", 1)
         self.assertNotEqual(drifted, self.spec)

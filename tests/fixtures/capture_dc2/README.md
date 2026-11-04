@@ -10,7 +10,7 @@ DD-5-min component 3); the negative set and the tests stay.
 | `golden.json` | The expected reader output: counts, clocks, `img_resolved`, every decision sample, segments and a pixel subsample. Computed by `make_synthetic.py` from its own simulation, not by the reader: `action_cmd`, `hl_seq` and the held-command rule come from the simulation's decision events (the command decided after P_t and where it was applied), not from the ctl rows at P_t + 1. The masks and the obs rule repeat contract section 6, so C22-min checks the parse, the joins and the R-01 offsets; the real T0b golden adds what the synthetic one lacks (decode failures, skipped slots, missing hf frames, paused rows). |
 | `routes/golden_s_curve_v1.json` | The golden episodes' route (drivedit_nav route schema). |
 | `cards/S105_synthetic.json` | A synthetic vehicle card with the TBD-7 gear fields only (`dir_state`). |
-| `negative/{gap,missing_commit,reused_slot}/mutation.json` | The negative set. Each is generated in the test with `make_synthetic.py --variant <name>` (the repo keeps only the spec, about 1 MB less per fixture) and must fail exactly the check it names. |
+| `negative/{gap,missing_commit,reused_slot,crash_unexplained,destroyed_unexplained}/mutation.json` | The negative set. Each is generated in the test with `make_synthetic.py --variant <name>` (the repo keeps only the spec, about 1 MB less per fixture) and must fail exactly the check it names. |
 
 Regenerate (writes only under /mnt/e or /dev/shm):
 

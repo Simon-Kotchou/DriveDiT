@@ -1,12 +1,12 @@
 """dc_validate checks (DD-5-min): the T0-MIN and T1 set of CAPTURE_PROGRAM r2 5.1, in report order.
 
     C01 C02 (files)  C05 C06 C07 C34 C35 (streams)  C08 C28 (timing)  C10 C11 C12 C13a C13b (images)
-    C15 (dynamics)  C17 (behaviour, SOFT at T1)  C20 C21 (health)  C31 (usable yield)
+    C15 (dynamics)  C17 (behaviour, SOFT at T1)  C20 C21 (health)  C31 (usable yield)  C36 (crash events)
 
 Each module documents its checks; base.py holds the result record, the severities and the run context.
 """
 
-from . import behaviour, dynamics, files, health, images, streams, timing, usable
+from . import behaviour, crash, dynamics, files, health, images, streams, timing, usable
 from .base import FAIL, HARD, NOT_EVALUATED, SOFT
 
 REGISTRY = (
@@ -29,6 +29,7 @@ REGISTRY = (
     ("C31", usable.check_c31),
     ("C34", streams.check_c34),
     ("C35", streams.check_c35),
+    ("C36", crash.check_c36),
 )
 CHECK_IDS = tuple(cid for cid, _ in REGISTRY)
 

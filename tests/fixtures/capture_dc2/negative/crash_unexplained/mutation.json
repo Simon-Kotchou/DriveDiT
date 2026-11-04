@@ -1,0 +1,6 @@
+{
+  "variant": "crash_unexplained",
+  "fails": ["C36"],
+  "generate": "python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out <dir under /mnt/e or /dev/shm> --variant crash_unexplained",
+  "description": "the crash session (contract 9.5.1) without the ego collision and veh_damage rows of episode 1: the episode still ends with termination_reason collision, which no terminal ego crash event explains"
+}

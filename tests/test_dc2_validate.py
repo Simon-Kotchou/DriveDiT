@@ -8,7 +8,11 @@ dc_validate runs in-process through its main(argv) (stdout captured). Acceptance
   * dc_validate exits 0 on the golden fixture (and on the 5 Hz fallback session);
   * each negative fixture (tests/fixtures/capture_dc2/negative/*/mutation.json, generated here) fails exactly the
     check it names;
-  * C17 passes a synthetic session along a loop route and fails the same session against the mirrored route;
+  * C17 passes a synthetic session along a loop route and fails the same session against the mirrored route, and
+    fails it with an ego collision;
+  * the crash session of make_synthetic (contract 9.5.1) passes every check, and C36 (payloads, the collision
+    threshold and onset, the start/end pairs, crash terminations, ego_destroyed), C35 (unknown vehicle slots) and
+    C15 (only the ego's events mask its rows) fail or hold on mutations of it;
   * dc-1.0 sessions FAIL for their known reasons (synthetic legacy session; the real sessions 4811, 2702 and 2929
     when their E: copy exists, else that test skips: TICKETS_UNIFIED decision 13 is open);
   * reports are written only under /mnt/e (a refusal for /dev/shm and /mnt/c), never to a path built from
@@ -42,7 +46,7 @@ PROGRAM_MD = "/mnt/e/drivedit_realign/program/CAPTURE_PROGRAM.md"
 LEGACY_ROOT = "/mnt/e/DriveDiT/captures/_legacy_DrivingData_C"
 NO_SUCH_E_DIR = "/mnt/e/__dd5_no_such_dir__"
 CHECK_IDS = ("C01", "C02", "C05", "C06", "C07", "C08", "C10", "C11", "C12", "C13a", "C13b", "C15", "C17", "C20",
-             "C21", "C28", "C31", "C34", "C35")
+             "C21", "C28", "C31", "C34", "C35", "C36")
 
 
 def load(name, rel):
@@ -181,7 +185,7 @@ class GoldenTest(unittest.TestCase):
     def test_negative_fixtures_fail_exactly_their_check(self):
         specs = sorted(glob.glob(os.path.join(FIXTURES, "negative", "*", "mutation.json")))
         self.assertEqual([os.path.basename(os.path.dirname(p)) for p in specs],
-                         ["gap", "missing_commit", "reused_slot"])
+                         ["crash_unexplained", "destroyed_unexplained", "gap", "missing_commit", "reused_slot"])
         tmp = temp_dir("dc2_negative_")
         try:
             for path in specs:
@@ -245,6 +249,36 @@ class GoldenTest(unittest.TestCase):
             self.assertIn("dc-1.0", by_id(rep)["C01"]["detail"])
         finally:
             shutil.rmtree(tmp)
+
+
+def add_event(session, after_seq, kind, payload, veh_slot_id, physics_step=None):
+    """Insert one events row after event_seq after_seq (same episode, step, frame and world time unless
+    physics_step is given), renumber the rows after it, and keep commit.csv and session_end.json counts true."""
+    sdir = os.path.join(session, "events")
+    names = sorted(n for n in os.listdir(sdir) if n.startswith("chunk_"))
+    seq_shift = {"done": False}
+    for name in names:
+        def edit(cols, rows):
+            out = []
+            for r in rows:
+                if seq_shift["done"]:
+                    r[0] = str(int(r[0]) + 1)
+                out.append(r)
+                if int(r[0]) == after_seq and not seq_shift["done"]:
+                    new = list(r)
+                    new[0] = str(after_seq + 1)
+                    new[cols.index("kind")] = kind
+                    new[cols.index("payload")] = payload
+                    new[cols.index("veh_slot_id")] = str(veh_slot_id)
+                    if physics_step is not None:
+                        new[cols.index("physics_step")] = str(physics_step)
+                    out.append(new)
+                    seq_shift["done"] = True
+            return out
+        rewrite_chunk(session, "events", int(name[6:11]), edit)
+    edit_json(os.path.join(session, "session_end.json"),
+              lambda o: o["counts"]["events"].update({"rows": o["counts"]["events"]["rows"] + 1,
+                                                      "last_key": o["counts"]["events"]["last_key"] + 1}))
 
 
 class FailLoudTest(unittest.TestCase):
@@ -504,6 +538,144 @@ class FailLoudTest(unittest.TestCase):
         self.assertIn("Eden-rooted", text)
 
 
+def edit_rows(session, stream, fn):
+    """fn(columns, row as a list of text) edits each row of every chunk of a stream in place; commit lines stay true."""
+    for name in sorted(os.listdir(os.path.join(session, stream))):
+        if name.startswith("chunk_"):
+            def edit(cols, rows):
+                for r in rows:
+                    fn(cols, r)
+                return rows
+            rewrite_chunk(session, stream, int(name[6:11]), edit)
+
+
+class CrashTest(unittest.TestCase):
+    """C36, C35 and C15 on the crash variant of make_synthetic (contract 9.5.1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_crash_")
+        cls.out = synth.generate(os.path.join(cls.tmp, "src"), variant="crash")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def copy(self, name):
+        dst = os.path.join(self.tmp, name, self.out["session_id"])
+        shutil.copytree(self.out["session_dir"], dst)
+        return dst
+
+    def check(self, session, *extra):
+        return run_json("--session", session, "--routes-dir", ROUTES, "--vehicle-card", CARD, *extra)
+
+    def payloads(self, session, kind, fn):
+        """fn(payload text) -> text for every events row of a kind."""
+        def edit(cols, r):
+            if r[cols.index("kind")] == kind:
+                r[cols.index("payload")] = fn(r[cols.index("payload")])
+        edit_rows(session, "events", edit)
+
+    def test_crash_session_passes(self):
+        code, rep = self.check(self.out["session_dir"])
+        self.assertEqual(code, 0, [(c["id"], c["detail"]) for c in rep["checks"] if c["status"] != "PASS"])
+        c36 = by_id(rep)["C36"]
+        self.assertEqual((c36["severity"], c36["status"]), ("HARD", "PASS"))
+        self.assertEqual(c36["value"], {"crash_events": 5, "crash_terminations": 1, "terminal_ego_episodes": 1,
+                                        "ego_destroyed": True})
+        self.assertTrue(c36["provisional"])                    # TBD-10 while dc-2.0 is a DRAFT
+        self.assertEqual(by_id(rep)["C01"]["status"], "PASS")  # ego_destroyed is a normal end
+
+    def test_golden_has_no_crash(self):
+        code, rep = run_json("--session", GOLDEN_DIR, "--routes-dir", ROUTES, "--checks", "C36")
+        self.assertEqual((code, by_id(rep)["C36"]["value"]["crash_events"]), (0, 1))   # its teleport row
+
+    def test_collision_below_the_threshold_fails(self):
+        session = self.copy("dv")
+        self.payloads(session, "collision", lambda v: v.replace("dv_mps=7.42", "dv_mps=3.10"))
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("below events.collision_dv_mps", by_id(rep)["C36"]["detail"])
+        session = self.copy("contact")                         # a contact-only row may lie below the threshold
+        self.payloads(session, "collision", lambda v: v.replace("dv_mps=7.42", "dv_mps=3.10").replace(
+            "src=dv_contact", "src=contact"))
+        code, rep = self.check(session, "--checks", "C36")
+        self.assertEqual((code, by_id(rep)["C36"]["status"]), (0, "PASS"))   # veh_damage still explains the end
+
+    def test_onset_after_the_row_fails(self):
+        session = self.copy("onset")
+        self.payloads(session, "collision", lambda v: "onset_step=99999;" + v.split(";", 1)[1])
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("after the row's physics_step", by_id(rep)["C36"]["detail"])
+
+    def test_bad_payloads_fail(self):
+        for name, fn in (("enum", lambda v: v.replace("other=rock", "other=moon")),
+                         ("unknown", lambda v: v + ";colour=red"),
+                         ("missing", lambda v: v.replace("v_mps=7.91;", "")),
+                         ("exponent", lambda v: v.replace("dv_mps=7.42", "dv_mps=7e0"))):
+            session = self.copy("payload_" + name)
+            self.payloads(session, "collision", fn)
+            code, rep = self.check(session, "--checks", "C36")
+            self.assertEqual((code, by_id(rep)["C36"]["status"]), (1, "FAIL"), name)
+
+    def test_unpaired_fire_end_fails(self):
+        session = self.copy("pair")
+        add_event(session, 0, "veh_fire_end", "", 1, physics_step=0)
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("veh_fire_end on slot 1 without a veh_fire_start", by_id(rep)["C36"]["detail"])
+
+    def test_termination_must_match_the_first_terminal_event(self):
+        session = self.copy("term")
+        set_column(session, "episodes", "termination_reason", lambda key, v: "rollover" if key == 1 else v)
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("termination_reason rollover, but its first terminal ego event", by_id(rep)["C36"]["detail"])
+
+    def test_rows_after_the_destroyed_ego_fail(self):
+        session = self.copy("late")
+
+        def earlier(cols, r):                                  # the destroyed row 0.5 s before the last ctl row
+            if r[cols.index("payload")].startswith("state=destroyed"):
+                r[cols.index("physics_step")] = str(int(r[cols.index("physics_step")]) - 30)
+        edit_rows(session, "events", earlier)
+        code, rep = self.check(session, "--checks", "C36")
+        self.assertEqual(by_id(rep)["C36"]["status"], "FAIL")
+        self.assertIn("ctl row(s) after the ego's veh_damage destroyed row", by_id(rep)["C36"]["detail"])
+
+    def test_destroyed_ego_with_a_planned_end_fails(self):
+        session = self.copy("planned")
+        edit_json(os.path.join(session, "session_end.json"), lambda o: o.update({"end_reason": "duration"}))
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("ended duration, not ego_destroyed", by_id(rep)["C36"]["detail"])
+
+    def test_unknown_vehicle_slots_fail_c35(self):
+        session = self.copy("slot")
+        self.payloads(session, "collision", lambda v: v.replace("other=rock", "other=vehicle;other_slot=7"))
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C35"]))
+        self.assertIn("unknown other_slot(s) [7]", by_id(rep)["C35"]["detail"])
+        session = self.copy("veh")
+        add_event(session, 0, "rollover", "up_y=0.20", 9, physics_step=0)
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C35"]))
+        self.assertIn("unknown vehicle slot(s) [9]", by_id(rep)["C35"]["detail"])
+
+    def test_c15_masks_only_the_egos_events(self):
+        dynamics = dc_validate.checks.dynamics
+        s = dc_validate.base.load_reader().open_session(GOLDEN_DIR, strict=False, decode_images=False)
+        base = len(dynamics.eligible_rows(s, 3, 0.8))
+        ev, tel = s.streams["events"], s.streams["telemetry"]
+        row = {c: None for c in ev.columns}
+        row.update({"event_seq": len(ev), "episode_id": 0, "physics_step": 0, "render_frame": 0, "kind": "collision",
+                    "world_time_ms": tel.col("world_time_ms")[len(tel) // 2], "veh_slot_id": 9, "payload": ""})
+        ev.append_rows([row])
+        self.assertEqual(len(dynamics.eligible_rows(s, 3, 0.8)), base)          # a traffic slot's crash
+        ev.append_rows([dict(row, event_seq=len(ev), veh_slot_id=tel.col("ego_slot_id")[0])])
+        self.assertLess(len(dynamics.eligible_rows(s, 3, 0.8)), base)           # the ego's crash
+
 class ReportTest(unittest.TestCase):
     def test_default_report_root(self):
         self.assertEqual(dc_validate.DEFAULT_REPORT_DIR, "/mnt/e/DriveDiT/reports")
@@ -689,6 +861,20 @@ class C17LoopTest(unittest.TestCase):
         dst = os.path.join(self.tmp, name, os.path.basename(self.session))
         shutil.copytree(self.session, dst)
         return dst
+
+    def test_an_ego_collision_fails_c17(self):
+        session = self.copy("collision")
+        s = dc_validate.base.load_reader().open_session(session, decode_images=False)
+        ev, ego = s.streams["events"], s.streams["telemetry"].col("ego_slot_id")[0]
+        start = ev.col("kind").index("episode_start")
+        step = ev.col("physics_step")[start] + 60
+        add_event(session, ev.col("event_seq")[start], "collision",
+                  "onset_step=%d;dv_mps=1.20;v_mps=2.00;other=static;src=contact" % step, ego, physics_step=step)
+        code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"))
+        c17 = by_id(rep)["C17"]
+        self.assertEqual((c17["status"], c17["value"]["collision_per_30min_max"]), ("FAIL", 0), c17)
+        self.assertIn("1 ego collision(s)", c17["detail"])
+        self.assertEqual(failing(rep), ["C17"])                # the contact row itself is consistent (C36)
 
     def test_route_hash_mismatch_fails(self):                                 # F-15
         session = self.copy("hash")

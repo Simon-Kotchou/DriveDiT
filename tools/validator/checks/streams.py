@@ -209,10 +209,22 @@ def check_c34(ctx):
                   % sum(len(st.commits) for st in s.streams.values()))
 
 
+def traffic_slot_ids(text):
+    """Slot ids of a telemetry.traffic_slots value ('veh_slot_id:entity_id' pairs joined by ';'); malformed pairs
+    are skipped."""
+    out = set()
+    for pair in (text or "").split(";"):
+        head = pair.split(":", 1)[0]
+        if head.lstrip("-").isdigit():
+            out.add(int(head))
+    return out
+
+
 def check_c35(ctx):
     """Entity identity (r2 5.1 C35): one entity id per vehicle slot id (ego slots in telemetry and episodes, traffic
     slots), no slot shared by the ego and a traffic vehicle, and one ego slot per episode (telemetry, img and the
-    episodes row agree). Exact."""
+    episodes row agree). Every events.veh_slot_id >= 0 and every crash payload other_slot (contract 9.5.1) is a known
+    ego or traffic slot (the traffic stream or telemetry.traffic_slots). Exact."""
     if ctx.load_error:
         return unreadable(ctx, "C35")
     s = ctx.session
@@ -247,6 +259,17 @@ def check_c35(ctx):
     for e, slots in sorted(per_episode.items()):
         if len(slots) > 1:
             issues.append("episode %d has ego slots %s" % (e, sorted(slots)))
+    known = set(entities)
+    for text in tel.col("traffic_slots"):
+        known |= traffic_slot_ids(text)
+    ev = s.streams["events"]
+    unknown = sorted(set(slot for slot in ev.col("veh_slot_id") if slot is not None and slot >= 0) - known)
+    if unknown:
+        issues.append("events name unknown vehicle slot(s) %s" % unknown)
+    others = sorted(set(c["values"]["other_slot"] for c in s.crash_events
+                        if isinstance(c["values"].get("other_slot"), int)) - known)
+    if others:
+        issues.append("collision payloads name unknown other_slot(s) %s" % others)
     return result(ctx, "C35", HARD, FAIL if issues else PASS, len(issues), "exact",
                   first(issues) if issues else "%d slot(s), one entity each; one ego slot per episode"
                   % len(entities))

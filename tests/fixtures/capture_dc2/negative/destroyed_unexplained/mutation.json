@@ -1,0 +1,6 @@
+{
+  "variant": "destroyed_unexplained",
+  "fails": ["C36"],
+  "generate": "python3 -I -B tests/fixtures/capture_dc2/make_synthetic.py --out <dir under /mnt/e or /dev/shm> --variant destroyed_unexplained",
+  "description": "the crash session (contract 9.5.1) without its veh_damage state=destroyed row: session_end.json says ego_destroyed, but no ego destroyed row exists"
+}

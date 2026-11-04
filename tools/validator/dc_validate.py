@@ -7,8 +7,8 @@
         [--checks C01,C06,...] [--json] [--legacy]
 
 What it checks: C01 C02 C05 C06 C07 C08 C10 C11 C12 C13a C13b C15 C17 C20 C21 C28 C31 C34 C35 (the T0-MIN and T1
-set; tools/validator/checks/ documents each). The session is read by data/dc2/reader.py (strict=False, so every
-problem is reported, not raised). Thresholds are keyed by pin: thresholds_dc2.<pin_id>.json (a <pin_id>-<suffix>
+set) and C36 (the crash events of contract 9.5.1); tools/validator/checks/ documents each. The session is read by
+data/dc2/reader.py (strict=False, so every problem is reported, not raised). Thresholds are keyed by pin: thresholds_dc2.<pin_id>.json (a <pin_id>-<suffix>
 pin of the same build falls back to thresholds_dc2.<pin_id>.json), each CAPTURE_PROGRAM r2 5.2 verbatim; a session
 whose pin has no thresholds file is refused (exit 3); --thresholds overrides the choice. Severities and trial rules
 follow the session's trial.trial_id, or a --trial of the same or a higher tier (a lower one is refused): C02 dirty

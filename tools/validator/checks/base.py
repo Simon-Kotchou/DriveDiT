@@ -10,7 +10,7 @@ A check is a function check(ctx) -> result dict:
   * N/A: the check does not apply to this session (for example C17 without mode-E episodes);
   * NOT_EVALUATED: it applies but an input is missing (no engine logs, no route file); a HARD or SOFT check left
     NOT_EVALUATED is a warning;
-  * provisional: the check depends on a TBD-by-probe value of contract dc-2.0 (TBD-1 to TBD-9) and the contract is
+  * provisional: the check depends on a TBD-by-probe value of contract dc-2.0 (TBD-1 to TBD-10) and the contract is
     not frozen yet, so its threshold or rule may still change at the T0-ENG freeze.
 
 Severities follow the trial gates (severity()): CAPTURE_PROGRAM 4.4 T0-MIN makes C12, C13b and C21 SOFT and T1 makes
@@ -49,6 +49,7 @@ CHECK_TBDS = {
     "C05": (), "C06": ("TBD-1",), "C07": ("TBD-1",), "C08": ("TBD-1", "TBD-2"), "C10": ("TBD-2", "TBD-4"),
     "C11": ("TBD-4",), "C12": (), "C13a": ("TBD-2",), "C13b": (), "C15": ("TBD-5",), "C17": ("TBD-5",),
     "C20": (), "C21": (), "C28": ("TBD-1",), "C31": ("TBD-1", "TBD-2"), "C34": ("TBD-3",), "C35": (),
+    "C36": ("TBD-10",),
     "C01": (), "C02": ("TBD-6",),
 }
 

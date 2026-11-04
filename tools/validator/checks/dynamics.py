@@ -4,14 +4,22 @@ import math
 
 import numpy
 
-from .base import FAIL, HARD, NOT_EVALUATED, PASS, first, result, unreadable
+from .base import FAIL, HARD, NOT_EVALUATED, PASS, first, load_reader, result, unreadable
 
 SPEED_TOL_MPS = 0.3         # r1 [TL] 5.1 C15: median |speed - |dpos|/dt| (r2 keeps "speed vs dpos/dt")
 ACC_TOL_MPS2 = 0.5          # r1 [TL] 5.1 C15: median |acc_fwd - dv/dt|
 EVENT_GUARD_S = 1.0         # r1 [TL] 5.1 C15: no event within +-1 s
+# ... of the ego or of no vehicle (veh_slot_id -1): a traffic vehicle's crash events (contract 9.5.1) never mask ego
+# rows
 DISCONTINUITY_EVENTS = ("episode_start", "episode_end", "perturb_start", "perturb_end", "teleport", "respawn",
-                        "stuck", "collision", "camera_reset", "pause", "resume", "env_change")
+                        "stuck", "collision", "veh_damage", "veh_fire_start", "rollover", "camera_reset", "pause",
+                        "resume", "env_change")
 MIN_SAMPLES = 20
+
+
+def session_ego_slots(s):
+    """The session's ego slot ids (data/dc2/reader.py ego_slots)."""
+    return load_reader().ego_slots(s)
 
 
 def fit_steer_gain(kappa, steer):
@@ -35,12 +43,14 @@ def steer_series(s, steps, delay):
 
 def eligible_rows(s, min_speed, max_alat_frac):
     """Telemetry row indices with speed > min_speed, |a_lat| < max_alat_frac x the episode's style_alat_max_mps2
-    (nominal 2.75) and no discontinuity event within +-1 s."""
+    (nominal 2.75) and no discontinuity event of the ego (or of no vehicle) within +-1 s."""
     tel = s.streams["telemetry"]
     texp = s.telemetry_export
     ev = s.streams["events"]
     guard_ms = EVENT_GUARD_S * 1000.0
-    event_ms = [w for kind, w in zip(ev.col("kind"), ev.col("world_time_ms")) if kind in DISCONTINUITY_EVENTS]
+    slots = session_ego_slots(s) | {-1}
+    event_ms = [w for kind, w, slot in zip(ev.col("kind"), ev.col("world_time_ms"), ev.col("veh_slot_id"))
+                if kind in DISCONTINUITY_EVENTS and slot in slots]
     alat_max = {e: a for e, a in zip(s.streams["episodes"].col("episode_id"),
                                      s.streams["episodes"].col("style_alat_max_mps2"))}
     rows = []

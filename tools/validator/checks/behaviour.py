@@ -6,11 +6,14 @@ import numpy
 
 from .base import FAIL, HARD, INFO, NA, NOT_EVALUATED, PASS, SOFT, first, percentile, result, unreadable, \
     wrap_angle
-from .dynamics import fit_steer_gain, steer_series
+from .dynamics import fit_steer_gain, session_ego_slots, steer_series
 
 MOVING_MPS = 1.0            # r1 [TL] 5.1 C17: moving = speed > 1 m/s
 CURV_HALF_WINDOW_M = 5.0    # route curvature: heading change over +-5 m of arc length
 MIN_TURN_RAD = 0.2          # below this much turning (session and route) the L/R comparison has no signal
+# C17.collision_per_30min_max when the thresholds file has none: a clean mode-E expert never collides (contract
+# 9.5.1; not in CAPTURE_PROGRAM 5.2 r2.2, whose block the thresholds file copies verbatim)
+COLLISION_PER_30MIN_MAX = 0
 
 
 def route_curvature(route, s):
@@ -55,7 +58,9 @@ def check_c17(ctx):
     """Behavioural profile of the mode-E expert episodes after the C17.warmup_s warm-up (world time since the
     session start), r2 5.1 C17 with the C17 thresholds:
       * moving fraction (speed > 1 m/s) >= moving_frac_min; speed p50 / p95 reported;
-      * stuck events per 30 min <= stuck_per_30min_max; road adherence P(road_dist_m <= road_width_m / 2 + 1 m)
+      * stuck events per 30 min <= stuck_per_30min_max and ego collision rows per 30 min <=
+        collision_per_30min_max (default 0: a clean expert never collides), both of the ego slot only (contract
+        9.5.1: traffic vehicles have their own rows); road adherence P(road_dist_m <= road_width_m / 2 + 1 m)
         >= road_adherence_min;
       * against the route of each episode (drivedit_nav route schema; --route / --routes-dir; a filled
         episodes.route_sha256 must match): progress by drivedit_nav.nav_sequence over the telemetry poses, the
@@ -132,13 +137,23 @@ def check_c17(ctx):
     if value["moving_frac"] < thr.get("moving_frac_min", 0.7):
         issues.append("moving fraction %.3f < %s" % (value["moving_frac"], thr.get("moving_frac_min")))
     ev = s.streams["events"]
-    stuck = sum(1 for kind, e, w in zip(ev.col("kind"), ev.col("episode_id"), ev.col("world_time_ms"))
-                if kind == "stuck" and e in episodes and w >= warm_ms)
+    egos = session_ego_slots(s)
+    counted = [kind for kind, e, w, slot in zip(ev.col("kind"), ev.col("episode_id"), ev.col("world_time_ms"),
+                                                ev.col("veh_slot_id"))
+               if e in episodes and w >= warm_ms and slot in egos]
+    stuck = counted.count("stuck")
+    collisions = counted.count("collision")
     duration_s = len(rows) * dt
     value["stuck_per_30min"] = stuck * 1800.0 / duration_s if duration_s > 0 else None
     if value["stuck_per_30min"] is not None and value["stuck_per_30min"] > thr.get("stuck_per_30min_max", 2):
         issues.append("%d stuck event(s) = %.2f per 30 min > %s" % (stuck, value["stuck_per_30min"],
                                                                     thr.get("stuck_per_30min_max")))
+    max_collisions = thr.get("collision_per_30min_max", COLLISION_PER_30MIN_MAX)
+    value["collision_per_30min"] = collisions * 1800.0 / duration_s if duration_s > 0 else None
+    value["collision_per_30min_max"] = max_collisions
+    if value["collision_per_30min"] is not None and value["collision_per_30min"] > max_collisions:
+        issues.append("%d ego collision(s) = %.2f per 30 min > %s" % (collisions, value["collision_per_30min"],
+                                                                      max_collisions))
     skipped = []
     no_signal = None
     road = [(tel.col("road_dist_m")[i], tel.col("road_width_m")[i]) for i in rows]

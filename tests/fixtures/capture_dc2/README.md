@@ -25,7 +25,8 @@ decision_hz = 5, N = 12); the tests generate it, it is not committed.
 
 Crash events (contract 9.5.1): `session.json` carries the `events.*` detector parameters (the TBD-10 defaults) and
 telemetry the optional `dv_max_mps`, computed by the reference detector `data/dc2/crash_dv.py` (100 ms of world time,
-interpolated, gap rule) on the simulated velocities. The crash fixtures are generated in the tests, not committed,
+interpolated, gap rule; watched at the session open and repositioned before the teleport, as DC_CrashWatch does) on
+the simulated velocities. The crash fixtures are generated in the tests, not committed,
 in the shape DD-4-min writes them:
 - `--variant crash`: the golden session in which the ego stops dead against a rock 4 s into episode 1 and is
   destroyed 4 steps later. At that terminal step L: the `collision` row (`onset_step` = the impact step, `dv_mps`

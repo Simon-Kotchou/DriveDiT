@@ -97,7 +97,8 @@ CRASH_VARIANTS = ("crash", "crash_unexplained", "destroyed_unexplained")
 # session.json events.* (contract 10.1, TBD-10 defaults)
 EVENT_PARAMS = {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_window_tol_ms": 50,
                 "collision_peak_ms": 200, "collision_refractory_ms": 1000, "episode_end_wait_ms": 250,
-                "crash_cooldown_ms": 3000, "rollover_up_y": 0.5, "rollover_hold_ms": 500, "state_poll_ms": 100,
+                "crash_cooldown_ms": 3000, "episode_block_max_ms": 60000, "rollover_up_y": 0.5,
+                "rollover_hold_ms": 500, "state_poll_ms": 100,
                 "contact_source": "vanilla_process_collision"}
 KINDS = ("golden", "t0_loop", "golden_5hz", "crash_30hz")
 
@@ -470,13 +471,15 @@ def velocity_samples(sim):
 
 
 def detector_dv(sim):
-    """{row: dv_h or None} of the reference detector over the rows (history cleared at a teleport, 9.5.1)."""
+    """{row: dv_h or None} of the reference detector over the rows, with DC_CrashWatch's lifecycle: watched at the
+    session open (world time 0), repositioned before the step that moves the ego (the teleport row precedes it)."""
     det = crash_dv.Detector()
-    resets = set(p + 1 for p, kind, _ in sim.events if kind in ("teleport", "respawn"))
+    det.watch(0)
+    moves = set(p + 1 for p, kind, _ in sim.events if kind in ("teleport", "respawn"))
     out = {}
     for st, (w, vx, vz) in zip(sim.steps, velocity_samples(sim)):
-        if st["p"] in resets:
-            det.reset()
+        if st["p"] in moves:
+            det.reposition(w)
         out[st["p"]] = det.step(w, vx, vz, st["p"])
     return out, det
 

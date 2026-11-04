@@ -794,15 +794,45 @@ class CrashDetectorTest(unittest.TestCase):
         self.assertIsNone(det.step(t0 + 50, 0.0, 0.0))         # history shorter than the window
         self.assertEqual(det.step(t0 + 100, 0.0, 0.0), 0.0)
 
-    def test_a_reset_clears_the_history_and_equal_times_replace(self):
+    def test_a_reposition_clears_the_history_and_equal_times_replace(self):
         det = crash_dv.Detector()
+        det.watch(0)
         for i in range(8):
             det.step(i * 33, 0.0, 8.0)
-        det.reset()
+        det.reposition(260)
         self.assertIsNone(det.step(300, 0.0, 0.0))
         self.assertIsNone(det.step(300, 0.0, 5.0))              # no world-time advance: replaces the sample
         self.assertEqual(det.samples, [(300, 0.0, 5.0)])
         self.assertEqual(det.onsets, [])
+
+    def test_the_start_up_suppression(self):
+        # DC_CrashWatch suppresses onsets for 1000 ms after a slot is watched; dv_h is still measured
+        det = crash_dv.Detector()
+        det.watch(0)
+        series = [det.step(t, 0.0, 8.0 if t < 300 else 0.0) for t in range(0, 600, 33)]
+        self.assertEqual(det.onsets, [])
+        self.assertGreater(max(v for v in series if v is not None), 7.9)
+        for t in range(600, 2400, 33):
+            det.step(t, 0.0, 8.0 if t < 1800 else 0.0)
+        self.assertEqual([round(o["peak"], 3) for o in det.onsets], [8.0])
+
+    def test_a_reposition_finalises_the_pending_onset(self):
+        # the round-2 reproduction: 8 -> 0 is an 8 m/s onset; a reset and 30 m/s inside the old peak window must not
+        # grow it (DC_CrashWatch.PrepareReposition writes the row before the move)
+        det = crash_dv.Detector()
+        det.watch(0)
+        t = 0
+        while t < 1500:
+            det.step(t, 0.0, 8.0)
+            t += 33
+        det.step(t, 0.0, 0.0)
+        self.assertEqual(len(det.onsets), 1)
+        det.reposition(t + 10)
+        det.step(t + 33, 0.0, 30.0)
+        det.step(t + 66, 0.0, 30.0)
+        self.assertEqual(len(det.onsets), 1)
+        self.assertAlmostEqual(det.onsets[0]["peak"], 8.0, 3)
+        self.assertIsNone(det.pending)
 
 
 class CrashTest(unittest.TestCase):
@@ -885,6 +915,34 @@ class CrashTest(unittest.TestCase):
             self.assertEqual(s.terminal_ego[1]["kind"], "veh_damage")     # the destroyed row still counts
         finally:
             shutil.rmtree(tmp)
+
+    def test_chronology_and_confirmation_decide_terminal_events(self):
+        s = reader.open_session(GOLDEN_DIR, vehicle_card=CARD, decode_images=False)
+        ev = s.streams["events"]
+        episodes = s.streams["episodes"]
+        start, end = episodes.col("start_physics_step")[0], episodes.col("end_physics_step")[0]
+        ego = s.streams["telemetry"].col("ego_slot_id")[0]
+        row = {c: None for c in ev.columns}
+        row.update({"event_seq": len(ev), "episode_id": 0, "render_frame": 0, "world_time_ms": 0, "kind": "rollover",
+                    "veh_slot_id": ego})
+        # confirmed at start + 20 with an onset at start + 40: chronologically invalid, never terminal
+        ev.append_rows([dict(row, physics_step=start + 20, payload="onset_step=%d;up_y=0.20" % (start + 40))])
+        reader._read_crash_events(s)
+        bad = [c for c in s.crash_events if c["kind"] == "rollover"][0]
+        self.assertEqual((bad["in_episode"], bad["chrono_ok"]), (True, False))
+        self.assertEqual(s.terminal_ego, {})
+        # confirmed after the episode ended (end + 30): the core could not latch it, so it is not the termination
+        ev.append_rows([dict(row, event_seq=len(ev), physics_step=end + 30,
+                             payload="onset_step=%d;up_y=0.20" % (end - 3))])
+        reader._read_crash_events(s)
+        self.assertEqual(s.terminal_ego[0]["step"], end - 3)              # still masks policy labels from its onset
+        self.assertFalse(s.terminal_ego_confirmed[0]["confirmed_inside"])  # the core could not have latched it
+        # confirmed inside the episode
+        ev.append_rows([dict(row, event_seq=len(ev), physics_step=end - 5,
+                             payload="onset_step=%d;up_y=0.20" % (end - 35))])
+        reader._read_crash_events(s)
+        self.assertEqual(s.terminal_ego_confirmed[0]["confirm_step"], end - 5)
+        self.assertTrue(s.terminal_ego_confirmed[0]["confirmed_inside"])
 
     def test_a_traffic_reset_never_masks_the_ego(self):
         s = reader.open_session(GOLDEN_DIR, vehicle_card=CARD)

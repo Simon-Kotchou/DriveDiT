@@ -17,6 +17,11 @@ every window is world time, never a count of steps or callbacks.
     does not advance replaces the newest sample;
   * onset: the first evaluated callback with dv_h >= dv_mps outside the refractory and the suppression; its v_ref is
     kept, dv_mps of the row is the peak of |v_h(t) - v_ref| over peak_ms after the onset.
+
+The lifecycle matches DC_CrashWatch: watch(t) when the slot is watched (history empty, onsets suppressed for
+SUPPRESS_AFTER_WATCH_MS); reposition(t) before a SetWorldTransform (PrepareReposition: the pending onset is finalised
+with its peak so far, the history is cleared, onsets are suppressed for SUPPRESS_AFTER_REPOSITION_MS). A gap restarts
+only the history (the pending onset and the suppression are kept).
 """
 
 import math
@@ -27,10 +32,13 @@ DV_MPS = 4.0             # events.collision_dv_mps (PROVISIONAL)
 PEAK_MS = 200            # events.collision_peak_ms
 REFRACTORY_MS = 1000     # events.collision_refractory_ms
 CAPACITY = 32            # samples kept per slot (the Enforce ring); enough for the window at any step >= 5 ms
+SUPPRESS_AFTER_WATCH_MS = 1000          # DC_CrashWatch.SUPPRESS_AFTER_WATCH_MS
+SUPPRESS_AFTER_REPOSITION_MS = 500      # DC_CrashWatch.SUPPRESS_AFTER_TELEPORT_MS
 
 
 class Detector:
-    """The detector of one vehicle slot. step() returns the callback's dv_h (None when not evaluated)."""
+    """The detector of one vehicle slot. Call watch(t) first (as DC_CrashWatch.WatchSlot does); step() returns the
+    callback's dv_h (None when not evaluated)."""
 
     def __init__(self, window_ms=WINDOW_MS, tol_ms=WINDOW_TOL_MS, dv_mps=DV_MPS, peak_ms=PEAK_MS,
                  refractory_ms=REFRACTORY_MS, capacity=CAPACITY):
@@ -42,12 +50,18 @@ class Detector:
         self.pending = None          # the onset whose peak window is still open
         self.onsets = []             # every onset: {step, t_ms, ref, peak, peak_vec}
 
-    def reset(self):
-        """A reposition (or a gap): the history is cleared."""
+    def watch(self, t_ms):
+        """The slot is watched from t_ms on: empty history, onsets suppressed for SUPPRESS_AFTER_WATCH_MS."""
         self.samples = []
+        self.pending = None
+        self.suppress_until_ms = t_ms + SUPPRESS_AFTER_WATCH_MS
 
-    def suppress(self, until_ms):
-        self.suppress_until_ms = max(self.suppress_until_ms, until_ms)
+    def reposition(self, t_ms):
+        """Before the slot is moved (PrepareReposition, and again at the teleport row): the pending onset is finalised
+        with its peak so far, the history is cleared, onsets are suppressed for SUPPRESS_AFTER_REPOSITION_MS."""
+        self.pending = None
+        self.samples = []
+        self.suppress_until_ms = max(self.suppress_until_ms, t_ms + SUPPRESS_AFTER_REPOSITION_MS)
 
     def reference(self, t_ms):
         """(vx, vz) at t_ms - window_ms by interpolation, or None (not evaluated). Applies the gap rule."""
@@ -102,7 +116,9 @@ def frame_bound(samples, pattern):
     return out
 
 
-def dv_series(samples, **kwargs):
-    """[(t_ms, dv or None)] of a detector run over callbacks (t_ms, vx, vz)."""
+def dv_series(samples, watch_ms=None, **kwargs):
+    """[(t_ms, dv or None)] of a detector watched at watch_ms (default: the first sample) over callbacks (t_ms, vx,
+    vz)."""
     det = Detector(**kwargs)
+    det.watch(samples[0][0] if watch_ms is None else watch_ms)
     return [(s[0], det.step(s[0], s[1], s[2])) for s in samples], det

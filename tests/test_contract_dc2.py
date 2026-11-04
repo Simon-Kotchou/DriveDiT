@@ -374,7 +374,8 @@ PAYLOAD_KINDS = ["collision"] + CRASH_KINDS + ["stuck", "teleport"]
 SESSION_EVENT_PARAMS = {"events.collision_dv_mps": 4.0, "events.collision_window_ms": 100,
                         "events.collision_window_tol_ms": 50, "events.collision_peak_ms": 200,
                         "events.collision_refractory_ms": 1000, "events.episode_end_wait_ms": 250,
-                        "events.crash_cooldown_ms": 3000, "events.rollover_up_y": 0.5,
+                        "events.crash_cooldown_ms": 3000, "events.episode_block_max_ms": 60000,
+                        "events.rollover_up_y": 0.5,
                         "events.rollover_hold_ms": 500, "events.state_poll_ms": 100}
 
 
@@ -591,7 +592,8 @@ class StreamSchemaTest(unittest.TestCase):
 
     def test_spec_values_lists_equal_json(self):
         self.assertEqual(md_values_violations(self.schema, self.spec), [])
-        drifted = self.spec.replace("ego_destroyed, script_error:write_fail", "script_error:write_fail", 1)
+        drifted = self.spec.replace("ego_destroyed, ego_disabled, script_error:write_fail",
+                                    "script_error:write_fail", 1)
         self.assertNotEqual(drifted, self.spec)
         self.assertTrue(md_values_violations(self.schema, drifted))
 
@@ -610,7 +612,8 @@ class StreamSchemaTest(unittest.TestCase):
 
     def test_spec_payload_table_equals_json(self):
         self.assertEqual(md_payload_violations(self.schema, self.spec), [])
-        drifted = self.spec.replace("| `collision` | `src` | enum | - | yes |", "| `collision` | `src` | enum | - | no |", 1)
+        drifted = self.spec.replace("| `collision` | `src` | enum | - | yes |",
+                                    "| `collision` | `src` | enum | - | no |", 1)
         self.assertNotEqual(drifted, self.spec)
         self.assertTrue(md_payload_violations(self.schema, drifted))
         bad = copy.deepcopy(self.schema)
@@ -640,8 +643,9 @@ class StreamSchemaTest(unittest.TestCase):
         # frame-bound rows (D-A): the window is world time, never a step count
         crash = self.spec[self.spec.index("### 9.5.1 Crash events"):self.spec.index("### 9.6 Stream")]
         for phrase in ("world time, never a count of steps or callbacks", "collision_window_tol_ms",
-                       "Episode ownership", "PrepareReposition", "crash_cooldown_ms", "by onset or by confirmation",
-                       "of the ego slot and of no vehicle"):
+                       "Episode ownership", "PrepareReposition", "crash_cooldown_ms",
+                       "first terminal ego\n  event by confirmation", "the only source of the terminations",
+                       "the episode that owns that step", "episode_block_max_ms", "of the ego slot and of no vehicle"):
             self.assertIn(phrase, crash, phrase)
         self.assertNotIn("6 at 60 Hz", crash)
         self.assertIn("### 9.5.1 Crash events", self.spec)
@@ -652,8 +656,10 @@ class StreamSchemaTest(unittest.TestCase):
     def test_ego_destroyed_is_a_normal_end(self):
         end = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}
         self.assertIn("ego_destroyed", end["end_reason"]["enum"])
+        self.assertIn("ego_disabled", end["end_reason"]["enum"])
         self.assertEqual(end["end_reason"]["enum"], self.schema["enums"]["end_reason"])
-        self.assertIn("not an error", end["status"]["desc"])
+        self.assertIn("ego_destroyed and ego_disabled are not errors", end["status"]["desc"])
+        self.assertIn("ego_disabled", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
         self.assertIn("ego_destroyed", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
         self.assertIn("ego_destroyed", self.spec[self.spec.index("## 15. Open items"):])
 

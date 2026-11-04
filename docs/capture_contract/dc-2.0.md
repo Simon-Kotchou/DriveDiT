@@ -51,7 +51,7 @@ block the freeze. TBD-6 to TBD-10 change a value or a mechanism only, never a fi
 | TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that | E-04, E-01 | no |
 | TBD-8 | render-settings dump keys | GetGame().GetEngineUserSettings() modules VideoUserSettings and DisplayUserSettings, keys from SCR_SettingsManagerVideoModule.c:12-56 | E-20 | no |
 | TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | E-08a | no |
-| TBD-10 | collision detector and crash-event parameters (session.json events.*) | collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override | E-01 extension | no |
+| TBD-10 | collision detector and crash-event parameters (session.json events.*) | collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, episode_block_max_ms 60000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override | E-01 extension | no |
 
 Consequences the freeze must apply:
 - TBD-1: the rule is applied in this order: `physics_steps_per_decision` N = floor(100 ms / slice + 0.5) first (an
@@ -275,7 +275,10 @@ Checks that fail before step 4 (guard, trial, fingerprint, build, readiness) cre
 with `end_reason` `zero_ego`, 0 rows and 0 images; an ego or camera lost later ends it `failed` with `ego_lost` or
 `camera_lost` (a camera that fails to initialise fails readiness). An ego destroyed after the first row
 (`DamageManagerComponent.IsDestroyed()`) ends the session with `end_reason` `ego_destroyed`, which is not an error:
-status stays `ok`, because a crash is valid data. `ego_lost` stays for an ego that vanishes or changes identity.
+status stays `ok`, because a crash is valid data. `ego_lost` stays for an ego that vanishes or changes identity. An
+ego that, between episodes, stays tilted, immobile or burning without being destroyed for
+`events.episode_block_max_ms` (9.5.1) ends the session through the planned end (5.3 step 6, with its drain) with
+`end_reason` `ego_disabled`, also not an error; the session logs one WARNING line naming the condition.
 - One terminal step L: the last step whose rows are written. Destruction seen after a step's simulation lets that
   step's ctl and telemetry rows be written and ends after it (L is that step); seen at a frame start or before a
   step, L is the previous step.
@@ -665,7 +668,7 @@ missing required key fails).
 | `dismount` | `v_mps` | float | m/s | yes | Horizontal speed of the vehicle at the dismount. |
 | `remount` | `driver` | enum | - | yes | Life state of the new pilot-seat occupant. Values: alive, incapacitated, dead. |
 | `remount` | `by` | enum | - | no | Who seated the driver, when the writer knows it: ai (the vanilla AI got in), reseat (a director teleported the same character back), spawn (a director seated a new character). Values: ai, reseat, spawn. |
-| `rollover` | `onset_step` | int | step | yes | First physics_step of the hold: the first callback with up_y below events.rollover_up_y. The row is written once the hold of events.rollover_hold_ms is confirmed and belongs to the episode of this step, even when that episode has ended meanwhile (a driver may end it at the first tilted step). |
+| `rollover` | `onset_step` | int | step | yes | First physics_step of the hold: the first callback with up_y below events.rollover_up_y; never after the row's physics_step. The row is written once the hold of events.rollover_hold_ms is confirmed and belongs to the episode of this step, even when that episode has ended meanwhile. |
 | `rollover` | `up_y` | float | 1 | yes | up_y of the vehicle (GetWorldTransform row 1, y) when the hold was confirmed. Range [-1, 1]. |
 | `stuck` | `stuck_s` | float | s | no | How long the vehicle had been stuck when the expert or a director reported it. At least 0. |
 | `stuck` | `termination_reason` | enum | - | no | Present when the stuck ends the episode (the expert's stuck termination). Values: stuck. |
@@ -716,8 +719,14 @@ fallback). Rows are frame-bound (dc-2.0 freeze decision D-A): one callback cover
 Episode ownership: a crash row belongs to the episode in which it occurred, `episode_id` is that episode (-1 between
 episodes) even when the row is written after that episode's `episode_end`: the onset for a `collision` (its
 `onset_step`, or the step at which a contact was reported), the first tilted step for a `rollover` (its
-`onset_step`), the poll for the other kinds. `event_seq` and `world_time_ms` stay in write order. A crash row whose
-step lies outside its episode fails C36.
+`onset_step`), the poll for the other kinds. `event_seq` and `world_time_ms` stay in write order.
+- Steps and episodes are taken as one pair. Whatever happens inside a physics callback (an onset, a tilt, a poll in
+  that callback) takes that callback's step and the episode of its ctl row. A report that arrives between callbacks
+  (a vanilla contact, a destruction or damage poll at a frame start or after an episode end) takes the last
+  completed step and the episode that owns that step (its ctl `episode_id`), even when that episode has just ended:
+  a contact reported after `episode_end` of an episode that ended at step P carries `onset_step` P and that episode.
+- A crash row whose onset lies outside its episode (a -1 row inside any episode), or whose `onset_step` lies after
+  its own `physics_step`, fails C36 and is never a terminal event.
 
 Polled state (every slot, every `events.state_poll_ms` of world time, so its timing is +- one period):
 - `veh_damage`: the damage state changes, or `movement_damage` crosses 1.0 in either direction;
@@ -733,6 +742,8 @@ Polled state (every slot, every `events.state_poll_ms` of world time, so its tim
 
 `rollover`: up_y below `events.rollover_up_y` for `events.rollover_hold_ms` of world time; the row is written when the
 hold is confirmed and carries the first tilted step as `onset_step`. Re-armed once up_y has stayed above 0.8 for 2 s.
+The confirmed rollover row is the only source of the termination `rollover`: a tilt that rights itself before the hold
+ends ends nothing.
 
 Pairs: per slot `veh_fire_start` and `veh_fire_end` alternate, start first, and so do `dismount` and `remount`; the
 last of a slot may stay open at the session end (C36). Payload numbers lie in the `range` and at or above the `min`
@@ -743,16 +754,19 @@ other than `undamaged` or `movement_damage` >= 1, a `veh_fire_start`, a `rollove
 `rollover`, which gives `rollover`. Each has an onset (`onset_step` of a collision or rollover, else its
 `physics_step`) and a confirmation (when the core can latch it: the onset of a collision, the end of the hold of a
 rollover, the poll of the others).
-- The capture core latches the reason in the callback of the confirmation, before the driver's own termination of
-  that callback, and only into the event's own episode; the episode then ends at the next decision step. That end
-  waits until the ego's pending `collision` row is written, at most `events.episode_end_wait_ms` after its onset, so
-  the row carries the episode id and precedes `episode_end`.
-- A driver may end the episode earlier on the same physical event (an expert sees a rollover at the first tilted
-  step). So the `termination_reason` `collision` or `rollover` of an episode must be the reason of its first terminal
-  ego event either by onset or by confirmation (C36).
+- The capture core is the only source of the terminations `collision` and `rollover`: a driver never reports them
+  (an expert that sees `up_y` below a limit must not end the episode itself). The core latches the reason in the
+  callback of the confirmation, before the driver's own termination of that callback, and only into the event's own
+  episode; the episode then ends at the next decision step. That end waits until the ego's pending `collision` row is
+  written, at most `events.episode_end_wait_ms` after its onset, so the row carries the episode id and precedes
+  `episode_end`.
+- So the `termination_reason` `collision` or `rollover` of an episode must be the reason of its first terminal ego
+  event by confirmation, confirmed inside the episode (C36).
 - No new episode begins while the ego's `collision` row is pending, within `events.crash_cooldown_ms` after its last
   terminal crash event (in or between episodes; why 3000 ms: section 10.1), while it is tilted (up_y below
-  `events.rollover_up_y`), immobile (`movement_damage` >= 1) or burning.
+  `events.rollover_up_y`), immobile (`movement_damage` >= 1) or burning. The last three can last forever without a
+  destruction: after `events.episode_block_max_ms` (60 s) of them between episodes the session ends with
+  `ego_disabled` (5.3).
 - A destroyed ego ends the session with `ego_destroyed` (5.3).
 - The builder sets `policy_valid` 0 for every decision step whose action window (P_t, P_t + N] contains or follows
   the earliest onset of the episode's terminal ego events; `wm_valid` is not changed, because crash dynamics are
@@ -797,10 +811,10 @@ rollover, the poll of the others).
 
 Crash terminations: `collision` and `rollover` come from the first terminal ego crash event of the episode as
 defined in 9.5.1 (a collision row with `src` `dv` or `dv_contact`, a `veh_damage` with a state other than `undamaged`
-or `movement_damage` >= 1, a `veh_fire_start`; a `rollover`), first by onset or first by confirmation: the core
-latches the reason when it confirms the event, a driver may report the same event at its onset. A termination the
-driver reported for an earlier event wins (first terminal event, r2 1.3). No new reason value exists for crashes; a
-destroyed ego still ends its episode with `collision`.
+or `movement_damage` >= 1, a `veh_fire_start`; a `rollover`), the first by confirmation: the core latches the reason
+when it confirms the event and is their only source (a driver never reports `collision` or `rollover`). A termination
+the driver reported for an earlier event of another kind wins (first terminal event, r2 1.3). No new reason value
+exists for crashes; a destroyed ego still ends its episode with `collision`.
 
 ### 9.7 Stream `traffic` (reserved for T2)
 
@@ -996,6 +1010,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `events.collision_refractory_ms` | int | ms | yes | Per-slot refractory after an onset: a further crossing or a contact with the same other entity belongs to the same impact (default 1000). [TBD-10] |
 | `events.episode_end_wait_ms` | int | ms | yes | Longest wait, from the onset, of an episode end for the ego's pending collision row (default 250). [TBD-10] |
 | `events.crash_cooldown_ms` | int | ms | yes | No new episode begins until this long after the ego's last terminal crash event (default 3000: longer than the refractory 1000 ms plus the rollover hold 500 ms plus a poll period and the 250 ms row wait, so the late polls of one impact, a rollover after it and a merged second contact land before the next episode; 3 s also lets the vehicle come to rest, 20 m/s at 7 m/s2). [TBD-10] |
+| `events.episode_block_max_ms` | int | ms | yes | Longest time, between episodes, for which the ego may stay tilted, immobile or burning without being destroyed: the session then ends through the planned end with end_reason ego_disabled (default 60000; the cool-down and a pending row do not count). [TBD-10] |
 | `events.rollover_up_y` | float | 1 | yes | rollover when up_y (GetWorldTransform row 1, y) stays below this (default 0.5, a tilt of 60 deg). [TBD-10] |
 | `events.rollover_hold_ms` | int | ms | yes | How long up_y must stay below rollover_up_y (default 500). [TBD-10] |
 | `events.state_poll_ms` | int | ms | yes | Poll period of the damage, fire, driver and seat state of every slot (default 100). [TBD-10] |
@@ -1037,8 +1052,8 @@ the harvester, never treated as complete.
 |---|---|---|---|---|
 | `contract_version` | str | - | yes | dc-2.0. |
 | `session_id` | str | - | yes | As in session.json. |
-| `status` | enum | - | yes | ok only when every commit succeeded and no error ended the session (ego_destroyed is not an error); failed otherwise. Values: ok, failed. |
-| `end_reason` | enum | - | yes | Why the session ended (ego_destroyed: the ego was destroyed after the first row, a normal end with status ok; section 5.3). Values: duration, stop, dc_stop, ego_destroyed, script_error:write_fail, script_error:other, zero_ego, ego_lost, camera_lost. |
+| `status` | enum | - | yes | ok only when every commit succeeded and no error ended the session (ego_destroyed and ego_disabled are not errors); failed otherwise. Values: ok, failed. |
+| `end_reason` | enum | - | yes | Why the session ended (ego_destroyed: the ego was destroyed after the first row; ego_disabled: between episodes it stayed tilted, immobile or burning for events.episode_block_max_ms; both normal ends with status ok, section 5.3). Values: duration, stop, dc_stop, ego_destroyed, ego_disabled, script_error:write_fail, script_error:other, zero_ego, ego_lost, camera_lost. |
 | `end.unix_s` | int | s | yes | Wall time at end. |
 | `end.utc` | str | - | yes | ISO 8601 UTC at end. |
 | `end.world_ms` | int | ms | yes | world_time_ms at end. |
@@ -1160,14 +1175,15 @@ Rules (r2 3.3, R35):
   - splits: the VAL-C hash rule `int(sha256(session_id)[:8], 16) mod 10 == 0` (3.2);
   - session root `$profile:DC_Sessions/` beside the dc-1.0 `DrivingData` and the probes' `DC_Probes` (4.3);
   - one ego per session; every ctl and telemetry row describes a live ego (2);
-  - `end_reason` values duration, stop, dc_stop, ego_destroyed (not an error), script_error:write_fail,
-    script_error:other, zero_ego, ego_lost, camera_lost; failures before the directory exists have none; status ok or
-    failed only (5.3, 10.2);
+  - `end_reason` values duration, stop, dc_stop, ego_destroyed and ego_disabled (not errors),
+    script_error:write_fail, script_error:other, zero_ego, ego_lost, camera_lost; failures before the directory
+    exists have none; status ok or failed only (5.3, 10.2);
   - crash events (9.5.1): the kinds veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount and
     rollover, the collision, stuck and teleport payloads, the world-frame delta-v detector timed in world ms (frame-
     bound rows, D-A) with its gap rule and TBD-10 values, the vanilla ProcessCollision contact source (the addon's
-    first modded class), episode ownership by onset, the core's ego termination latch and the first-by-onset-or-
-    confirmation rule, the episode end waiting up to `events.episode_end_wait_ms` for the ego's collision row, the
+    first modded class), episode ownership by onset with step/episode pairs for reports between callbacks, the core
+    as the only source of collision and rollover terminations (first by confirmation), the bounded block ending in
+    `ego_disabled`, the episode end waiting up to `events.episode_end_wait_ms` for the ego's collision row, the
     crash cool-down before the next episode, the reposition protocol, the `ego_destroyed` end at one terminal step,
     the optional `dv_max_mps` columns and the builder's `policy_valid` and ego-only `teleport` rules after a crash;
   - the launch-guard escape `wb_escape`, its process-start binding and its C02 use-class rule (5.1);

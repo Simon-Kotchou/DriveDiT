@@ -55,9 +55,18 @@
 //     driver in the pilot seat the director teleports the driver back into it, or seats a new one through direct
 //     seating when the old one is gone or dead (a dead one is moved out of the seat first; the group is kept when it
 //     becomes empty; this also covers a group whose members an eviction deleted, C-9). It does not reseat into a car
-//     that cannot move or is on fire, and gives up after MAX_RESEATS_WITHOUT_PROGRESS reseats in a row that did not
-//     get the car moving. While the driver is out the stuck clock pauses; it restarts when the vanilla AI gets back in
-//     by itself, so stuck time adds up only across dismounts that a reseat ended;
+//     that cannot move or is on fire (it retires that group, see below), and gives up after
+//     MAX_RESEATS_WITHOUT_PROGRESS reseats in a row that did not get the car moving. While the driver is out the stuck
+//     clock pauses; it restarts when the vanilla AI gets back in by itself, so stuck time adds up only across
+//     dismounts that a reseat ended;
+//   - never lets a group without an AI agent hold a waypoint: vanilla dereferences the missing group leader when a
+//     group move fails (SCR_AIProcessFailedMovementResult.c:59), a VM exception that halts Workbench, and such a
+//     group exists only because delete-when-empty is off (see the seat watchdog). An agent-less group whose new driver
+//     the seat watchdog will still seat loses its current waypoint until the driver is in (CheckGroupMembers); a
+//     group that cannot drive any more is retired (RetireGroup): no AI agent left and a car that cannot move or is on
+//     fire, or no seat watchdog to seat a new driver; a car that cannot move or is on fire once the seat watchdog's
+//     time is up; the deleted group or vehicle. Retiring removes its waypoints, deletes the empty group, ends its seat
+//     watchdog, move-failure counting and statistics, and logs one "group N retired: <reason>" line;
 //   - stops the collector session (SCR_MLDataCollector.StopSession) when the game mode or the game ends.
 //
 // LIFECYCLE (vanilla 1.8.0.13 Game/GameMode/SCR_BaseGameMode.c:428-458 and :499-521): the authority's first
@@ -174,6 +183,11 @@ class SCR_MLDataCaptureGroupState : Managed
 	int m_iMoveFailures;			//!< failed vanilla group moves (OnMoveFailed)
 	string m_sLastMoveFailure;		//!< "<EMoveError> (vehicle <name>)" of the latest failed group move
 	float m_fLastMoveFailureMs = -1;	//!< world time of the latest failed group move, -1 = none
+
+	bool m_bRetired;				//!< RetireGroup ran: no waypoint, never a new one, no seat watchdog, no move-failure counting
+	string m_sRetireReason;			//!< why RetireGroup took the group out
+	float m_fRetiredAtS = -1;		//!< director time [s] of the retirement, -1 = active
+	int m_iSuspendedWaypoint = -1;	//!< index into m_aWaypoints taken away while the group had no AI agent, -1 = none
 
 	static const int MOVE_FAILURE_LOG_LIMIT = 50;
 
@@ -953,7 +967,14 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (state.m_Vehicle)
 			pilot = state.m_Vehicle.GetPilot() != null;
 
-		return text + string.Format(" driver=%1 pilot=%2 lod_pin=%3 observer=%4", DescribeDriver(state.m_Driver), pilot, state.m_bLODPinned, state.m_bObserverAdded);
+		text += string.Format(" driver=%1 pilot=%2 lod_pin=%3 observer=%4", DescribeDriver(state.m_Driver), pilot, state.m_bLODPinned, state.m_bObserverAdded);
+		if (state.m_iSuspendedWaypoint >= 0)
+			text += " waypoint_suspended=1";
+
+		if (state.m_bRetired)
+			text += " retired=1";
+
+		return text;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1092,15 +1113,22 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	protected void DeleteGroupEntities(SCR_MLDataCaptureGroupState state)
 	{
+		DeleteWaypointEntities(state);
+		if (state.m_Group)
+			SCR_EntityHelper.DeleteEntityAndChildren(state.m_Group);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Deletes the group's own waypoint entities (DC_G<k>_WP<n>); the group must not hold them any more.
+	protected void DeleteWaypointEntities(SCR_MLDataCaptureGroupState state)
+	{
 		foreach (SCR_MLDataCaptureWaypoint record : state.m_aWaypoints)
 		{
 			if (record.m_Waypoint)
 				SCR_EntityHelper.DeleteEntityAndChildren(record.m_Waypoint);
 		}
 		state.m_aWaypoints.Clear();
-
-		if (state.m_Group)
-			SCR_EntityHelper.DeleteEntityAndChildren(state.m_Group);
+		state.m_iCurrentWaypoint = -1;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1150,13 +1178,24 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	//------------------------------------------------------------------------------------------------
 	//! Gives the group a new waypoint: never the current one and never one within 2x the completion radius of the
 	//! vehicle or of the current target. If no target qualifies, the group gets none and MonitorVehicles retries
-	//! (an excluded target would be completed without the vehicle moving).
+	//! (an excluded target would be completed without the vehicle moving). A retired group gets none; a group without
+	//! an AI agent gets none until the seat watchdog seated a new driver (CheckGroupMembers), retried the same way.
 	protected void AssignNextWaypoint(SCR_MLDataCaptureGroupState state)
 	{
-		if (!m_bActive || !state || !state.m_Group)
+		if (!m_bActive || !state || !state.m_Group || state.m_bRetired)
 			return;
 
 		state.m_fNextAssignAtMs = -1;
+		int retryMs = m_iWaypointDelay;
+		if (retryMs < 1000)
+			retryMs = 1000;
+
+		if (state.m_Group.GetAgentsCount() == 0)
+		{
+			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
+			return;
+		}
+
 		int groupId = state.m_iGroupId;
 		int count = state.m_aWaypoints.Count();
 		int current = state.m_iCurrentWaypoint;
@@ -1184,10 +1223,6 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		if (candidates.IsEmpty())
 		{
-			int retryMs = m_iWaypointDelay;
-			if (retryMs < 1000)
-				retryMs = 1000;
-
 			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
 			if (!state.m_bNoTargetWarned)
 			{
@@ -1315,6 +1350,13 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		int boardingFailed;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			// A group retired during the boarding window never becomes ready.
+			if (state.m_bRetired)
+			{
+				boardingFailed++;
+				continue;
+			}
+
 			UpdateOccupancy(state, elapsedS);
 			if (!state.m_bDriverReady)
 			{
@@ -1402,7 +1444,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		string vehicles;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
-			if (!state.m_bDriverReady || state.m_bRegistered)
+			if (state.m_bRetired || !state.m_bDriverReady || state.m_bRegistered)
 				continue;
 
 			vehicles += string.Format(" V%1=%2", readyGroups.Count(), state.m_Vehicle.GetName());
@@ -1546,9 +1588,18 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		float elapsedS = (nowMs - m_fStartTimeMs) / 1000.0;
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			// A retired group gets no waypoint, no seat watchdog and no statistics updates any more.
+			if (state.m_bRetired)
+				continue;
+
 			// Occupancy for stuck recovery is re-read here, so it does not depend on the readiness poll having run
 			// or still running, and it drops when the driver leaves or dies.
 			UpdateOccupancy(state, elapsedS);
+
+			// Before the seating retries and the waypoint assignment: a group without an AI agent must hold no waypoint.
+			CheckGroupMembers(state);
+			if (state.m_bRetired)
+				continue;
 
 			// A driver that is ready only after the boarding window ended (late, or seated earlier and then lost before
 			// the start) is not added to a running session: the collector's vehicle ids and session_info.txt are fixed
@@ -1596,6 +1647,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 			// Before CheckStuck, which pauses its clock while the seat watchdog has the driver out.
 			WatchDriverSeat(state, elapsedS, speed);
+			if (state.m_bRetired)
+				continue;
+
 			CheckStuck(state, position, dtS);
 		}
 
@@ -1657,6 +1711,176 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Run by MonitorVehicles for every active group that started driving, before its waypoint assignment. Vanilla
+	//! dereferences the group leader without a null check when a group move fails
+	//! (Game/AI/ScriptedNodes/Groups/SCR_AIProcessFailedMovementResult.c:58-59; also
+	//! Game/AI/ScriptedNodes/Logical/SCR_AIDecoDistanceHysteresis.c:41), so a group without an AI agent
+	//! (AIGroup.GetAgentsCount, Game/generated/AI/AIGroup.c:24) must never hold a waypoint:
+	//! - group or vehicle deleted: retired;
+	//! - no AI agent, and the car cannot move or is on fire, or no seat watchdog will seat a new driver (it is off, or
+	//!   the group's driver never sat in the pilot seat, WatchDriverSeat) and the group's driver is not alive: retired,
+	//!   which deletes the empty group;
+	//! - no AI agent otherwise: its current waypoint is taken away until an agent is back (the seat watchdog's new
+	//!   driver, or the living driver whose join is still in progress);
+	//! - with the seat watchdog off: a car that cannot move or is on fire without a living driver in its pilot seat is
+	//!   retired (with the watchdog on, ReseatDriver retires it when its time is up).
+	protected void CheckGroupMembers(SCR_MLDataCaptureGroupState state)
+	{
+		if (state.m_bRetired || !state.m_bDrivingStarted)
+			return;
+
+		if (!state.m_Group)
+		{
+			RetireGroup(state, "its AI group was deleted");
+			return;
+		}
+
+		if (!state.m_Vehicle)
+		{
+			RetireGroup(state, "its vehicle was deleted");
+			return;
+		}
+
+		bool watchdogReseats = m_fReseatAfterS > 0 && state.m_fFirstSeatedS >= 0;
+		if (state.m_Group.GetAgentsCount() > 0)
+		{
+			if (state.m_iSuspendedWaypoint >= 0)
+				ResumeWaypoint(state);
+
+			if (!watchdogReseats && !state.m_bDriverSeated && !IsVehicleUsable(state.m_Vehicle))
+				RetireGroup(state, string.Format("%1 cannot move or is on fire (%2), its driver is out and no seat watchdog reseats it", state.m_Vehicle.GetName(), DescribeVehicleDamage(state.m_Vehicle)));
+
+			return;
+		}
+
+		if (!IsVehicleUsable(state.m_Vehicle))
+		{
+			RetireGroup(state, string.Format("no AI agent left and %1 cannot move or is on fire (%2)", state.m_Vehicle.GetName(), DescribeVehicleDamage(state.m_Vehicle)));
+			return;
+		}
+
+		// A living driver of this group without an agent in it is taken for a join still in progress: wait for it.
+		if (!watchdogReseats && DescribeDriver(state.m_Driver) != "alive")
+		{
+			RetireGroup(state, string.Format("no AI agent left (driver %1) and no seat watchdog seats a new driver (it is off, or this group's driver never sat in the pilot seat)", DescribeDriver(state.m_Driver)));
+			return;
+		}
+
+		SuspendWaypoint(state);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Takes the current waypoint away from a group without an AI agent (CheckGroupMembers) and keeps it for
+	//! ResumeWaypoint. With no current waypoint (between a completion and the next assignment) there is nothing to
+	//! take: AssignNextWaypoint waits while the group has no agent.
+	protected void SuspendWaypoint(SCR_MLDataCaptureGroupState state)
+	{
+		if (state.m_iSuspendedWaypoint >= 0)
+			return;
+
+		AIWaypoint current = state.m_Group.GetCurrentWaypoint(); // Game/generated/AI/AIGroup.c:38
+		int index = state.FindWaypoint(current);
+		if (index < 0)
+			return;
+
+		state.m_Group.RemoveWaypoint(current); // Game/generated/AI/AIGroup.c:33
+		state.m_iSuspendedWaypoint = index;
+		Print(string.Format("[DataCapture] WARNING: group %1 has no AI agent left: waypoint %2 taken away until the group has an AI agent again (the seat watchdog seats a new driver in %3; vanilla dereferences the missing group leader when a group move fails) %4", state.m_iGroupId, state.m_aWaypoints[index].m_iTargetId, state.m_Vehicle.GetName(), DescribeGroup(state)), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Gives a suspended waypoint back once the group has an AI agent again.
+	protected void ResumeWaypoint(SCR_MLDataCaptureGroupState state)
+	{
+		int index = state.m_iSuspendedWaypoint;
+		state.m_iSuspendedWaypoint = -1;
+		if (index < 0 || index >= state.m_aWaypoints.Count())
+			return;
+
+		state.m_Group.AddWaypoint(state.m_aWaypoints[index].m_Waypoint); // Game/generated/AI/AIGroup.c:32
+		Print(string.Format("[DataCapture] Group %1 has an AI agent again: waypoint %2 given back %3", state.m_iGroupId, state.m_aWaypoints[index].m_iTargetId, DescribeGroup(state)), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Takes a group that cannot drive any more out of the capture for good: removes its waypoints from it and deletes
+	//! them, never assigns it a new one, ends its seat watchdog, move-failure counting (OnMoveFailed is unsubscribed),
+	//! stuck resets and statistics updates, releases its LOD pin and vehicle observer, and logs one line
+	//! "[DataCapture] WARNING: group N retired: <reason>".
+	//! An empty group is deleted. That is the vanilla fate of every empty group: SCR_AIGroup.OnEmpty deletes it with
+	//! SCR_EntityHelper.DeleteEntityAndChildren unless delete-when-empty is off (Game/Entities/SCR_AIGroup.c:2448-2460,
+	//! off since SpawnAIGroup), deferred by 1 ms only because deleting inside that event is unsafe (:2458). RetireGroup
+	//! runs from the call queue (MonitorVehicles), the context that deferred delete runs in. Only removing the
+	//! waypoints would keep an agent-less group running its behaviour tree, a state vanilla never produces, in which
+	//! every group node that reads the leader dereferences null (SCR_AIProcessFailedMovementResult.c:59,
+	//! SCR_AIDecoDistanceHysteresis.c:41 in MoveToWPWithTransport.bt), whatever its trigger.
+	//! A group with members left (a living driver next to a burning car) keeps them: its waypoints go, and
+	//! delete-when-empty is turned back on (SCR_AIGroup.c:3373), so vanilla deletes it once the last one is gone.
+	protected void RetireGroup(SCR_MLDataCaptureGroupState state, string reason)
+	{
+		if (state.m_bRetired)
+			return;
+
+		string before = DescribeGroup(state);
+		int lastTargetId = state.GetCurrentTargetId();
+		state.m_bRetired = true;
+		state.m_sRetireReason = reason;
+		state.m_fRetiredAtS = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 1000.0;
+		state.m_fNextAssignAtMs = -1;
+		state.m_fNextSeatAttemptAtMs = -1;
+		state.m_iSuspendedWaypoint = -1;
+		state.m_fStuckTimeS = 0;
+		state.m_bDriverSeated = false;
+		state.m_bDriverReady = false;
+
+		int removed;
+		SCR_AIGroup group = state.m_Group;
+		if (group)
+		{
+			group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
+			SCR_AIGroupUtilityComponent groupUtility = group.GetGroupUtilityComponent();
+			if (groupUtility)
+				groupUtility.GetOnMoveFailed().Remove(state.OnMoveFailed);
+
+			array<AIWaypoint> waypoints = {};
+			group.GetWaypoints(waypoints); // Game/generated/AI/AIGroup.c:39
+			foreach (AIWaypoint waypoint : waypoints)
+			{
+				if (!waypoint)
+					continue;
+
+				group.RemoveWaypoint(waypoint);
+				removed++;
+			}
+		}
+
+		ReleaseGroup(state, GetObserversSystem(), true);
+		DeleteWaypointEntities(state);
+
+		string groupText = "AI group already gone";
+		if (group)
+		{
+			int agents = group.GetAgentsCount();
+			if (agents == 0)
+			{
+				SCR_EntityHelper.DeleteEntityAndChildren(group); // Game/Helpers/SCR_EntityHelper.c:177
+				state.m_Group = null;
+				groupText = "empty AI group deleted";
+			}
+			else
+			{
+				group.SetDeleteWhenEmpty(true);
+				groupText = string.Format("AI group kept with %1 agents, vanilla deletes it once empty", agents);
+			}
+		}
+
+		string lastTarget = "none";
+		if (lastTargetId > 0)
+			lastTarget = lastTargetId.ToString();
+
+		Print(string.Format("[DataCapture] WARNING: group %1 retired: %2 (%3 waypoints removed, last target %4, %5; no new waypoint, seat watchdog or move-failure counting from now on) %6", state.m_iGroupId, reason, removed, lastTarget, groupText, before), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Seat watchdog (see the header), run by MonitorVehicles once the boarding window is over and only for groups whose
 	//! driver sat in the pilot seat at least once, so direct seating, walk-in boarding and the readiness poll are left
 	//! alone. Logs each time the pilot seat loses its living driver and each time one is back (and restarts the stuck
@@ -1712,10 +1936,10 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One seat watchdog attempt on a pilot seat without a living driver. It seats nobody, and says why once per dismount
-	//! (LogOncePerDismount), when:
+	//! One seat watchdog attempt on a pilot seat without a living driver. It retires the group (RetireGroup) when:
 	//! - the group or the pilot seat no longer exists;
-	//! - the car cannot move or is on fire (IsVehicleUsable): the vanilla AI would order the driver straight out again;
+	//! - the car cannot move or is on fire (IsVehicleUsable): the vanilla AI would order the driver straight out again.
+	//! It seats nobody, and says why once per dismount (LogOncePerDismount), when:
 	//! - the last MAX_RESEATS_WITHOUT_PROGRESS reseats left the car within m_fStuckDistanceM of where the previous one put
 	//!   the driver in: the vanilla AI keeps ordering it out, so the watchdog waits until the car has moved;
 	//! - the pilot seat holds a character that is not dead (a living one would be the seated driver, so an unconscious
@@ -1740,13 +1964,14 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		PilotCompartmentSlot pilotSlot = state.m_Vehicle.GetPilotCompartmentSlot();
 		if (!pilotSlot || !state.m_Group)
 		{
-			LogOncePerDismount(state, "gone", string.Format("[DataCapture] ERROR: group %1: cannot reseat the driver of %2: its group or pilot seat no longer exists", state.m_iGroupId, vehicleName), LogLevel.ERROR);
+			RetireGroup(state, string.Format("cannot reseat the driver of %1: its AI group or pilot seat no longer exists", vehicleName));
 			return;
 		}
 
+		// The vanilla AI would order a new driver straight out again (SCR_AILeaveStaticVehicles), so the group is done.
 		if (!IsVehicleUsable(state.m_Vehicle))
 		{
-			LogOncePerDismount(state, "unusable", string.Format("[DataCapture] WARNING: group %1: not reseating the driver of %2 after %3 s: the car cannot move or is on fire (%4), so the vanilla AI would order it straight out again %5", state.m_iGroupId, vehicleName, unseatedS.ToString(-1, 0), DescribeVehicleDamage(state.m_Vehicle), DescribeGroup(state)), LogLevel.WARNING);
+			RetireGroup(state, string.Format("%1 cannot move or is on fire (%2) %3 s after its pilot seat lost the living driver, so the seat watchdog does not reseat it", vehicleName, DescribeVehicleDamage(state.m_Vehicle), unseatedS.ToString(-1, 0)));
 			return;
 		}
 
@@ -1899,10 +2124,27 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		float minutes = (GetGame().GetWorld().GetWorldTime() - m_fStartTimeMs) / 60000.0;
 
+		int retired;
+		foreach (SCR_MLDataCaptureGroupState retiredState : m_aGroups)
+		{
+			if (retiredState.m_bRetired)
+				retired++;
+		}
+
 		Print("=== ML DATA CAPTURE DRIVING STATISTICS ===", LogLevel.NORMAL);
-		Print(string.Format("Director time: %1 min, groups: %2/%3, waypoints completed: %4", minutes.ToString(-1, 1), m_aGroups.Count(), m_iMaxAIGroups, m_iTotalWaypointsCompleted), LogLevel.NORMAL);
+		Print(string.Format("Director time: %1 min, groups: %2/%3 (%4 retired), waypoints completed: %5", minutes.ToString(-1, 1), m_aGroups.Count(), m_iMaxAIGroups, retired, m_iTotalWaypointsCompleted), LogLevel.NORMAL);
 		foreach (SCR_MLDataCaptureGroupState state : m_aGroups)
 		{
+			// The totals a retired group reached; no live state, which no longer changes.
+			if (state.m_bRetired)
+			{
+				float retiredMin = state.m_fRetiredAtS / 60.0;
+				Print(string.Format("Group %1: retired %2 min after the director start: %3; distance=%4 m waypoints=%5 stuck_resets=%6 dismounts=%7 reseats=%8 move_failures=%9",
+					state.m_iGroupId, retiredMin.ToString(-1, 1), state.m_sRetireReason, state.m_fDistance.ToString(-1, 1), state.m_iWaypointsCompleted,
+					state.m_iStuckResets, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures), LogLevel.NORMAL);
+				continue;
+			}
+
 			// string.Format takes at most 9 arguments: the seat fields are formatted first.
 			string seat = string.Format("driver_seated=%1 driver_ready=%2 dismounts=%3 reseats=%4 move_failures=%5",
 				state.m_bDriverSeated, state.m_bDriverReady, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures);

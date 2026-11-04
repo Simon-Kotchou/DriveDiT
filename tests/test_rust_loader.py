@@ -15,14 +15,10 @@ Run with:
 import pytest
 import torch
 import numpy as np
-import tempfile
 import shutil
 import time
-from pathlib import Path
-from typing import Dict, Any, List, Tuple
-from dataclasses import dataclass
+from typing import Dict, Any, List
 import json
-import cv2
 
 # Import loaders
 from data import (
@@ -86,98 +82,26 @@ from data.enfusion_loader import (
 )
 
 
-@dataclass
-class TestSessionData:
-    """Test session data generator."""
-    session_dir: Path
-    num_frames: int
-    image_size: Tuple[int, int]
-
-    @classmethod
-    def create(
-        cls,
-        root_dir: Path,
-        session_id: str = "session_0001",
-        num_frames: int = 32,
-        image_size: Tuple[int, int] = (256, 256),
-    ) -> "TestSessionData":
-        """Create a test session with synthetic data."""
-        session_dir = root_dir / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create frames directory
-        frames_dir = session_dir / "frames"
-        frames_dir.mkdir(exist_ok=True)
-
-        # Create depth directory
-        depth_dir = session_dir / "depth"
-        depth_dir.mkdir(exist_ok=True)
-
-        # Generate synthetic frames
-        for i in range(num_frames):
-            # Create random image
-            frame = np.random.randint(0, 255, (*image_size, 3), dtype=np.uint8)
-            frame_path = frames_dir / f"frame_{i:06d}.png"
-            cv2.imwrite(str(frame_path), frame)
-
-            # Create depth map
-            depth = np.random.rand(*image_size).astype(np.float32) * 100
-            depth_path = depth_dir / f"depth_{i:06d}.npz"
-            np.savez(str(depth_path), depth=depth)
-
-        # Create telemetry
-        telemetry_data = []
-        for i in range(num_frames):
-            telemetry_data.append({
-                "timestamp": i / 30.0,
-                "steering_angle": np.sin(i * 0.1) * 0.5,
-                "accel": 0.3,
-                "brake": 0.0,
-                "speed": 10.0 + np.random.randn() * 0.5,
-            })
-
-        telemetry_path = session_dir / "telemetry.csv"
-        with open(telemetry_path, "w") as f:
-            # Write header
-            f.write("timestamp,steering_angle,accel,brake,speed\n")
-            for row in telemetry_data:
-                f.write(f"{row['timestamp']},{row['steering_angle']},"
-                       f"{row['accel']},{row['brake']},{row['speed']}\n")
-
-        # Create session info
-        info_path = session_dir / "session_info.txt"
-        with open(info_path, "w") as f:
-            f.write(f"session_id: {session_id}\n")
-            f.write(f"num_frames: {num_frames}\n")
-
-        return cls(
-            session_dir=session_dir,
-            num_frames=num_frames,
-            image_size=image_size,
-        )
+# The synthetic sessions these tests used (a 5-column telemetry.csv "timestamp,steering_angle,accel,brake,speed" and a
+# "key: value" session_info.txt) followed no writer's schema and were removed (CR-109, DD-5-min). The loaders under
+# test read dc-1.0 sessions only, the Rust round trip (C23) is deferred, and dc-2.0 sessions are read by
+# data/dc2/reader.py against the golden fixture in tests/fixtures/capture_dc2 (tests/test_dc2_reader.py).
+INVENTED_FIXTURE_REMOVED = (
+    "invented 5-column CSV fixture removed (CR-109); dc-2.0 data: data/dc2/reader.py and tests/fixtures/capture_dc2; "
+    "Rust round trip C23 deferred"
+)
 
 
 @pytest.fixture
 def test_data_dir():
-    """Create temporary test data directory."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-
-        # Create multiple test sessions
-        TestSessionData.create(root, "session_0001", num_frames=32)
-        TestSessionData.create(root, "session_0002", num_frames=48)
-        TestSessionData.create(root, "session_0003", num_frames=24)
-
-        yield root
+    """No session data: see INVENTED_FIXTURE_REMOVED."""
+    pytest.skip(INVENTED_FIXTURE_REMOVED)
 
 
 @pytest.fixture
 def small_test_data():
-    """Create minimal test data for quick tests."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-        TestSessionData.create(root, "session_test", num_frames=16, image_size=(64, 64))
-        yield root
+    """No session data: see INVENTED_FIXTURE_REMOVED."""
+    pytest.skip(INVENTED_FIXTURE_REMOVED)
 
 
 class TestBackendAvailability:

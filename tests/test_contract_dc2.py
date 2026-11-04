@@ -10,7 +10,10 @@ Checks, without touching any session data:
     asks of DD-11-min, appears in the JSON files;
   * the features_v1 registry rules: no student_input channel is absolute, the policy sees action_cmd and action_exec
     only as history (offset <= -1), aux_target and eval_only channels are never inputs, C24's forbidden list;
-  * the field tables in docs/capture_contract/dc-2.0.md equal the JSON, row by row;
+  * the field tables in docs/capture_contract/dc-2.0.md equal the JSON, row by row, including every "Values:" list;
+  * the crash-event payload table of section 9.5.1 equals the JSON event_payloads, and the crash events, the
+    ego_destroyed end reason, the session.json events.* parameters (TBD-10) and dv_max_mps are where the contract
+    puts them;
   * the probe-dependent values are TBD entries that cite docs/trials/T0-ENG.md, and the spec's TBD and tensor tables
     equal the JSON in every column;
   * the timing rules: the decision boundary on a synthetic timeline whose command changes, the as-of telemetry join,
@@ -311,7 +314,7 @@ def md_tables(text):
     tables = {}
     lines = text.split("\n")
     for i, line in enumerate(lines):
-        m = re.match(r"^<!-- dc2:(fields (stream|derived|file)=(\S+)|tbd|tensors) -->$", line.strip())
+        m = re.match(r"^<!-- dc2:(fields (stream|derived|file)=(\S+)|tbd|tensors|payloads) -->$", line.strip())
         if not m:
             continue
         key = (m.group(2), m.group(3)) if m.group(2) else (m.group(1), "")
@@ -360,6 +363,102 @@ def md_agreement_violations(schema, text):
             want = [t["id"], t["item"], t["default_r2"], t["decided_by"], "yes" if t["blocks_freeze"] else "no"]
             if r != want:
                 errors.append("spec: TBD row %s differs from tbd_by_probe (item, default, probe or blocking)" % t["id"])
+    return errors
+
+
+VALUES_RE = re.compile(r"Values: (.*?)\.(?: \[[^\]]*\])?$")
+PAYLOAD_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# Crash events of section 9.5.1 (t0d crash-events design, coordinator decisions of 2026-11-03)
+CRASH_KINDS = ["veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover"]
+PAYLOAD_KINDS = ["collision"] + CRASH_KINDS + ["stuck", "teleport"]
+SESSION_EVENT_PARAMS = {"events.collision_dv_mps": 4.0, "events.collision_window_ms": 100,
+                        "events.collision_peak_ms": 200, "events.collision_refractory_ms": 1000,
+                        "events.episode_end_wait_ms": 250, "events.rollover_up_y": 0.5,
+                        "events.rollover_hold_ms": 500, "events.state_poll_ms": 100}
+
+
+def md_values_violations(schema, text):
+    """Every enum field's description in the spec ends its text with 'Values: a, b, c.' equal to the JSON enum, and
+    no field without an enum has such a list."""
+    errors = []
+    tables = md_tables(text)
+    for kind, entries in (("stream", schema["streams"]), ("derived", schema["derived"]), ("file", schema["files"])):
+        for name, entry in entries.items():
+            for r, f in zip(tables.get((kind, name), []), entry["fields"]):
+                m = VALUES_RE.search(r[4])
+                listed = [v.strip() for v in m.group(1).split(",")] if m else None
+                if "enum" in f and listed != [str(v) for v in f["enum"]]:
+                    errors.append("spec: %s %s.%s Values %r differ from the JSON enum %r" % (
+                        kind, name, f["name"], listed, f["enum"]))
+                if "enum" not in f and listed is not None:
+                    errors.append("spec: %s %s.%s lists Values but the JSON has no enum" % (kind, name, f["name"]))
+    return errors
+
+
+def payload_violations(schema):
+    """Structure of event_payloads: known kinds, key names, CSV types, declared units, enums, bool required."""
+    errors = []
+    ep = schema.get("event_payloads")
+    if not isinstance(ep, dict) or not isinstance(ep.get("kinds"), dict):
+        return ["event_payloads: missing or without kinds"]
+    kinds = schema["enums"]["event_kind"]
+    for kind, keys in ep["kinds"].items():
+        if kind not in kinds:
+            errors.append("event_payloads.%s: not an event kind" % kind)
+        names = [k.get("key") for k in keys]
+        if len(set(names)) != len(names):
+            errors.append("event_payloads.%s: duplicate keys" % kind)
+        for k in keys:
+            for field in ("key", "type", "unit", "required", "desc"):
+                if field not in k:
+                    errors.append("event_payloads.%s: key without %r: %r" % (kind, field, k))
+            if any(field not in k for field in ("key", "type", "unit", "required", "desc")):
+                continue
+            where = "event_payloads.%s.%s" % (kind, k["key"])
+            if not PAYLOAD_KEY_RE.match(k["key"]):
+                errors.append("%s: bad key name" % where)
+            if k["type"] not in TYPES:
+                errors.append("%s: unknown type %r" % (where, k["type"]))
+            if k["unit"] not in schema["units"]:
+                errors.append("%s: unit %r not declared" % (where, k["unit"]))
+            if not isinstance(k["required"], bool):
+                errors.append("%s: required is not a bool" % where)
+            if k["type"] == "enum" and not k.get("enum"):
+                errors.append("%s: enum without values" % where)
+            if "enum" in k and k["type"] != "enum":
+                errors.append("%s: values on a %s key" % (where, k["type"]))
+            if not k["desc"].strip() or "|" in k["desc"]:
+                errors.append("%s: empty description or '|' in it" % where)
+    return errors
+
+
+def payload_row(kind, k):
+    """The spec's payload-table cells (kind, key, type, unit, req) of one JSON payload key."""
+    return ["`%s`" % kind, "`%s`" % k["key"], k["type"], k["unit"], "yes" if k["required"] else "no"]
+
+
+def md_payload_violations(schema, text):
+    """The section 9.5.1 table equals event_payloads row by row (a kind without keys is one row with key '-'), and
+    every enum key lists its JSON values."""
+    rows = md_tables(text).get(("payloads", ""))
+    if rows is None:
+        return ["spec: no payload table (<!-- dc2:payloads -->)"]
+    want = []
+    for kind, keys in schema["event_payloads"]["kinds"].items():
+        if not keys:
+            want.append((["`%s`" % kind, "-", "-", "-", "-"], None))
+        for k in keys:
+            want.append((payload_row(kind, k), k))
+    errors = []
+    if [r[:5] for r in rows] != [w for w, _ in want]:
+        errors.append("spec: payload table differs from event_payloads: md %r json %r" % (
+            [r[:2] for r in rows], [w[:2] for w, _ in want]))
+        return errors
+    for r, (_, k) in zip(rows, want):
+        m = VALUES_RE.search(r[5])
+        listed = [v.strip() for v in m.group(1).split(",")] if m else None
+        if k is not None and "enum" in k and listed != [str(v) for v in k["enum"]]:
+            errors.append("spec: payload %s Values %r differ from %r" % (r[1], listed, k["enum"]))
     return errors
 
 
@@ -481,6 +580,75 @@ class StreamSchemaTest(unittest.TestCase):
         bad["streams"]["hf"]["fields"].append(
             {"name": "extra", "type": "int", "unit": "-", "required": False, "desc": "x"})
         self.assertTrue(md_agreement_violations(bad, self.spec))
+
+    def test_spec_values_lists_equal_json(self):
+        self.assertEqual(md_values_violations(self.schema, self.spec), [])
+        drifted = self.spec.replace("ego_destroyed, script_error:write_fail", "script_error:write_fail", 1)
+        self.assertNotEqual(drifted, self.spec)
+        self.assertTrue(md_values_violations(self.schema, drifted))
+
+    def test_event_payloads_structure(self):
+        self.assertEqual(payload_violations(self.schema), [])
+        self.assertEqual(list(self.schema["event_payloads"]["kinds"]), PAYLOAD_KINDS)
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["collision"][0]["unit"] = "furlong"
+        self.assertTrue(payload_violations(bad))
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["crash"] = []
+        self.assertTrue(payload_violations(bad))
+
+    def test_spec_payload_table_equals_json(self):
+        self.assertEqual(md_payload_violations(self.schema, self.spec), [])
+        drifted = self.spec.replace("| `collision` | `src` | enum | - | yes |", "| `collision` | `src` | enum | - | no |", 1)
+        self.assertNotEqual(drifted, self.spec)
+        self.assertTrue(md_payload_violations(self.schema, drifted))
+        bad = copy.deepcopy(self.schema)
+        bad["event_payloads"]["kinds"]["rollover"][0]["enum"] = ["x"]
+        bad["event_payloads"]["kinds"]["rollover"][0]["type"] = "enum"
+        self.assertTrue(md_payload_violations(bad, self.spec))
+
+    def test_crash_events(self):
+        kinds = {f["name"]: f for f in self.schema["streams"]["events"]["fields"]}["kind"]["enum"]
+        self.assertEqual(kinds, self.schema["enums"]["event_kind"])
+        for kind in CRASH_KINDS + ["collision", "stuck", "teleport"]:
+            self.assertIn(kind, kinds)
+        collision = {k["key"]: k for k in self.schema["event_payloads"]["kinds"]["collision"]}
+        self.assertEqual(collision["src"]["enum"], ["dv", "dv_contact", "contact"])
+        self.assertEqual(collision["other"]["enum"], ["vehicle", "character", "tree", "building", "rock", "terrain",
+                                                      "static", "dynamic", "unknown"])
+        for key in ("onset_step", "dv_mps", "v_mps", "other", "src"):
+            self.assertTrue(collision[key]["required"], key)
+        self.assertEqual(self.schema["event_payloads"]["kinds"]["veh_fire_end"], [])
+        self.assertIn("### 9.5.1 Crash events", self.spec)
+        terminations = {f["name"]: f for f in self.schema["streams"]["episodes"]["fields"]}["termination_reason"]
+        self.assertIn("collision", terminations["enum"])
+        self.assertIn("rollover", terminations["enum"])
+
+    def test_ego_destroyed_is_a_normal_end(self):
+        end = {f["name"]: f for f in self.schema["files"]["session_end.json"]["fields"]}
+        self.assertIn("ego_destroyed", end["end_reason"]["enum"])
+        self.assertEqual(end["end_reason"]["enum"], self.schema["enums"]["end_reason"])
+        self.assertIn("not an error", end["status"]["desc"])
+        self.assertIn("ego_destroyed", self.spec[self.spec.index("### 5.3 Lifecycle"):self.spec.index("## 6. ")])
+        self.assertIn("ego_destroyed", self.spec[self.spec.index("## 15. Open items"):])
+
+    def test_crash_parameters_are_session_values(self):
+        session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
+        tbd = {t["id"]: t for t in self.schema["tbd_by_probe"]}["TBD-10"]
+        self.assertFalse(tbd["blocks_freeze"])
+        self.assertTrue(tbd["default"]["provisional"])
+        for name, default in SESSION_EVENT_PARAMS.items():
+            self.assertTrue(session[name]["required"], name)
+            self.assertEqual(session[name].get("tbd"), "TBD-10", name)
+            self.assertEqual(tbd["default"][name.split(".", 1)[1]], default, name)
+        self.assertEqual(session["events.contact_source"]["enum"], ["vanilla_process_collision", "none"])
+        self.assertEqual(self.schema["enums"]["contact_source"], session["events.contact_source"]["enum"])
+        for stream in ("telemetry", "traffic"):
+            dv = {f["name"]: f for f in self.schema["streams"][stream]["fields"]}["dv_max_mps"]
+            self.assertFalse(dv["required"], stream)
+            self.assertEqual((dv["unit"], dv.get("tbd")), ("m/s", "TBD-10"), stream)
+        self.assertIn("PROVISIONAL", tbd["default_r2"])
+        self.assertIn("1.9", tbd["default_r2"])
 
     def test_status_line(self):
         self.assertEqual(self.spec.split("\n")[2], STATUS_LINE)
@@ -700,7 +868,7 @@ class StreamSchemaTest(unittest.TestCase):
         section15 = self.spec[self.spec.index("## 15. Open items"):]
         for phrase in ("decision boundary", "decision phase lock", "obs_t rule", "ego frame", "`end_reason` values",
                        "chunk rules", "nav_v1 rules", "route schema", "`wb_escape`", "DC_Sessions/",
-                       "forward-only"):
+                       "forward-only", "crash events", "modded class"):
             self.assertIn(phrase, section15, phrase)
         self.assertIn("nav_v2", self.spec[:self.spec.index("## 1. ")])
 

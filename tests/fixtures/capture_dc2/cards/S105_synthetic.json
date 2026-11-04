@@ -1,0 +1,10 @@
+{
+  "card_id": "S105_synthetic",
+  "vehicle": "S105",
+  "pin_id": "1.8.0.13",
+  "synthetic": true,
+  "note": "SYNTHETIC vehicle card of the DD-5-min fixtures (TBD-7 fields only); the real S105 card comes from DD-7-min ident",
+  "gear_indices_forward": [3],
+  "gear_index_neutral": null,
+  "gear_index_reverse": null
+}

@@ -1,0 +1,2 @@
+event_seq,episode_id,physics_step,render_frame,world_time_ms,kind,veh_slot_id,payload
+6,1,750,262652,12516,episode_end,1,termination_reason=timeout

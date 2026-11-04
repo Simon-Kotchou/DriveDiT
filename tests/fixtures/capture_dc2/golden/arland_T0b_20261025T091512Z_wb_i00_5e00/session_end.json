@@ -6,9 +6,9 @@
   "end": {
     "unix_s": 1792919726,
     "utc": "2026-10-25T09:15:26Z",
-    "world_ms": 13000,
-    "physics_step": 779,
-    "render_frame": 262681
+    "world_ms": 13649,
+    "physics_step": 407,
+    "render_frame": 262291
   },
   "pin": {
     "pin_id": "1.8.0.13",
@@ -19,24 +19,24 @@
   },
   "counts": {
     "ctl": {
-      "rows": 780,
+      "rows": 310,
       "chunks": 2,
-      "last_key": 779
+      "last_key": 407
     },
     "telemetry": {
-      "rows": 260,
+      "rows": 310,
       "chunks": 2,
-      "last_key": 777
+      "last_key": 407
     },
     "hf": {
-      "rows": 782,
+      "rows": 392,
       "chunks": 2,
-      "last_key": 262681
+      "last_key": 262291
     },
     "img": {
-      "rows": 130,
+      "rows": 68,
       "chunks": 2,
-      "last_key": 129
+      "last_key": 67
     },
     "events": {
       "rows": 7,
@@ -50,8 +50,8 @@
     }
   },
   "images": {
-    "requested": 130,
-    "issued": 130,
+    "requested": 68,
+    "issued": 68,
     "skipped_busy": 0,
     "make_failed": 0,
     "timed_out": 0,

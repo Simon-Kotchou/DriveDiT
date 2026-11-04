@@ -7,16 +7,19 @@
         [--checks C01,C06,...] [--image-suffix S] [--json] [--legacy]
 
 What it checks: C01 C02 C05 C06 C07 C08 C10 C11 C12 C13a C13b C15 C17 C20 C21 C28 C31 C34 C35 (the T0-MIN and T1
-set; tools/validator/checks/ documents each). The session is read by data/dc2/reader.py (strict=False, so every
-problem is reported, not raised). Thresholds are keyed by pin: thresholds_dc2.<pin_id>.json (a <pin_id>-<suffix>
+set), C36 (the crash events of contract 9.5.1) and C37 (the evidence a 10 Hz session needs, SOFT, freeze decision
+D-B); tools/validator/checks/ documents each. ctl and telemetry are read as frame-bound rows (one per fixed-frame
+callback, freeze decision D-A); the rates and N come from the session's clocks, never from the thresholds file. The session is read by
+data/dc2/reader.py (strict=False, so every problem is reported, not raised). Thresholds are keyed by pin: thresholds_dc2.<pin_id>.json (a <pin_id>-<suffix>
 pin of the same build falls back to thresholds_dc2.<pin_id>.json), each CAPTURE_PROGRAM r2 5.2 verbatim; a session
 whose pin has no thresholds file is refused (exit 3); --thresholds overrides the choice. Severities and trial rules
 follow the session's trial.trial_id, or a --trial of the same or a higher tier (a lower one is refused): C02 dirty
 flag from T1, C10 T0 limit, C12 / C13b SOFT, C21 SOFT before T1 and HARD from T1, C31 from T1, C17 SOFT at T1 /
-HARD at T2-T3 / INFO elsewhere. A check that depends on a TBD-by-probe value is marked "provisional" while dc-2.0
-is a DRAFT. --profile capture is the only profile so far (eval_lockstep and eval_async come with the bridge, DD-8).
---image-suffix names the TBD-4 file suffix the engine appends to an img path (one of the reader's IMAGE_SUFFIXES,
-default .png); the harvester passes its --screenshot-suffix through it.
+HARD at T2-T3 / INFO elsewhere. A check that depends on a TBD-by-probe value the streams JSON does not mark
+decided is "provisional" (after the freeze: C36, TBD-10). --profile capture is the only profile so far
+(eval_lockstep and eval_async come with the bridge, DD-8). --image-suffix names the TBD-4 file suffix the engine
+appends to an img path (one of the reader's IMAGE_SUFFIXES, default .png, decided at the freeze); the harvester
+passes its --screenshot-suffix through it.
 
 The sealed admission runs before any session file is parsed: an Everon session (map_id, terrain, an Eden-rooted
 root_world, the session id, a path under heldout/ or SEALED; also with --legacy) and every --route file (map_id

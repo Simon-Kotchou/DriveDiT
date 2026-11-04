@@ -25,29 +25,54 @@ so no column list is written down here):
     another of IMAGE_SUFFIXES), its size and its fiducial v2 code
     (data/dc2/fiducial.py); captured_render_frame is the code unwrapped against issue_render_frame (img_resolved).
 
-Joins and timing (section 6 and the streams JSON "timing"): img -> hf exact on captured_render_frame; hf -> ctl
-exact on last_physics_step; hf -> telemetry as-of (the newest telemetry step <= last_physics_step, younger than k
-steps); telemetry and ctl by physics_step. Rates and periods come from session.json clocks.* and the counters,
-never from an assumed frame rate (CR-094); rows are keyed by their own counters, never by position (CR-085). Only
-the ego is read: dc-2.0 has one ego per session and the traffic stream is kept apart.
+Rows are frame-bound (contract section 6, freeze decision D-A): ctl and telemetry hold one row per fixed-frame
+callback with the same keys; physics_step is the engine's fixed-step clock and advances by the row's covered_steps,
+so a row covers the steps physics_step - covered_steps + 1 .. physics_step (covering_row). world_time_ms is the frame
+clock, and the logged pose follows it.
 
-Decision samples (the R-01 decision boundary): decision step t is the physics step P_t with P_t mod N == 0
-(N = clocks.physics_steps_per_decision). state_t = telemetry at P_t; action_label_t = ctl.exp_*_now at P_t;
-action_cmd_t = ctl.hl_* at P_t + 1 (decided after step P_t, applied from P_t + 1); action_exec_t = the ctl rows
-P_t + 1 .. P_t + N; obs_t = the newest decoded image whose captured frame joins hf, ctl and telemetry and has
-last_physics_step <= P_t, valid when it is at most one image period old. A decision step is wm-valid only with every
-ctl row of its window, every action_exec channel, a telemetry row at P_t, one episode over the window, the command
-held unchanged over the window (same hl_seq and hl_*), a valid image of the same episode and no teleport or respawn
-between the image's last physics step and P_t + N. Segments are the maximal runs of wm-valid, non-warm-up decision
-steps of one episode, so they split at gaps, episode boundaries and masks.
+Joins and timing (section 6 and the streams JSON "timing"): img -> hf exact on captured_render_frame C (in Workbench
+also img.done_render_frame - 1, kept as a cross-check); the image of frame C shows the state of hf row C + 1, its pose
+row; hf -> ctl and hf -> telemetry exact on last_physics_step (both have a row per callback). Rates and periods come
+from session.json clocks.* (decision_hz, image_hz, physics_steps_per_decision) and engine.step_dt_s and from the
+counters, never from an assumed frame rate (CR-094); rows are keyed by their own counters, never by position
+(CR-085). Only the ego is read: dc-2.0 has one ego per session and the traffic stream is kept apart.
+
+Decision samples (the R-01 decision boundary on the world-time grid): grid point g is due at anchor + g x 1000 /
+decision_hz ms (anchor = world_time_ms of the first ctl row); decision callback C_t is the first ctl row at or past
+its due time (decision_callbacks), P_t its physics_step, and the decision interval is (P_t, P_t+1] up to the next
+decision callback. state_t = the telemetry row of C_t; action_label_t = ctl.exp_*_now of C_t; action_cmd_t = ctl.hl_*
+of the row after C_t (decided after the rows of C_t, applied from step P_t + 1); action_exec_t = the executed values
+of the steps P_t + 1 .. P_t + N (N = clocks.physics_steps_per_decision), each from the ctl row that covers it, empty
+past P_t+1; obs_t = the newest decoded image whose pose row (hf row C + 1) joins ctl and telemetry and has
+last_physics_step <= P_t, valid when it is at most one image period old (from the world time of hf row C). A decision
+step is wm-valid only with every step of its interval covered by ctl rows, a telemetry row at P_t, one episode over
+the interval, the command held unchanged over it (same hl_seq and hl_*), every action_exec entry inside it, a valid
+image of the same episode and no teleport or respawn between the image's last physics step and P_t+1. Segments are
+the maximal runs of wm-valid, non-warm-up decision steps of one episode on consecutive grid points, so they split at
+gaps, skipped grid points, episode boundaries and masks.
+
+Crash events (section 9.5.1): the rows of the kinds that event_payloads defines are parsed into Session.crash_events
+(payload values typed by their key spec, ranges and minimums included, with the problems C36 reports). A row belongs
+to its episode_id (episode ownership); its step is the onset (onset_step of a collision or rollover, else
+physics_step) and must lie inside that episode, a row with episode_id -1 outside every episode, and never after the
+row's own physics_step (chronology). Terminal ego events (a collision with src dv or dv_contact, a veh_damage with a
+state other than undamaged or movement_damage >= 1, a veh_fire_start, a rollover) count only when both hold:
+Session.terminal_ego[e] is the first by onset, Session.terminal_ego_confirmed[e] the first by confirmation (a rollover
+is confirmed at its row, the end of the hold; confirmed_inside tells whether that was inside the episode). The core is
+the only source of the terminations collision and rollover, so an episode's termination collision or rollover is the
+reason of its first terminal ego event by confirmation, confirmed inside it (C36).
+A decision step whose interval (P_t, P_t+1] contains or follows the earliest onset is not policy-valid (wm_valid
+unchanged: crash dynamics are world-model data). The teleport mask uses only teleport and respawn rows of the ego slot
+or of no vehicle (veh_slot_id -1).
 
 Files: every file the reader opens (stream directories, chunks, session files, images) must resolve inside the
 session directory (symlinks followed), and img.path must be exactly frames/f_<slot_id:08d> (TBD-4); anything else
 is a C01 (outside) or C11 (path) problem and is not read.
 
-The seal (session_end.json, sections 5.3, 8 and 10.2): status ok with a non-error end_reason (C01), contract_version
+The seal (session_end.json, sections 5.3, 8 and 10.2): status ok with a non-error end_reason (C01; ego_destroyed is
+a normal end), contract_version
 dc-2.0 and episodes equal to the committed episodes rows (C01); the committed ctl, telemetry and hf rows reach the
-session end (end.physics_step, end.render_frame: C34), so a lost or truncated tail is seen.
+session end (end.physics_step for ctl and telemetry, end.render_frame: C34), so a lost or truncated tail is seen.
 
 Refusals (ReaderError subclasses): dc-1.0 sessions (LegacySessionError; never mixed with dc-2.0 data, section 14);
 Everon (map_id everon, terrain Eden, an Eden-rooted root_world, an everon_ session id, or a path under heldout/ or a
@@ -89,24 +114,26 @@ CHUNK_RE = re.compile(r"^chunk_([0-9]{5})\.csv$")
 INT_RE = re.compile(r"-?[0-9]+")
 FLOAT_RE = re.compile(r"-?[0-9]+(\.[0-9]+)?")     # '.' decimal point, no exponent; nan and inf never match
 EDEN_ROOT_RE = re.compile(r"^(\{[0-9A-Fa-f]+\})?worlds/eden/", re.IGNORECASE)   # every Eden-rooted world is Everon
-# session_end.json end_reason values that end a session in error (section 5.3); duration, stop and dc_stop are
-# the normal endings.
+# session_end.json end_reason values that end a session in error (section 5.3); duration, stop, dc_stop and
+# ego_destroyed (the ego was destroyed after the first row: a crash is valid data, status ok) are the normal endings.
 ERROR_END_REASONS = ("script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost")
+TERMINAL_COLLISION_SRC = ("dv", "dv_contact")     # src contact is a hit below the detector: never terminal (9.5.1)
 STRICT_FATAL = ("C01", "C02", "C05", "C07", "C34")
 HL_COLUMNS = ("hl_seq", "hl_kappa", "hl_accel", "hl_dir")
 
 # Stream columns the derived views read (docs dc-2.0.md 9.8 ctl_export / telemetry_export and the decision
 # boundary). Schema.check_columns verifies at load time that the streams JSON still defines every one of them.
 DERIVED_SOURCES = {
-    "ctl": ("physics_step", "world_time_ms", "episode_id", "mode", "driver", "hl_seq", "hl_kappa", "hl_accel",
-            "hl_dir", "exp_kappa_now", "exp_accel_now", "exp_dir_now", "llc_steer_lim", "llc_throttle", "llc_brake",
-            "input_post_steer", "react_visible"),
-    "telemetry": ("physics_step", "world_time_ms", "episode_id", "fwd_x", "fwd_z", "vel_local_x", "vel_local_z",
-                  "angvel_local_y", "acc_local_x", "acc_local_z", "gear"),
+    "ctl": ("physics_step", "covered_steps", "render_frame", "world_time_ms", "episode_id", "mode", "driver",
+            "hl_seq", "hl_kappa", "hl_accel", "hl_dir", "exp_kappa_now", "exp_accel_now", "exp_dir_now",
+            "llc_steer_lim", "llc_throttle", "llc_brake", "input_post_steer", "react_visible"),
+    "telemetry": ("physics_step", "covered_steps", "render_frame", "world_time_ms", "episode_id", "ego_slot_id",
+                  "fwd_x", "fwd_z", "vel_local_x", "vel_local_z", "angvel_local_y", "acc_local_x", "acc_local_z",
+                  "gear"),
     "hf": ("render_frame", "world_time_ms", "last_physics_step", "paused"),
-    "img": ("slot_id", "issue_status", "issue_render_frame", "path"),
-    "events": ("event_seq", "physics_step", "world_time_ms", "kind"),
-    "episodes": ("episode_id",),
+    "img": ("slot_id", "issue_status", "issue_render_frame", "path", "done_render_frame"),
+    "events": ("event_seq", "episode_id", "physics_step", "world_time_ms", "kind", "veh_slot_id", "payload"),
+    "episodes": ("episode_id", "ego_slot_id"),
 }
 
 Problem = collections.namedtuple("Problem", "check where message")
@@ -162,6 +189,7 @@ class Schema:
         self.commit_name = self.raw["session"]["commit_name"]
         self.frames_dir = self.raw["session"]["frames_dir"]
         self.tbd = {t["id"]: t for t in self.raw["tbd_by_probe"]}
+        self.payloads = self.raw.get("event_payloads", {}).get("kinds", {})
         self.check_columns()
 
     def fields(self, stream):
@@ -199,23 +227,54 @@ def load_schema(path=None):
     return _SCHEMA_CACHE[key]
 
 
-def tbd1_rule(slice_s, decision_hz=10.0):
-    """(physics_steps_per_decision N, telemetry_every_k k) of TBD-1 for a fixed time slice in seconds: N =
-    floor(1 / decision_hz / slice + 0.5) first (100 ms at the 10 Hz default, 200 ms at the 5 Hz fallback of TBD-2,
-    where N is 12 at a 60 Hz slice), then k = the largest divisor of N with k * slice <= 50 ms (+1 us), at least 1."""
-    slice_s = float(slice_s)
-    if not (slice_s > 0.0 and math.isfinite(slice_s)):
-        raise ValueError("fixed time slice %r is not a positive number" % slice_s)
+def steps_per_decision(decision_hz, step_dt_s):
+    """physics_steps_per_decision N of TBD-1 (freeze decision D-A): N = floor(1000 / decision_hz / step_dt_ms + 0.5)
+    from the measured engine step dt (session.json engine.step_dt_s), never from GetFixedTimeSlice(): 6 at 5 Hz and
+    3 at 10 Hz with the 1/30 s steps of 1.8."""
+    step_dt_s = float(step_dt_s)
+    if not (step_dt_s > 0.0 and math.isfinite(step_dt_s)):
+        raise ValueError("step dt %r is not a positive number" % step_dt_s)
     decision_hz = float(decision_hz)
     if not (decision_hz > 0.0 and math.isfinite(decision_hz)):
         raise ValueError("decision rate %r is not a positive number" % decision_hz)
-    n = int(math.floor(1.0 / decision_hz / slice_s + 0.5))
-    n = max(n, 1)
-    k = 1
-    for d in range(1, n + 1):
-        if n % d == 0 and d * slice_s <= 0.05 + 1e-6:
-            k = d
-    return n, k
+    return max(int(math.floor(1000.0 / decision_hz / (step_dt_s * 1000.0) + 0.5)), 1)
+
+
+def grid_period_ms(hz):
+    """Integer period of a world-time grid at hz (the contract's rates 5 and 10 Hz divide 1000 ms); None otherwise."""
+    if not isinstance(hz, (int, float)) or isinstance(hz, bool) or not hz > 0:
+        return None
+    period = 1000.0 / float(hz)
+    return int(round(period)) if abs(period - round(period)) < 1e-9 else None
+
+
+def decision_callbacks(world_times, decision_hz):
+    """[(row index, grid point)] of the decision callbacks of one ctl stream in row order (contract section 6): grid
+    point g is due at anchor + g x 1000 / decision_hz ms, anchor = the first row's world_time_ms; its decision callback
+    is the first row with world_time_ms >= its due time; a row that reaches several grid points takes one decision,
+    for the newest of them (the others are skipped: grid point gaps). Returns (decisions, skipped grid points)."""
+    period = grid_period_ms(decision_hz)
+    if period is None or not world_times:
+        return [], 0
+    anchor = world_times[0]
+    out, skipped, g = [], 0, 0
+    for i, w in enumerate(world_times):
+        if w is None or w < anchor + g * period:
+            continue
+        reached = (w - anchor) // period
+        skipped += reached - g
+        out.append((i, reached))
+        g = reached + 1
+    return out, skipped
+
+
+def covering_row(steps, covered, q):
+    """Index of the row (steps sorted, covered_steps per row) that covers physics step q, or None: a row covers
+    physics_step - covered_steps + 1 .. physics_step."""
+    i = bisect.bisect_left(steps, q)
+    if i < len(steps) and covered[i] is not None and steps[i] - covered[i] + 1 <= q:
+        return i
+    return None
 
 
 # ------------------------------------------------------------------------------------------------
@@ -592,12 +651,16 @@ class Session:
 
     meta, end, harvest       session.json, session_end.json (None when unsealed), harvest.json (or None)
     session_id, map_id, terrain, trial_id, sealed
-    clocks                   dict: k, N, decision_hz, image_hz, slice_s, img_lead_ms, img_inflight_timeout_ms,
-                             chunk_max_s, image_period_ms
+    clocks                   dict: N, step_dt_s, step_dt_source, decision_hz, image_hz, image_hz_setting, slice_s
+                             (raw GetFixedTimeSlice, provenance only), img_lead_ms, img_inflight_timeout_ms,
+                             chunk_max_s, image_period_ms, decision_period_ms
+    grid_anchor_ms           world_time_ms of the first ctl row (the decision and image grids' anchor)
     streams                  {name: Stream} of committed rows; heartbeat: list of row dicts
     images                   img_resolved rows (one per img row, in img order)
     ctl_export, telemetry_export   per-row derived views (dicts of numpy arrays)
     decisions                decision samples (list of dicts; see _build_decisions)
+    crash_events, terminal_ego, terminal_ego_confirmed   parsed crash-event rows and each episode's first terminal
+                             ego event by onset and by confirmation (9.5.1)
     segments                 list of {episode_id, first_decision_step, last_decision_step, n_steps}
     problems                 list of Problem (check, where, message)
     salvageable              the problems that salvage=True excuses (an unsealed or failed seal and its tail)
@@ -617,6 +680,9 @@ class Session:
         self.images = []
         self.image_suffix = IMAGE_SUFFIX
         self.vehicle_card = None
+        self.crash_events = []
+        self.terminal_ego = {}
+        self.terminal_ego_confirmed = {}
 
     # -- small helpers --------------------------------------------------------------------------
     def meta_get(self, dotted, default=None):
@@ -662,8 +728,8 @@ class Session:
     def golden_view(self, pixel_slots=(), stride=16):
         """The comparable summary that tests/fixtures/capture_dc2/golden.json holds (see make_synthetic.py)."""
         counts = {name: len(s) for name, s in sorted(self.streams.items()) if s.present}
-        clocks = {k: self.clocks[k] for k in ("telemetry_every_k", "physics_steps_per_decision", "decision_hz",
-                                               "image_hz", "img_lead_ms")}
+        clocks = {k: self.clocks[k] for k in ("physics_steps_per_decision", "decision_hz", "image_hz",
+                                               "image_hz_setting", "img_lead_ms", "step_dt_s")}
         images = [{k: r[k] for k in ("slot_id", "file", "file_exists", "png_w", "png_h", "fid_ok",
                                      "captured_render_frame")} for r in self.images]
         decisions = []
@@ -679,9 +745,9 @@ class Session:
 
 
 GOLDEN_SCHEMA = "drivedit.dc2-golden/1"
-GOLDEN_DECISION_KEYS = ("decision_step", "episode_id", "hl_seq", "state", "action_cmd", "action_label",
-                        "action_exec", "obs_slot_id", "obs_captured_render_frame", "obs_last_physics_step",
-                        "obs_age_steps", "obs_age_ms", "obs_valid", "masks")
+GOLDEN_DECISION_KEYS = ("decision_step", "grid_point", "episode_id", "hl_seq", "interval_steps", "state",
+                        "action_cmd", "action_label", "action_exec", "obs_slot_id", "obs_captured_render_frame",
+                        "obs_last_physics_step", "obs_age_steps", "obs_age_ms", "obs_valid", "masks")
 
 
 def open_session(path, sealed_eval=False, strict=True, schema=None, decode_images=True, vehicle_card=None,
@@ -777,6 +843,7 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
     _build_exports(s)
     _build_hf_joins(s)
     _resolve_images(s, decode_images, image_visitor)
+    _read_crash_events(s)
     _build_decisions(s)
     return s
 
@@ -811,7 +878,7 @@ def _check_seal(s):
     """The seal against the committed data (sections 5.3, 8, 10.2): C01 for a failed status or an error end_reason
     (salvageable), the contract version and the episodes count; C34 when the committed ctl, telemetry or hf rows do
     not reach end.physics_step / end.render_frame (a lost or truncated tail; salvageable, since a failed session
-    stops acknowledging rows)."""
+    stops acknowledging rows). ctl and telemetry hold the same keys, so both must reach end.physics_step."""
     if s.end is None or not isinstance(s.end, dict):
         return
     status, reason = s.end_get("status"), s.end_get("end_reason")
@@ -829,10 +896,8 @@ def _check_seal(s):
         s.problems.append(Problem("C01", "session_end.json", "episodes %r, %d committed episodes row(s)"
                                   % (episodes, n_episodes)))
     end_step, end_frame = s.end_get("end.physics_step"), s.end_get("end.render_frame")
-    k = s.clocks["k"]
-    want_tel = end_step - end_step % k if isinstance(end_step, int) and end_step >= 0 else None
     for stream, key, want, what in (("ctl", "physics_step", end_step, "end.physics_step"),
-                                    ("telemetry", "physics_step", want_tel, "the last k-th step <= end.physics_step"),
+                                    ("telemetry", "physics_step", end_step, "end.physics_step"),
                                     ("hf", "render_frame", end_frame, "end.render_frame")):
         keys = s.streams[stream].col(key) if stream in s.streams else []
         last = max(keys) if keys else None
@@ -868,26 +933,31 @@ def _check_identity(s, base):
 def _read_clocks(s):
     get = s.meta_get
     clocks = {
-        "telemetry_every_k": get("clocks.telemetry_every_k"),
         "physics_steps_per_decision": get("clocks.physics_steps_per_decision"),
         "decision_hz": get("clocks.decision_hz"),
         "image_hz": get("clocks.image_hz"),
+        "image_hz_setting": get("clocks.image_hz_setting"),
         "img_lead_ms": get("clocks.img_lead_ms"),
         "img_inflight_timeout_ms": get("clocks.img_inflight_timeout_ms"),
         "chunk_max_s": get("clocks.chunk_max_s"),
+        "step_dt_s": get("engine.step_dt_s"),
+        "step_dt_source": get("engine.step_dt_source"),
         "slice_s": get("engine.fixed_time_slice_s"),
     }
-    k, n = clocks["telemetry_every_k"], clocks["physics_steps_per_decision"]
-    ok = (isinstance(k, int) and isinstance(n, int) and k >= 1 and n >= 1 and n % k == 0
-          and isinstance(clocks["image_hz"], (int, float)) and clocks["image_hz"] > 0)
+    n, dhz, ihz, dt = (clocks["physics_steps_per_decision"], clocks["decision_hz"], clocks["image_hz"],
+                       clocks["step_dt_s"])
+    ok = (isinstance(n, int) and not isinstance(n, bool) and n >= 1 and grid_period_ms(dhz) is not None
+          and grid_period_ms(ihz) is not None and isinstance(dt, (int, float)) and not isinstance(dt, bool)
+          and dt > 0)
     if not ok:
-        raise ReaderError("%s: session.json clocks are unusable (k %r, physics_steps_per_decision %r, image_hz %r); "
-                          "k must divide N" % (s.path, k, n, clocks["image_hz"]))
-    clocks["k"] = k
+        raise ReaderError("%s: session.json clocks are unusable (physics_steps_per_decision %r, decision_hz %r, "
+                          "image_hz %r, engine.step_dt_s %r); the grid rates must divide 1000 ms"
+                          % (s.path, n, dhz, ihz, dt))
     clocks["N"] = n
-    clocks["image_period_ms"] = 1000.0 / float(clocks["image_hz"])
+    clocks["image_period_ms"] = 1000.0 / float(ihz)
+    clocks["decision_period_ms"] = grid_period_ms(dhz)
     s.clocks = clocks
-    s.steer_sign = get("control.steer_sign", -1)
+    s.steer_sign = get("control.steer_sign", 1)
     s.yaw_axis_sign = get("control.yaw_axis_sign", 1)
 
 
@@ -997,9 +1067,11 @@ def _resolve_images(s, decode, visitor):
     for i in range(len(img)):
         slot = img.data["slot_id"][i]
         row = {"slot_id": slot, "issue_status": img.data["issue_status"][i],
-               "issue_render_frame": img.data["issue_render_frame"][i], "file": None, "file_exists": 0,
+               "issue_render_frame": img.data["issue_render_frame"][i],
+               "done_render_frame": img.data["done_render_frame"][i], "file": None, "file_exists": 0,
                "png_w": None, "png_h": None, "fid_ok": 0, "fid_status": None, "code": None,
-               "captured_render_frame": None, "fid_margin": None, "hf_index": None, "error": None}
+               "captured_render_frame": None, "fid_margin": None, "hf_index": None, "pose_hf_index": None,
+               "error": None}
         s.images.append(row)
         rel, error = s.image_files[i]
         if rel is None:
@@ -1028,6 +1100,7 @@ def _resolve_images(s, decode, visitor):
             row["captured_render_frame"] = fiducial.unwrap(result.code, row["issue_render_frame"])
             row["fid_margin"] = fid_margin(rgb, result)
             row["hf_index"] = hf_index.get(row["captured_render_frame"])
+            row["pose_hf_index"] = hf_index.get(row["captured_render_frame"] + 1)     # the image's pose row
         if visitor is not None:
             visitor(s, row, rgb)
 
@@ -1071,22 +1144,17 @@ def _build_exports(s):
 
 
 def _build_hf_joins(s):
-    """hf -> ctl (exact on last_physics_step) and hf -> telemetry (as-of, age below k steps): row indices or None."""
+    """hf -> ctl and hf -> telemetry, both exact on last_physics_step (a row per callback): row indices or None."""
     hf = s.streams["hf"]
     ctl_index = s.streams["ctl"].index()
-    tel_steps = s.streams["telemetry"].data["physics_step"]
-    order = sorted(range(len(tel_steps)), key=lambda i: tel_steps[i])
-    sorted_steps = [tel_steps[i] for i in order]
-    k = s.clocks["k"]
+    tel_index = s.streams["telemetry"].index()
     s.hf_ctl = []
     s.hf_tel = []
     for lps in hf.data["last_physics_step"]:
         s.hf_ctl.append(ctl_index.get(lps))
-        j = bisect.bisect_right(sorted_steps, lps) - 1
-        if j >= 0 and lps - sorted_steps[j] < k:
-            s.hf_tel.append(order[j])
-        else:
-            s.hf_tel.append(None)
+        s.hf_tel.append(tel_index.get(lps))
+    ctl = s.streams["ctl"]
+    s.grid_anchor_ms = ctl.data["world_time_ms"][0] if len(ctl) else None
 
 
 def _event_times(s, kinds):
@@ -1095,64 +1163,222 @@ def _event_times(s, kinds):
             for i in range(len(ev)) if ev.data["kind"][i] in kinds]
 
 
+# ------------------------------------------------------------------------------------------------
+# Crash events (section 9.5.1)
+# ------------------------------------------------------------------------------------------------
+def parse_payload(text):
+    """[(key, value text)] of an events.payload: 'key=value' pairs joined by ';' (section 9.5); None or '' is [].
+    Raises ValueError for a pair without '=', an empty key or value (a key without a value is left out, 9.5.1)."""
+    if not text:
+        return []
+    pairs = []
+    for part in text.split(";"):
+        if "=" not in part:
+            raise ValueError("pair %r has no '='" % part)
+        key, value = part.split("=", 1)
+        if not key or value == "":
+            raise ValueError("pair %r has an empty key or value" % part)
+        pairs.append((key, value))
+    return pairs
+
+
+def payload_value(spec, text):
+    """Typed value of one payload key (event_payloads key spec: type, enum, range, min); ValueError when it does not
+    parse or lies outside its range or below its minimum."""
+    t = spec["type"]
+    if t in ("int", "float"):
+        value = _conv_int(text) if t == "int" else _conv_float(text)
+        if "range" in spec and not spec["range"][0] <= value <= spec["range"][1]:
+            raise ValueError("%s is outside [%s, %s]" % (text, spec["range"][0], spec["range"][1]))
+        if "min" in spec and value < spec["min"]:
+            raise ValueError("%s is below the minimum %s" % (text, spec["min"]))
+        return value
+    if t == "bool":
+        return _conv_bool(text)
+    if "=" in text or ";" in text or "," in text or '"' in text:
+        raise ValueError("%r holds a separator" % text)
+    if t == "enum" and text not in spec["enum"]:
+        raise ValueError("%r is not one of %s" % (text, ", ".join(spec["enum"])))
+    return text
+
+
+def check_payload(kind, text, payloads):
+    """(values, problems) of one events row of a kind in event_payloads: values {key: typed value} of the keys that
+    parse; problems name a payload that does not split, a repeated or unknown key, a missing required key and a
+    value that does not parse as its type or enum (C36)."""
+    keys = {k["key"]: k for k in payloads[kind]}
+    try:
+        pairs = parse_payload(text)
+    except ValueError as e:
+        return {}, ["payload %r: %s" % (text, e)]
+    values, problems, seen = {}, [], set()
+    for key, value in pairs:
+        if key in seen:
+            problems.append("key %s repeated" % key)
+            continue
+        seen.add(key)
+        if key not in keys:
+            problems.append("key %s is not a %s key" % (key, kind))
+            continue
+        try:
+            values[key] = payload_value(keys[key], value)
+        except ValueError as e:
+            problems.append("key %s: %s" % (key, e))
+    for key, spec in keys.items():
+        if spec["required"] and key not in seen:
+            problems.append("required key %s missing" % key)
+    return values, problems
+
+
+def onset_and_confirmation(kind, values, physics_step):
+    """(onset, confirmation) steps of a crash row: a collision is latched at its onset, a rollover when its hold ends
+    (the row's physics_step) after an onset at the first tilted step, a polled kind at its poll (section 9.5.1)."""
+    onset = physics_step
+    if kind in ("collision", "rollover") and isinstance(values.get("onset_step"), int):
+        onset = values["onset_step"]
+    confirmation = onset if kind == "collision" else physics_step
+    return onset, confirmation
+
+
+def terminal_reason(kind, values):
+    """The episodes.termination_reason an ego crash event makes ('collision', 'rollover'), or None (9.5.1)."""
+    if kind == "collision":
+        return "collision" if values.get("src") in TERMINAL_COLLISION_SRC else None
+    if kind == "veh_damage":
+        immobile = values.get("movement_damage") is not None and values["movement_damage"] >= 1.0
+        state = values.get("state")
+        return "collision" if (state is not None and state != "undamaged") or immobile else None
+    if kind == "veh_fire_start":
+        return "collision"
+    if kind == "rollover":
+        return "rollover"
+    return None
+
+
+def ego_slots(s):
+    """The ego slot ids of the session (telemetry and episodes; one per session in dc-2.0)."""
+    slots = set(v for v in s.streams["telemetry"].col("ego_slot_id") if v is not None)
+    slots |= set(v for v in s.streams["episodes"].col("ego_slot_id") if v is not None)
+    return slots
+
+
+def episode_bounds(s):
+    """{episode_id: (start_physics_step, end_physics_step)} of the committed episodes rows."""
+    ep = s.streams["episodes"]
+    return {e: (a, b) for e, a, b in zip(ep.col("episode_id"), ep.col("start_physics_step"),
+                                         ep.col("end_physics_step")) if a is not None and b is not None}
+
+
+def _read_crash_events(s):
+    """Session.crash_events: one dict per events row of a kind in event_payloads, in row order: event_seq, episode_id,
+    physics_step, world_time_ms, kind, veh_slot_id, values, problems, step (the onset), confirm_step, in_episode (the
+    onset lies inside its episode_id's bounds, or inside none for episode_id -1), chrono_ok (the onset is not after
+    the row's physics_step), confirmed_inside (confirm_step <= the episode's end_physics_step), ego (the row names an
+    ego slot) and terminal (terminal_reason of an ego row). terminal_ego / terminal_ego_confirmed: {episode_id: the
+    episode's first valid (in_episode, chrono_ok) terminal ego event by onset / by confirmation}."""
+    ev = s.streams["events"]
+    payloads = s.schema.payloads
+    egos = ego_slots(s)
+    bounds = episode_bounds(s)
+    s.crash_events = []
+    for i in range(len(ev)):
+        kind = ev.data["kind"][i]
+        if kind not in payloads:
+            continue
+        values, problems = check_payload(kind, ev.data["payload"][i], payloads)
+        step, confirm = onset_and_confirmation(kind, values, ev.data["physics_step"][i])
+        e = ev.data["episode_id"][i]
+        if e is not None and e >= 0:
+            inside = e in bounds and bounds[e][0] <= step <= bounds[e][1]
+        else:
+            inside = not any(a <= step <= b for a, b in bounds.values())
+        ego = ev.data["veh_slot_id"][i] in egos
+        s.crash_events.append({"event_seq": ev.data["event_seq"][i], "episode_id": e,
+                               "physics_step": ev.data["physics_step"][i],
+                               "world_time_ms": ev.data["world_time_ms"][i], "kind": kind,
+                               "veh_slot_id": ev.data["veh_slot_id"][i], "values": values, "problems": problems,
+                               "step": step, "confirm_step": confirm, "in_episode": inside,
+                               "chrono_ok": step <= ev.data["physics_step"][i],
+                               "confirmed_inside": e is not None and e in bounds and confirm <= bounds[e][1],
+                               "ego": ego,
+                               "terminal": terminal_reason(kind, values) if ego else None})
+    s.terminal_ego, s.terminal_ego_confirmed = {}, {}
+    for c in s.crash_events:
+        e = c["episode_id"]
+        if c["terminal"] is None or e is None or e < 0 or not c["in_episode"] or not c["chrono_ok"]:
+            continue
+        if e not in s.terminal_ego or c["step"] < s.terminal_ego[e]["step"]:
+            s.terminal_ego[e] = c
+        if e not in s.terminal_ego_confirmed or c["confirm_step"] < s.terminal_ego_confirmed[e]["confirm_step"]:
+            s.terminal_ego_confirmed[e] = c
+
+
 def _build_decisions(s):
     ctl, tel, hf = s.streams["ctl"], s.streams["telemetry"], s.streams["hf"]
     n = s.clocks["N"]
-    ctl_index, tel_index = ctl.index(), tel.index()
+    tel_index = tel.index()
     texp = s.telemetry_export
     cexp = s.ctl_export
     period = s.clocks["image_period_ms"]
-    # obs candidates: decoded images joined to hf, and through hf to ctl and telemetry (section 6: a frame whose
-    # joins fail is not joined and its masks are 0), by captured frame; the last field is the frame's episode
+    steps = ctl.data["physics_step"]
+    covered = ctl.data["covered_steps"]
+    # obs candidates: decoded images whose captured frame C is in hf and whose pose row C + 1 joins ctl and telemetry
+    # (section 6: a frame whose joins fail is not joined and its masks are 0), by captured frame:
+    # (C, pose row last_physics_step, world time of hf row C, slot, episode of the pose row's ctl row)
     cands = []
     for row in s.images:
-        h = row["hf_index"]
-        if row["fid_ok"] and h is not None and s.hf_ctl[h] is not None and s.hf_tel[h] is not None:
-            cands.append((row["captured_render_frame"], hf.data["last_physics_step"][h],
-                          hf.data["world_time_ms"][h], row["slot_id"], ctl.data["episode_id"][s.hf_ctl[h]]))
+        h, ph = row["hf_index"], row["pose_hf_index"]
+        if row["fid_ok"] and h is not None and ph is not None and s.hf_ctl[ph] is not None \
+                and s.hf_tel[ph] is not None:
+            cands.append((row["captured_render_frame"], hf.data["last_physics_step"][ph], hf.data["world_time_ms"][h],
+                          row["slot_id"], ctl.data["episode_id"][s.hf_ctl[ph]]))
     cands.sort()
     cand_lps = [c[1] for c in cands]
     lps_sorted = all(cand_lps[i] <= cand_lps[i + 1] for i in range(len(cand_lps) - 1))
     warm = _event_times(s, ("warmup_end",))
     warmup_end_ms = warm[0][1] if warm else float(s.meta_get("trial.warmup_s", 0.0) or 0.0) * 1000.0
     env_ms = [w for _, w in _event_times(s, ("env_change",))]
-    tele_steps = [p for p, _ in _event_times(s, ("teleport", "respawn"))]
+    # a reset of a traffic vehicle never masks ego samples: the ego's rows and the vehicle-independent ones (-1)
+    tele_slots = ego_slots(s) | {-1}
+    ev = s.streams["events"]
+    tele_steps = [ev.data["physics_step"][i] for i in range(len(ev))
+                  if ev.data["kind"][i] in ("teleport", "respawn") and ev.data["veh_slot_id"][i] in tele_slots]
+    crash_step = {e: c["step"] for e, c in s.terminal_ego.items()}
     s.decisions = []
-    steps = ctl.data["physics_step"]
-    if not steps:
-        s.segments = []
-        return
-    first = int(math.ceil(max(min(steps), 0) / float(n))) * n
-    last = max(steps)
-    for p in range(first, last + 1, n):
-        c0 = ctl_index.get(p)
+    callbacks, s.decision_grid_skipped = decision_callbacks(ctl.data["world_time_ms"], s.clocks["decision_hz"])
+    for t, (c0, grid) in enumerate(callbacks):
+        p = steps[c0]
+        nxt = callbacks[t + 1][0] if t + 1 < len(callbacks) else None
+        p_next = steps[nxt] if nxt is not None else None
+        c1 = c0 + 1 if c0 + 1 < len(ctl) else None
         t0 = tel_index.get(p)
-        window = [ctl_index.get(p + j) for j in range(1, n + 1)]
-        c1 = window[0]
-        world = ctl.data["world_time_ms"][c0] if c0 is not None else (
-            tel.data["world_time_ms"][t0] if t0 is not None else None)
-        episode = ctl.data["episode_id"][c0] if c0 is not None else (
-            tel.data["episode_id"][t0] if t0 is not None else None)
-        complete = c0 is not None and t0 is not None and all(w is not None for w in window)
+        world = ctl.data["world_time_ms"][c0]
+        episode = ctl.data["episode_id"][c0]
+        # the decision interval (P_t, P_t+1]: the rows after C_t up to the next decision callback, which must cover
+        # every step without a gap
+        interval = list(range(c0 + 1, nxt + 1)) if nxt is not None else []
+        contiguous = nxt is not None and all(
+            steps[j] - covered[j] == steps[j - 1] for j in interval)
+        complete = t0 is not None and contiguous
         one_episode = complete and episode is not None and episode >= 0 and all(
-            ctl.data["episode_id"][w] == episode for w in window)
+            ctl.data["episode_id"][j] == episode for j in interval)
         state = None
         if t0 is not None:
             state = [_num(texp["speed_fwd_mps"][t0]), _num(texp["yaw_rate_rps"][t0]),
                      _num(texp["acc_long_mps2"][t0]), texp["dir_state"][t0]]
-        label = None if c0 is None else [ctl.data["exp_kappa_now"][c0], ctl.data["exp_accel_now"][c0],
-                                         ctl.data["exp_dir_now"][c0]]
+        label = [ctl.data["exp_kappa_now"][c0], ctl.data["exp_accel_now"][c0], ctl.data["exp_dir_now"][c0]]
         cmd = None if c1 is None else [ctl.data["hl_kappa"][c1], ctl.data["hl_accel"][c1], ctl.data["hl_dir"][c1]]
         exec_rows = []
-        for w in window:
-            if w is None:
+        for q in range(p + 1, p + n + 1):
+            j = covering_row(steps, covered, q)
+            if j is None or p_next is None or q > p_next:
                 exec_rows.append(None)
             else:
-                exec_rows.append([cexp["steer_cmd"][w], ctl.data["llc_throttle"][w], ctl.data["llc_brake"][w],
-                                  cexp["steer_input"][w]])
+                exec_rows.append([cexp["steer_cmd"][j], ctl.data["llc_throttle"][j], ctl.data["llc_brake"][j],
+                                  cexp["steer_input"][j]])
         hl_seq = None if c1 is None else ctl.data["hl_seq"][c1]
-        mode = ctl.data["mode"][c1] if c1 is not None else (ctl.data["mode"][c0] if c0 is not None else None)
-        # obs_t: newest decoded image whose captured frame has last_physics_step <= P_t
+        mode = ctl.data["mode"][c1] if c1 is not None else ctl.data["mode"][c0]
+        # obs_t: newest decoded image whose pose row has last_physics_step <= P_t
         obs = None
         if cands:
             if lps_sorted:     # sorted by captured frame, so the last eligible candidate is the newest
@@ -1166,35 +1392,41 @@ def _build_decisions(s):
         obs_valid = 0
         if obs is not None:
             obs_fields = {"obs_slot_id": obs[3], "obs_captured_render_frame": obs[0], "obs_last_physics_step": obs[1],
-                          "obs_age_steps": p - obs[1], "obs_age_ms": None if world is None else world - obs[2]}
-            if world is not None and obs_fields["obs_age_ms"] <= period:
+                          "obs_age_steps": p - obs[1], "obs_age_ms": world - obs[2]}
+            if obs_fields["obs_age_ms"] <= period:
                 obs_valid = 1
         same_episode = obs_valid == 1 and obs[4] == episode
-        warmup = 1 if world is not None and world < warmup_end_ms else 0
-        env_transition = 1 if world is not None and any(0 <= world - w < ENV_TRANSITION_MS for w in env_ms) else 0
-        # a teleport or respawn between the image's last physics step and the window's end puts the obs and the
-        # state (or the window) on different sides of the jump
+        warmup = 1 if world < warmup_end_ms else 0
+        env_transition = 1 if any(0 <= world - w < ENV_TRANSITION_MS for w in env_ms) else 0
+        # a teleport or respawn between the image's last physics step and the interval's end puts the obs and the
+        # state (or the interval) on different sides of the jump
+        end_q = p_next if p_next is not None else p + n
         first_q = obs[1] if obs_valid == 1 else p
-        teleport = 1 if any(first_q <= q <= p + n for q in tele_steps) else 0
-        react_hidden = any(w is not None and ctl.data["react_visible"][w] == 0 for w in [c0] + window)
+        teleport = 1 if any(first_q <= q <= end_q for q in tele_steps) else 0
+        react_hidden = any(ctl.data["react_visible"][j] == 0 for j in [c0] + interval)
         has_cmd = cmd is not None and all(v is not None for v in cmd)
         held = has_cmd and complete and all(
-            [ctl.data[c][w] for c in HL_COLUMNS] == [hl_seq] + cmd for w in window)
-        exec_ok = all(r is not None and all(v is not None for v in r) for r in exec_rows)
-        has_label = label is not None and all(v is not None for v in label)
+            [ctl.data[c][j] for c in HL_COLUMNS] == [hl_seq] + cmd for j in interval)
+        inside = exec_rows[:min(n, p_next - p)] if p_next is not None else []
+        exec_ok = bool(inside) and all(r is not None and all(v is not None for v in r) for r in inside)
+        has_label = all(v is not None for v in label)
         wm_valid = int(complete and one_episode and held and exec_ok and obs_valid == 1 and same_episode
                        and not teleport)
-        policy_valid = int(c0 is not None and t0 is not None and episode is not None and episode >= 0 and has_label
+        # a crash: no decision whose interval (p, p_next] contains or follows the episode's first terminal ego event
+        # is a policy label (section 9.5.1); wm_valid keeps the crash dynamics
+        crashed = episode in crash_step and crash_step[episode] <= end_q
+        policy_valid = int(t0 is not None and episode is not None and episode >= 0 and has_label
                            and mode not in ("X", "A", "I", None) and obs_valid == 1 and same_episode
-                           and not react_hidden and not teleport)
-        d = {"decision_step": p, "episode_id": episode, "hl_seq": hl_seq, "mode": mode, "world_time_ms": world,
+                           and not react_hidden and not teleport and not crashed)
+        d = {"decision_step": p, "grid_point": grid, "episode_id": episode, "hl_seq": hl_seq,
+             "interval_steps": None if p_next is None else p_next - p, "mode": mode, "world_time_ms": world,
              "state": state, "action_cmd": cmd, "action_label": label, "action_exec": exec_rows,
              "obs_valid": obs_valid,
              "masks": {"policy_valid": policy_valid, "wm_valid": wm_valid, "warmup": warmup,
                        "env_transition": env_transition, "teleport": teleport}}
         d.update(obs_fields)
         s.decisions.append(d)
-    s.segments = segments_of(s.decisions, n)
+    s.segments = segments_of(s.decisions)
 
 
 def _num(v):
@@ -1202,16 +1434,18 @@ def _num(v):
     return None if math.isnan(v) else v
 
 
-def segments_of(decisions, n):
-    """Maximal runs of consecutive decision steps (step + N) of one episode that are wm-valid and not warm-up."""
+def segments_of(decisions, n=None):
+    """Maximal runs of wm-valid, non-warm-up decision steps of one episode on consecutive grid points (n is unused:
+    decision intervals are frame-bound, so consecutive means grid_point + 1)."""
     segments = []
     cur = None
     for d in decisions:
         ok = d["masks"]["wm_valid"] == 1 and d["masks"]["warmup"] == 0 and d["episode_id"] is not None \
             and d["episode_id"] >= 0
         if ok and cur is not None and d["episode_id"] == cur["episode_id"] \
-                and d["decision_step"] == cur["last_decision_step"] + n:
+                and d["grid_point"] == cur["last_grid_point"] + 1:
             cur["last_decision_step"] = d["decision_step"]
+            cur["last_grid_point"] = d["grid_point"]
             cur["n_steps"] += 1
             continue
         if cur is not None:
@@ -1219,7 +1453,9 @@ def segments_of(decisions, n):
             cur = None
         if ok:
             cur = {"episode_id": d["episode_id"], "first_decision_step": d["decision_step"],
-                   "last_decision_step": d["decision_step"], "n_steps": 1}
+                   "last_decision_step": d["decision_step"], "last_grid_point": d["grid_point"], "n_steps": 1}
     if cur is not None:
         segments.append(cur)
+    for seg in segments:
+        del seg["last_grid_point"]
     return segments

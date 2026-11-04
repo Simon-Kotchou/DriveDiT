@@ -1,0 +1,7 @@
+event_seq,episode_id,physics_step,render_frame,world_time_ms,kind,veh_slot_id,payload
+0,-1,-1,261899,0,session_start,1,
+1,-1,59,261958,2024,warmup_end,1,
+2,0,60,261960,2075,episode_start,1,route_id=golden_s_curve_v1;mode=E
+3,0,217,262109,7279,episode_end,1,termination_reason=timeout
+4,-1,222,262115,7541,teleport,1,reason=episode_reset
+5,1,234,262126,7875,episode_start,1,route_id=golden_s_curve_v1;mode=E

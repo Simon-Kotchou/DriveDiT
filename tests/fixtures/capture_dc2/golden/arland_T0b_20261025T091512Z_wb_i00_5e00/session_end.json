@@ -1,0 +1,65 @@
+{
+  "contract_version": "dc-2.0",
+  "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00",
+  "status": "ok",
+  "end_reason": "duration",
+  "end": {
+    "unix_s": 1792919726,
+    "utc": "2026-10-25T09:15:26Z",
+    "world_ms": 13649,
+    "physics_step": 407,
+    "render_frame": 262291
+  },
+  "pin": {
+    "pin_id": "1.8.0.13",
+    "build_key": null
+  },
+  "engine": {
+    "build_version": "1.8.0.13"
+  },
+  "counts": {
+    "ctl": {
+      "rows": 310,
+      "chunks": 2,
+      "last_key": 407
+    },
+    "telemetry": {
+      "rows": 310,
+      "chunks": 2,
+      "last_key": 407
+    },
+    "hf": {
+      "rows": 392,
+      "chunks": 2,
+      "last_key": 262291
+    },
+    "img": {
+      "rows": 68,
+      "chunks": 2,
+      "last_key": 67
+    },
+    "events": {
+      "rows": 7,
+      "chunks": 2,
+      "last_key": 6
+    },
+    "episodes": {
+      "rows": 2,
+      "chunks": 2,
+      "last_key": 1
+    }
+  },
+  "images": {
+    "requested": 68,
+    "issued": 68,
+    "skipped_busy": 0,
+    "make_failed": 0,
+    "timed_out": 0,
+    "pending_at_end": 0
+  },
+  "episodes": 2,
+  "heartbeats": 2,
+  "observed": {
+    "decision_grid_points_skipped": 0
+  }
+}

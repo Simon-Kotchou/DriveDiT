@@ -1,0 +1,7272 @@
+{
+ "clocks": {
+  "decision_hz": 5.0,
+  "image_hz": 5.0,
+  "image_hz_setting": "default",
+  "img_lead_ms": 0,
+  "physics_steps_per_decision": 6,
+  "step_dt_s": 0.033333
+ },
+ "contract_version": "dc-2.0",
+ "counts": {
+  "ctl": 310,
+  "episodes": 2,
+  "events": 7,
+  "hf": 392,
+  "img": 68,
+  "telemetry": 310
+ },
+ "decision_steps": [
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 0,
+   "episode_id": -1,
+   "grid_point": 0,
+   "hl_seq": -1,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": null,
+   "obs_age_steps": null,
+   "obs_captured_render_frame": null,
+   "obs_last_physics_step": null,
+   "obs_slot_id": null,
+   "obs_valid": 0,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 9,
+   "episode_id": -1,
+   "grid_point": 1,
+   "hl_seq": -1,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 261908,
+   "obs_last_physics_step": 6,
+   "obs_slot_id": 1,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 13,
+   "episode_id": -1,
+   "grid_point": 2,
+   "hl_seq": -1,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261914,
+   "obs_last_physics_step": 13,
+   "obs_slot_id": 2,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 19,
+   "episode_id": -1,
+   "grid_point": 3,
+   "hl_seq": -1,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261920,
+   "obs_last_physics_step": 19,
+   "obs_slot_id": 3,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 24,
+   "episode_id": -1,
+   "grid_point": 4,
+   "hl_seq": -1,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261925,
+   "obs_last_physics_step": 24,
+   "obs_slot_id": 4,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 33,
+   "episode_id": -1,
+   "grid_point": 5,
+   "hl_seq": -1,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 261931,
+   "obs_last_physics_step": 30,
+   "obs_slot_id": 5,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 37,
+   "episode_id": -1,
+   "grid_point": 6,
+   "hl_seq": -1,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261937,
+   "obs_last_physics_step": 37,
+   "obs_slot_id": 6,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 43,
+   "episode_id": -1,
+   "grid_point": 7,
+   "hl_seq": -1,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261943,
+   "obs_last_physics_step": 43,
+   "obs_slot_id": 7,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 51,
+   "episode_id": -1,
+   "grid_point": 8,
+   "hl_seq": -1,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 261948,
+   "obs_last_physics_step": 48,
+   "obs_slot_id": 8,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 55,
+   "episode_id": -1,
+   "grid_point": 9,
+   "hl_seq": -1,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 1,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261954,
+   "obs_last_physics_step": 55,
+   "obs_slot_id": 9,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.01683,
+     0.666667,
+     0.0,
+     0.01683
+    ],
+    [
+     0.01683,
+     0.666667,
+     0.0,
+     0.01683
+    ],
+    [
+     0.022771,
+     0.666667,
+     0.0,
+     0.022771
+    ],
+    [
+     0.026964,
+     0.666667,
+     0.0,
+     0.026964
+    ],
+    [
+     0.029923,
+     0.666667,
+     0.0,
+     0.029923
+    ],
+    null
+   ],
+   "action_label": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "decision_step": 61,
+   "episode_id": 0,
+   "grid_point": 10,
+   "hl_seq": 0,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261960,
+   "obs_last_physics_step": 61,
+   "obs_slot_id": 10,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005757,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.034622,
+     0.666667,
+     0.0,
+     0.034622
+    ],
+    [
+     0.034622,
+     0.666667,
+     0.0,
+     0.034622
+    ],
+    [
+     0.034622,
+     0.666667,
+     0.0,
+     0.034622
+    ],
+    [
+     0.035727,
+     0.666667,
+     0.0,
+     0.035727
+    ],
+    [
+     0.036507,
+     0.666667,
+     0.0,
+     0.036507
+    ],
+    [
+     0.037058,
+     0.666667,
+     0.0,
+     0.037058
+    ]
+   ],
+   "action_label": [
+    0.005757,
+    2.0,
+    1
+   ],
+   "decision_step": 66,
+   "episode_id": 0,
+   "grid_point": 11,
+   "hl_seq": 1,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261965,
+   "obs_last_physics_step": 66,
+   "obs_slot_id": 11,
+   "obs_valid": 1,
+   "state": [
+    0.3648,
+    0.001397,
+    1.9844,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006562,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.039544,
+     0.666667,
+     0.0,
+     0.039544
+    ],
+    [
+     0.04078,
+     0.666667,
+     0.0,
+     0.04078
+    ],
+    [
+     0.041653,
+     0.666667,
+     0.0,
+     0.041653
+    ],
+    [
+     0.042268,
+     0.666667,
+     0.0,
+     0.042268
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.006562,
+    2.0,
+    1
+   ],
+   "decision_step": 75,
+   "episode_id": 0,
+   "grid_point": 12,
+   "hl_seq": 2,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 261971,
+   "obs_last_physics_step": 72,
+   "obs_slot_id": 12,
+   "obs_valid": 1,
+   "state": [
+    0.9303,
+    0.004384,
+    1.9613,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.007046,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.044408,
+     0.666667,
+     0.0,
+     0.044408
+    ],
+    [
+     0.044408,
+     0.666667,
+     0.0,
+     0.044408
+    ],
+    [
+     0.045163,
+     0.666667,
+     0.0,
+     0.045163
+    ],
+    [
+     0.045696,
+     0.666667,
+     0.0,
+     0.045696
+    ],
+    [
+     0.046072,
+     0.666667,
+     0.0,
+     0.046072
+    ],
+    [
+     0.046338,
+     0.666667,
+     0.0,
+     0.046338
+    ]
+   ],
+   "action_label": [
+    0.007046,
+    2.0,
+    1
+   ],
+   "decision_step": 79,
+   "episode_id": 0,
+   "grid_point": 13,
+   "hl_seq": 3,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261977,
+   "obs_last_physics_step": 79,
+   "obs_slot_id": 13,
+   "obs_valid": 1,
+   "state": [
+    1.1777,
+    0.007134,
+    1.9437,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.008206,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.050141,
+     0.666667,
+     0.0,
+     0.050141
+    ],
+    [
+     0.050141,
+     0.666667,
+     0.0,
+     0.050141
+    ],
+    [
+     0.051484,
+     0.666667,
+     0.0,
+     0.051484
+    ],
+    [
+     0.052431,
+     0.666667,
+     0.0,
+     0.052431
+    ],
+    [
+     0.0531,
+     0.666667,
+     0.0,
+     0.0531
+    ],
+    [
+     0.053992,
+     0.666667,
+     0.0,
+     0.053992
+    ]
+   ],
+   "action_label": [
+    0.008206,
+    2.0,
+    1
+   ],
+   "decision_step": 85,
+   "episode_id": 0,
+   "grid_point": 14,
+   "hl_seq": 4,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 261983,
+   "obs_last_physics_step": 85,
+   "obs_slot_id": 14,
+   "obs_valid": 1,
+   "state": [
+    1.5779,
+    0.010607,
+    1.9237,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.01029,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.058288,
+     0.666667,
+     0.0,
+     0.058288
+    ],
+    [
+     0.06132,
+     0.666667,
+     0.0,
+     0.06132
+    ],
+    [
+     0.06346,
+     0.666667,
+     0.0,
+     0.06346
+    ],
+    [
+     0.066314,
+     0.666667,
+     0.0,
+     0.066314
+    ],
+    [
+     0.066314,
+     0.666667,
+     0.0,
+     0.066314
+    ],
+    [
+     0.066314,
+     0.666667,
+     0.0,
+     0.066314
+    ]
+   ],
+   "action_label": [
+    0.01029,
+    2.0,
+    1
+   ],
+   "decision_step": 93,
+   "episode_id": 0,
+   "grid_point": 15,
+   "hl_seq": 5,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 261988,
+   "obs_last_physics_step": 90,
+   "obs_slot_id": 15,
+   "obs_valid": 1,
+   "state": [
+    2.0749,
+    0.015571,
+    1.9039,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.012473,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.071267,
+     0.666667,
+     0.0,
+     0.071267
+    ],
+    [
+     0.074764,
+     0.666667,
+     0.0,
+     0.074764
+    ],
+    [
+     0.077232,
+     0.666667,
+     0.0,
+     0.077232
+    ],
+    [
+     0.078974,
+     0.666667,
+     0.0,
+     0.078974
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.012473,
+    2.0,
+    1
+   ],
+   "decision_step": 99,
+   "episode_id": 0,
+   "grid_point": 16,
+   "hl_seq": 6,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 261994,
+   "obs_last_physics_step": 96,
+   "obs_slot_id": 16,
+   "obs_valid": 1,
+   "state": [
+    2.4659,
+    0.023029,
+    1.8842,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.013951,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.085352,
+     0.666667,
+     0.0,
+     0.085352
+    ],
+    [
+     0.085352,
+     0.666667,
+     0.0,
+     0.085352
+    ],
+    [
+     0.087604,
+     0.666667,
+     0.0,
+     0.087604
+    ],
+    [
+     0.089193,
+     0.666667,
+     0.0,
+     0.089193
+    ],
+    [
+     0.090314,
+     0.666667,
+     0.0,
+     0.090314
+    ],
+    [
+     0.091106,
+     0.666667,
+     0.0,
+     0.091106
+    ]
+   ],
+   "action_label": [
+    0.013951,
+    2.0,
+    1
+   ],
+   "decision_step": 103,
+   "episode_id": 0,
+   "grid_point": 17,
+   "hl_seq": 7,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262000,
+   "obs_last_physics_step": 103,
+   "obs_slot_id": 17,
+   "obs_valid": 1,
+   "state": [
+    2.7036,
+    0.031474,
+    1.8672,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.016847,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.100746,
+     0.666667,
+     0.0,
+     0.100746
+    ],
+    [
+     0.100746,
+     0.666667,
+     0.0,
+     0.100746
+    ],
+    [
+     0.104148,
+     0.666667,
+     0.0,
+     0.104148
+    ],
+    [
+     0.106549,
+     0.666667,
+     0.0,
+     0.106549
+    ],
+    [
+     0.108245,
+     0.666667,
+     0.0,
+     0.108245
+    ],
+    [
+     0.110505,
+     0.666667,
+     0.0,
+     0.110505
+    ]
+   ],
+   "action_label": [
+    0.016847,
+    2.0,
+    1
+   ],
+   "decision_step": 109,
+   "episode_id": 0,
+   "grid_point": 18,
+   "hl_seq": 8,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262006,
+   "obs_last_physics_step": 109,
+   "obs_slot_id": 18,
+   "obs_valid": 1,
+   "state": [
+    3.0881,
+    0.04157,
+    1.8479,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.021145,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.119464,
+     0.666667,
+     0.0,
+     0.119464
+    ],
+    [
+     0.125788,
+     0.666667,
+     0.0,
+     0.125788
+    ],
+    [
+     0.130252,
+     0.666667,
+     0.0,
+     0.130252
+    ],
+    [
+     0.133403,
+     0.666667,
+     0.0,
+     0.133403
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.021145,
+    2.0,
+    1
+   ],
+   "decision_step": 117,
+   "episode_id": 0,
+   "grid_point": 19,
+   "hl_seq": 9,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262011,
+   "obs_last_physics_step": 114,
+   "obs_slot_id": 19,
+   "obs_valid": 1,
+   "state": [
+    3.5692,
+    0.056737,
+    1.8289,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.023392,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.143651,
+     0.666667,
+     0.0,
+     0.143651
+    ],
+    [
+     0.143651,
+     0.666667,
+     0.0,
+     0.143651
+    ],
+    [
+     0.147268,
+     0.666667,
+     0.0,
+     0.147268
+    ],
+    [
+     0.149821,
+     0.666667,
+     0.0,
+     0.149821
+    ],
+    [
+     0.151623,
+     0.666667,
+     0.0,
+     0.151623
+    ],
+    [
+     0.152895,
+     0.666667,
+     0.0,
+     0.152895
+    ]
+   ],
+   "action_label": [
+    0.023392,
+    2.0,
+    1
+   ],
+   "decision_step": 121,
+   "episode_id": 0,
+   "grid_point": 20,
+   "hl_seq": 10,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262017,
+   "obs_last_physics_step": 121,
+   "obs_slot_id": 20,
+   "obs_valid": 1,
+   "state": [
+    3.7999,
+    0.075095,
+    1.8124,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.027085,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.165473,
+     0.666667,
+     0.0,
+     0.165473
+    ],
+    [
+     0.165473,
+     0.666667,
+     0.0,
+     0.165473
+    ],
+    [
+     0.169913,
+     0.666667,
+     0.0,
+     0.169913
+    ],
+    [
+     0.173046,
+     0.666667,
+     0.0,
+     0.173046
+    ],
+    [
+     0.175258,
+     0.666667,
+     0.0,
+     0.175258
+    ],
+    null
+   ],
+   "action_label": [
+    0.027085,
+    2.0,
+    1
+   ],
+   "decision_step": 127,
+   "episode_id": 0,
+   "grid_point": 21,
+   "hl_seq": 11,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262023,
+   "obs_last_physics_step": 127,
+   "obs_slot_id": 21,
+   "obs_valid": 1,
+   "state": [
+    4.1731,
+    0.094637,
+    1.7937,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.030251,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.189934,
+     0.666667,
+     0.0,
+     0.189934
+    ],
+    [
+     0.189934,
+     0.666667,
+     0.0,
+     0.189934
+    ],
+    [
+     0.189934,
+     0.666667,
+     0.0,
+     0.189934
+    ],
+    [
+     0.193387,
+     0.666667,
+     0.0,
+     0.193387
+    ],
+    [
+     0.195824,
+     0.666667,
+     0.0,
+     0.195824
+    ],
+    [
+     0.197545,
+     0.666667,
+     0.0,
+     0.197545
+    ]
+   ],
+   "action_label": [
+    0.030251,
+    2.0,
+    1
+   ],
+   "decision_step": 132,
+   "episode_id": 0,
+   "grid_point": 22,
+   "hl_seq": 12,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262028,
+   "obs_last_physics_step": 132,
+   "obs_slot_id": 22,
+   "obs_valid": 1,
+   "state": [
+    4.4963,
+    0.117033,
+    1.7774,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.035078,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.209844,
+     0.666667,
+     0.0,
+     0.209844
+    ],
+    [
+     0.216906,
+     0.666667,
+     0.0,
+     0.216906
+    ],
+    [
+     0.221891,
+     0.666667,
+     0.0,
+     0.221891
+    ],
+    [
+     0.22541,
+     0.666667,
+     0.0,
+     0.22541
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.035078,
+    2.0,
+    1
+   ],
+   "decision_step": 141,
+   "episode_id": 0,
+   "grid_point": 23,
+   "hl_seq": 13,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262034,
+   "obs_last_physics_step": 138,
+   "obs_slot_id": 23,
+   "obs_valid": 1,
+   "state": [
+    5.0028,
+    0.14575,
+    1.7569,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.037457,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.236458,
+     0.666667,
+     0.0,
+     0.236458
+    ],
+    [
+     0.236458,
+     0.666667,
+     0.0,
+     0.236458
+    ],
+    [
+     0.240357,
+     0.666667,
+     0.0,
+     0.240357
+    ],
+    [
+     0.243109,
+     0.666667,
+     0.0,
+     0.243109
+    ],
+    [
+     0.245052,
+     0.666667,
+     0.0,
+     0.245052
+    ],
+    [
+     0.246423,
+     0.666667,
+     0.0,
+     0.246423
+    ]
+   ],
+   "action_label": [
+    0.037457,
+    2.0,
+    1
+   ],
+   "decision_step": 145,
+   "episode_id": 0,
+   "grid_point": 24,
+   "hl_seq": 14,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262040,
+   "obs_last_physics_step": 145,
+   "obs_slot_id": 24,
+   "obs_valid": 1,
+   "state": [
+    5.2245,
+    0.175176,
+    1.741,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.039959,
+    1.933631,
+    1
+   ],
+   "action_exec": [
+    [
+     0.255499,
+     0.644544,
+     0.0,
+     0.255499
+    ],
+    [
+     0.255499,
+     0.644544,
+     0.0,
+     0.255499
+    ],
+    [
+     0.258703,
+     0.644544,
+     0.0,
+     0.258703
+    ],
+    [
+     0.260964,
+     0.644544,
+     0.0,
+     0.260964
+    ],
+    [
+     0.26256,
+     0.644544,
+     0.0,
+     0.26256
+    ],
+    [
+     0.264688,
+     0.644544,
+     0.0,
+     0.264688
+    ]
+   ],
+   "action_label": [
+    0.039959,
+    1.933631,
+    1
+   ],
+   "decision_step": 151,
+   "episode_id": 0,
+   "grid_point": 25,
+   "hl_seq": 15,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262046,
+   "obs_last_physics_step": 151,
+   "obs_slot_id": 25,
+   "obs_valid": 1,
+   "state": [
+    5.583,
+    0.204774,
+    1.723,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041612,
+    1.588609,
+    1
+   ],
+   "action_exec": [
+    [
+     0.268432,
+     0.529536,
+     0.0,
+     0.268432
+    ],
+    [
+     0.271074,
+     0.529536,
+     0.0,
+     0.271074
+    ],
+    [
+     0.272939,
+     0.529536,
+     0.0,
+     0.272939
+    ],
+    [
+     0.274256,
+     0.529536,
+     0.0,
+     0.274256
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.041612,
+    1.588609,
+    1
+   ],
+   "decision_step": 159,
+   "episode_id": 0,
+   "grid_point": 26,
+   "hl_seq": 16,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262051,
+   "obs_last_physics_step": 156,
+   "obs_slot_id": 26,
+   "obs_valid": 1,
+   "state": [
+    6.0142,
+    0.233577,
+    1.6395,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.04205,
+    1.451225,
+    1
+   ],
+   "action_exec": [
+    [
+     0.277018,
+     0.483742,
+     0.0,
+     0.277018
+    ],
+    [
+     0.277018,
+     0.483742,
+     0.0,
+     0.277018
+    ],
+    [
+     0.277993,
+     0.483742,
+     0.0,
+     0.277993
+    ],
+    [
+     0.278681,
+     0.483742,
+     0.0,
+     0.278681
+    ],
+    [
+     0.279167,
+     0.483742,
+     0.0,
+     0.279167
+    ],
+    [
+     0.27951,
+     0.483742,
+     0.0,
+     0.27951
+    ]
+   ],
+   "action_label": [
+    0.04205,
+    1.451225,
+    1
+   ],
+   "decision_step": 163,
+   "episode_id": 0,
+   "grid_point": 27,
+   "hl_seq": 17,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262057,
+   "obs_last_physics_step": 163,
+   "obs_slot_id": 27,
+   "obs_valid": 1,
+   "state": [
+    6.186,
+    0.253216,
+    1.2808,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.042173,
+    1.262879,
+    1
+   ],
+   "action_exec": [
+    [
+     0.280257,
+     0.42096,
+     0.0,
+     0.280257
+    ],
+    [
+     0.280257,
+     0.42096,
+     0.0,
+     0.280257
+    ],
+    [
+     0.280521,
+     0.42096,
+     0.0,
+     0.280521
+    ],
+    [
+     0.280708,
+     0.42096,
+     0.0,
+     0.280708
+    ],
+    [
+     0.280839,
+     0.42096,
+     0.0,
+     0.280839
+    ],
+    null
+   ],
+   "action_label": [
+    0.042173,
+    1.262879,
+    1
+   ],
+   "decision_step": 169,
+   "episode_id": 0,
+   "grid_point": 28,
+   "hl_seq": 18,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262063,
+   "obs_last_physics_step": 169,
+   "obs_slot_id": 28,
+   "obs_valid": 1,
+   "state": [
+    6.4214,
+    0.268088,
+    1.1315,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041983,
+    1.125458,
+    1
+   ],
+   "action_exec": [
+    [
+     0.280309,
+     0.375153,
+     0.0,
+     0.280309
+    ],
+    [
+     0.280309,
+     0.375153,
+     0.0,
+     0.280309
+    ],
+    [
+     0.280309,
+     0.375153,
+     0.0,
+     0.280309
+    ],
+    [
+     0.280184,
+     0.375153,
+     0.0,
+     0.280184
+    ],
+    [
+     0.280096,
+     0.375153,
+     0.0,
+     0.280096
+    ],
+    [
+     0.280034,
+     0.375153,
+     0.0,
+     0.280034
+    ]
+   ],
+   "action_label": [
+    0.041983,
+    1.125458,
+    1
+   ],
+   "decision_step": 174,
+   "episode_id": 0,
+   "grid_point": 29,
+   "hl_seq": 19,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262068,
+   "obs_last_physics_step": 174,
+   "obs_slot_id": 29,
+   "obs_valid": 1,
+   "state": [
+    6.5932,
+    0.27668,
+    0.9345,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041513,
+    0.943795,
+    1
+   ],
+   "action_exec": [
+    [
+     0.279011,
+     0.314598,
+     0.0,
+     0.279011
+    ],
+    [
+     0.278348,
+     0.314598,
+     0.0,
+     0.278348
+    ],
+    [
+     0.277879,
+     0.314598,
+     0.0,
+     0.277879
+    ],
+    [
+     0.277549,
+     0.314598,
+     0.0,
+     0.277549
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.041513,
+    0.943795,
+    1
+   ],
+   "decision_step": 183,
+   "episode_id": 0,
+   "grid_point": 30,
+   "hl_seq": 20,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262074,
+   "obs_last_physics_step": 180,
+   "obs_slot_id": 30,
+   "obs_valid": 1,
+   "state": [
+    6.8203,
+    0.283755,
+    0.7876,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041348,
+    0.882708,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276689,
+     0.294236,
+     0.0,
+     0.276689
+    ],
+    [
+     0.276689,
+     0.294236,
+     0.0,
+     0.276689
+    ],
+    [
+     0.276385,
+     0.294236,
+     0.0,
+     0.276385
+    ],
+    [
+     0.276171,
+     0.294236,
+     0.0,
+     0.276171
+    ],
+    [
+     0.276019,
+     0.294236,
+     0.0,
+     0.276019
+    ],
+    [
+     0.275913,
+     0.294236,
+     0.0,
+     0.275913
+    ]
+   ],
+   "action_label": [
+    0.041348,
+    0.882708,
+    1
+   ],
+   "decision_step": 187,
+   "episode_id": 0,
+   "grid_point": 31,
+   "hl_seq": 21,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262080,
+   "obs_last_physics_step": 187,
+   "obs_slot_id": 31,
+   "obs_valid": 1,
+   "state": [
+    6.8966,
+    0.286448,
+    0.5998,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.040754,
+    0.793992,
+    1
+   ],
+   "action_exec": [
+    [
+     0.273994,
+     0.264664,
+     0.0,
+     0.273994
+    ],
+    [
+     0.273994,
+     0.264664,
+     0.0,
+     0.273994
+    ],
+    [
+     0.273317,
+     0.264664,
+     0.0,
+     0.273317
+    ],
+    [
+     0.272839,
+     0.264664,
+     0.0,
+     0.272839
+    ],
+    [
+     0.272502,
+     0.264664,
+     0.0,
+     0.272502
+    ],
+    null
+   ],
+   "action_label": [
+    0.040754,
+    0.793992,
+    1
+   ],
+   "decision_step": 193,
+   "episode_id": 0,
+   "grid_point": 32,
+   "hl_seq": 22,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262086,
+   "obs_last_physics_step": 193,
+   "obs_slot_id": 32,
+   "obs_valid": 1,
+   "state": [
+    7.0075,
+    0.289423,
+    0.5331,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.036979,
+    0.730319,
+    1
+   ],
+   "action_exec": [
+    [
+     0.258071,
+     0.24344,
+     0.0,
+     0.258071
+    ],
+    [
+     0.258071,
+     0.24344,
+     0.0,
+     0.258071
+    ],
+    [
+     0.258071,
+     0.24344,
+     0.0,
+     0.258071
+    ],
+    [
+     0.254676,
+     0.24344,
+     0.0,
+     0.254676
+    ],
+    [
+     0.252279,
+     0.24344,
+     0.0,
+     0.252279
+    ],
+    [
+     0.250587,
+     0.24344,
+     0.0,
+     0.250587
+    ]
+   ],
+   "action_label": [
+    0.036979,
+    0.730319,
+    1
+   ],
+   "decision_step": 198,
+   "episode_id": 0,
+   "grid_point": 33,
+   "hl_seq": 23,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262091,
+   "obs_last_physics_step": 198,
+   "obs_slot_id": 33,
+   "obs_valid": 1,
+   "state": [
+    7.0871,
+    0.289237,
+    0.4402,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.024386,
+    0.644495,
+    1
+   ],
+   "action_exec": [
+    [
+     0.228723,
+     0.214832,
+     0.0,
+     0.228723
+    ],
+    [
+     0.209268,
+     0.214832,
+     0.0,
+     0.209268
+    ],
+    [
+     0.195535,
+     0.214832,
+     0.0,
+     0.195535
+    ],
+    [
+     0.185842,
+     0.214832,
+     0.0,
+     0.185842
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.024386,
+    0.644495,
+    1
+   ],
+   "decision_step": 207,
+   "episode_id": 0,
+   "grid_point": 34,
+   "hl_seq": 24,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262097,
+   "obs_last_physics_step": 204,
+   "obs_slot_id": 34,
+   "obs_valid": 1,
+   "state": [
+    7.1944,
+    0.266879,
+    0.3721,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.017458,
+    0.615635,
+    1
+   ],
+   "action_exec": [
+    [
+     0.154271,
+     0.205212,
+     0.0,
+     0.154271
+    ],
+    [
+     0.154271,
+     0.205212,
+     0.0,
+     0.154271
+    ],
+    [
+     0.143128,
+     0.205212,
+     0.0,
+     0.143128
+    ],
+    [
+     0.135263,
+     0.205212,
+     0.0,
+     0.135263
+    ],
+    [
+     0.129711,
+     0.205212,
+     0.0,
+     0.129711
+    ],
+    [
+     0.125792,
+     0.205212,
+     0.0,
+     0.125792
+    ]
+   ],
+   "action_label": [
+    0.017458,
+    0.615635,
+    1
+   ],
+   "decision_step": 211,
+   "episode_id": 0,
+   "grid_point": 35,
+   "hl_seq": 25,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262103,
+   "obs_last_physics_step": 211,
+   "obs_slot_id": 35,
+   "obs_valid": 1,
+   "state": [
+    7.2305,
+    0.201361,
+    0.2833,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    0.006476,
+    0.573723,
+    1
+   ],
+   "decision_step": 217,
+   "episode_id": 0,
+   "grid_point": 36,
+   "hl_seq": 25,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 1,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262109,
+   "obs_last_physics_step": 217,
+   "obs_slot_id": 36,
+   "obs_valid": 1,
+   "state": [
+    7.2828,
+    0.1373,
+    0.2518,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 225,
+   "episode_id": -1,
+   "grid_point": 37,
+   "hl_seq": 25,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 1,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262114,
+   "obs_last_physics_step": 222,
+   "obs_slot_id": 37,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 229,
+   "episode_id": -1,
+   "grid_point": 38,
+   "hl_seq": 25,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262120,
+   "obs_last_physics_step": 229,
+   "obs_slot_id": 38,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.01683,
+     0.666667,
+     0.0,
+     0.01683
+    ],
+    [
+     0.01683,
+     0.666667,
+     0.0,
+     0.01683
+    ],
+    [
+     0.022771,
+     0.666667,
+     0.0,
+     0.022771
+    ],
+    [
+     0.026964,
+     0.666667,
+     0.0,
+     0.026964
+    ],
+    [
+     0.029923,
+     0.666667,
+     0.0,
+     0.029923
+    ],
+    null
+   ],
+   "action_label": [
+    0.005554,
+    2.0,
+    1
+   ],
+   "decision_step": 235,
+   "episode_id": 1,
+   "grid_point": 39,
+   "hl_seq": 26,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262126,
+   "obs_last_physics_step": 235,
+   "obs_slot_id": 39,
+   "obs_valid": 1,
+   "state": [
+    0.0,
+    0.0,
+    0.0,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.005753,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.034608,
+     0.666667,
+     0.0,
+     0.034608
+    ],
+    [
+     0.034608,
+     0.666667,
+     0.0,
+     0.034608
+    ],
+    [
+     0.034608,
+     0.666667,
+     0.0,
+     0.034608
+    ],
+    [
+     0.03571,
+     0.666667,
+     0.0,
+     0.03571
+    ],
+    [
+     0.036488,
+     0.666667,
+     0.0,
+     0.036488
+    ],
+    [
+     0.037038,
+     0.666667,
+     0.0,
+     0.037038
+    ]
+   ],
+   "action_label": [
+    0.005753,
+    2.0,
+    1
+   ],
+   "decision_step": 240,
+   "episode_id": 1,
+   "grid_point": 40,
+   "hl_seq": 27,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262131,
+   "obs_last_physics_step": 240,
+   "obs_slot_id": 40,
+   "obs_valid": 1,
+   "state": [
+    0.3608,
+    0.001397,
+    1.9844,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.006555,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.039513,
+     0.666667,
+     0.0,
+     0.039513
+    ],
+    [
+     0.040744,
+     0.666667,
+     0.0,
+     0.040744
+    ],
+    [
+     0.041612,
+     0.666667,
+     0.0,
+     0.041612
+    ],
+    [
+     0.042226,
+     0.666667,
+     0.0,
+     0.042226
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.006555,
+    2.0,
+    1
+   ],
+   "decision_step": 249,
+   "episode_id": 1,
+   "grid_point": 41,
+   "hl_seq": 28,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262137,
+   "obs_last_physics_step": 246,
+   "obs_slot_id": 41,
+   "obs_valid": 1,
+   "state": [
+    0.9264,
+    0.004359,
+    1.9615,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.007038,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.044359,
+     0.666667,
+     0.0,
+     0.044359
+    ],
+    [
+     0.044359,
+     0.666667,
+     0.0,
+     0.044359
+    ],
+    [
+     0.045112,
+     0.666667,
+     0.0,
+     0.045112
+    ],
+    [
+     0.045643,
+     0.666667,
+     0.0,
+     0.045643
+    ],
+    [
+     0.046018,
+     0.666667,
+     0.0,
+     0.046018
+    ],
+    [
+     0.046283,
+     0.666667,
+     0.0,
+     0.046283
+    ]
+   ],
+   "action_label": [
+    0.007038,
+    2.0,
+    1
+   ],
+   "decision_step": 253,
+   "episode_id": 1,
+   "grid_point": 42,
+   "hl_seq": 29,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262143,
+   "obs_last_physics_step": 253,
+   "obs_slot_id": 42,
+   "obs_valid": 1,
+   "state": [
+    1.1738,
+    0.007127,
+    1.9437,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.008193,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.050071,
+     0.666667,
+     0.0,
+     0.050071
+    ],
+    [
+     0.050071,
+     0.666667,
+     0.0,
+     0.050071
+    ],
+    [
+     0.051408,
+     0.666667,
+     0.0,
+     0.051408
+    ],
+    [
+     0.052352,
+     0.666667,
+     0.0,
+     0.052352
+    ],
+    [
+     0.053018,
+     0.666667,
+     0.0,
+     0.053018
+    ],
+    [
+     0.053906,
+     0.666667,
+     0.0,
+     0.053906
+    ]
+   ],
+   "action_label": [
+    0.008193,
+    2.0,
+    1
+   ],
+   "decision_step": 259,
+   "episode_id": 1,
+   "grid_point": 43,
+   "hl_seq": 30,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262149,
+   "obs_last_physics_step": 259,
+   "obs_slot_id": 43,
+   "obs_valid": 1,
+   "state": [
+    1.5741,
+    0.010594,
+    1.9237,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.010291,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.05823,
+     0.666667,
+     0.0,
+     0.05823
+    ],
+    [
+     0.061283,
+     0.666667,
+     0.0,
+     0.061283
+    ],
+    [
+     0.063437,
+     0.666667,
+     0.0,
+     0.063437
+    ],
+    [
+     0.06631,
+     0.666667,
+     0.0,
+     0.06631
+    ],
+    [
+     0.06631,
+     0.666667,
+     0.0,
+     0.06631
+    ],
+    [
+     0.06631,
+     0.666667,
+     0.0,
+     0.06631
+    ]
+   ],
+   "action_label": [
+    0.010291,
+    2.0,
+    1
+   ],
+   "decision_step": 267,
+   "episode_id": 1,
+   "grid_point": 44,
+   "hl_seq": 31,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262154,
+   "obs_last_physics_step": 264,
+   "obs_slot_id": 44,
+   "obs_valid": 1,
+   "state": [
+    2.0749,
+    0.015546,
+    1.9039,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.012475,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.071268,
+     0.666667,
+     0.0,
+     0.071268
+    ],
+    [
+     0.074767,
+     0.666667,
+     0.0,
+     0.074767
+    ],
+    [
+     0.077237,
+     0.666667,
+     0.0,
+     0.077237
+    ],
+    [
+     0.078981,
+     0.666667,
+     0.0,
+     0.078981
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.012475,
+    2.0,
+    1
+   ],
+   "decision_step": 273,
+   "episode_id": 1,
+   "grid_point": 45,
+   "hl_seq": 32,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262160,
+   "obs_last_physics_step": 270,
+   "obs_slot_id": 45,
+   "obs_valid": 1,
+   "state": [
+    2.4659,
+    0.023027,
+    1.8842,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.013953,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.085362,
+     0.666667,
+     0.0,
+     0.085362
+    ],
+    [
+     0.085362,
+     0.666667,
+     0.0,
+     0.085362
+    ],
+    [
+     0.087614,
+     0.666667,
+     0.0,
+     0.087614
+    ],
+    [
+     0.089203,
+     0.666667,
+     0.0,
+     0.089203
+    ],
+    [
+     0.090325,
+     0.666667,
+     0.0,
+     0.090325
+    ],
+    null
+   ],
+   "action_label": [
+    0.013953,
+    2.0,
+    1
+   ],
+   "decision_step": 277,
+   "episode_id": 1,
+   "grid_point": 46,
+   "hl_seq": 33,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262166,
+   "obs_last_physics_step": 277,
+   "obs_slot_id": 46,
+   "obs_valid": 1,
+   "state": [
+    2.7036,
+    0.031499,
+    1.8671,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.016451,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.101074,
+     0.666667,
+     0.0,
+     0.101074
+    ],
+    [
+     0.101074,
+     0.666667,
+     0.0,
+     0.101074
+    ],
+    [
+     0.101074,
+     0.666667,
+     0.0,
+     0.101074
+    ],
+    [
+     0.103603,
+     0.666667,
+     0.0,
+     0.103603
+    ],
+    [
+     0.105389,
+     0.666667,
+     0.0,
+     0.105389
+    ],
+    [
+     0.106649,
+     0.666667,
+     0.0,
+     0.106649
+    ]
+   ],
+   "action_label": [
+    0.016451,
+    2.0,
+    1
+   ],
+   "decision_step": 282,
+   "episode_id": 1,
+   "grid_point": 47,
+   "hl_seq": 34,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262171,
+   "obs_last_physics_step": 282,
+   "obs_slot_id": 47,
+   "obs_valid": 1,
+   "state": [
+    3.0437,
+    0.040562,
+    1.8503,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.021171,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.11798,
+     0.666667,
+     0.0,
+     0.11798
+    ],
+    [
+     0.124792,
+     0.666667,
+     0.0,
+     0.124792
+    ],
+    [
+     0.1296,
+     0.666667,
+     0.0,
+     0.1296
+    ],
+    [
+     0.132995,
+     0.666667,
+     0.0,
+     0.132995
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.021171,
+    2.0,
+    1
+   ],
+   "decision_step": 291,
+   "episode_id": 1,
+   "grid_point": 48,
+   "hl_seq": 35,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262177,
+   "obs_last_physics_step": 288,
+   "obs_slot_id": 48,
+   "obs_valid": 1,
+   "state": [
+    3.571,
+    0.055649,
+    1.8288,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.023442,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.143579,
+     0.666667,
+     0.0,
+     0.143579
+    ],
+    [
+     0.143579,
+     0.666667,
+     0.0,
+     0.143579
+    ],
+    [
+     0.147315,
+     0.666667,
+     0.0,
+     0.147315
+    ],
+    [
+     0.149952,
+     0.666667,
+     0.0,
+     0.149952
+    ],
+    [
+     0.151813,
+     0.666667,
+     0.0,
+     0.151813
+    ],
+    [
+     0.153127,
+     0.666667,
+     0.0,
+     0.153127
+    ]
+   ],
+   "action_label": [
+    0.023442,
+    2.0,
+    1
+   ],
+   "decision_step": 295,
+   "episode_id": 1,
+   "grid_point": 49,
+   "hl_seq": 36,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262183,
+   "obs_last_physics_step": 295,
+   "obs_slot_id": 49,
+   "obs_valid": 1,
+   "state": [
+    3.8017,
+    0.074865,
+    1.8124,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.027156,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.165816,
+     0.666667,
+     0.0,
+     0.165816
+    ],
+    [
+     0.165816,
+     0.666667,
+     0.0,
+     0.165816
+    ],
+    [
+     0.170294,
+     0.666667,
+     0.0,
+     0.170294
+    ],
+    [
+     0.173455,
+     0.666667,
+     0.0,
+     0.173455
+    ],
+    [
+     0.175686,
+     0.666667,
+     0.0,
+     0.175686
+    ],
+    null
+   ],
+   "action_label": [
+    0.027156,
+    2.0,
+    1
+   ],
+   "decision_step": 301,
+   "episode_id": 1,
+   "grid_point": 50,
+   "hl_seq": 37,
+   "interval_steps": 5,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262189,
+   "obs_last_physics_step": 301,
+   "obs_slot_id": 50,
+   "obs_valid": 1,
+   "state": [
+    4.1749,
+    0.094781,
+    1.7937,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.030298,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.190296,
+     0.666667,
+     0.0,
+     0.190296
+    ],
+    [
+     0.190296,
+     0.666667,
+     0.0,
+     0.190296
+    ],
+    [
+     0.190296,
+     0.666667,
+     0.0,
+     0.190296
+    ],
+    [
+     0.193734,
+     0.666667,
+     0.0,
+     0.193734
+    ],
+    [
+     0.19616,
+     0.666667,
+     0.0,
+     0.19616
+    ],
+    [
+     0.197873,
+     0.666667,
+     0.0,
+     0.197873
+    ]
+   ],
+   "action_label": [
+    0.030298,
+    2.0,
+    1
+   ],
+   "decision_step": 306,
+   "episode_id": 1,
+   "grid_point": 51,
+   "hl_seq": 38,
+   "interval_steps": 9,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262194,
+   "obs_last_physics_step": 306,
+   "obs_slot_id": 51,
+   "obs_valid": 1,
+   "state": [
+    4.4963,
+    0.117319,
+    1.7774,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.035106,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.210124,
+     0.666667,
+     0.0,
+     0.210124
+    ],
+    [
+     0.217159,
+     0.666667,
+     0.0,
+     0.217159
+    ],
+    [
+     0.222125,
+     0.666667,
+     0.0,
+     0.222125
+    ],
+    [
+     0.22563,
+     0.666667,
+     0.0,
+     0.22563
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.035106,
+    2.0,
+    1
+   ],
+   "decision_step": 315,
+   "episode_id": 1,
+   "grid_point": 52,
+   "hl_seq": 39,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262200,
+   "obs_last_physics_step": 312,
+   "obs_slot_id": 52,
+   "obs_valid": 1,
+   "state": [
+    5.0028,
+    0.145982,
+    1.7569,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.037474,
+    2.0,
+    1
+   ],
+   "action_exec": [
+    [
+     0.236627,
+     0.666667,
+     0.0,
+     0.236627
+    ],
+    [
+     0.236627,
+     0.666667,
+     0.0,
+     0.236627
+    ],
+    [
+     0.240509,
+     0.666667,
+     0.0,
+     0.240509
+    ],
+    [
+     0.243248,
+     0.666667,
+     0.0,
+     0.243248
+    ],
+    [
+     0.245182,
+     0.666667,
+     0.0,
+     0.245182
+    ],
+    [
+     0.246547,
+     0.666667,
+     0.0,
+     0.246547
+    ]
+   ],
+   "action_label": [
+    0.037474,
+    2.0,
+    1
+   ],
+   "decision_step": 319,
+   "episode_id": 1,
+   "grid_point": 53,
+   "hl_seq": 40,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262206,
+   "obs_last_physics_step": 319,
+   "obs_slot_id": 53,
+   "obs_valid": 1,
+   "state": [
+    5.2245,
+    0.175347,
+    1.741,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.039964,
+    1.933631,
+    1
+   ],
+   "action_exec": [
+    [
+     0.255585,
+     0.644544,
+     0.0,
+     0.255585
+    ],
+    [
+     0.255585,
+     0.644544,
+     0.0,
+     0.255585
+    ],
+    [
+     0.258774,
+     0.644544,
+     0.0,
+     0.258774
+    ],
+    [
+     0.261026,
+     0.644544,
+     0.0,
+     0.261026
+    ],
+    [
+     0.262615,
+     0.644544,
+     0.0,
+     0.262615
+    ],
+    [
+     0.264734,
+     0.644544,
+     0.0,
+     0.264734
+    ]
+   ],
+   "action_label": [
+    0.039964,
+    1.933631,
+    1
+   ],
+   "decision_step": 325,
+   "episode_id": 1,
+   "grid_point": 54,
+   "hl_seq": 41,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262212,
+   "obs_last_physics_step": 325,
+   "obs_slot_id": 54,
+   "obs_valid": 1,
+   "state": [
+    5.583,
+    0.204877,
+    1.723,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041611,
+    1.588609,
+    1
+   ],
+   "action_exec": [
+    [
+     0.268462,
+     0.529536,
+     0.0,
+     0.268462
+    ],
+    [
+     0.271094,
+     0.529536,
+     0.0,
+     0.271094
+    ],
+    [
+     0.272951,
+     0.529536,
+     0.0,
+     0.272951
+    ],
+    [
+     0.274263,
+     0.529536,
+     0.0,
+     0.274263
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.041611,
+    1.588609,
+    1
+   ],
+   "decision_step": 333,
+   "episode_id": 1,
+   "grid_point": 55,
+   "hl_seq": 42,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262217,
+   "obs_last_physics_step": 330,
+   "obs_slot_id": 55,
+   "obs_valid": 1,
+   "state": [
+    6.0142,
+    0.233618,
+    1.6395,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.042047,
+    1.451225,
+    1
+   ],
+   "action_exec": [
+    [
+     0.277013,
+     0.483742,
+     0.0,
+     0.277013
+    ],
+    [
+     0.277013,
+     0.483742,
+     0.0,
+     0.277013
+    ],
+    [
+     0.277984,
+     0.483742,
+     0.0,
+     0.277984
+    ],
+    [
+     0.278669,
+     0.483742,
+     0.0,
+     0.278669
+    ],
+    [
+     0.279153,
+     0.483742,
+     0.0,
+     0.279153
+    ],
+    [
+     0.279494,
+     0.483742,
+     0.0,
+     0.279494
+    ]
+   ],
+   "action_label": [
+    0.042047,
+    1.451225,
+    1
+   ],
+   "decision_step": 337,
+   "episode_id": 1,
+   "grid_point": 56,
+   "hl_seq": 43,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262223,
+   "obs_last_physics_step": 337,
+   "obs_slot_id": 56,
+   "obs_valid": 1,
+   "state": [
+    6.186,
+    0.253117,
+    1.281,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.042169,
+    1.262879,
+    1
+   ],
+   "action_exec": [
+    [
+     0.280235,
+     0.42096,
+     0.0,
+     0.280235
+    ],
+    [
+     0.280235,
+     0.42096,
+     0.0,
+     0.280235
+    ],
+    [
+     0.280497,
+     0.42096,
+     0.0,
+     0.280497
+    ],
+    [
+     0.280682,
+     0.42096,
+     0.0,
+     0.280682
+    ],
+    [
+     0.280812,
+     0.42096,
+     0.0,
+     0.280812
+    ],
+    [
+     0.280904,
+     0.42096,
+     0.0,
+     0.280904
+    ]
+   ],
+   "action_label": [
+    0.042169,
+    1.262879,
+    1
+   ],
+   "decision_step": 343,
+   "episode_id": 1,
+   "grid_point": 57,
+   "hl_seq": 44,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262229,
+   "obs_last_physics_step": 343,
+   "obs_slot_id": 57,
+   "obs_valid": 1,
+   "state": [
+    6.4214,
+    0.267978,
+    1.1316,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041988,
+    1.10754,
+    1
+   ],
+   "action_exec": [
+    [
+     0.280457,
+     0.36918,
+     0.0,
+     0.280457
+    ],
+    [
+     0.280457,
+     0.36918,
+     0.0,
+     0.280457
+    ],
+    [
+     0.280299,
+     0.36918,
+     0.0,
+     0.280299
+    ],
+    [
+     0.280187,
+     0.36918,
+     0.0,
+     0.280187
+    ],
+    [
+     0.280109,
+     0.36918,
+     0.0,
+     0.280109
+    ],
+    [
+     0.280004,
+     0.36918,
+     0.0,
+     0.280004
+    ]
+   ],
+   "action_label": [
+    0.041988,
+    1.10754,
+    1
+   ],
+   "decision_step": 349,
+   "episode_id": 1,
+   "grid_point": 58,
+   "hl_seq": 45,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262235,
+   "obs_last_physics_step": 349,
+   "obs_slot_id": 58,
+   "obs_valid": 1,
+   "state": [
+    6.6156,
+    0.277729,
+    0.9333,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041494,
+    0.94617,
+    1
+   ],
+   "action_exec": [
+    [
+     0.279011,
+     0.31539,
+     0.0,
+     0.279011
+    ],
+    [
+     0.27831,
+     0.31539,
+     0.0,
+     0.27831
+    ],
+    [
+     0.277816,
+     0.31539,
+     0.0,
+     0.277816
+    ],
+    [
+     0.277466,
+     0.31539,
+     0.0,
+     0.277466
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.041494,
+    0.94617,
+    1
+   ],
+   "decision_step": 357,
+   "episode_id": 1,
+   "grid_point": 59,
+   "hl_seq": 46,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262240,
+   "obs_last_physics_step": 354,
+   "obs_slot_id": 59,
+   "obs_valid": 1,
+   "state": [
+    6.8173,
+    0.283744,
+    0.7698,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.041328,
+    0.884827,
+    1
+   ],
+   "action_exec": [
+    [
+     0.276582,
+     0.294942,
+     0.0,
+     0.276582
+    ],
+    [
+     0.276582,
+     0.294942,
+     0.0,
+     0.276582
+    ],
+    [
+     0.27627,
+     0.294942,
+     0.0,
+     0.27627
+    ],
+    [
+     0.27605,
+     0.294942,
+     0.0,
+     0.27605
+    ],
+    [
+     0.275894,
+     0.294942,
+     0.0,
+     0.275894
+    ],
+    [
+     0.275785,
+     0.294942,
+     0.0,
+     0.275785
+    ]
+   ],
+   "action_label": [
+    0.041328,
+    0.884827,
+    1
+   ],
+   "decision_step": 361,
+   "episode_id": 1,
+   "grid_point": 60,
+   "hl_seq": 47,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262246,
+   "obs_last_physics_step": 361,
+   "obs_slot_id": 60,
+   "obs_valid": 1,
+   "state": [
+    6.894,
+    0.2863,
+    0.6022,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.040759,
+    0.79574,
+    1
+   ],
+   "action_exec": [
+    [
+     0.273941,
+     0.265247,
+     0.0,
+     0.273941
+    ],
+    [
+     0.273941,
+     0.265247,
+     0.0,
+     0.273941
+    ],
+    [
+     0.27329,
+     0.265247,
+     0.0,
+     0.27329
+    ],
+    [
+     0.272831,
+     0.265247,
+     0.0,
+     0.272831
+    ],
+    [
+     0.272507,
+     0.265247,
+     0.0,
+     0.272507
+    ],
+    [
+     0.272075,
+     0.265247,
+     0.0,
+     0.272075
+    ]
+   ],
+   "action_label": [
+    0.040759,
+    0.79574,
+    1
+   ],
+   "decision_step": 367,
+   "episode_id": 1,
+   "grid_point": 61,
+   "hl_seq": 48,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262252,
+   "obs_last_physics_step": 367,
+   "obs_slot_id": 61,
+   "obs_valid": 1,
+   "state": [
+    7.0053,
+    0.289241,
+    0.5352,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.033951,
+    0.702841,
+    1
+   ],
+   "action_exec": [
+    [
+     0.258622,
+     0.23428,
+     0.0,
+     0.258622
+    ],
+    [
+     0.249127,
+     0.23428,
+     0.0,
+     0.249127
+    ],
+    [
+     0.242424,
+     0.23428,
+     0.0,
+     0.242424
+    ],
+    [
+     0.233487,
+     0.23428,
+     0.0,
+     0.233487
+    ],
+    [
+     0.233487,
+     0.23428,
+     0.0,
+     0.233487
+    ],
+    [
+     0.233487,
+     0.23428,
+     0.0,
+     0.233487
+    ]
+   ],
+   "action_label": [
+    0.033951,
+    0.702841,
+    1
+   ],
+   "decision_step": 375,
+   "episode_id": 1,
+   "grid_point": 62,
+   "hl_seq": 49,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262257,
+   "obs_last_physics_step": 372,
+   "obs_slot_id": 62,
+   "obs_valid": 1,
+   "state": [
+    7.1214,
+    0.289193,
+    0.4414,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.024349,
+    0.643805,
+    1
+   ],
+   "action_exec": [
+    [
+     0.213879,
+     0.214602,
+     0.0,
+     0.213879
+    ],
+    [
+     0.198716,
+     0.214602,
+     0.0,
+     0.198716
+    ],
+    [
+     0.188013,
+     0.214602,
+     0.0,
+     0.188013
+    ],
+    [
+     0.180457,
+     0.214602,
+     0.0,
+     0.180457
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    0.024349,
+    0.643805,
+    1
+   ],
+   "decision_step": 381,
+   "episode_id": 1,
+   "grid_point": 63,
+   "hl_seq": 50,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262263,
+   "obs_last_physics_step": 378,
+   "obs_slot_id": 63,
+   "obs_valid": 1,
+   "state": [
+    7.1952,
+    0.251034,
+    0.3445,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    0.01778,
+    0.61502,
+    1
+   ],
+   "action_exec": [
+    [
+     0.152311,
+     0.205007,
+     0.0,
+     0.152311
+    ],
+    [
+     0.152311,
+     0.205007,
+     0.0,
+     0.152311
+    ],
+    [
+     0.142377,
+     0.205007,
+     0.0,
+     0.142377
+    ],
+    [
+     0.135365,
+     0.205007,
+     0.0,
+     0.135365
+    ],
+    [
+     0.130415,
+     0.205007,
+     0.0,
+     0.130415
+    ],
+    [
+     0.126921,
+     0.205007,
+     0.0,
+     0.126921
+    ]
+   ],
+   "action_label": [
+    0.01778,
+    0.61502,
+    1
+   ],
+   "decision_step": 385,
+   "episode_id": 1,
+   "grid_point": 64,
+   "hl_seq": 51,
+   "interval_steps": 6,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 1,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 1
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262269,
+   "obs_last_physics_step": 385,
+   "obs_slot_id": 64,
+   "obs_valid": 1,
+   "state": [
+    7.2312,
+    0.195555,
+    0.2826,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ]
+   ],
+   "action_label": [
+    0.006899,
+    0.573215,
+    1
+   ],
+   "decision_step": 391,
+   "episode_id": 1,
+   "grid_point": 65,
+   "hl_seq": 51,
+   "interval_steps": 8,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262275,
+   "obs_last_physics_step": 391,
+   "obs_slot_id": 65,
+   "obs_valid": 1,
+   "state": [
+    7.2835,
+    0.138549,
+    0.2511,
+    1
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    [
+     null,
+     null,
+     null,
+     0.0
+    ],
+    null,
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 399,
+   "episode_id": -1,
+   "grid_point": 66,
+   "hl_seq": 51,
+   "interval_steps": 4,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 80,
+   "obs_age_steps": 3,
+   "obs_captured_render_frame": 262280,
+   "obs_last_physics_step": 396,
+   "obs_slot_id": 66,
+   "obs_valid": 1,
+   "state": [
+    7.1882,
+    0.0,
+    -0.3609,
+    0
+   ]
+  },
+  {
+   "action_cmd": [
+    null,
+    null,
+    null
+   ],
+   "action_exec": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "action_label": [
+    null,
+    null,
+    null
+   ],
+   "decision_step": 403,
+   "episode_id": -1,
+   "grid_point": 67,
+   "hl_seq": 51,
+   "interval_steps": null,
+   "masks": {
+    "env_transition": 0,
+    "policy_valid": 0,
+    "teleport": 0,
+    "warmup": 0,
+    "wm_valid": 0
+   },
+   "obs_age_ms": 0,
+   "obs_age_steps": 0,
+   "obs_captured_render_frame": 262286,
+   "obs_last_physics_step": 403,
+   "obs_slot_id": 67,
+   "obs_valid": 1,
+   "state": [
+    7.1427,
+    0.0,
+    -0.3576,
+    0
+   ]
+  }
+ ],
+ "img_resolved": [
+  {
+   "captured_render_frame": 261903,
+   "fid_ok": 1,
+   "file": "frames/f_00000000.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 0
+  },
+  {
+   "captured_render_frame": 261908,
+   "fid_ok": 1,
+   "file": "frames/f_00000001.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 1
+  },
+  {
+   "captured_render_frame": 261914,
+   "fid_ok": 1,
+   "file": "frames/f_00000002.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 2
+  },
+  {
+   "captured_render_frame": 261920,
+   "fid_ok": 1,
+   "file": "frames/f_00000003.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 3
+  },
+  {
+   "captured_render_frame": 261925,
+   "fid_ok": 1,
+   "file": "frames/f_00000004.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 4
+  },
+  {
+   "captured_render_frame": 261931,
+   "fid_ok": 1,
+   "file": "frames/f_00000005.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 5
+  },
+  {
+   "captured_render_frame": 261937,
+   "fid_ok": 1,
+   "file": "frames/f_00000006.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 6
+  },
+  {
+   "captured_render_frame": 261943,
+   "fid_ok": 1,
+   "file": "frames/f_00000007.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 7
+  },
+  {
+   "captured_render_frame": 261948,
+   "fid_ok": 1,
+   "file": "frames/f_00000008.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 8
+  },
+  {
+   "captured_render_frame": 261954,
+   "fid_ok": 1,
+   "file": "frames/f_00000009.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 9
+  },
+  {
+   "captured_render_frame": 261960,
+   "fid_ok": 1,
+   "file": "frames/f_00000010.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 10
+  },
+  {
+   "captured_render_frame": 261965,
+   "fid_ok": 1,
+   "file": "frames/f_00000011.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 11
+  },
+  {
+   "captured_render_frame": 261971,
+   "fid_ok": 1,
+   "file": "frames/f_00000012.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 12
+  },
+  {
+   "captured_render_frame": 261977,
+   "fid_ok": 1,
+   "file": "frames/f_00000013.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 13
+  },
+  {
+   "captured_render_frame": 261983,
+   "fid_ok": 1,
+   "file": "frames/f_00000014.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 14
+  },
+  {
+   "captured_render_frame": 261988,
+   "fid_ok": 1,
+   "file": "frames/f_00000015.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 15
+  },
+  {
+   "captured_render_frame": 261994,
+   "fid_ok": 1,
+   "file": "frames/f_00000016.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 16
+  },
+  {
+   "captured_render_frame": 262000,
+   "fid_ok": 1,
+   "file": "frames/f_00000017.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 17
+  },
+  {
+   "captured_render_frame": 262006,
+   "fid_ok": 1,
+   "file": "frames/f_00000018.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 18
+  },
+  {
+   "captured_render_frame": 262011,
+   "fid_ok": 1,
+   "file": "frames/f_00000019.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 19
+  },
+  {
+   "captured_render_frame": 262017,
+   "fid_ok": 1,
+   "file": "frames/f_00000020.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 20
+  },
+  {
+   "captured_render_frame": 262023,
+   "fid_ok": 1,
+   "file": "frames/f_00000021.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 21
+  },
+  {
+   "captured_render_frame": 262028,
+   "fid_ok": 1,
+   "file": "frames/f_00000022.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 22
+  },
+  {
+   "captured_render_frame": 262034,
+   "fid_ok": 1,
+   "file": "frames/f_00000023.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 23
+  },
+  {
+   "captured_render_frame": 262040,
+   "fid_ok": 1,
+   "file": "frames/f_00000024.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 24
+  },
+  {
+   "captured_render_frame": 262046,
+   "fid_ok": 1,
+   "file": "frames/f_00000025.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 25
+  },
+  {
+   "captured_render_frame": 262051,
+   "fid_ok": 1,
+   "file": "frames/f_00000026.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 26
+  },
+  {
+   "captured_render_frame": 262057,
+   "fid_ok": 1,
+   "file": "frames/f_00000027.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 27
+  },
+  {
+   "captured_render_frame": 262063,
+   "fid_ok": 1,
+   "file": "frames/f_00000028.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 28
+  },
+  {
+   "captured_render_frame": 262068,
+   "fid_ok": 1,
+   "file": "frames/f_00000029.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 29
+  },
+  {
+   "captured_render_frame": 262074,
+   "fid_ok": 1,
+   "file": "frames/f_00000030.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 30
+  },
+  {
+   "captured_render_frame": 262080,
+   "fid_ok": 1,
+   "file": "frames/f_00000031.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 31
+  },
+  {
+   "captured_render_frame": 262086,
+   "fid_ok": 1,
+   "file": "frames/f_00000032.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 32
+  },
+  {
+   "captured_render_frame": 262091,
+   "fid_ok": 1,
+   "file": "frames/f_00000033.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 33
+  },
+  {
+   "captured_render_frame": 262097,
+   "fid_ok": 1,
+   "file": "frames/f_00000034.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 34
+  },
+  {
+   "captured_render_frame": 262103,
+   "fid_ok": 1,
+   "file": "frames/f_00000035.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 35
+  },
+  {
+   "captured_render_frame": 262109,
+   "fid_ok": 1,
+   "file": "frames/f_00000036.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 36
+  },
+  {
+   "captured_render_frame": 262114,
+   "fid_ok": 1,
+   "file": "frames/f_00000037.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 37
+  },
+  {
+   "captured_render_frame": 262120,
+   "fid_ok": 1,
+   "file": "frames/f_00000038.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 38
+  },
+  {
+   "captured_render_frame": 262126,
+   "fid_ok": 1,
+   "file": "frames/f_00000039.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 39
+  },
+  {
+   "captured_render_frame": 262131,
+   "fid_ok": 1,
+   "file": "frames/f_00000040.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 40
+  },
+  {
+   "captured_render_frame": 262137,
+   "fid_ok": 1,
+   "file": "frames/f_00000041.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 41
+  },
+  {
+   "captured_render_frame": 262143,
+   "fid_ok": 1,
+   "file": "frames/f_00000042.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 42
+  },
+  {
+   "captured_render_frame": 262149,
+   "fid_ok": 1,
+   "file": "frames/f_00000043.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 43
+  },
+  {
+   "captured_render_frame": 262154,
+   "fid_ok": 1,
+   "file": "frames/f_00000044.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 44
+  },
+  {
+   "captured_render_frame": 262160,
+   "fid_ok": 1,
+   "file": "frames/f_00000045.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 45
+  },
+  {
+   "captured_render_frame": 262166,
+   "fid_ok": 1,
+   "file": "frames/f_00000046.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 46
+  },
+  {
+   "captured_render_frame": 262171,
+   "fid_ok": 1,
+   "file": "frames/f_00000047.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 47
+  },
+  {
+   "captured_render_frame": 262177,
+   "fid_ok": 1,
+   "file": "frames/f_00000048.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 48
+  },
+  {
+   "captured_render_frame": 262183,
+   "fid_ok": 1,
+   "file": "frames/f_00000049.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 49
+  },
+  {
+   "captured_render_frame": 262189,
+   "fid_ok": 1,
+   "file": "frames/f_00000050.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 50
+  },
+  {
+   "captured_render_frame": 262194,
+   "fid_ok": 1,
+   "file": "frames/f_00000051.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 51
+  },
+  {
+   "captured_render_frame": 262200,
+   "fid_ok": 1,
+   "file": "frames/f_00000052.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 52
+  },
+  {
+   "captured_render_frame": 262206,
+   "fid_ok": 1,
+   "file": "frames/f_00000053.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 53
+  },
+  {
+   "captured_render_frame": 262212,
+   "fid_ok": 1,
+   "file": "frames/f_00000054.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 54
+  },
+  {
+   "captured_render_frame": 262217,
+   "fid_ok": 1,
+   "file": "frames/f_00000055.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 55
+  },
+  {
+   "captured_render_frame": 262223,
+   "fid_ok": 1,
+   "file": "frames/f_00000056.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 56
+  },
+  {
+   "captured_render_frame": 262229,
+   "fid_ok": 1,
+   "file": "frames/f_00000057.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 57
+  },
+  {
+   "captured_render_frame": 262235,
+   "fid_ok": 1,
+   "file": "frames/f_00000058.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 58
+  },
+  {
+   "captured_render_frame": 262240,
+   "fid_ok": 1,
+   "file": "frames/f_00000059.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 59
+  },
+  {
+   "captured_render_frame": 262246,
+   "fid_ok": 1,
+   "file": "frames/f_00000060.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 60
+  },
+  {
+   "captured_render_frame": 262252,
+   "fid_ok": 1,
+   "file": "frames/f_00000061.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 61
+  },
+  {
+   "captured_render_frame": 262257,
+   "fid_ok": 1,
+   "file": "frames/f_00000062.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 62
+  },
+  {
+   "captured_render_frame": 262263,
+   "fid_ok": 1,
+   "file": "frames/f_00000063.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 63
+  },
+  {
+   "captured_render_frame": 262269,
+   "fid_ok": 1,
+   "file": "frames/f_00000064.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 64
+  },
+  {
+   "captured_render_frame": 262275,
+   "fid_ok": 1,
+   "file": "frames/f_00000065.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 65
+  },
+  {
+   "captured_render_frame": 262280,
+   "fid_ok": 1,
+   "file": "frames/f_00000066.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 66
+  },
+  {
+   "captured_render_frame": 262286,
+   "fid_ok": 1,
+   "file": "frames/f_00000067.png",
+   "file_exists": 1,
+   "png_h": 240,
+   "png_w": 256,
+   "slot_id": 67
+  }
+ ],
+ "pixels": {
+  "slots": [
+   {
+    "core": [
+     [
+      [
+       0.435294,
+       0.596078,
+       0.588235,
+       0.490196,
+       0.596078,
+       0.552941,
+       0.32549,
+       0.4
+      ],
+      [
+       0.470588,
+       0.631373,
+       0.623529,
+       0.52549,
+       0.631373,
+       0.588235,
+       0.360784,
+       0.435294
+      ],
+      [
+       0.490196,
+       0.65098,
+       0.643137,
+       0.545098,
+       0.65098,
+       0.607843,
+       0.380392,
+       0.454902
+      ],
+      [
+       0.482353,
+       0.643137,
+       0.635294,
+       0.537255,
+       0.643137,
+       0.6,
+       0.372549,
+       0.447059
+      ],
+      [
+       0.454902,
+       0.615686,
+       0.607843,
+       0.509804,
+       0.615686,
+       0.572549,
+       0.345098,
+       0.419608
+      ],
+      [
+       0.415686,
+       0.576471,
+       0.568627,
+       0.470588,
+       0.576471,
+       0.533333,
+       0.305882,
+       0.380392
+      ],
+      [
+       0.388235,
+       0.54902,
+       0.541176,
+       0.443137,
+       0.54902,
+       0.505882,
+       0.278431,
+       0.352941
+      ],
+      [
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549,
+       0.372549
+      ],
+      [
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647,
+       0.517647
+      ],
+      [
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216
+      ],
+      [
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843
+      ],
+      [
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451
+      ],
+      [
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294
+      ],
+      [
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804
+      ],
+      [
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392
+      ]
+     ],
+     [
+      [
+       0.396078,
+       0.556863,
+       0.54902,
+       0.45098,
+       0.556863,
+       0.513725,
+       0.286275,
+       0.360784
+      ],
+      [
+       0.431373,
+       0.592157,
+       0.584314,
+       0.486275,
+       0.592157,
+       0.54902,
+       0.321569,
+       0.396078
+      ],
+      [
+       0.45098,
+       0.611765,
+       0.603922,
+       0.505882,
+       0.611765,
+       0.568627,
+       0.341176,
+       0.415686
+      ],
+      [
+       0.443137,
+       0.603922,
+       0.596078,
+       0.498039,
+       0.603922,
+       0.560784,
+       0.333333,
+       0.407843
+      ],
+      [
+       0.415686,
+       0.576471,
+       0.568627,
+       0.470588,
+       0.576471,
+       0.533333,
+       0.305882,
+       0.380392
+      ],
+      [
+       0.376471,
+       0.537255,
+       0.529412,
+       0.431373,
+       0.537255,
+       0.494118,
+       0.266667,
+       0.341176
+      ],
+      [
+       0.34902,
+       0.509804,
+       0.501961,
+       0.403922,
+       0.509804,
+       0.466667,
+       0.239216,
+       0.313725
+      ],
+      [
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333
+      ],
+      [
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431,
+       0.478431
+      ],
+      [
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4
+      ],
+      [
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627,
+       0.368627
+      ],
+      [
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235
+      ],
+      [
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078,
+       0.196078
+      ],
+      [
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588
+      ],
+      [
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176
+      ]
+     ],
+     [
+      [
+       0.337255,
+       0.498039,
+       0.490196,
+       0.392157,
+       0.498039,
+       0.454902,
+       0.227451,
+       0.301961
+      ],
+      [
+       0.372549,
+       0.533333,
+       0.52549,
+       0.427451,
+       0.533333,
+       0.490196,
+       0.262745,
+       0.337255
+      ],
+      [
+       0.392157,
+       0.552941,
+       0.545098,
+       0.447059,
+       0.552941,
+       0.509804,
+       0.282353,
+       0.356863
+      ],
+      [
+       0.384314,
+       0.545098,
+       0.537255,
+       0.439216,
+       0.545098,
+       0.501961,
+       0.27451,
+       0.34902
+      ],
+      [
+       0.356863,
+       0.517647,
+       0.509804,
+       0.411765,
+       0.517647,
+       0.47451,
+       0.247059,
+       0.321569
+      ],
+      [
+       0.317647,
+       0.478431,
+       0.470588,
+       0.372549,
+       0.478431,
+       0.435294,
+       0.207843,
+       0.282353
+      ],
+      [
+       0.290196,
+       0.45098,
+       0.443137,
+       0.345098,
+       0.45098,
+       0.407843,
+       0.180392,
+       0.254902
+      ],
+      [
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451
+      ],
+      [
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608
+      ],
+      [
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176
+      ],
+      [
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804
+      ],
+      [
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412
+      ],
+      [
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255,
+       0.137255
+      ],
+      [
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765
+      ],
+      [
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353
+      ]
+     ]
+    ],
+    "slot_id": 0
+   },
+   {
+    "core": [
+     [
+      [
+       0.568627,
+       0.490196,
+       0.45098,
+       0.564706,
+       0.427451,
+       0.25098,
+       0.419608,
+       0.529412
+      ],
+      [
+       0.584314,
+       0.505882,
+       0.466667,
+       0.580392,
+       0.443137,
+       0.266667,
+       0.435294,
+       0.545098
+      ],
+      [
+       0.619608,
+       0.541176,
+       0.501961,
+       0.615686,
+       0.478431,
+       0.301961,
+       0.470588,
+       0.580392
+      ],
+      [
+       0.654902,
+       0.576471,
+       0.537255,
+       0.65098,
+       0.513725,
+       0.337255,
+       0.505882,
+       0.615686
+      ],
+      [
+       0.67451,
+       0.596078,
+       0.556863,
+       0.670588,
+       0.533333,
+       0.356863,
+       0.52549,
+       0.635294
+      ],
+      [
+       0.67451,
+       0.596078,
+       0.556863,
+       0.670588,
+       0.533333,
+       0.356863,
+       0.52549,
+       0.635294
+      ],
+      [
+       0.647059,
+       0.568627,
+       0.529412,
+       0.643137,
+       0.505882,
+       0.329412,
+       0.498039,
+       0.607843
+      ],
+      [
+       0.47451,
+       0.47451,
+       0.47451,
+       0.47451,
+       0.47451,
+       0.47451,
+       0.47451,
+       0.47451
+      ],
+      [
+       0.447059,
+       0.447059,
+       0.447059,
+       0.447059,
+       0.447059,
+       0.447059,
+       0.447059,
+       0.447059
+      ],
+      [
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333,
+       0.333333
+      ],
+      [
+       0.498039,
+       0.498039,
+       0.498039,
+       0.498039,
+       0.498039,
+       0.498039,
+       0.498039,
+       0.498039
+      ],
+      [
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961
+      ],
+      [
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608,
+       0.219608
+      ],
+      [
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373
+      ],
+      [
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451,
+       0.27451
+      ]
+     ],
+     [
+      [
+       0.529412,
+       0.45098,
+       0.411765,
+       0.52549,
+       0.388235,
+       0.211765,
+       0.380392,
+       0.490196
+      ],
+      [
+       0.545098,
+       0.466667,
+       0.427451,
+       0.541176,
+       0.403922,
+       0.227451,
+       0.396078,
+       0.505882
+      ],
+      [
+       0.580392,
+       0.501961,
+       0.462745,
+       0.576471,
+       0.439216,
+       0.262745,
+       0.431373,
+       0.541176
+      ],
+      [
+       0.615686,
+       0.537255,
+       0.498039,
+       0.611765,
+       0.47451,
+       0.298039,
+       0.466667,
+       0.576471
+      ],
+      [
+       0.635294,
+       0.556863,
+       0.517647,
+       0.631373,
+       0.494118,
+       0.317647,
+       0.486275,
+       0.596078
+      ],
+      [
+       0.635294,
+       0.556863,
+       0.517647,
+       0.631373,
+       0.494118,
+       0.317647,
+       0.486275,
+       0.596078
+      ],
+      [
+       0.607843,
+       0.529412,
+       0.490196,
+       0.603922,
+       0.466667,
+       0.290196,
+       0.458824,
+       0.568627
+      ],
+      [
+       0.435294,
+       0.435294,
+       0.435294,
+       0.435294,
+       0.435294,
+       0.435294,
+       0.435294,
+       0.435294
+      ],
+      [
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843,
+       0.407843
+      ],
+      [
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118,
+       0.294118
+      ],
+      [
+       0.458824,
+       0.458824,
+       0.458824,
+       0.458824,
+       0.458824,
+       0.458824,
+       0.458824,
+       0.458824
+      ],
+      [
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745
+      ],
+      [
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392,
+       0.180392
+      ],
+      [
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157
+      ],
+      [
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294
+      ]
+     ],
+     [
+      [
+       0.470588,
+       0.392157,
+       0.352941,
+       0.466667,
+       0.329412,
+       0.152941,
+       0.321569,
+       0.431373
+      ],
+      [
+       0.486275,
+       0.407843,
+       0.368627,
+       0.482353,
+       0.345098,
+       0.168627,
+       0.337255,
+       0.447059
+      ],
+      [
+       0.521569,
+       0.443137,
+       0.403922,
+       0.517647,
+       0.380392,
+       0.203922,
+       0.372549,
+       0.482353
+      ],
+      [
+       0.556863,
+       0.478431,
+       0.439216,
+       0.552941,
+       0.415686,
+       0.239216,
+       0.407843,
+       0.517647
+      ],
+      [
+       0.576471,
+       0.498039,
+       0.458824,
+       0.572549,
+       0.435294,
+       0.258824,
+       0.427451,
+       0.537255
+      ],
+      [
+       0.576471,
+       0.498039,
+       0.458824,
+       0.572549,
+       0.435294,
+       0.258824,
+       0.427451,
+       0.537255
+      ],
+      [
+       0.54902,
+       0.470588,
+       0.431373,
+       0.545098,
+       0.407843,
+       0.231373,
+       0.4,
+       0.509804
+      ],
+      [
+       0.376471,
+       0.376471,
+       0.376471,
+       0.376471,
+       0.376471,
+       0.376471,
+       0.376471,
+       0.376471
+      ],
+      [
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902,
+       0.34902
+      ],
+      [
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294,
+       0.235294
+      ],
+      [
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4
+      ],
+      [
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922
+      ],
+      [
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569,
+       0.121569
+      ],
+      [
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333
+      ],
+      [
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471
+      ]
+     ]
+    ],
+    "slot_id": 22
+   },
+   {
+    "core": [
+     [
+      [
+       0.419608,
+       0.584314,
+       0.537255,
+       0.462745,
+       0.580392,
+       0.486275,
+       0.278431,
+       0.403922
+      ],
+      [
+       0.396078,
+       0.560784,
+       0.513725,
+       0.439216,
+       0.556863,
+       0.462745,
+       0.254902,
+       0.380392
+      ],
+      [
+       0.4,
+       0.564706,
+       0.517647,
+       0.443137,
+       0.560784,
+       0.466667,
+       0.258824,
+       0.384314
+      ],
+      [
+       0.427451,
+       0.592157,
+       0.545098,
+       0.470588,
+       0.588235,
+       0.494118,
+       0.286275,
+       0.411765
+      ],
+      [
+       0.466667,
+       0.631373,
+       0.584314,
+       0.509804,
+       0.627451,
+       0.533333,
+       0.32549,
+       0.45098
+      ],
+      [
+       0.498039,
+       0.662745,
+       0.615686,
+       0.541176,
+       0.658824,
+       0.564706,
+       0.356863,
+       0.482353
+      ],
+      [
+       0.505882,
+       0.670588,
+       0.623529,
+       0.54902,
+       0.666667,
+       0.572549,
+       0.364706,
+       0.490196
+      ],
+      [
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412
+      ],
+      [
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804,
+       0.309804
+      ],
+      [
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451,
+       0.227451
+      ],
+      [
+       0.52549,
+       0.52549,
+       0.52549,
+       0.52549,
+       0.52549,
+       0.52549,
+       0.52549,
+       0.52549
+      ],
+      [
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216,
+       0.439216
+      ],
+      [
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961,
+       0.301961
+      ],
+      [
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373
+      ],
+      [
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686
+      ]
+     ],
+     [
+      [
+       0.380392,
+       0.545098,
+       0.498039,
+       0.423529,
+       0.541176,
+       0.447059,
+       0.239216,
+       0.364706
+      ],
+      [
+       0.356863,
+       0.521569,
+       0.47451,
+       0.4,
+       0.517647,
+       0.423529,
+       0.215686,
+       0.341176
+      ],
+      [
+       0.360784,
+       0.52549,
+       0.478431,
+       0.403922,
+       0.521569,
+       0.427451,
+       0.219608,
+       0.345098
+      ],
+      [
+       0.388235,
+       0.552941,
+       0.505882,
+       0.431373,
+       0.54902,
+       0.454902,
+       0.247059,
+       0.372549
+      ],
+      [
+       0.427451,
+       0.592157,
+       0.545098,
+       0.470588,
+       0.588235,
+       0.494118,
+       0.286275,
+       0.411765
+      ],
+      [
+       0.458824,
+       0.623529,
+       0.576471,
+       0.501961,
+       0.619608,
+       0.52549,
+       0.317647,
+       0.443137
+      ],
+      [
+       0.466667,
+       0.631373,
+       0.584314,
+       0.509804,
+       0.627451,
+       0.533333,
+       0.32549,
+       0.45098
+      ],
+      [
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196
+      ],
+      [
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588,
+       0.270588
+      ],
+      [
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235,
+       0.188235
+      ],
+      [
+       0.486275,
+       0.486275,
+       0.486275,
+       0.486275,
+       0.486275,
+       0.486275,
+       0.486275,
+       0.486275
+      ],
+      [
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4,
+       0.4
+      ],
+      [
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745,
+       0.262745
+      ],
+      [
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157,
+       0.192157
+      ],
+      [
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471
+      ]
+     ],
+     [
+      [
+       0.321569,
+       0.486275,
+       0.439216,
+       0.364706,
+       0.482353,
+       0.388235,
+       0.180392,
+       0.305882
+      ],
+      [
+       0.298039,
+       0.462745,
+       0.415686,
+       0.341176,
+       0.458824,
+       0.364706,
+       0.156863,
+       0.282353
+      ],
+      [
+       0.301961,
+       0.466667,
+       0.419608,
+       0.345098,
+       0.462745,
+       0.368627,
+       0.160784,
+       0.286275
+      ],
+      [
+       0.329412,
+       0.494118,
+       0.447059,
+       0.372549,
+       0.490196,
+       0.396078,
+       0.188235,
+       0.313725
+      ],
+      [
+       0.368627,
+       0.533333,
+       0.486275,
+       0.411765,
+       0.529412,
+       0.435294,
+       0.227451,
+       0.352941
+      ],
+      [
+       0.4,
+       0.564706,
+       0.517647,
+       0.443137,
+       0.560784,
+       0.466667,
+       0.258824,
+       0.384314
+      ],
+      [
+       0.407843,
+       0.572549,
+       0.52549,
+       0.45098,
+       0.568627,
+       0.47451,
+       0.266667,
+       0.392157
+      ],
+      [
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373
+      ],
+      [
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765,
+       0.211765
+      ],
+      [
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412,
+       0.129412
+      ],
+      [
+       0.427451,
+       0.427451,
+       0.427451,
+       0.427451,
+       0.427451,
+       0.427451,
+       0.427451,
+       0.427451
+      ],
+      [
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176,
+       0.341176
+      ],
+      [
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922,
+       0.203922
+      ],
+      [
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333,
+       0.133333
+      ],
+      [
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647
+      ]
+     ]
+    ],
+    "slot_id": 45
+   },
+   {
+    "core": [
+     [
+      [
+       0.443137,
+       0.262745,
+       0.423529,
+       0.643137,
+       0.556863,
+       0.541176,
+       0.635294,
+       0.505882
+      ],
+      [
+       0.478431,
+       0.298039,
+       0.458824,
+       0.678431,
+       0.592157,
+       0.576471,
+       0.670588,
+       0.541176
+      ],
+      [
+       0.494118,
+       0.313725,
+       0.47451,
+       0.694118,
+       0.607843,
+       0.592157,
+       0.686275,
+       0.556863
+      ],
+      [
+       0.486275,
+       0.305882,
+       0.466667,
+       0.686275,
+       0.6,
+       0.584314,
+       0.678431,
+       0.54902
+      ],
+      [
+       0.454902,
+       0.27451,
+       0.435294,
+       0.654902,
+       0.568627,
+       0.552941,
+       0.647059,
+       0.517647
+      ],
+      [
+       0.415686,
+       0.235294,
+       0.396078,
+       0.615686,
+       0.529412,
+       0.513725,
+       0.607843,
+       0.478431
+      ],
+      [
+       0.388235,
+       0.207843,
+       0.368627,
+       0.588235,
+       0.501961,
+       0.486275,
+       0.580392,
+       0.45098
+      ],
+      [
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412
+      ],
+      [
+       0.329412,
+       0.329412,
+       0.329412,
+       0.329412,
+       0.329412,
+       0.329412,
+       0.329412,
+       0.329412
+      ],
+      [
+       0.239216,
+       0.239216,
+       0.239216,
+       0.239216,
+       0.239216,
+       0.239216,
+       0.239216,
+       0.239216
+      ],
+      [
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412,
+       0.529412
+      ],
+      [
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608,
+       0.419608
+      ],
+      [
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353,
+       0.282353
+      ],
+      [
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529,
+       0.223529
+      ],
+      [
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686,
+       0.215686
+      ]
+     ],
+     [
+      [
+       0.403922,
+       0.223529,
+       0.384314,
+       0.603922,
+       0.517647,
+       0.501961,
+       0.596078,
+       0.466667
+      ],
+      [
+       0.439216,
+       0.258824,
+       0.419608,
+       0.639216,
+       0.552941,
+       0.537255,
+       0.631373,
+       0.501961
+      ],
+      [
+       0.454902,
+       0.27451,
+       0.435294,
+       0.654902,
+       0.568627,
+       0.552941,
+       0.647059,
+       0.517647
+      ],
+      [
+       0.447059,
+       0.266667,
+       0.427451,
+       0.647059,
+       0.560784,
+       0.545098,
+       0.639216,
+       0.509804
+      ],
+      [
+       0.415686,
+       0.235294,
+       0.396078,
+       0.615686,
+       0.529412,
+       0.513725,
+       0.607843,
+       0.478431
+      ],
+      [
+       0.376471,
+       0.196078,
+       0.356863,
+       0.576471,
+       0.490196,
+       0.47451,
+       0.568627,
+       0.439216
+      ],
+      [
+       0.34902,
+       0.168627,
+       0.329412,
+       0.54902,
+       0.462745,
+       0.447059,
+       0.541176,
+       0.411765
+      ],
+      [
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196
+      ],
+      [
+       0.290196,
+       0.290196,
+       0.290196,
+       0.290196,
+       0.290196,
+       0.290196,
+       0.290196,
+       0.290196
+      ],
+      [
+       0.2,
+       0.2,
+       0.2,
+       0.2,
+       0.2,
+       0.2,
+       0.2,
+       0.2
+      ],
+      [
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196,
+       0.490196
+      ],
+      [
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392,
+       0.380392
+      ],
+      [
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137,
+       0.243137
+      ],
+      [
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314
+      ],
+      [
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471,
+       0.176471
+      ]
+     ],
+     [
+      [
+       0.345098,
+       0.164706,
+       0.32549,
+       0.545098,
+       0.458824,
+       0.443137,
+       0.537255,
+       0.407843
+      ],
+      [
+       0.380392,
+       0.2,
+       0.360784,
+       0.580392,
+       0.494118,
+       0.478431,
+       0.572549,
+       0.443137
+      ],
+      [
+       0.396078,
+       0.215686,
+       0.376471,
+       0.596078,
+       0.509804,
+       0.494118,
+       0.588235,
+       0.458824
+      ],
+      [
+       0.388235,
+       0.207843,
+       0.368627,
+       0.588235,
+       0.501961,
+       0.486275,
+       0.580392,
+       0.45098
+      ],
+      [
+       0.356863,
+       0.176471,
+       0.337255,
+       0.556863,
+       0.470588,
+       0.454902,
+       0.54902,
+       0.419608
+      ],
+      [
+       0.317647,
+       0.137255,
+       0.298039,
+       0.517647,
+       0.431373,
+       0.415686,
+       0.509804,
+       0.380392
+      ],
+      [
+       0.290196,
+       0.109804,
+       0.270588,
+       0.490196,
+       0.403922,
+       0.388235,
+       0.482353,
+       0.352941
+      ],
+      [
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373
+      ],
+      [
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373,
+       0.231373
+      ],
+      [
+       0.141176,
+       0.141176,
+       0.141176,
+       0.141176,
+       0.141176,
+       0.141176,
+       0.141176,
+       0.141176
+      ],
+      [
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373,
+       0.431373
+      ],
+      [
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569,
+       0.321569
+      ],
+      [
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314,
+       0.184314
+      ],
+      [
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549,
+       0.12549
+      ],
+      [
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647,
+       0.117647
+      ]
+     ]
+    ],
+    "slot_id": 67
+   }
+  ],
+  "stride": 16
+ },
+ "schema": "drivedit.dc2-golden/1",
+ "segments": [
+  {
+   "episode_id": 0,
+   "first_decision_step": 61,
+   "last_decision_step": 211,
+   "n_steps": 26
+  },
+  {
+   "episode_id": 1,
+   "first_decision_step": 235,
+   "last_decision_step": 385,
+   "n_steps": 26
+  }
+ ],
+ "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00"
+}

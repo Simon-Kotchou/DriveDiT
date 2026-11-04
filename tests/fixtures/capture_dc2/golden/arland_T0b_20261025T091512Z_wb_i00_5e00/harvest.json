@@ -1,0 +1,6 @@
+{
+  "schema": "drivedit.harvest/0-synthetic",
+  "session_id": "arland_T0b_20261025T091512Z_wb_i00_5e00",
+  "build_key": "3ca22488f6fa925cfac63edacb82b09f1db1792493115d0558ce1df3ce573980",
+  "note": "DD-6-min writes harvest.json; this synthetic one carries only build_key"
+}

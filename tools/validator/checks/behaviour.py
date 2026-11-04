@@ -94,7 +94,11 @@ def check_c17(ctx):
     tel = s.streams["telemetry"]
     texp = s.telemetry_export
     warm_ms = float(thr.get("warmup_s", 60)) * 1000.0
-    dt = s.clocks["k"] * s.clocks["slice_s"]
+    # per-row time: the world-time difference to the previous telemetry row (one row per callback; the logged state
+    # follows the frame clock, contract section 6); the first row of the stream counts covered_steps x step dt
+    world, covered = tel.col("world_time_ms"), tel.col("covered_steps")
+    dt_row = [((world[i] - world[i - 1]) / 1000.0) if i > 0 else covered[0] * s.clocks["step_dt_s"]
+              for i in range(len(tel))]
     rows = []
     turn_s, turn_r, steer_rows = [], [], []
     notes = []
@@ -125,8 +129,8 @@ def check_c17(ctx):
         for n, i in enumerate(after):
             v = float(texp["speed_fwd_mps"][i])
             k_r = route_curvature(route, progress[i])
-            turn_s.append(float(texp["yaw_rate_rps"][i]) * dt)
-            turn_r.append(k_r * abs(v) * dt)
+            turn_s.append(float(texp["yaw_rate_rps"][i]) * dt_row[i])
+            turn_r.append(k_r * abs(v) * dt_row[i])
             steer_rows.append((float(steer[n]), v, float(texp["yaw_rate_rps"][i]), k_r))
         compared += 1
     if not rows:
@@ -146,7 +150,7 @@ def check_c17(ctx):
     collisions = sum(1 for c in s.crash_events
                      if c["kind"] == "collision" and c["ego"] and c["terminal"] and c["episode_id"] in episodes
                      and c["world_time_ms"] >= warm_ms)
-    duration_s = len(rows) * dt
+    duration_s = sum(dt_row[i] for i in rows)
     value["stuck_per_30min"] = stuck * 1800.0 / duration_s if duration_s > 0 else None
     if value["stuck_per_30min"] is not None and value["stuck_per_30min"] > thr.get("stuck_per_30min_max", 2):
         issues.append("%d stuck event(s) = %.2f per 30 min > %s" % (stuck, value["stuck_per_30min"],

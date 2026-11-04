@@ -1,27 +1,39 @@
-"""C08 (telemetry cadence and image slot timing) and C28 (physics tick)."""
+"""C08 (cadence: rows per callback, decision and image grids), C28 (physics tick) and C37 (10 Hz image-rate
+evidence)."""
 
 import bisect
 import math
 
-from .base import FAIL, HARD, NOT_EVALUATED, PASS, first, percentile, result, unreadable
+from .base import FAIL, HARD, NA, NOT_EVALUATED, PASS, SOFT, first, percentile, result, unreadable
 
 
-IMAGE_HZ_FALLBACK = 5.0    # dc-2.0 TBD-2: the 5 Hz fallback; image_hz and decision_hz drop to 5 Hz together
+# dc-2.0 TBD-2 (freeze decision D-B): 5 Hz is the production default; 10 Hz only as the session setting
+# clocks.image_hz_setting trial_conf. image_hz and decision_hz are equal.
+IMAGE_HZ_DEFAULT = 5.0
+IMAGE_HZ_OVERRIDE = 10.0
+SETTING_OF_RATE = {IMAGE_HZ_DEFAULT: "default", IMAGE_HZ_OVERRIDE: "trial_conf"}
+# D-B: a 10 Hz session must show its own capture utilisation u95 <= 0.85 (the capture stall p95 over the slot period)
+U95_MAX_10HZ = 0.85
+STEP_DT_TOL = 0.05          # the measured step dt of section 6 agrees with the engine's within 5%
 
 
 def check_c08(ctx):
-    """Cadence (r2 5.1 C08; dc-2.0.md section 6, TBD-1, TBD-2):
-      * rates: clocks.image_hz is the thresholds' image_hz or the TBD-2 fallback (5 Hz); decision_hz equals image_hz
-        (the decision interval is the image interval); N and k follow the TBD-1 rule for the session's fixed time
-        slice at that decision rate (N = floor(1 / decision_hz / slice + 0.5), k the largest divisor of N with
-        k x slice <= 50 ms), so N = 12 at the 5 Hz fallback; decision_hz = 1 / (N x slice) within 1%;
-      * telemetry: rows only on steps with step mod k == 0, and 0 missed rows over every k-th step from 0 to the
-        session's last step (session_end end.physics_step; count-based, so a lost tail counts);
-      * image grid: every slot's requested_world_ms on grid point g (anchor + g x 1000 / image_hz - img_lead_ms,
-        anchor = world time of physics step 0), the grid points of the slots 0, 1, 2, ... without a hole, and every
-        grid point due before the session end (less the clocks.img_inflight_timeout_ms drain) has a slot row;
+    """Cadence (r2 5.1 C08; dc-2.0.md section 6, freeze decisions D-A and D-B):
+      * rates: clocks.image_hz is 5 (clocks.image_hz_setting default) or 10 (setting trial_conf, the non-default
+        session setting); decision_hz equals image_hz (the decision interval is the image interval); N =
+        clocks.physics_steps_per_decision follows the D-A rule from the measured engine.step_dt_s (N = floor(1000 /
+        decision_hz / step_dt_ms + 0.5)), never from engine.fixed_time_slice_s; the thresholds' image_hz,
+        telemetry_every_k_physics_steps, decision_hz and C27.physics_steps_per_decision are pre-freeze program values
+        and are not used;
+      * telemetry: one row per callback: 0 ctl rows without a telemetry row (C08.max_missed_telemetry_rows) and no
+        telemetry row after the session's last step;
+      * decisions: the grid callbacks of the world-time grid (anchor = world time of the first ctl row) are rebuilt;
+        grid points a hitch skipped are reported, not failed;
+      * image grid: every slot's requested_world_ms on grid point g (anchor + g x 1000 / image_hz - img_lead_ms, the
+        same anchor), the grid points of the slots 0, 1, 2, ... without a hole, and every grid point due before the
+        session end (less the clocks.img_inflight_timeout_ms drain) has a slot row;
       * issued slots store both timestamps and are issued within C08.img_slot_jitter_frames_p99 render frames of the
-        first frame at or past their due time (p99)."""
+        first frame at or past their due time once the anchor exists (p99)."""
     if ctx.load_error:
         return unreadable(ctx, "C08")
     s = ctx.session
@@ -29,55 +41,43 @@ def check_c08(ctx):
     reader = ctx.reader
     issues = []
     clocks = s.clocks
-    slice_s = clocks["slice_s"]
-    k, n = clocks["k"], clocks["N"]
-    image_hz, dhz = clocks["image_hz"], clocks["decision_hz"]
-    allowed = sorted(set([float(ctx.thresholds.get("image_hz", 10)), IMAGE_HZ_FALLBACK]))
-    if float(image_hz) not in allowed:
-        issues.append("clocks.image_hz %r is not one of %s (the thresholds' image_hz or the TBD-2 fallback)"
-                      % (image_hz, allowed))
-    dhz_ok = isinstance(dhz, (int, float)) and not isinstance(dhz, bool) and dhz > 0
-    if not (dhz_ok and abs(float(dhz) - float(image_hz)) < 1e-9):
+    n, dt = clocks["N"], clocks["step_dt_s"]
+    image_hz, dhz, setting = clocks["image_hz"], clocks["decision_hz"], clocks["image_hz_setting"]
+    want_setting = SETTING_OF_RATE.get(float(image_hz))
+    if want_setting is None:
+        issues.append("clocks.image_hz %r is not 5 (the default) or 10 (the trial-conf setting, TBD-2)" % (image_hz,))
+    elif setting != want_setting:
+        issues.append("clocks.image_hz %r needs clocks.image_hz_setting %r, the session says %r (10 Hz only as an "
+                      "explicit non-default session setting, D-B)" % (image_hz, want_setting, setting))
+    if abs(float(dhz) - float(image_hz)) > 1e-9:
         issues.append("clocks.decision_hz %r differs from image_hz %r (TBD-2: the decision interval is the image "
                       "interval)" % (dhz, image_hz))
-    if isinstance(slice_s, (int, float)) and slice_s > 0:
-        if dhz_ok:
-            rule_n, rule_k = reader.tbd1_rule(slice_s, dhz)
-            if (rule_n, rule_k) != (n, k):
-                issues.append("clocks N=%d k=%d, TBD-1 rule for slice %.6f s at %s Hz gives N=%d k=%d"
-                              % (n, k, slice_s, dhz, rule_n, rule_k))
-            if abs(dhz * n * slice_s - 1.0) > 0.01:
-                issues.append("decision_hz %r is not 1 / (N x slice) = %.3f" % (dhz, 1.0 / (n * slice_s)))
-    else:
-        issues.append("engine.fixed_time_slice_s %r unusable" % (slice_s,))
-    steps = s.streams["telemetry"].col("physics_step")
-    ctl_steps = s.streams["ctl"].col("physics_step")
+    rule_n = reader.steps_per_decision(dhz, dt)
+    if rule_n != n:
+        issues.append("clocks.physics_steps_per_decision %d, the D-A rule for step dt %.6f s at %s Hz gives %d"
+                      % (n, dt, dhz, rule_n))
+    ctl, tel = s.streams["ctl"], s.streams["telemetry"]
+    ctl_steps, steps = ctl.col("physics_step"), tel.col("physics_step")
     end_step = s.end_get("end.physics_step") if s.end is not None else None
     if not (isinstance(end_step, int) and end_step >= 0):
         end_step = max(ctl_steps) if ctl_steps else (max(steps) if steps else None)
-    off_grid = [p for p in steps if p % k]
+    tel_set = set(steps)
+    missed = sum(1 for p in ctl_steps if p not in tel_set)
     late = [p for p in steps if end_step is not None and p > end_step]
-    missed = 0
-    if end_step is not None:
-        missed = len(set(range(0, end_step + 1, k)) - set(steps))
-    if off_grid:
-        issues.append("%d telemetry row(s) off the k=%d grid (%s)" % (len(off_grid), k, first(off_grid, 3)))
     if late:
         issues.append("%d telemetry row(s) after the session's last step %d" % (len(late), end_step))
     max_missed = thr.get("max_missed_telemetry_rows", 0)
     if missed > max_missed:
-        issues.append("%d missed telemetry row(s) over steps 0..%s (max %d)" % (missed, end_step, max_missed))
-    ctl = s.streams["ctl"]
-    anchor = None
-    idx0 = ctl.index().get(0)
-    if idx0 is not None:
-        anchor = ctl.col("world_time_ms")[idx0]
+        issues.append("%d ctl row(s) without their telemetry row (max %d): telemetry is one row per callback"
+                      % (missed, max_missed))
+    callbacks, skipped = reader.decision_callbacks(ctl.col("world_time_ms"), dhz)
+    anchor = ctl.col("world_time_ms")[0] if len(ctl) else None
     img = s.streams["img"]
-    period = 1000.0 / float(image_hz)
+    period = reader.grid_period_ms(image_hz) or 1000.0 / float(image_hz)
     lead = clocks["img_lead_ms"] or 0
     off = holes = tail = 0
     if anchor is None:
-        issues.append("no ctl row for physics step 0: the image grid anchor is unknown")
+        issues.append("no ctl row: the decision and image grid anchor is unknown")
     else:
         expected = 0
         for due in img.col("requested_world_ms"):
@@ -99,8 +99,10 @@ def check_c08(ctx):
                           "end): every grid point reached becomes the next slot (section 6)"
                           % (holes + tail, holes, tail))
     hf = s.streams["hf"]
-    hw, lps, frames = hf.col("world_time_ms"), hf.col("last_physics_step"), hf.col("render_frame")
-    usable = [(w, f) for w, step, f in zip(hw, lps, frames) if step is not None and step >= 0]
+    hw, frames = hf.col("world_time_ms"), hf.col("render_frame")
+    # a slot can be issued once the anchor exists: in the frames after the first callback's frame
+    first_cb_frame = ctl.col("render_frame")[0] if len(ctl) else None
+    usable = [(w, f) for w, f in zip(hw, frames) if first_cb_frame is not None and f > first_cb_frame]
     ws = [w for w, _ in usable]
     jitters = []
     missing_ts = 0
@@ -122,31 +124,36 @@ def check_c08(ctx):
     limit = thr.get("img_slot_jitter_frames_p99", 1)
     if p99 is not None and p99 > limit:
         issues.append("image slot jitter p99 %.2f frames > %s" % (p99, limit))
-    value = {"missed_telemetry_rows": missed, "off_grid_rows": len(off_grid), "img_jitter_p99_frames": p99,
-             "missing_grid_points": holes + tail, "image_hz": image_hz, "decision_hz": dhz, "N": n, "k": k}
+    value = {"missed_telemetry_rows": missed, "decision_callbacks": len(callbacks),
+             "decision_grid_points_skipped": skipped, "img_jitter_p99_frames": p99,
+             "missing_grid_points": holes + tail, "image_hz": image_hz, "image_hz_setting": setting,
+             "decision_hz": dhz, "N": n, "step_dt_s": dt}
     if not steps and not jitters:
         return result(ctx, "C08", HARD, NOT_EVALUATED, value, thr, "no telemetry and no issued image slot")
     return result(ctx, "C08", HARD, FAIL if issues else PASS, value, thr,
-                  first(issues) if issues else "k=%d N=%d by the TBD-1 rule at %s Hz; %d telemetry rows, 0 missed; "
-                  "every grid point has a slot; slot jitter p99 %s frames over %d slots"
-                  % (k, n, dhz, len(steps), p99, len(jitters)))
+                  first(issues) if issues else "N=%d at %s Hz (%s) from step dt %.6f s; %d telemetry rows, one per "
+                  "callback; %d decision callbacks (%d grid points skipped); every grid point has a slot; slot jitter "
+                  "p99 %s frames over %d slots" % (n, dhz, setting, dt, len(steps), len(callbacks), skipped, p99,
+                                                   len(jitters)))
 
 
 def check_c28(ctx):
-    """Physics tick (r2 5.1 C28): ctl rows advance physics_step at 1 / fixed_time_slice per world second within
-    C28.tol_frac over the session (counter-based, so a lost row is C06's, not a tick error), excluding paused
-    intervals (events pause .. resume); 0 tick gaps, a tick gap being two consecutive ctl rows whose world time
-    advanced more than (steps advanced + 1) slices + 1 ms (world time moved without physics steps). Rows per
-    full world second are reported."""
+    """Physics tick (r2 5.1 C28; dc-2.0.md section 6, D-A): the fixed-step clock advances at 1 / engine.step_dt_s steps
+    per world second within C28.tol_frac over the session (counter-based, so a lost row is C06's, not a tick error),
+    excluding paused intervals (events pause .. resume); 0 tick gaps, a tick gap being two consecutive ctl rows whose
+    world time advanced more than (the steps advanced + 1) step dt + 1 ms, the steps advanced being the later row's
+    covered_steps when no row is missing (world time moved without physics steps; probe run 4: 0 in 10215
+    callbacks); session.json engine.step_dt_s within 5% of the session's own measure
+    (world time span / steps). Rows per full world second are reported."""
     if ctx.load_error:
         return unreadable(ctx, "C28")
     s = ctx.session
     tol = ctx.thr("C28", "tol_frac", 0.01)
-    slice_s = s.clocks["slice_s"]
+    dt_s = s.clocks["step_dt_s"]
     ctl = s.streams["ctl"]
-    steps, world = ctl.col("physics_step"), ctl.col("world_time_ms")
-    if len(steps) < 2 or not (isinstance(slice_s, (int, float)) and slice_s > 0):
-        return result(ctx, "C28", HARD, NOT_EVALUATED, None, {"tol_frac": tol}, "fewer than 2 ctl rows or no slice")
+    steps, world, covered = ctl.col("physics_step"), ctl.col("world_time_ms"), ctl.col("covered_steps")
+    if len(steps) < 2:
+        return result(ctx, "C28", HARD, NOT_EVALUATED, None, {"tol_frac": tol}, "fewer than 2 ctl rows")
     ev = s.streams["events"]
     pauses = []
     start = None
@@ -156,33 +163,75 @@ def check_c28(ctx):
         elif kind == "resume" and start is not None:
             pauses.append((start, w))
             start = None
-    slice_ms = slice_s * 1000.0
+    dt_ms = dt_s * 1000.0
     gaps = []
     paused_ms = 0.0
     paused_steps = 0
     for i in range(1, len(steps)):
         dstep = steps[i] - steps[i - 1]
         dw = world[i] - world[i - 1]
-        if any(a <= world[i - 1] and world[i] <= b + slice_ms for a, b in pauses):
+        if any(a <= world[i - 1] and world[i] <= b + dt_ms for a, b in pauses):
             paused_ms += dw
             paused_steps += dstep
             continue
-        if dw > (dstep + 1) * slice_ms + 1.0:
-            gaps.append("steps %d..%d: %d ms" % (steps[i - 1], steps[i], dw))
+        if dw > (dstep + 1) * dt_ms + 1.0:
+            gaps.append("steps %d..%d: %d ms over %d step(s)" % (steps[i - 1], steps[i], dw, dstep))
     span_ms = (world[-1] - world[0]) - paused_ms
     span_steps = (steps[-1] - steps[0]) - paused_steps
     rate = span_steps / (span_ms / 1000.0) if span_ms > 0 else None
-    expected = 1.0 / slice_s
+    expected = 1.0 / dt_s
     issues = list(gaps)
     if rate is None or abs(rate / expected - 1.0) > tol:
-        issues.insert(0, "physics steps per world second %s, expected %.3f +-%.1f%%" % (
+        issues.insert(0, "physics steps per world second %s, expected %.3f (1 / engine.step_dt_s) +-%.1f%%" % (
             "n/a" if rate is None else "%.3f" % rate, expected, tol * 100))
+    if rate is not None and abs(rate * dt_s - 1.0) > STEP_DT_TOL:
+        issues.append("engine.step_dt_s %.6f s is not within %.0f%% of the session's %.6f s" % (
+            dt_s, 100 * STEP_DT_TOL, 1.0 / rate))
     per_second = {}
     for st, w in zip(steps, world):
         per_second[w // 1000] = per_second.get(w // 1000, 0) + 1
     full = [c for sec, c in per_second.items() if sec != min(per_second) and sec != max(per_second)]
     value = {"steps_per_world_s": rate, "tick_gaps": len(gaps),
-             "rows_per_full_second": [min(full), max(full)] if full else None}
+             "rows_per_full_second": [min(full), max(full)] if full else None,
+             "covered_steps": {str(c): covered.count(c) for c in sorted(set(c for c in covered if c is not None))}}
     return result(ctx, "C28", HARD, FAIL if issues else PASS, value, {"tol_frac": tol},
                   first(issues) if issues else "%.3f steps per world second (expected %.3f), 0 tick gaps"
                   % (rate, expected))
+
+
+def check_c37(ctx):
+    """10 Hz image-rate evidence (SOFT; freeze decision D-B, contract TBD-2): 5 Hz sessions are N/A. A session at the
+    non-default 10 Hz setting warns unless it shows its own capture utilisation u95 <= 0.85: u95 is the p95 over the
+    issued slots with a done_render_frame of the capture stall (the world time of the captured frame C = done - 1,
+    hf row C + 1 minus hf row C; world/real 1.000 in probe runs 3-4, and the engine caps one frame's world time at
+    100 ms, so a longer stall reads as u = 1 at 10 Hz) divided by the slot period. Without done_render_frame or the hf
+    rows the evidence is missing (a warning). Telemetry-only sessions are N/A."""
+    if ctx.load_error:
+        return unreadable(ctx, "C37", SOFT)
+    s = ctx.session
+    thr = {"u95_max_10hz": U95_MAX_10HZ}
+    image_hz = float(s.clocks["image_hz"])
+    img = s.streams["img"]
+    issued = [i for i in range(len(img)) if img.col("issue_status")[i] == "issued"]
+    if image_hz != IMAGE_HZ_OVERRIDE:
+        return result(ctx, "C37", SOFT, NA, {"image_hz": image_hz}, thr, "the 5 Hz default needs no evidence")
+    if not issued:
+        return result(ctx, "C37", SOFT, NA, {"image_hz": image_hz}, thr, "no image request (telemetry only)")
+    hf_world = dict(zip(s.streams["hf"].col("render_frame"), s.streams["hf"].col("world_time_ms")))
+    period = 1000.0 / image_hz
+    stalls = []
+    for i in issued:
+        done = img.col("done_render_frame")[i]
+        if done is None or done - 1 not in hf_world or done not in hf_world:
+            continue
+        stalls.append((hf_world[done] - hf_world[done - 1]) / period)
+    if len(stalls) < max(1, len(issued) // 2):
+        return result(ctx, "C37", SOFT, FAIL, {"image_hz": image_hz, "slots_with_evidence": len(stalls),
+                                              "issued": len(issued)}, thr,
+                      "10 Hz session without its capture utilisation evidence (done_render_frame on %d of %d issued "
+                      "slots): 10 Hz needs u95 <= %.2f (D-B)" % (len(stalls), len(issued), U95_MAX_10HZ))
+    u95 = percentile(stalls, 95)
+    value = {"image_hz": image_hz, "u95": u95, "slots_with_evidence": len(stalls), "issued": len(issued)}
+    return result(ctx, "C37", SOFT, PASS if u95 <= U95_MAX_10HZ else FAIL, value, thr,
+                  "capture utilisation u95 %.3f %s %.2f over %d slots at 10 Hz" % (
+                      u95, "<=" if u95 <= U95_MAX_10HZ else ">", U95_MAX_10HZ, len(stalls)))

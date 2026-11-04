@@ -286,9 +286,10 @@ def check_c12(ctx):
 def check_c13a(ctx):
     """Fiducial pairing (r2 5.1 C13a): of the readable images, >= C13a.min_decode_frac decode in both bands with
     agreeing 18-bit codes (C13a.code_bits); every decoded captured_render_frame (the code unwrapped against
-    issue_render_frame) joins an hf row exactly (0 join failures); no capture offset (captured - issued frame) is
-    negative (a frame captured before its request is a stale or misnamed file). The offset p50 and p99 are
-    reported."""
+    issue_render_frame) joins an hf row exactly and has its pose row, hf row captured + 1 (the image of frame C shows
+    the state of hf row C + 1, contract section 6; 0 join failures); no capture offset (captured - issued frame) is
+    negative (a frame captured before its request is a stale or misnamed file). The offset p50 and p99 and how often
+    the captured frame equals img.done_render_frame - 1 (Workbench 1.8: always, run 4) are reported."""
     if ctx.load_error:
         return unreadable(ctx, "C13a")
     s = ctx.session
@@ -299,7 +300,9 @@ def check_c13a(ctx):
         return result(ctx, "C13a", HARD, NOT_EVALUATED, None, thr, "no readable image")
     decoded = [r for r in readable if r["fid_ok"]]
     frac = len(decoded) / float(len(readable))
-    unjoined = [r["slot_id"] for r in decoded if r["hf_index"] is None]
+    unjoined = [r["slot_id"] for r in decoded if r["hf_index"] is None or r["pose_hf_index"] is None]
+    with_done = [r for r in decoded if r["done_render_frame"] is not None]
+    done_agree = sum(1 for r in with_done if r["captured_render_frame"] == r["done_render_frame"] - 1)
     offsets = [r["captured_render_frame"] - r["issue_render_frame"] for r in decoded]
     issues = []
     if thr.get("code_bits") != fid.CODE_BITS:
@@ -308,8 +311,8 @@ def check_c13a(ctx):
         issues.append("decoded %d of %d (%.4f < %s)" % (len(decoded), len(readable), frac,
                                                        thr.get("min_decode_frac")))
     if unjoined:
-        issues.append("%d decoded image(s) whose captured frame has no hf row (slots %s)" % (len(unjoined),
-                                                                                           first(unjoined, 5)))
+        issues.append("%d decoded image(s) whose captured frame or pose row (captured + 1) has no hf row (slots %s)"
+                      % (len(unjoined), first(unjoined, 5)))
     negative = [r["slot_id"] for r in decoded if r["captured_render_frame"] - r["issue_render_frame"] < 0]
     if negative:
         issues.append("%d image(s) captured before their request was issued (slots %s): a stale or misnamed file"
@@ -317,7 +320,8 @@ def check_c13a(ctx):
     margins = [r["fid_margin"] for r in decoded if r["fid_margin"] is not None]
     value = {"decode_frac": frac, "join_failures": len(unjoined), "offset_p50": percentile(offsets, 50),
              "offset_p99": percentile(offsets, 99), "negative_offsets": sum(1 for o in offsets if o < 0),
-             "min_margin": min(margins) if margins else None}
+             "min_margin": min(margins) if margins else None,
+             "done_minus_one_agree": (done_agree / float(len(with_done))) if with_done else None}
     return result(ctx, "C13a", HARD, FAIL if issues else PASS, value, thr,
                   first(issues) if issues else "%d of %d decoded and joined; capture offset p50 %s p99 %s frames"
                   % (len(decoded), len(readable), value["offset_p50"], value["offset_p99"]))
@@ -327,7 +331,8 @@ def check_c13b(ctx):
     """Motion lag (r2 5.1 C13b), independent of the fiducial: the horizontal shift of the upper core between
     consecutive slots (1-D normalised cross-correlation of column means) is fitted against the camera heading change
     hf cam_fwd(captured + L) - cam_fwd(previous captured + L) for L in E06A.shift_range; the best lag (smallest
-    residual) must satisfy |L| <= C13b.max_abs_lag_frames. SOFT (CAPTURE_PROGRAM 4.4, T0-MIN and T1) when the
+    residual) must satisfy |L| <= C13b.max_abs_lag_frames (the contract's pairing makes L = +1 the expected lag: the
+    image of frame C shows hf row C + 1). SOFT (CAPTURE_PROGRAM 4.4, T0-MIN and T1) when the
     session's yaw-rate std >= C13b.min_yaw_rate_std_rps, else INFO."""
     if ctx.load_error:
         return unreadable(ctx, "C13b")

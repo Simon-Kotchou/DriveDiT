@@ -10,8 +10,9 @@ A check is a function check(ctx) -> result dict:
   * N/A: the check does not apply to this session (for example C17 without mode-E episodes);
   * NOT_EVALUATED: it applies but an input is missing (no engine logs, no route file); a HARD or SOFT check left
     NOT_EVALUATED is a warning;
-  * provisional: the check depends on a TBD-by-probe value of contract dc-2.0 (TBD-1 to TBD-10) and the contract is
-    not frozen yet, so its threshold or rule may still change at the T0-ENG freeze.
+  * provisional: the check depends on a TBD-by-probe value of contract dc-2.0 whose status in the streams JSON
+    tbd_by_probe is not "decided" (after the 2026-11-04 freeze only TBD-10, so C36), so its threshold or rule may
+    still change; a schema without statuses (a draft) treats every TBD as open.
 
 Severities follow the trial gates (severity()): CAPTURE_PROGRAM 4.4 T0-MIN makes C12, C13b and C21 SOFT and T1 makes
 C21 HARD; C31 is reported (INFO) before T1. C17 (behaviour.py) and C13b's yaw condition (images.py) add their own
@@ -49,7 +50,7 @@ CHECK_TBDS = {
     "C05": (), "C06": ("TBD-1",), "C07": ("TBD-1",), "C08": ("TBD-1", "TBD-2"), "C10": ("TBD-2", "TBD-4"),
     "C11": ("TBD-4",), "C12": (), "C13a": ("TBD-2",), "C13b": (), "C15": ("TBD-5",), "C17": ("TBD-5",),
     "C20": (), "C21": (), "C28": ("TBD-1",), "C31": ("TBD-1", "TBD-2"), "C34": ("TBD-3",), "C35": (),
-    "C36": ("TBD-10",),
+    "C36": ("TBD-10",), "C37": ("TBD-2",),
     "C01": (), "C02": ("TBD-6",),
 }
 
@@ -101,6 +102,8 @@ class Context:
         self.images = images
         self.reader = load_reader()
         self._routes = dict(routes or {})
+        tbd = self.reader.load_schema().tbd
+        self.open_tbds = set(t for t, spec in tbd.items() if spec.get("status") != "decided")
 
     def severity(self, check_id):
         return severity(check_id, self.rank)
@@ -138,7 +141,7 @@ class Context:
 
 
 def result(ctx, check_id, severity, status, value=None, threshold=None, detail="", not_evaluated=None):
-    provisional = bool(CHECK_TBDS.get(check_id)) and not ctx.contract_frozen
+    provisional = bool(set(CHECK_TBDS.get(check_id, ())) & ctx.open_tbds)
     out = {"id": check_id, "severity": severity, "status": status, "value": value, "threshold": threshold,
            "detail": detail, "provisional": provisional}
     if not_evaluated:

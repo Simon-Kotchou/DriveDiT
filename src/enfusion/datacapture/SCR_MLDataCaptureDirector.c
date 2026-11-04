@@ -66,14 +66,16 @@
 //     avoiding the failed one from now on; once MAX_LIMIT_RESETS of these did not help, the group is retired. While
 //     the driver is out the stuck clock pauses; it restarts when the vanilla AI gets back in by itself, so stuck time
 //     adds up only across dismounts that a reseat ended;
-//   - never lets a group without an AI agent hold a waypoint: vanilla dereferences the missing group leader when a
+//   - never lets a group without an AI leader hold a waypoint: vanilla dereferences the missing group leader when a
 //     group move fails (SCR_AIProcessFailedMovementResult.c:59), a VM exception that halts Workbench, and such a
-//     group exists only because delete-when-empty is off (see the seat watchdog). An agent-less group whose new driver
-//     the seat watchdog will still seat loses its current waypoint until the driver is in (CheckGroupMembers); a
-//     group that cannot drive any more is retired (RetireGroup): no AI agent left and a car that cannot move or is on
-//     fire, or no seat watchdog to seat a new driver; a car that cannot move or is on fire once the seat watchdog's
-//     time is up; the deleted group or vehicle. Retiring removes its waypoints, deletes the empty group, ends its seat
-//     watchdog, move-failure counting and statistics, and logs one "group N retired: <reason>" line;
+//     group exists only because delete-when-empty is off (see the seat watchdog). The group's own events (leader
+//     changed, agent removed, driver dead) take its waypoint away at once (TakeWaypointAway); on the next monitor tick
+//     a leaderless group whose new driver the seat watchdog will still seat also gets its group AI deactivated until
+//     the driver is in (CheckGroupMembers), and a group that cannot drive any more is retired (RetireGroup): no AI
+//     leader and a car that cannot move or is on fire, or no seat watchdog to seat a new driver; a car that cannot move
+//     or is on fire once the seat watchdog's time is up; the deleted group or vehicle. Retiring removes its waypoints,
+//     deletes a leaderless group 1 ms later (as vanilla's OnEmpty), ends its seat watchdog, move-failure counting and
+//     statistics, and logs one "group N retired: <reason>" line;
 //   - releases the waypoint of a group move that failed with UNKNOWN (OnMoveFailed -> ReleaseFailedWaypoint): vanilla
 //     would raise a node error (a VM-exception dialog in Workbench) and park the group for good
 //     (SCR_AIProcessFailedMovementResult.c:99-101). Its activities are cancelled as when a waypoint is deselected, the
@@ -90,7 +92,8 @@
 // Call queue: at most one entry per director function is ever pending (one repeating spawn tick, one repeating
 // monitor tick that also runs the per-group seating retries, the waypoint assignments and the driving check, one
 // readiness poll, one fallback timer), so a single ScriptCallQueue.Remove per function in StopDirector() clears
-// everything the director queued.
+// everything the director queued. The only other entry is vanilla's SCR_EntityHelper.DeleteEntityAndChildren for a
+// retired group, 1 ms after RetireGroup (as SCR_AIGroup.OnEmpty queues it); it needs no removal.
 //
 // Failure handling: a group whose spawn point, vehicle, vehicle simulation, pilot seat, group prefab, driver prefab
 // or waypoint prefab is missing or invalid is skipped with an ERROR before anything is spawned for it (no shared-car
@@ -205,6 +208,8 @@ class SCR_MLDataCaptureGroupState : Managed
 	ref array<vector> m_aGoodPoses = {};		//!< vehicle transforms while it drove (RecordGoodPose): 4 vectors each, newest last
 	ref array<float> m_aGoodPoseTimesS = {};	//!< director time [s] of each good pose
 	int m_iReleasedWaypoints;		//!< waypoints taken away after an UNKNOWN failure of their move (ReleaseFailedWaypoint)
+	int m_iWaypointDelayMs = 3000;	//!< the director's m_iWaypointDelay, for assignments the record arms itself
+	bool m_bGroupAIDeactivated;		//!< SuspendWaypoint deactivated the group's AI while it had no leader
 
 	static const int MOVE_FAILURE_LOG_LIMIT = 50;
 
@@ -245,6 +250,86 @@ class SCR_MLDataCaptureGroupState : Managed
 			return -1;
 
 		return m_aWaypoints[m_iCurrentWaypoint].m_iTargetId;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! \return true when the group has no AI agent or no leader entity (AIGroup.GetAgentsCount / GetLeaderEntity,
+	//! Game/generated/AI/AIGroup.c:24, :41): the state in which vanilla group nodes dereference null when a move fails
+	//! (Game/AI/ScriptedNodes/Groups/SCR_AIProcessFailedMovementResult.c:59, SCR_AIDecoDistanceHysteresis.c:41)
+	bool IsLeaderless()
+	{
+		return !m_Group || m_Group.GetAgentsCount() == 0 || !m_Group.GetLeaderEntity();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Removes every waypoint the group holds, at once, and keeps the director's current one for ResumeWaypoint. It
+	//! runs inside the group's and the driver's events (OnLeaderChanged, OnAgentRemoved, OnAgentLifeStateChanged), so a
+	//! leaderless group never holds a waypoint between two monitor ticks. It only removes waypoints
+	//! (AIGroup.RemoveWaypoint, AIGroup.c:33), as vanilla does inside its own group nodes
+	//! (SCR_AIProcessFailedMovementResult.c:118-119); retiring and deleting the group are left to the call queue
+	//! (CheckGroupMembers, RetireGroup).
+	//! \return true when a waypoint was removed
+	bool TakeWaypointAway(string why)
+	{
+		if (m_bRetired || !m_Group)
+			return false;
+
+		int currentIndex = FindWaypoint(m_Group.GetCurrentWaypoint()); // AIGroup.c:38
+		array<AIWaypoint> held = {};
+		m_Group.GetWaypoints(held); // AIGroup.c:39
+		int removed;
+		foreach (AIWaypoint heldWaypoint : held)
+		{
+			if (!heldWaypoint)
+				continue;
+
+			m_Group.RemoveWaypoint(heldWaypoint);
+			removed++;
+		}
+
+		if (currentIndex >= 0 && m_iSuspendedWaypoint < 0)
+			m_iSuspendedWaypoint = currentIndex;
+
+		if (removed == 0)
+			return false;
+
+		string target = "none";
+		if (currentIndex >= 0)
+			target = m_aWaypoints[currentIndex].m_iTargetId.ToString();
+
+		Print(string.Format("[DataCapture] WARNING: group %1 %2: waypoint %3 taken away at once (%4 removed) until the group has an AI leader again - vanilla dereferences a missing group leader when a group move fails", m_iGroupId, why, target, removed), LogLevel.WARNING);
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroup.GetOnLeaderChanged() handler (Game/Entities/SCR_AIGroup.c:2342; invoked at :2486-2487 from the native
+	//! AIGroup.OnLeaderChanged event, Game/generated/AI/AIGroup.c:60): the moment the group loses its leader.
+	void OnLeaderChanged(AIAgent currentLeader, AIAgent prevLeader)
+	{
+		if (!currentLeader || !currentLeader.GetControlledEntity())
+			TakeWaypointAway("lost its leader");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroup.GetOnAgentRemoved() handler (SCR_AIGroup.c:2327; invoked at :2479-2480 from the native
+	//! AIGroup.OnAgentRemoved event, AIGroup.c:59), with the parameters of SCR_AIGroupUtilityComponent.OnAgentRemoved (:472)
+	void OnAgentRemoved(SCR_AIGroup group, AIAgent agent)
+	{
+		if (IsLeaderless())
+			TakeWaypointAway("lost its last AI agent");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! SCR_AIGroupUtilityComponent.m_OnAgentLifeStateChanged handler (:30, invoked at :664-667 from
+	//! SCR_AIInfoComponent.OnLifeStateChanged, Game/AI/Components/SCR_AIInfoComponent.c:372-398, itself called from
+	//! SCR_CharacterControllerComponent.OnLifeStateChanged, Game/Character/SCR_CharacterControllerComponent.c:339-341):
+	//! the moment the driver dies, before its agent leaves the group. Groups of one agent only.
+	void OnAgentLifeStateChanged(AIAgent agent, SCR_AIInfoComponent info, IEntity vehicle, ECharacterLifeState lifeState)
+	{
+		if (lifeState != ECharacterLifeState.DEAD || !m_Group || m_Group.GetAgentsCount() > 1)
+			return;
+
+		TakeWaypointAway("lost its driver (dead)");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -671,10 +756,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			state.m_fNextSeatAttemptAtMs = -1;
 			if (state.m_Group)
 			{
-				state.m_Group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
-				SCR_AIGroupUtilityComponent groupUtility = state.m_Group.GetGroupUtilityComponent();
-				if (groupUtility)
-					groupUtility.GetOnMoveFailed().Remove(state.OnMoveFailed);
+				UnsubscribeGroup(state);
 			}
 
 			ReleaseGroup(state, observers, stopCollector);
@@ -907,7 +989,15 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		// Seat watchdog diagnostics: a failed group move in the car is what makes the vanilla AI leave it.
 		SCR_AIGroupUtilityComponent groupUtility = group.GetGroupUtilityComponent(); // Game/Entities/SCR_AIGroup.c:258
 		if (groupUtility)
+		{
 			groupUtility.GetOnMoveFailed().Insert(state.OnMoveFailed);
+			groupUtility.m_OnAgentLifeStateChanged.Insert(state.OnAgentLifeStateChanged); // SCR_AIGroupUtilityComponent.c:30
+		}
+
+		// The moment the group loses its leader, its waypoint goes (SCR_MLDataCaptureGroupState.TakeWaypointAway).
+		group.GetOnLeaderChanged().Insert(state.OnLeaderChanged); // Game/Entities/SCR_AIGroup.c:2342
+		group.GetOnAgentRemoved().Insert(state.OnAgentRemoved); // SCR_AIGroup.c:2327
+		state.m_iWaypointDelayMs = m_iWaypointDelay;
 
 		Print(string.Format("[DataCapture] Group %1 spawned at %2 for vehicle %3 with %4 waypoints", groupId, spawnName, vehicleName, state.m_aWaypoints.Count()), LogLevel.NORMAL);
 
@@ -1323,7 +1413,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (retryMs < 1000)
 			retryMs = 1000;
 
-		if (state.m_Group.GetAgentsCount() == 0)
+		if (state.IsLeaderless())
 		{
 			state.m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime() + retryMs;
 			return;
@@ -1900,9 +1990,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		}
 
 		bool watchdogReseats = m_fReseatAfterS > 0 && state.m_fFirstSeatedS >= 0;
-		if (state.m_Group.GetAgentsCount() > 0)
+		if (!state.IsLeaderless())
 		{
-			if (state.m_iSuspendedWaypoint >= 0)
+			if (state.m_iSuspendedWaypoint >= 0 || state.m_bGroupAIDeactivated)
 				ResumeWaypoint(state);
 
 			if (!watchdogReseats && !state.m_bDriverSeated && !IsVehicleUsable(state.m_Vehicle))
@@ -1913,14 +2003,14 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		if (!IsVehicleUsable(state.m_Vehicle))
 		{
-			RetireGroup(state, string.Format("no AI agent left and %1 cannot move or is on fire (%2)", state.m_Vehicle.GetName(), DescribeVehicleDamage(state.m_Vehicle)));
+			RetireGroup(state, string.Format("no AI leader left and %1 cannot move or is on fire (%2)", state.m_Vehicle.GetName(), DescribeVehicleDamage(state.m_Vehicle)));
 			return;
 		}
 
 		// A living driver of this group without an agent in it is taken for a join still in progress: wait for it.
 		if (!watchdogReseats && DescribeDriver(state.m_Driver) != "alive")
 		{
-			RetireGroup(state, string.Format("no AI agent left (driver %1) and no seat watchdog seats a new driver (it is off, or this group's driver never sat in the pilot seat)", DescribeDriver(state.m_Driver)));
+			RetireGroup(state, string.Format("no AI leader left (driver %1) and no seat watchdog seats a new driver (it is off, or this group's driver never sat in the pilot seat)", DescribeDriver(state.m_Driver)));
 			return;
 		}
 
@@ -1928,35 +2018,63 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Takes the current waypoint away from a group without an AI agent (CheckGroupMembers) and keeps it for
-	//! ResumeWaypoint. With no current waypoint (between a completion and the next assignment) there is nothing to
-	//! take: AssignNextWaypoint waits while the group has no agent.
+	//! A leaderless group that the seat watchdog can still give a new driver (CheckGroupMembers, from the call queue):
+	//! no waypoint (TakeWaypointAway, which the group's events normally ran already) and no group AI. Vanilla
+	//! deactivates the AI of the groups it keeps without AI members (SCR_GroupsManagerComponent.c:1271, :1295;
+	//! AIAgent.DeactivateAI, Game/generated/AI/AIAgent.c:54), so no group behaviour tree runs without a leader.
+	//! ResumeWaypoint undoes both. With no current waypoint (between a completion and the next assignment) there is
+	//! nothing to take: AssignNextWaypoint waits while the group is leaderless.
 	protected void SuspendWaypoint(SCR_MLDataCaptureGroupState state)
 	{
-		if (state.m_iSuspendedWaypoint >= 0)
+		state.TakeWaypointAway("has no AI leader");
+		if (state.m_bGroupAIDeactivated || !state.m_Group.IsAIActivated()) // AIAgent.c:55
 			return;
 
-		AIWaypoint current = state.m_Group.GetCurrentWaypoint(); // Game/generated/AI/AIGroup.c:38
-		int index = state.FindWaypoint(current);
-		if (index < 0)
-			return;
-
-		state.m_Group.RemoveWaypoint(current); // Game/generated/AI/AIGroup.c:33
-		state.m_iSuspendedWaypoint = index;
-		Print(string.Format("[DataCapture] WARNING: group %1 has no AI agent left: waypoint %2 taken away until the group has an AI agent again (the seat watchdog seats a new driver in %3; vanilla dereferences the missing group leader when a group move fails) %4", state.m_iGroupId, state.m_aWaypoints[index].m_iTargetId, state.m_Vehicle.GetName(), DescribeGroup(state)), LogLevel.WARNING);
+		state.m_Group.DeactivateAI();
+		state.m_bGroupAIDeactivated = true;
+		Print(string.Format("[DataCapture] WARNING: group %1 has no AI leader: group AI deactivated until it has one again %2", state.m_iGroupId, DescribeGroup(state)), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Gives a suspended waypoint back once the group has an AI agent again.
+	//! Undoes SuspendWaypoint once the group has an AI leader again: the group AI (AIAgent.ActivateAI, AIAgent.c:53)
+	//! and the suspended waypoint (AIGroup.AddWaypoint, AIGroup.c:32).
 	protected void ResumeWaypoint(SCR_MLDataCaptureGroupState state)
 	{
+		if (state.m_bGroupAIDeactivated)
+		{
+			state.m_bGroupAIDeactivated = false;
+			state.m_Group.ActivateAI();
+		}
+
 		int index = state.m_iSuspendedWaypoint;
 		state.m_iSuspendedWaypoint = -1;
-		if (index < 0 || index >= state.m_aWaypoints.Count())
+		string target = "none (the next one follows)";
+		if (index >= 0 && index < state.m_aWaypoints.Count())
+		{
+			state.m_Group.AddWaypoint(state.m_aWaypoints[index].m_Waypoint);
+			target = state.m_aWaypoints[index].m_iTargetId.ToString();
+		}
+
+		Print(string.Format("[DataCapture] Group %1 has an AI leader again: group AI active, waypoint %2 given back %3", state.m_iGroupId, target, DescribeGroup(state)), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Removes every director handler from the group (RetireGroup, StopDirector)
+	protected void UnsubscribeGroup(SCR_MLDataCaptureGroupState state)
+	{
+		SCR_AIGroup group = state.m_Group;
+		if (!group)
 			return;
 
-		state.m_Group.AddWaypoint(state.m_aWaypoints[index].m_Waypoint); // Game/generated/AI/AIGroup.c:32
-		Print(string.Format("[DataCapture] Group %1 has an AI agent again: waypoint %2 given back %3", state.m_iGroupId, state.m_aWaypoints[index].m_iTargetId, DescribeGroup(state)), LogLevel.NORMAL);
+		group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
+		group.GetOnLeaderChanged().Remove(state.OnLeaderChanged);
+		group.GetOnAgentRemoved().Remove(state.OnAgentRemoved);
+		SCR_AIGroupUtilityComponent groupUtility = group.GetGroupUtilityComponent();
+		if (!groupUtility)
+			return;
+
+		groupUtility.GetOnMoveFailed().Remove(state.OnMoveFailed);
+		groupUtility.m_OnAgentLifeStateChanged.Remove(state.OnAgentLifeStateChanged);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1994,11 +2112,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		SCR_AIGroup group = state.m_Group;
 		if (group)
 		{
-			group.GetOnWaypointCompleted().Remove(OnWaypointCompleted);
-			SCR_AIGroupUtilityComponent groupUtility = group.GetGroupUtilityComponent();
-			if (groupUtility)
-				groupUtility.GetOnMoveFailed().Remove(state.OnMoveFailed);
-
+			UnsubscribeGroup(state);
 			array<AIWaypoint> waypoints = {};
 			group.GetWaypoints(waypoints); // Game/generated/AI/AIGroup.c:39
 			foreach (AIWaypoint waypoint : waypoints)
@@ -2018,11 +2132,12 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (group)
 		{
 			int agents = group.GetAgentsCount();
-			if (agents == 0)
+			if (agents == 0 || !group.GetLeaderEntity())
 			{
-				SCR_EntityHelper.DeleteEntityAndChildren(group); // Game/Helpers/SCR_EntityHelper.c:177
+				// Exactly vanilla's deferred delete of an empty group (SCR_AIGroup.c:2460; SCR_EntityHelper.c:177).
+				GetGame().GetCallqueue().CallLater(SCR_EntityHelper.DeleteEntityAndChildren, 1, false, group);
 				state.m_Group = null;
-				groupText = "empty AI group deleted";
+				groupText = string.Format("AI group without a leader (%1 agents) deleted 1 ms later", agents);
 			}
 			else
 			{

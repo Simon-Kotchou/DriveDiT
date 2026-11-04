@@ -960,6 +960,283 @@ class ReviewFindingsTest(unittest.TestCase):
         self.assertIn("2 other entries in frames/ left alone", out)
 
 
+class ReReviewFindingsTest(unittest.TestCase):
+    """Regression tests for the second review of 6c8a660..2c21d59 (retention/review/CODEX2.md), as triaged: the
+    record validated is the record used (1), the record is made durable on every run before any delete (2), the
+    unit's location is checked right before its first mutation (3), deletes go through a private staging directory
+    with restore and crash recovery (4), eligibility inputs are re-checked before the first mutation (5), and
+    oversized metadata holds the play (6)."""
+
+    def setUp(self):
+        self.root = th.temp_dir("dd6ret_w_")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def sub(self, name):
+        root = os.path.join(self.root, name)
+        os.mkdir(root)
+        return root
+
+    def kill(self, root, hook, *argv):
+        proc = run_subprocess(root, hook, "--apply", *argv)
+        self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stdout + proc.stderr)
+
+    @staticmethod
+    def failing_dir_fsync():
+        real = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "injected directory fsync failure")
+            return real(fd)
+        return mock.patch("os.fsync", fsync)
+
+    # -- 1: the record validated is the record used ---------------------------------------------------
+    def test_r1_a_record_replaced_during_verification_holds_the_session(self):
+        _, dest = make_captured(self.root)
+        self.kill(self.root, "after_record")
+        path = os.path.join(dest, "_harvest", "RETENTION.json")
+        tampered = read_json(path)
+        with open(os.path.join(dest, "_harvest", "SHA256SUMS"), "rb") as f:
+            listed = harvest.parse_sums(f.read())
+        tampered["deleted"].append({"file": "frames/f_00000000.png", "slot": 0,
+                                    "sha256": listed["frames/f_00000000.png"], "bytes": len(tiny_png(0))})
+        original = harvest.sha256_file
+        swapped = []
+
+        def sha256_file(full):
+            if not swapped:                                         # while verification hashes the session
+                write(path, json.dumps(tampered).encode("ascii"))
+                swapped.append(full)
+            return original(full)
+        with mock.patch.object(harvest, "sha256_file", sha256_file):
+            code, out = run(self.root, "--apply")
+        self.assertTrue(swapped)
+        self.assertEqual(code, 2, out)
+        self.assertIn("RETENTION.json changed while the session was verified", out)
+        self.assertEqual(len(frame_slots(dest)), 250)
+
+    # -- 2: the record is durable before any delete, on every run -------------------------------------
+    def test_r2_a_run_after_a_failed_directory_fsync_deletes_nothing_until_the_record_is_durable(self):
+        for mode in ("session", "probe"):
+            with self.subTest(mode):
+                root = self.sub(mode)
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    argv = ["--apply"]
+                else:
+                    unit = make_play(root)
+                    argv = ["--probes", "--apply"]
+                for attempt in (1, 2):                              # the second run resumes the renamed record
+                    with self.failing_dir_fsync():
+                        code, out = run(root, *argv)
+                    self.assertEqual(code, 2, (attempt, out))
+                    self.assertIn("could not be written durably", out)
+                    self.assertEqual(len(frame_slots(unit)), 250)
+                    record = os.path.join(unit, "_harvest" if mode == "session" else "", "RETENTION.json")
+                    self.assertTrue(os.path.isfile(record))
+                    if mode == "probe":
+                        age(unit, 3)
+                code, out = run(root, *argv)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(frame_slots(unit), [0, 100, 200, 249])
+
+    def test_r2_a_kill_between_the_rename_and_the_directory_fsync(self):
+        _, dest = make_captured(self.root)
+        self.kill(self.root, "record_renamed")
+        self.assertEqual(read_json(os.path.join(dest, "_harvest", "RETENTION.json"))["status"], "deleting")
+        with self.failing_dir_fsync():                              # not durable yet: nothing may go
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(len(frame_slots(dest)), 250)
+        events = []
+        real_fsync, real_unlink = os.fsync, os.unlink
+
+        def fsync(fd):
+            events.append(("fsync", stat.S_ISDIR(os.fstat(fd).st_mode)))
+            return real_fsync(fd)
+
+        def unlink(name, *a, **k):
+            events.append(("unlink", name))
+            return real_unlink(name, *a, **k)
+        with mock.patch("os.fsync", fsync), mock.patch("os.unlink", unlink):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(frame_slots(dest), [0, 100, 200, 249])
+        first_delete = events.index(next(e for e in events if e[0] == "unlink" and str(e[1]).startswith("f_")))
+        self.assertIn(("fsync", True), events[:first_delete])        # the record's directory, before any delete
+
+    # -- 3: the location is checked right before the first mutation -----------------------------------
+    def test_r3_a_unit_moved_after_its_descriptors_were_opened_is_held(self):
+        _, dest = make_captured(self.root)
+        moved = dest + "_moved"
+        original = ret.Retention.recheck_inputs
+
+        def recheck_inputs(r, plan, *fds):
+            result = original(r, plan, *fds)
+            os.rename(dest, moved)                                  # after the open, before the first mutation
+            return result
+        with mock.patch.object(ret.Retention, "recheck_inputs", recheck_inputs):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("was moved or replaced after it was planned", out)
+        self.assertEqual(len(frame_slots(moved)), 250)
+        self.assertFalse(os.path.exists(os.path.join(moved, "_harvest", "RETENTION.json")))
+
+    # -- 4: staging, restore and crash recovery ---------------------------------------------------------
+    def test_r4_a_staged_file_that_fails_its_check_is_put_back(self):
+        _, dest = make_captured(self.root)
+        staged_file = os.path.join(dest, "frames", ret.STAGING, "f_00000001.png")
+        changed = []
+
+        def hook(r, name):
+            if name == "after_stage" and not changed:
+                with open(staged_file, "ab") as f:                  # the staged file is not the planned one
+                    f.write(b"x")
+                changed.append(name)
+        with mock.patch.object(ret.Retention, "hook", hook):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("it was put back in frames/", out)
+        with open(os.path.join(dest, "frames", "f_00000001.png"), "rb") as f:
+            self.assertEqual(f.read(), tiny_png(1) + b"x")
+        self.assertEqual((len(frame_slots(dest)), staged(dest)), (250, None))
+
+    def test_r4_a_kill_with_a_file_in_staging_is_restored_then_completed(self):
+        for mode in ("session", "probe"):
+            with self.subTest(mode):
+                root = self.sub(mode)
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    argv = []
+                else:
+                    unit = make_play(root)
+                    argv = ["--probes"]
+                self.kill(root, "after_stage", *argv)
+                self.assertEqual(staged(unit), ["f_00000001.png"])
+                if mode == "session":
+                    self.assertTrue(harvest.verify_sums(unit)[0])     # a staged file still counts
+                before = th.snapshot(root)
+                code, out = run(root, *argv)                        # a dry run holds it and writes nothing
+                self.assertEqual(code, 2, out)
+                self.assertIn("holds files of an interrupted retention run", out)
+                self.assertEqual(th.snapshot(root), before)
+                code, out = run(root, "--apply", *argv)
+                self.assertEqual(code, 0, out)
+                self.assertIn("recovered %s: restored 1 raw screenshot(s)" % os.path.relpath(unit, root), out)
+                self.assertEqual((frame_slots(unit), staged(unit)), ([0, 100, 200, 249], None))
+
+    def test_r4_an_unverifiable_staged_file_is_restored_not_deleted(self):
+        _, dest = make_captured(self.root)
+        self.kill(self.root, "after_stage")
+        with open(os.path.join(dest, "frames", ret.STAGING, "f_00000001.png"), "ab") as f:
+            f.write(b"changed while staged")
+        code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("recovered ", out)
+        self.assertIn("SHA256SUMS does not verify", out)                # restored as it is, then held
+        with open(os.path.join(dest, "frames", "f_00000001.png"), "rb") as f:
+            self.assertEqual(f.read(), tiny_png(1) + b"changed while staged")
+        self.assertEqual((len(frame_slots(dest)), staged(dest)), (250, None))
+
+    def test_r4_a_staged_file_whose_name_is_back_in_frames_is_left_alone(self):
+        _, dest = make_captured(self.root)
+        self.kill(self.root, "after_stage")
+        write(os.path.join(dest, "frames", "f_00000001.png"), b"a new file under the same name")
+        before = th.snapshot(self.root)
+        code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("is both in frames/ and in frames/%s/; nothing touched" % ret.STAGING, out)
+        self.assertEqual(th.snapshot(self.root), before)
+
+    # -- 5: eligibility inputs re-checked before the first mutation -------------------------------------
+    def test_r5_eligibility_that_changes_after_planning_holds_the_unit(self):
+        def footer_failed(root, unit):
+            write(os.path.join(unit, "run_footer.txt"), b"schema=dc-probe-run/1\nstatus=failed\nreason=crash\n")
+
+        def derivative_removed(root, unit):
+            os.remove(os.path.join(unit, "_harvest", "deriv", "f_00000001.jpg"))
+
+        def derivative_changed(root, unit):
+            with open(os.path.join(unit, "_harvest", "deriv", "f_00000003.jpg"), "ab") as f:
+                f.write(b"x")
+
+        def events_changed(root, unit):
+            with open(os.path.join(unit, "events", "chunk_00000.csv"), "ab") as f:
+                f.write(b"9,0,0,0,0,collision,0,\n")
+
+        def kept_removed(root, unit):
+            os.remove(os.path.join(unit, "frames", "f_00000100.png"))
+
+        def catalog_row_added(root, unit):                          # a second row (the run holds the lock)
+            h = harvest.Harvester(root, harvest.parse_args([]), True)
+            h.catalog_append(h.catalog_row(unit))
+
+        cases = {"footer flips to failed": ("probe", footer_failed, "run_footer.txt changed after the unit"),
+                 "derivative removed": ("session", derivative_removed, "_harvest/deriv/f_00000001.jpg is gone"),
+                 "derivative changed": ("session", derivative_changed, "_harvest/deriv/f_00000003.jpg is gone or "
+                                        "changed"),
+                 "event data changed": ("session", events_changed, "events/chunk_00000.csv is gone or changed"),
+                 "kept frame removed": ("session", kept_removed, "kept file frames/f_00000100.png is gone"),
+                 "catalog row added": ("session", catalog_row_added, "catalog rows changed after it was planned")}
+        for n, (name, (mode, change, text)) in enumerate(sorted(cases.items())):
+            with self.subTest(name):
+                root = self.sub("case%d" % n)
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    argv = ["--apply"]
+                else:
+                    unit = make_play(root)
+                    argv = ["--probes", "--apply"]
+                original = ret.Retention.apply
+
+                def apply(r, plan):
+                    change(root, unit)
+                    return original(r, plan)
+                with mock.patch.object(ret.Retention, "apply", apply):
+                    code, out = run(root, *argv)
+                self.assertEqual(code, 2, out)
+                self.assertIn(text, out)
+                self.assertGreaterEqual(len(frame_slots(unit)), 249, out)
+                self.assertNotIn("deleted ", out)
+                for sub in ("", "_harvest"):
+                    self.assertFalse(os.path.exists(os.path.join(unit, sub, "RETENTION.json")), out)
+
+    # -- 6: oversized metadata --------------------------------------------------------------------------
+    def test_r6_metadata_beyond_the_read_limit_holds_the_play(self):
+        limit = ret.KV_LIMIT
+        head = b"schema=dc-probe-run/1\nstatus=complete\nreason=done\n"
+        cases = {"footer duplicate beyond the limit": ("run_footer.txt", head + b"pad=" + b"x" * limit
+                                                       + b"\nstatus=failed\n", "held"),
+                 "header map beyond the limit": ("run_header.txt", None, "held"),
+                 "footer exactly at the limit": ("run_footer.txt", None, "would-delete"),
+                 "footer one byte over the limit": ("run_footer.txt", None, "held")}
+        plays = {}
+        for n, (name, (fname, data, _)) in enumerate(sorted(cases.items())):
+            pdir = make_play(self.root, launch="20261024T000000Z-wb-%04d" % (40 + n))
+            path = os.path.join(pdir, fname)
+            with open(path, "rb") as f:
+                current = f.read()
+            if name == "header map beyond the limit":
+                data = current + b"pad=" + b"x" * limit + b"\nworld.map_id=everon\n"
+            elif name.startswith("footer exactly") or name.startswith("footer one byte"):
+                fill = limit - len(head) - len(b"pad=\n") + (1 if "over" in name else 0)
+                data = head + b"pad=" + b"x" * fill + b"\n"
+                self.assertEqual(len(data), limit + (1 if "over" in name else 0))
+            write(path, data)
+            age(pdir, 3)
+            plays[name] = (pdir, fname)
+        code, out = run(self.root, "--probes")
+        self.assertEqual(code, 2, out)
+        for name, (fname, _, status) in sorted(cases.items()):
+            with self.subTest(name):
+                line = line_of(out, status, os.path.relpath(plays[name][0], self.root))
+                self.assertIsNotNone(line, out)
+                if status == "held":
+                    self.assertIn("%s is larger than %d bytes" % (fname, limit), line)
+
+
 class ScopeTest(unittest.TestCase):
     def setUp(self):
         self.root = th.temp_dir("dd6ret_r_")

@@ -128,9 +128,10 @@ def check_c07(ctx):
     image pairing of section 6 relies on; a stale value pairs an image with an older state); img requested_world_ms
     and issue_render_frame increasing, done_render_frame after issue_render_frame; episodes ordered, not overlapping,
     and begun at a decision callback. The writer's R-01 decision boundary on the world-time grid (streams JSON
-    timing.decision): ctl hl_seq is -1 until the first command and advances by 1 exactly on the row right after every
-    decision callback of an episode that goes on (a kept command is numbered again) and on no other row; a command
-    (hl_kappa, hl_accel, hl_dir) changes only together with that increment or at an episode boundary. 0 violations."""
+    timing.decision): ctl hl_seq is -1 (the no-command sentinel: hl_* empty) until the first command and advances by
+    1 exactly on the row right after every decision callback of an episode that starts or goes on (a kept command is
+    numbered again) and on no other row, so a number before the first episode fails; a command (hl_kappa, hl_accel,
+    hl_dir) changes only together with that increment or at an episode boundary. 0 violations."""
     if ctx.load_error:
         return unreadable(ctx, "C07")
     s = ctx.session
@@ -233,7 +234,7 @@ def _decision_boundary(s):
         # every decision callback of an episode that goes on numbers its command (a kept command is numbered again)
         due = i in after_decision and ep[i - 1] is not None and ep[i - 1] >= 0 and ep[i] == ep[i - 1]
         if seq[i] == seq[i - 1] + 1:
-            if i not in after_decision:
+            if not due:             # only a decision callback inside a starting or continuing episode numbers one
                 seq_bad.append(steps[i])
         elif seq[i] != seq[i - 1]:
             seq_bad.append(steps[i])
@@ -241,10 +242,17 @@ def _decision_boundary(s):
             unnumbered.append(steps[i])
         elif changed and ep[i] == ep[i - 1]:
             held_bad.append(steps[i])
+    # -1 is the no-command sentinel: no command before the first one, and no row with a command keeps it
+    sentinel = [steps[i] for i in range(len(steps)) if seq[i] == -1 and
+                any(ctl.col(c)[i] is not None for c in HL_COMMAND)]
     issues = []
+    if sentinel:
+        issues.append("ctl: %d row(s) with a command but hl_seq -1 (the no-command sentinel): %s"
+                      % (len(sentinel), first(sentinel, 4)))
     if seq_bad:
         issues.append("ctl.hl_seq changes off the decision boundary (only on the row after a decision callback of "
-                      "the world-time grid, by +1; -1 at the first row) at %d row(s): %s"
+                      "the world-time grid inside a starting or continuing episode, by +1; -1 until the first "
+                      "command) at %d row(s): %s"
                       % (len(seq_bad), first(seq_bad, 4)))
     if unnumbered:
         issues.append("ctl: no hl_seq increment on %d row(s) after a decision callback inside an episode (every "

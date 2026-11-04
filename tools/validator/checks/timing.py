@@ -208,54 +208,59 @@ def check_c28(ctx):
 def check_c37(ctx):
     """10 Hz image-rate evidence (SOFT; freeze decision D-B, contract TBD-2): 5 Hz sessions are N/A. A session at the
     non-default 10 Hz setting warns unless it shows its own capture utilisation u95 <= 0.85: u95 is the p95 over the
-    issued slots with a done_render_frame of the capture stall (the world time of the captured frame C = done - 1,
-    hf row C + 1 minus hf row C; world/real 1.000 in probe runs 3-4, and the engine caps one frame's world time at
-    100 ms, so a longer stall reads as u = 1 at 10 Hz) divided by the slot period. done_render_frame is evidence only
-    where the decoded fiducial confirms it (captured frame = done - 1): a slot whose decoded frame contradicts it
-    makes the evidence untrustworthy (a warning, never a pass), and without a decoded image it cannot be confirmed
-    (NOT_EVALUATED). Without done_render_frame or the hf rows the evidence is missing (a warning). Telemetry-only
-    sessions are N/A."""
+    issued slots of the capture stall (the world time of the captured frame C, hf row C + 1 minus hf row C;
+    world/real 1.000 in probe runs 3-4, and the engine caps one frame's world time at 100 ms, so a longer stall reads
+    as u = 1 at 10 Hz) divided by the slot period. C is the decoded fiducial frame of every decoded issued slot, so a
+    row whose done_render_frame was dropped still counts (review round 2: dropping only the slow completions turned a
+    FAIL into a PASS; C13a fails such rows as a writer-integrity defect); done_render_frame is a cross-check only, and
+    a slot whose done_render_frame contradicts its decoded frame (done != C + 1) refuses the evidence (a warning,
+    never a pass). An issued slot without a usable stall (not decoded, its hf rows missing; the request a seal caught
+    in flight excepted) is assumed at the worst case u = 1: the check passes only when the p95 with those
+    assumptions still meets the limit, so omissions can never move the percentile into a pass. Without any decoded
+    image it is NOT_EVALUATED; telemetry-only sessions are N/A."""
     if ctx.load_error:
         return unreadable(ctx, "C37", SOFT)
     s = ctx.session
     thr = {"u95_max_10hz": U95_MAX_10HZ}
     image_hz = float(s.clocks["image_hz"])
-    img = s.streams["img"]
-    issued = [i for i in range(len(img)) if img.col("issue_status")[i] == "issued"]
+    rows = [r for r in s.images if r["issue_status"] == "issued"]
     if image_hz != IMAGE_HZ_OVERRIDE:
         return result(ctx, "C37", SOFT, NA, {"image_hz": image_hz}, thr, "the 5 Hz default needs no evidence")
-    if not issued:
+    if not rows:
         return result(ctx, "C37", SOFT, NA, {"image_hz": image_hz}, thr, "no image request (telemetry only)")
     hf_world = dict(zip(s.streams["hf"].col("render_frame"), s.streams["hf"].col("world_time_ms")))
     period = 1000.0 / image_hz
-    decoded = {r["slot_id"]: r["captured_render_frame"] for r in s.images if r["fid_ok"]}
-    contradicted = []
-    stalls = []
-    for i in issued:
-        done, slot = img.col("done_render_frame")[i], img.col("slot_id")[i]
-        if done is None or slot not in decoded:
+    contradicted, stalls, unmeasured, no_done = [], [], [], []
+    for r in rows:
+        if r.get("pose_after_seal"):
+            continue                                # caught in flight at the seal: no completion exists
+        c = r["captured_render_frame"] if r["fid_ok"] else None
+        if c is None or c not in hf_world or c + 1 not in hf_world:
+            unmeasured.append(r["slot_id"])
             continue
-        if decoded[slot] != done - 1:
-            contradicted.append(slot)
-            continue
-        if done - 1 not in hf_world or done not in hf_world:
-            continue
-        stalls.append((hf_world[done] - hf_world[done - 1]) / period)
+        done = r["done_render_frame"]
+        if done is None:
+            no_done.append(r["slot_id"])
+        elif done != c + 1:
+            contradicted.append(r["slot_id"])
+        stalls.append((hf_world[c + 1] - hf_world[c]) / period)
+    value = {"image_hz": image_hz, "issued": len(rows), "measured": len(stalls), "unmeasured": len(unmeasured),
+             "without_done_render_frame": len(no_done), "contradicted_slots": len(contradicted)}
     if contradicted:
-        return result(ctx, "C37", SOFT, FAIL, {"image_hz": image_hz, "contradicted_slots": len(contradicted),
-                                              "issued": len(issued)}, thr,
+        return result(ctx, "C37", SOFT, FAIL, value, thr,
                       "done_render_frame contradicted by the decoded frame on %d slot(s) (%s): the utilisation "
                       "evidence is refused" % (len(contradicted), first(contradicted, 5)))
-    if not decoded:
-        return result(ctx, "C37", SOFT, NOT_EVALUATED, {"image_hz": image_hz, "issued": len(issued)}, thr,
-                      "no decoded image confirms done_render_frame")
-    if len(stalls) < max(1, len(issued) // 2):
-        return result(ctx, "C37", SOFT, FAIL, {"image_hz": image_hz, "slots_with_evidence": len(stalls),
-                                              "issued": len(issued)}, thr,
-                      "10 Hz session without its capture utilisation evidence (done_render_frame on %d of %d issued "
-                      "slots): 10 Hz needs u95 <= %.2f (D-B)" % (len(stalls), len(issued), U95_MAX_10HZ))
+    if not stalls:
+        return result(ctx, "C37", SOFT, NOT_EVALUATED, value, thr,
+                      "no decoded image with its hf rows: the capture utilisation cannot be measured")
     u95 = percentile(stalls, 95)
-    value = {"image_hz": image_hz, "u95": u95, "slots_with_evidence": len(stalls), "issued": len(issued)}
+    worst = percentile(stalls + [max([1.0] + stalls)] * len(unmeasured), 95)
+    value.update({"u95": u95, "u95_worst_case": worst})
+    if worst > U95_MAX_10HZ >= u95:
+        return result(ctx, "C37", SOFT, FAIL, value, thr,
+                      "capture utilisation u95 %.3f over %d measured slots, but %d issued slot(s) could not be measured "
+                      "(%s) and could raise it to %.3f > %.2f: 10 Hz needs its evidence (D-B)"
+                      % (u95, len(stalls), len(unmeasured), first(unmeasured, 5), worst, U95_MAX_10HZ))
     return result(ctx, "C37", SOFT, PASS if u95 <= U95_MAX_10HZ else FAIL, value, thr,
-                  "capture utilisation u95 %.3f %s %.2f over %d slots at 10 Hz" % (
-                      u95, "<=" if u95 <= U95_MAX_10HZ else ">", U95_MAX_10HZ, len(stalls)))
+                  "capture utilisation u95 %.3f %s %.2f over %d decoded slots at 10 Hz (%d unmeasured)" % (
+                      u95, "<=" if u95 <= U95_MAX_10HZ else ">", U95_MAX_10HZ, len(stalls), len(unmeasured)))

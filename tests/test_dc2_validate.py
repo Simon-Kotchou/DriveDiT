@@ -408,15 +408,18 @@ class FailLoudTest(unittest.TestCase):
                          (3, 10.0, "trial_conf"))
         self.assertEqual((c37["severity"], c37["status"]), ("SOFT", "PASS"))
         self.assertAlmostEqual(c37["value"]["u95"], 0.8)                  # an 80 ms capture stall per 100 ms slot
-        # without done_render_frame the evidence is missing: a warning, never a failure
+        # without done_render_frame the rows are completions the writer dropped (C13a, HARD); C37 still measures the
+        # stalls from the decoded frames (review round 2, N2)
         session = os.path.join(self.tmp, "g10_noev", out["session_id"])
         shutil.copytree(out["session_dir"], session)
         set_column(session, "img", "done_render_frame", lambda key, v: "")
         code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"), "--vehicle-card",
                              CARD)
-        self.assertEqual((code, failing(rep)), (2, ["C37"]))                  # a SOFT failure: a warning
-        self.assertEqual(by_id(rep)["C37"]["severity"], "SOFT")
-        self.assertIn("without its capture utilisation evidence", by_id(rep)["C37"]["detail"])
+        self.assertEqual((code, failing(rep)), (1, ["C13a"]))
+        self.assertIn("a completion the writer dropped", by_id(rep)["C13a"]["detail"])
+        c37 = by_id(rep)["C37"]
+        self.assertEqual((c37["status"], c37["value"]["without_done_render_frame"]), ("PASS", c37["value"]["issued"]))
+        self.assertAlmostEqual(c37["value"]["u95"], 0.8)
         # review round 1, X5: a redirected completion (done_render_frame one frame late) is contradicted by the
         # decoded frames: the evidence is refused, never a pass
         session = os.path.join(self.tmp, "g10_late", out["session_id"])
@@ -475,6 +478,28 @@ class FailLoudTest(unittest.TestCase):
             self.assertIn(check, failing(rep), name)
             self.assertIn(why, by_id(rep)[check]["detail"], name)
             self.assertEqual(by_id(rep)[check]["severity"], "HARD", name)
+
+    def test_capture_past_the_seal_fails_c13a(self):                          # review round 2, N1
+        """Codex: golden slot 67 (done at 262287, nothing pending) re-encoded to frame 262296, past the seal at
+        262291: a join failure, never the seal exemption."""
+        session = self.golden()
+        render_slot(session, 67, 262296)
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C13a"]))
+        c13a = by_id(rep)["C13a"]
+        self.assertEqual((c13a["value"]["join_failures"], c13a["value"]["pending_after_seal"]), (1, 0))
+
+    def test_hl_seq_before_the_first_command_fails_c07(self):                 # review round 2, N5
+        session = self.golden()                  # Codex: +1 on every hl_seq after step 0 (0 during the warm-up)
+        set_column(session, "ctl", "hl_seq", lambda key, v: str(int(v) + 1) if key > 0 else v)
+        code, rep = self.check(session)
+        self.assertIn("C07", failing(rep))
+        self.assertIn("decision boundary", by_id(rep)["C07"]["detail"])
+        session = self.golden("cmd")             # a command under the -1 sentinel
+        set_column(session, "ctl", "hl_kappa", lambda key, v: "0.010000" if key == 5 else v)     # a warm-up row
+        code, rep = self.check(session)
+        self.assertIn("C07", failing(rep))
+        self.assertIn("hl_seq -1 (the no-command sentinel)", by_id(rep)["C07"]["detail"])
 
     def test_unnumbered_commands_fail_c07(self):                              # review round 1, X7
         session = self.golden()
@@ -686,6 +711,69 @@ class FailLoudTest(unittest.TestCase):
         code, text = run("--session", session, "--no-report")
         self.assertEqual(code, 3, text)
         self.assertIn("Eden-rooted", text)
+
+
+def render_slot(session, slot, captured):
+    """A slot's file re-encoded to show render frame `captured` (fiducial v2), drawn with the golden's last state."""
+    spec = dict(synth.SPECS["golden"])
+    sim = synth.simulate(spec, synth.drivedit_nav.route_from_dict(synth.ROUTES[spec["route"]]()))
+    state = sim.frames[min(captured + 1 - spec["render_frame0"], len(sim.frames) - 1)]["state"]
+    with open(os.path.join(session, "frames", "f_%08d.png" % slot), "wb") as f:
+        f.write(synth.png_bytes(synth.render_image(spec, state, synth.fiducial.code_for(captured))))
+
+
+class SlowCaptureTest(unittest.TestCase):
+    """Review round 2, N2: a 10 Hz session whose captures mix 80 and 90 ms stalls (u95 0.9 > 0.85). Dropping the
+    done_render_frame of the slow captures must not turn C37 into a pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_slow_")
+        cls.routes = os.path.join(cls.tmp, "r")
+        with mock.patch.dict(synth.SPECS["golden_10hz"], {"stall_ms": (80, 80, 90)}):
+            cls.out = synth.generate(os.path.join(cls.tmp, "src"), kind="golden_10hz", routes_dir=cls.routes)
+        s = reader.open_session(cls.out["session_dir"], vehicle_card=CARD)
+        hf = dict(zip(s.streams["hf"].col("render_frame"), s.streams["hf"].col("world_time_ms")))
+        cls.slow = sorted(r["slot_id"] for r in s.images if r["fid_ok"] and
+                          hf[r["captured_render_frame"] + 1] - hf[r["captured_render_frame"]] == 90)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def check(self, session):
+        return run_json("--session", session, "--routes-dir", self.routes, "--vehicle-card", CARD)
+
+    def copy(self, name):
+        dst = os.path.join(self.tmp, name, self.out["session_id"])
+        shutil.copytree(self.out["session_dir"], dst)
+        return dst
+
+    def test_slow_captures_fail_c37(self):
+        self.assertGreater(len(self.slow), 30)
+        code, rep = self.check(self.out["session_dir"])
+        self.assertEqual((code, failing(rep)), (2, ["C37"]))
+        self.assertAlmostEqual(by_id(rep)["C37"]["value"]["u95"], 0.9)
+
+    def test_dropping_the_slow_completions_does_not_pass(self):
+        session = self.copy("drop")
+        slow = set(self.slow)
+        set_column(session, "img", "done_render_frame", lambda key, v: "" if key in slow else v)
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C13a", "C37"]))
+        self.assertIn("a completion the writer dropped", by_id(rep)["C13a"]["detail"])
+        self.assertEqual(by_id(rep)["C13a"]["value"]["dropped_completions"], len(slow))
+        self.assertAlmostEqual(by_id(rep)["C37"]["value"]["u95"], 0.9)
+
+    def test_unmeasured_slow_captures_cannot_pass(self):
+        session = self.copy("gone")              # the slow captures' files removed: assumed at the worst case
+        for slot in self.slow:
+            os.remove(os.path.join(session, "frames", "f_%08d.png" % slot))
+        code, rep = self.check(session)
+        c37 = by_id(rep)["C37"]
+        self.assertEqual((c37["status"], c37["value"]["unmeasured"]), ("FAIL", len(self.slow)))
+        self.assertLessEqual(c37["value"]["u95"], 0.85)
+        self.assertIn("could not be measured", c37["detail"])
 
 
 def edit_rows(session, stream, fn):

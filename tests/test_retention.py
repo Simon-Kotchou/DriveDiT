@@ -20,6 +20,7 @@ write nothing; paths outside the root, DrivingData and _rejected are refused.
 """
 
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -27,12 +28,14 @@ import json
 import os
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
 import time
 import unittest
 import zlib
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 RETENTION = os.path.join(REPO, "tools", "harvester", "retention.py")
@@ -634,6 +637,307 @@ class ProbeRetentionTest(unittest.TestCase):
         code, out = run(self.root, "--probes", "--apply")
         self.assertEqual(code, 0, out)
         self.assertEqual(frame_slots(pdir), [0, 100, 200, 249])
+
+
+class ReviewFindingsTest(unittest.TestCase):
+    """Regression tests for the 2026-11-04 review of 6c8a660..af46db8 (retention/review/CODEX.md, findings 1-7):
+    a record is never a licence to delete, files are re-checked right before their unlink, deletes go through
+    pinned directory descriptors, the record is durable before any delete, repeated metadata keys hold a play, a
+    catalog that appears mid-run is not used without the lock, and screenshot names match whole."""
+
+    def setUp(self):
+        self.root = th.temp_dir("dd6ret_v_")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def sub(self, name):
+        root = os.path.join(self.root, name)
+        os.mkdir(root)
+        return root
+
+    def killed_after_record(self, root, *argv):
+        proc = run_subprocess(root, "after_record", "--apply", *argv)
+        self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stdout + proc.stderr)
+
+    # -- finding 1 ------------------------------------------------------------------------------------
+    def test_f1_a_record_never_licenses_deleting_a_protected_frame(self):
+        """A protected frame appended to the record's deleted list with its correct SHA256SUMS hash holds the
+        session; nothing is deleted."""
+        for name, slot in sorted({"first": 0, "every_n": 100, "event": 120, "no_derivative": 144,
+                                  "last": 249}.items()):
+            with self.subTest(name):
+                root = self.sub(name)
+                _, dest = make_captured(root, events=[("collision", slot_ms(120))], no_deriv=(144,))
+                self.killed_after_record(root)
+                path = os.path.join(dest, "_harvest", "RETENTION.json")
+                doc = read_json(path)
+                with open(os.path.join(dest, "_harvest", "SHA256SUMS"), "rb") as f:
+                    listed = harvest.parse_sums(f.read())
+                f_rel = "frames/f_%08d.png" % slot
+                doc["deleted"].append({"file": f_rel, "slot": slot, "sha256": listed[f_rel],
+                                       "bytes": len(tiny_png(slot))})
+                write(path, json.dumps(doc).encode("ascii"))
+                self.assertFalse(harvest.verify_sums(dest)[0])
+                code, out = run(root, "--apply")
+                self.assertEqual(code, 2, out)
+                self.assertTrue(out.startswith("held "), out)
+                self.assertIn("SHA256SUMS does not verify: _harvest/RETENTION.json lists '%s' as deleted, which the "
+                              "retention rule keeps" % f_rel, out)
+                self.assertEqual(len(frame_slots(dest)), 250)
+
+    def test_f1_a_missing_protected_frame_is_not_hidden_by_the_record(self):
+        _, dest = make_captured(self.root)
+        self.assertEqual(run(self.root, "--apply")[0], 0)
+        path = os.path.join(dest, "_harvest", "RETENTION.json")
+        doc = read_json(path)
+        with open(os.path.join(dest, "_harvest", "SHA256SUMS"), "rb") as f:
+            listed = harvest.parse_sums(f.read())
+        os.remove(os.path.join(dest, "frames", "f_00000100.png"))
+        doc["deleted"].append({"file": "frames/f_00000100.png", "slot": 100, "sha256": listed["frames/f_00000100.png"],
+                               "bytes": len(tiny_png(100))})
+        write(path, json.dumps(doc).encode("ascii"))
+        ok, detail = harvest.verify_sums(dest)
+        self.assertFalse(ok)
+        self.assertIn("lists 'frames/f_00000100.png' as deleted, which the retention rule keeps", detail)
+        code, out = run(self.root)
+        self.assertEqual(code, 2, out)
+        self.assertTrue(out.startswith("held "), out)
+
+    def test_f1_a_record_of_another_every_n_needs_that_every_n(self):
+        """A record rewritten consistently for --every-n 1000 does not widen a default run's deletes."""
+        _, dest = make_captured(self.root)
+        self.killed_after_record(self.root)
+        path = os.path.join(dest, "_harvest", "RETENTION.json")
+        doc = read_json(path)
+        with open(os.path.join(dest, "_harvest", "SHA256SUMS"), "rb") as f:
+            listed = harvest.parse_sums(f.read())
+        moved = [k for k in doc["kept"] if k["slot"] in (100, 200)]
+        doc["kept"] = [k for k in doc["kept"] if k["slot"] not in (100, 200)]
+        doc["deleted"] += [{"file": k["file"], "slot": k["slot"], "sha256": listed[k["file"]],
+                            "bytes": len(tiny_png(k["slot"]))} for k in moved]
+        doc["every_n"] = 1000
+        write(path, json.dumps(doc).encode("ascii"))
+        code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("--every-n 1000", out)
+        self.assertEqual(len(frame_slots(dest)), 250)
+        code, out = run(self.root, "--apply", "--every-n", "1000")         # the operator's explicit choice
+        self.assertEqual(code, 0, out)
+        self.assertEqual(frame_slots(dest), [0, 249])
+
+    def test_f1_a_probe_record_cannot_add_or_hide_a_kept_frame(self):
+        pdir = make_play(self.root)
+        self.killed_after_record(self.root, "--probes")
+        path = os.path.join(pdir, "RETENTION.json")
+        doc = read_json(path)
+        added = json.loads(json.dumps(doc))
+        added["deleted"].append({"file": "frames/f_00000000.png", "slot": 0,
+                                 "sha256": hashlib.sha256(tiny_png(0)).hexdigest(), "bytes": len(tiny_png(0))})
+        write(path, json.dumps(added).encode("ascii"))
+        age(pdir, 3)
+        code, out = run(self.root, "--probes", "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertTrue(out.startswith("held "), out)
+        self.assertIn("'frames/f_00000000.png' is not a raw frames/ screenshot or is named twice", out)
+        self.assertEqual(len(frame_slots(pdir)), 250)
+        write(path, json.dumps(doc).encode("ascii"))                    # the genuine record completes
+        age(pdir, 3)
+        self.assertEqual(run(self.root, "--probes", "--apply")[0], 0)
+        self.assertEqual(frame_slots(pdir), [0, 100, 200, 249])
+        with open(path, "rb") as f:
+            genuine = f.read()
+        os.remove(os.path.join(pdir, "frames", "f_00000100.png"))       # a kept frame lost after retention
+        age(pdir, 3)
+        code, out = run(self.root, "--probes")                          # the genuine record: reported missing
+        self.assertEqual(code, 2, out)
+        self.assertTrue(out.startswith("held "), out)
+        self.assertIn("kept frame frames/f_00000100.png of RETENTION.json is missing", out)
+        done = json.loads(genuine.decode("ascii"))                      # relabelling it as deleted does not help
+        done["deleted"].append({"file": "frames/f_00000100.png", "slot": 100,
+                                "sha256": hashlib.sha256(tiny_png(100)).hexdigest(), "bytes": len(tiny_png(100))})
+        done["kept"] = [k for k in done["kept"] if k["slot"] != 100]
+        write(path, json.dumps(done).encode("ascii"))
+        age(pdir, 3)
+        code, out = run(self.root, "--probes")
+        self.assertEqual(code, 2, out)
+        self.assertTrue(out.startswith("held "), out)
+        self.assertIn("are not the audit sample of every_n 100 and the rest", out)
+
+    # -- finding 2 ------------------------------------------------------------------------------------
+    def test_f2_a_file_changed_after_planning_is_not_deleted(self):
+        for mode in ("session", "probe"):
+            with self.subTest(mode):
+                root = self.sub(mode)
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    argv = ["--apply"]
+                else:
+                    unit = make_play(root)
+                    argv = ["--probes", "--apply"]
+                target = os.path.join(unit, "frames", "f_00000001.png")
+                original = ret.Retention.apply
+
+                def apply(r, plan):
+                    write(target, b"changed after planning, before the delete")
+                    return original(r, plan)
+                with mock.patch.object(ret.Retention, "apply", apply):
+                    code, out = run(root, *argv)
+                self.assertEqual(code, 2, out)
+                self.assertIn("frames/f_00000001.png changed after it was planned", out)
+                self.assertTrue(os.path.isfile(target), out)
+                with open(target, "rb") as f:
+                    self.assertEqual(f.read(), b"changed after planning, before the delete")
+                self.assertEqual(len(frame_slots(unit)), 250)
+
+    def test_f2_a_file_swapped_between_its_hash_and_its_unlink_is_not_deleted(self):
+        _, dest = make_captured(self.root)
+        target = os.path.join(dest, "frames", "f_00000001.png")
+        swapped = []
+
+        def hook(r, name):
+            if name == "before_unlink" and not swapped:
+                os.rename(target, target + ".old")
+                write(target, tiny_png(1))                              # same bytes, another inode
+                swapped.append(name)
+        with mock.patch.object(ret.Retention, "hook", hook):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 2, out)
+        self.assertTrue(os.path.isfile(target), out)
+        self.assertIn("changed after it was hashed", out)
+
+    # -- finding 3 ------------------------------------------------------------------------------------
+    def test_f3_an_ancestor_replaced_after_planning_is_not_followed(self):
+        for mode, how in (("session", "symlink"), ("session", "copy"), ("probe", "symlink"), ("probe", "copy")):
+            with self.subTest(mode=mode, how=how):
+                root = self.sub("%s_%s" % (mode, how))
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    ancestor = os.path.dirname(unit)                    # the trial directory
+                    argv = ["--apply"]
+                else:
+                    unit = make_play(root)
+                    ancestor = os.path.dirname(unit)                    # the launch directory
+                    argv = ["--probes", "--apply"]
+                elsewhere = os.path.join(root, "elsewhere")
+                moved = os.path.join(root, "moved_away")
+                original = ret.Retention.apply
+
+                def apply(r, plan):
+                    shutil.copytree(ancestor, elsewhere, symlinks=True)
+                    os.rename(ancestor, moved)
+                    if how == "symlink":
+                        os.symlink(elsewhere, ancestor)
+                    else:
+                        os.rename(elsewhere, ancestor)
+                    return original(r, plan)
+                with mock.patch.object(ret.Retention, "apply", apply):
+                    code, out = run(root, *argv)
+                self.assertEqual(code, 2, out)
+                self.assertTrue(out.startswith("held "), out)
+                self.assertIn("cannot be opened as a directory without following a symlink" if how == "symlink"
+                              else "the directory was replaced after it was planned", out)
+                copy = os.path.join(elsewhere if how == "symlink" else ancestor, os.path.basename(unit))
+                self.assertEqual(len(frame_slots(copy)), 250)
+                self.assertEqual(len(frame_slots(os.path.join(moved, os.path.basename(unit)))), 250)
+                for d in (copy, os.path.join(moved, os.path.basename(unit))):
+                    for sub in ("", "_harvest"):
+                        self.assertFalse(os.path.exists(os.path.join(d, sub, "RETENTION.json")), d)
+
+    # -- finding 4 ------------------------------------------------------------------------------------
+    def test_f4_a_record_that_cannot_be_made_durable_stops_every_delete(self):
+        real_fsync = os.fsync
+        for mode in ("session", "probe"):
+            for what in ("directory", "file"):
+                with self.subTest(mode=mode, what=what):
+                    root = self.sub("%s_%s" % (mode, what))
+                    if mode == "session":
+                        _, unit = make_captured(root)
+                        argv = ["--apply"]
+                    else:
+                        unit = make_play(root)
+                        argv = ["--probes", "--apply"]
+
+                    def fsync(fd):
+                        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+                        if is_dir == (what == "directory"):
+                            raise OSError(errno.EIO, "injected fsync failure")
+                        return real_fsync(fd)
+                    with mock.patch("os.fsync", fsync):
+                        code, out = run(root, *argv)
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("could not be written durably", out)
+                    self.assertEqual(len(frame_slots(unit)), 250)
+
+    # -- finding 5 ------------------------------------------------------------------------------------
+    def test_f5_repeated_metadata_keys_hold_the_play(self):
+        cases = {"footer status complete then failed": ("run_footer.txt", "status=failed\n", "held"),
+                 "footer repeats a key with the same value": ("run_footer.txt", "status=complete\n", "held"),
+                 "header map arland then everon": ("run_header.txt", "world.map_id=everon\n", "held"),
+                 "header repeats world.map_id": ("run_header.txt", "world.map_id=arland\n", "held"),
+                 "header repeats another key unchanged": ("run_header.txt", "drive.force_sim=0\n", "would-delete")}
+        plays = {}
+        for n, (name, (fname, line, _)) in enumerate(sorted(cases.items())):
+            pdir = make_play(self.root, launch="20261024T000000Z-wb-%04d" % (20 + n))
+            if name.endswith("unchanged"):
+                with open(os.path.join(pdir, fname), "ab") as f:
+                    f.write(b"drive.force_sim=0\n")
+            with open(os.path.join(pdir, fname), "ab") as f:
+                f.write(line.encode("ascii"))
+            age(pdir, 3)
+            plays[name] = pdir
+        before = th.snapshot(self.root)
+        code, out = run(self.root, "--probes")
+        self.assertEqual(code, 2, out)
+        for name, (fname, _, status) in sorted(cases.items()):
+            with self.subTest(name):
+                line = line_of(out, status, os.path.relpath(plays[name], self.root))
+                self.assertIsNotNone(line, out)
+                if status == "held":
+                    self.assertIn("%s repeats" % fname, line)
+        code, out = run(self.root, "--probes", "--apply")
+        for name, (fname, _, status) in sorted(cases.items()):
+            self.assertEqual(len(frame_slots(plays[name])), 250 if status == "held" else 4, name)
+        self.assertNotEqual(th.snapshot(self.root), before)
+
+    # -- finding 6 ------------------------------------------------------------------------------------
+    def test_f6_a_catalog_that_appears_after_the_check_is_not_used_without_the_lock(self):
+        _, dest = make_captured(self.root, catalogued=False)
+        original = ret.Retention.plan_all
+        made = []
+
+        def plan_all(r, *a, **k):
+            if not made:
+                catalogue(self.root, dest)                              # a harvester run catalogues it now
+                made.append(1)
+            return original(r, *a, **k)
+        with mock.patch.object(ret.Retention, "plan_all", plan_all):
+            code, out = run(self.root, "--apply")
+        self.assertEqual(code, 0, out)
+        self.assertIn("not in catalog/sessions.jsonl", out)
+        self.assertEqual(len(frame_slots(dest)), 250)
+        code, out = run(self.root, "--apply")                           # the next run reads it under the lock
+        self.assertEqual(code, 0, out)
+        self.assertEqual(frame_slots(dest), [0, 100, 200, 249])
+
+    # -- finding 7 ------------------------------------------------------------------------------------
+    def test_f7_screenshot_names_match_whole(self):
+        self.assertEqual(harvest.raw_shot_slot("f_00000005.png"), 5)
+        self.assertEqual(harvest.raw_shot_slot("f_00000005.bmp.png", ".bmp.png"), 5)
+        for bad in ("f_00000005.png\n", "f_00000005.png\r", "f_0000005\x01.png", "f_00000005.PNG", "f_00000005.png.x",
+                    "f_00000005.jpg", "xf_00000005.png", "f_00000005.bmp", ):
+            want = 5 if bad == "f_00000005.bmp" else None
+            self.assertEqual(harvest.raw_shot_slot(bad), want, repr(bad))
+        self.assertIsNone(harvest.raw_shot_slot("f_00000005.bmp", ".png"))
+        pdir = make_play(self.root, frames=range(20))
+        for name in ("f_00000005.png\n", "f_00000006.png\r"):
+            write(os.path.join(pdir, "frames", name), tiny_png(5))
+        age(pdir, 3)
+        code, out = run(self.root, "--probes", "--apply", "--every-n", "1000")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(os.listdir(os.path.join(pdir, "frames"))),
+                         sorted(["f_00000000.png", "f_00000019.png", "f_00000005.png\n", "f_00000006.png\r"]))
+        self.assertIn("2 other entries in frames/ left alone", out)
 
 
 class ScopeTest(unittest.TestCase):

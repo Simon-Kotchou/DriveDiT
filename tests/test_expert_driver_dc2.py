@@ -19,6 +19,7 @@ sources (the statements the Python models mirror) and check, per adaptation of t
 """
 
 import importlib.util
+import json
 import math
 import os
 import re
@@ -37,6 +38,7 @@ DD7_SOURCES = (LLC_SOURCE, EXPERT_SOURCE)  # the Enforce files of DD-7-min
 GATES_SOURCE = os.path.join(SOURCES, "DC_Gates.c")
 MANIFEST = os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt")
 STEP_DT = 1.0 / 30.0                    # the measured step dt on 1.8 (dc-2.0 section 6, D-A)
+CARD = os.path.join(REPO, "tools", "ident", "cards", "1.8.0.13", "S105.json")
 RUN4_STEPS, RUN4_CALLBACKS = 18113, 10215   # T0-ENG run 4 E-10: steps and fixed-frame callbacks of one Play
 
 
@@ -59,15 +61,69 @@ def enforce_body(source, cls, method):
     return " ".join(code_only(body).split())
 
 
-class LlcStepModel:
-    """Python mirror of the time-dependent statements of DC_LLCv1.Step and Longitudinal (rate limiter, lag, speed
-    reference, speed integral, clutch dip), with the statements test_llc_step_takes_the_callback_slice asserts."""
+def card_llc():
+    """llc_v1's parameters of the committed S105 card."""
+    with open(CARD, "r", encoding="ascii") as f:
+        return json.load(f)["llc_v1"]
 
-    def __init__(self, rate_per_s, tau_s, dip_steps, step_dt=STEP_DT, window=100.0, kp=0.0, ki=0.0):
+
+def clamp(value, low, high):
+    return min(max(value, low), high)
+
+
+class LlcLongitudinal:
+    """Python mirror of DC_LLCv1.Longitudinal, statement for statement (test_longitudinal_is_the_mirrored_code
+    asserts the Enforce body): the speed reference within the speed window, the PI with its anti-windup (no
+    integration while the throttle or the brake saturates in the direction of the error) and its integral limit
+    (+-integral_max_mps2 / speed_ki), the stop hold, the coast band. saturation_guard / integral_limit False are not
+    llc_v1: they show what the code would do without them (Codex LOW 2)."""
+
+    def __init__(self, llc, saturation_guard=True, integral_limit=True):
+        self.p, self.saturation_guard, self.integral_limit = dict(llc), saturation_guard, integral_limit
+        self.speed_ref = self.integral = 0.0
+        self.saturated = False
+
+    def step(self, accel, speed, slice_s):
+        p = self.p
+        throttle = brake = 0.0
+        self.speed_ref = clamp(self.speed_ref + accel * slice_s, max(0.0, speed - p["speed_window_mps"]),
+                               speed + p["speed_window_mps"])
+        error = self.speed_ref - speed
+        effort = accel + p["speed_kp"] * error + p["speed_ki"] * self.integral
+        saturated_up = effort * p["throttle_per_mps2"] >= p["throttle_max"] and error > 0
+        saturated_down = -effort * p["brake_per_mps2"] >= 1 and error < 0
+        self.saturated = saturated_up or saturated_down
+        if not self.saturation_guard or (not saturated_up and not saturated_down):
+            self.integral += error * slice_s
+        if self.integral_limit and p["speed_ki"] > 0:
+            bound = p["integral_max_mps2"] / p["speed_ki"]
+            self.integral = clamp(self.integral, -bound, bound)
+        effort = accel + p["speed_kp"] * error + p["speed_ki"] * self.integral
+        if accel <= 0 and self.speed_ref <= 0 and speed < p["stop_speed_mps"]:
+            self.integral = 0.0
+            return 0.0, p["brake_hold"]
+        if effort > p["coast_band_mps2"]:
+            throttle = clamp(effort * p["throttle_per_mps2"], 0.0, p["throttle_max"])
+        elif effort < -p["coast_band_mps2"]:
+            brake = clamp(-effort * p["brake_per_mps2"], 0.0, 1.0)
+        return throttle, brake
+
+
+class LlcStepModel:
+    """Python mirror of the time-dependent statements of DC_LLCv1.Step (rate limiter, lag, clutch dip) with
+    Longitudinal (LlcLongitudinal, the committed card's llc_v1 parameters), with the statements
+    test_llc_step_takes_the_callback_slice and test_longitudinal_is_the_mirrored_code assert."""
+
+    def __init__(self, rate_per_s, tau_s, dip_steps, step_dt=STEP_DT):
         self.rate, self.tau, self.dip_steps, self.step_dt = rate_per_s, tau_s, dip_steps, step_dt
-        self.window, self.kp, self.ki = window, kp, ki
-        self.limited = self.out = self.speed_ref = self.integral = 0.0
+        self.limited = self.out = 0.0
         self.dip_left, self.last_gear = 0, -1
+        self.lon = LlcLongitudinal(card_llc())
+        self.throttle = self.brake = 0.0
+
+    @property
+    def speed_ref(self):
+        return self.lon.speed_ref
 
     def step(self, steer_raw, accel, speed, gear, time_slice, covered):
         steps = covered if covered >= 1 else 1
@@ -79,8 +135,7 @@ class LlcStepModel:
             self.limited = steer_raw
         lag_alpha = 1.0 - math.exp(-slice_s / self.tau) if self.tau > 0 else 1.0
         self.out = min(max(self.out + (self.limited - self.out) * lag_alpha, -1.0), 1.0)
-        self.speed_ref = min(max(self.speed_ref + accel * slice_s, max(0.0, speed - self.window)), speed + self.window)
-        self.integral += (self.speed_ref - speed) * slice_s
+        self.throttle, self.brake = self.lon.step(accel, speed, slice_s)
         clutch = 1.0
         if gear != self.last_gear:
             self.dip_left = self.dip_steps
@@ -154,6 +209,86 @@ class ExpertDecisions:
         if not is_decision or self.decision_step != physics_step:
             return None
         return self.decision
+
+
+def windup(lon, seconds, covered=3, speed=0.0, accel=1.5):
+    """Codex's case: callbacks of `covered` steps, the speed held at `speed`, the accel target held. (throttle, brake)
+    of the last callback."""
+    out = (0.0, 0.0)
+    for _ in range(int(round(seconds / (covered * STEP_DT)))):
+        out = lon.step(accel, speed, covered * STEP_DT)
+    return out
+
+
+class LlcAntiWindupTest(unittest.TestCase):
+    """Codex LOW 2: llc_v1's PI keeps its anti-windup and integral limit over merged callbacks, and recovers."""
+
+    def test_longitudinal_is_the_mirrored_code(self):
+        body = enforce_body(read(LLC_SOURCE), "DC_LLCv1", "Longitudinal")
+        self.assertEqual(body, " ".join((
+            "protected void Longitudinal(float accel, float speed, float sliceS, out float throttle, out float brake)",
+            "{ throttle = 0; brake = 0;",
+            "m_fSpeedRef = Math.Clamp(m_fSpeedRef + accel * sliceS, Math.Max(0, speed - m_Card.m_fSpeedWindowMps),",
+            "speed + m_Card.m_fSpeedWindowMps);",
+            "float error = m_fSpeedRef - speed;",
+            "float effort = accel + m_Card.m_fSpeedKp * error + m_Card.m_fSpeedKi * m_fIntegral;",
+            "bool saturatedUp = effort * m_Card.m_fThrottlePerMps2 >= m_Card.m_fThrottleMax && error > 0;",
+            "bool saturatedDown = -effort * m_Card.m_fBrakePerMps2 >= 1 && error < 0;",
+            "if (!saturatedUp && !saturatedDown) m_fIntegral += error * sliceS;",
+            "if (m_Card.m_fSpeedKi > 0) m_fIntegral = Math.Clamp(m_fIntegral, -m_Card.m_fIntegralMaxMps2 /",
+            "m_Card.m_fSpeedKi, m_Card.m_fIntegralMaxMps2 / m_Card.m_fSpeedKi);",
+            "effort = accel + m_Card.m_fSpeedKp * error + m_Card.m_fSpeedKi * m_fIntegral;",
+            "if (accel <= 0 && m_fSpeedRef <= 0 && speed < m_Card.m_fStopSpeedMps)",
+            "{ brake = m_Card.m_fBrakeHold; m_fIntegral = 0; return; }",
+            "if (effort > m_Card.m_fCoastBandMps2) throttle = Math.Clamp(effort * m_Card.m_fThrottlePerMps2, 0,",
+            "m_Card.m_fThrottleMax);",
+            "else if (effort < -m_Card.m_fCoastBandMps2) brake = Math.Clamp(-effort * m_Card.m_fBrakePerMps2, 0, 1);")))
+
+    def test_saturation_stops_the_integral(self):
+        # 20 s in 3-step callbacks, the car held at 0 m/s, accel target 1.5: the throttle saturates and the integral
+        # stays small (Codex: 0.315), where the code without its guards winds up to about 38.8
+        lon = LlcLongitudinal(card_llc())
+        throttle, brake = windup(lon, 20.0)
+        self.assertTrue(lon.saturated)
+        self.assertEqual((throttle, brake), (lon.p["throttle_max"], 0.0))
+        self.assertAlmostEqual(lon.integral, 0.315, delta=0.01)
+        bare = LlcLongitudinal(card_llc(), saturation_guard=False, integral_limit=False)
+        windup(bare, 20.0)
+        self.assertAlmostEqual(bare.integral, 38.765, delta=0.05)
+        # the brake side: the car held at 15 m/s under the strongest decel target stops integrating once the brake
+        # saturates, inside the limit
+        lon = LlcLongitudinal(card_llc())
+        lon.speed_ref = 15.0
+        throttle, brake = windup(lon, 20.0, speed=15.0, accel=-4.0)
+        bound = lon.p["integral_max_mps2"] / lon.p["speed_ki"]
+        self.assertTrue(lon.saturated)
+        self.assertEqual((throttle, brake), (0.0, 1.0))
+        self.assertGreaterEqual(lon.integral, -bound)
+
+    def test_the_integral_limit_holds_without_saturation(self):
+        # a throttle gain too small to saturate: only the limit +-integral_max_mps2 / speed_ki bounds the integral
+        llc = dict(card_llc(), throttle_per_mps2=0.01)
+        bound = llc["integral_max_mps2"] / llc["speed_ki"]
+        lon = LlcLongitudinal(llc)
+        windup(lon, 20.0)
+        self.assertFalse(lon.saturated)
+        self.assertEqual(lon.integral, bound)
+        unbounded = LlcLongitudinal(llc, integral_limit=False)
+        windup(unbounded, 20.0)
+        self.assertGreater(unbounded.integral, 4 * bound)
+
+    def test_recovery_after_saturation(self):
+        # after the 20 s wind-up the car reaches the reference and the target is 0: llc_v1 lets go of the throttle at
+        # once and keeps it off; without the guards the throttle stays saturated, with the limit only it stays high
+        results = {}
+        for name, guard, limit in (("llc_v1", True, True), ("limit only", False, True), ("none", False, False)):
+            lon = LlcLongitudinal(card_llc(), saturation_guard=guard, integral_limit=limit)
+            windup(lon, 20.0)
+            caught_up = lon.speed_ref
+            results[name] = [lon.step(0.0, caught_up, 3 * STEP_DT)[0] for _ in range(10)]   # 1 s
+        self.assertTrue(all(t < 0.05 for t in results["llc_v1"]), results["llc_v1"])
+        self.assertTrue(all(t > 0.4 for t in results["limit only"]), results["limit only"])
+        self.assertTrue(all(t == card_llc()["throttle_max"] for t in results["none"]), results["none"])
 
 
 class LlcStepTimeTest(unittest.TestCase):

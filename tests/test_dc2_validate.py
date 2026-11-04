@@ -504,6 +504,18 @@ class FailLoudTest(unittest.TestCase):
         self.assertIn("at most 1 can be pending", c13a["detail"])
         self.assertEqual((c13a["value"]["pending_after_seal"], c13a["value"]["dropped_completions"]), (0, 3))
 
+    def test_pending_at_end_type_fails_c13a(self):                            # review round 4
+        """Codex: completed golden sessions declaring "1", 1.0, 3.0, true or null passed C13a. Only the JSON integer
+        0 or 1 is a pending count (the reader's predicate)."""
+        for name, value in (("str", "1"), ("float1", 1.0), ("float3", 3.0), ("bool", True), ("null", None)):
+            session = self.golden(name)
+            edit_json(os.path.join(session, "session_end.json"),
+                      lambda o, value=value: o["images"].update({"pending_at_end": value}))
+            code, rep = self.check(session)
+            self.assertEqual((code, failing(rep)), (1, ["C13a"]), name)
+            self.assertIn("is not the JSON integer 0 or 1", by_id(rep)["C13a"]["detail"], name)
+            self.assertEqual(by_id(rep)["C13a"]["value"]["pending_after_seal"], 0, name)
+
     def test_pending_integrity_rules(self):                                   # review round 3, N6
         """The exemption is the unique newest issued slot: skipped_busy or make_failed rows may follow it (a seal
         queue), an older pending row is a dropped completion, pending_at_end 2 fails."""

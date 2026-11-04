@@ -199,7 +199,7 @@ $grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Compon
   coords 620.086 39 2566.323
  }
  AI_Drive_Target_11 {
-  coords 1403.365 36.25 2314.117
+  coords 1459.607 36.34 2341.833
  }
  AI_Drive_Target_12 {
   coords 2209.135 57.973 2091.847
@@ -223,9 +223,9 @@ $grp GenericEntity : "{EBD91177954E8236}Prefabs/Systems/ScenarioFramework/Compon
   coords 1829.025 15.109 3444.452
  }
  AI_Drive_Target_19 {
-  coords 2555.162 19.076 3086.956
+  coords 2651.838 19.708 3100.644
  }
  AI_Drive_Target_20 {
-  coords 2635.36 98.781 2653.366
+  coords 2563.558 77.714 2750.052
  }
 }

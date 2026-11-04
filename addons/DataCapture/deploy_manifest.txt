@@ -23,6 +23,9 @@ addon  addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer
 # The dc-1.0 producers (SCR_MLDataCollector, SCR_MLScreenshotCapture, SCR_AnchorFrameSelector and the
 # SCR_MLDataCaptureDirector that starts the collector) are no longer deployed: DC_Arland runs the dc-2.0 capture
 # stack below (DD-4-min, R38). Their sources stay in src/ until DD-12 retires them.
+# The director's gate opener (DD-1) is deployed on its own: it needs no director, and a capture session start opens
+# the vehicle gates with it (DC_Gates.OpenVehicleGates).
+script src/enfusion/datacapture/DC_Gates.c
 
 # DC_Probes_Arland: the T0-ENG probe world (DD-4-probe). One deploy carries both worlds.
 addon  addons/DataCapture/worlds/DataCapture/DC_Probes_Arland.ent

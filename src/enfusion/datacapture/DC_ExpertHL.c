@@ -50,10 +50,15 @@
 // the lane corridor half width w/2 + m_fOffroadMarginM for more than m_fOffroadS, w/2 + 0.5 m for 3 s; w/2 is the
 // route's lane corridor at the current progress, the right lane of the road there: 2 m on 8 m roads, 1.125 m on
 // 4.5 m dirt roads; m_fCorridorHalfWidthM on a route without one), stuck (slower than m_fStuckKmh for m_fStuckS,
-// 1 km/h for 20 s; also an events row of kind stuck, which DD-5-min C17 counts), rollover (up axis tilted beyond
-// m_fRolloverDeg, up.worldUp < 0.5), timeout (m_fEpisodeTimeoutS, the r2 3.6 cap of 8 min; r2 1.3's
-// twice-the-expert-time rule is the evaluator's), engine_off (engine off for m_fEngineOffS). The thresholds are logged
-// in BeginDriver.
+// 1 km/h for 20 s; also an events row of kind stuck with stuck_s and termination_reason=stuck, which DD-5-min C17
+// counts), timeout (m_fEpisodeTimeoutS, the r2 3.6 cap of 8 min; r2 1.3's twice-the-expert-time rule is the
+// evaluator's), engine_off (engine off for m_fEngineOffS). The thresholds are logged in BeginDriver.
+// CRASH EVENTS (dc-2.0 9.5.1): collision and rollover end an episode only through the core's crash watch
+// (DC_CrashWatch: the world-frame delta-v detector and the rollover confirmed after events.rollover_hold_ms); the
+// expert reports neither (DC_StreamRecorder would ignore it with a WARNING). The driver never moves the ego (no
+// SetWorldTransform: the core spawns and parks it); code that ever does must call ctx.PrepareReposition() first and
+// log the teleport row (reason=...) through ctx.LogEvent. It spawns no traffic: a traffic spawner registers its
+// vehicles with DC_CrashWatch.WatchSlot.
 // Every constant is a parameter with a stated basis (r2 1.3, r2 3.6, style_v1 nominal a_lat,max 2.75 m/s2, the S105);
 // none is ported from the Everon-built navigation code (EL-002).
 //
@@ -802,9 +807,6 @@ class DC_ExpertDriver : DC_DriverInterface
 	[Attribute("480", UIWidgets.Slider, "timeout of an episode [s] (r2 3.6: hard cap 8 min)", "10 1800 10", category: "Terminations")]
 	protected float m_fEpisodeTimeoutS;
 
-	[Attribute("60", UIWidgets.Slider, "rollover when the up axis tilts beyond this [deg] (r2 1.3: up.worldUp < 0.5)", "10 90 1", category: "Terminations")]
-	protected float m_fRolloverDeg;
-
 	[Attribute("2", UIWidgets.Slider, "engine_off after the engine is off this long [s]", "0.1 30 0.1", category: "Terminations")]
 	protected float m_fEngineOffS;
 
@@ -951,7 +953,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		ctx.Log(string.Format("vehicle card %1 sha256 %2 (use_class %3)", m_Card.m_sPath, m_Card.m_sSha256, m_sUseClass));
 		ctx.Log(string.Format("route %1 (%2, split %3, %4 m, %5 points) sha256 %6; speed profile %7..%8 km/h", m_Route.m_sRouteId, m_Route.m_sPath, m_Route.m_sSplit, lengthM.ToString(-1, 1), m_Route.GetPointCount(), m_Route.m_sSha256, lowestKmh.ToString(-1, 1), highestKmh.ToString(-1, 1)));
 		ctx.Log(string.Format("%1 llc_sha %2, %3 expert_sha %4", DC_LLCv1.VERSION, m_sLlcSha, DC_ExpertHL.VERSION, m_sExpertSha));
-		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, rollover > %8 deg, timeout %9 s", m_fEndToleranceM, m_fDeviationM, corridorText, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fRolloverDeg, m_fEpisodeTimeoutS));
+		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, engine_off after %8 s, timeout %9 s; collision and rollover only from the core's crash watch", m_fEndToleranceM, m_fDeviationM, corridorText, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fEngineOffS, m_fEpisodeTimeoutS));
 		m_bReady = true;
 		return true;
 	}
@@ -1065,12 +1067,12 @@ class DC_ExpertDriver : DC_DriverInterface
 		post.m_fLaneLatErrM = m_Expert.GetLateral();
 		post.m_fLaneHeadErrRad = m_Expert.GetHeadingError();
 		post.m_fRouteProgressM = m_Expert.GetProgress();
-		post.m_sTermination = CheckTermination(transform[1], speed, simulation);
+		post.m_sTermination = CheckTermination(speed, simulation);
 		if (!post.m_sTermination.IsEmpty() && m_sReported.IsEmpty())
 		{
 			m_sReported = post.m_sTermination;
-			// the stuck event of dc-2.0 9.5 (DD-5-min C17 counts these rows), once, with the termination it ends
-			if (m_sReported == TERMINATION_STUCK && !m_Context.LogEvent(TERMINATION_STUCK, "termination_reason=stuck"))
+			// the stuck event of dc-2.0 9.5.1 (DD-5-min C17 counts these rows), once, with the termination it ends
+			if (m_sReported == TERMINATION_STUCK && !m_Context.LogEvent(TERMINATION_STUCK, StuckPayload()))
 				m_Context.Warn("the stuck event of this episode was not recorded");
 		}
 
@@ -1338,8 +1340,9 @@ class DC_ExpertDriver : DC_DriverInterface
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The first terminal event of this step, empty when none (the core keeps the first one it gets)
-	protected string CheckTermination(vector up, float speed, notnull VehicleWheeledSimulation simulation)
+	//! The first terminal event of this callback, empty when none (the core keeps the first one it gets). Never
+	//! collision or rollover: the crash watch is their only source (dc-2.0 9.5.1)
+	protected string CheckTermination(float speed, notnull VehicleWheeledSimulation simulation)
 	{
 		int now = m_Context.GetWorldMs();
 		if (m_Expert.IsComplete())
@@ -1362,9 +1365,6 @@ class DC_ExpertDriver : DC_DriverInterface
 		{
 			m_iOffCorridorSinceMs = -1;
 		}
-
-		if (up[1] < Math.Cos(m_fRolloverDeg * Math.DEG2RAD))
-			return "rollover";
 
 		if (!simulation.EngineIsOn())
 		{
@@ -1394,6 +1394,21 @@ class DC_ExpertDriver : DC_DriverInterface
 			return "timeout";
 
 		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Payload of the stuck event (dc-2.0 9.5.1, keys in the table's order, floats with 2 decimals): how long the ego
+	//! has been slower than m_fStuckKmh [s of world time], and the termination it ends the episode with
+	protected string StuckPayload()
+	{
+		float stuckS = 0;
+		if (m_iSlowSinceMs >= 0)
+		{
+			float stuckMs = m_Context.GetWorldMs() - m_iSlowSinceMs;
+			stuckS = Math.Max(stuckMs / 1000, 0);
+		}
+
+		return "stuck_s=" + stuckS.ToString(-1, 2) + ";termination_reason=" + TERMINATION_STUCK;
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -9,9 +9,13 @@ sources (the statements the Python models mirror) and check, per adaptation of t
   - decisions on the grid: the expert's decision is the evaluation of a decision callback's PostStep
     (ctx.IsDecisionStep), never keyed on physics_step mod N; exp_*_now is evaluated in every callback;
   - admission: DC_ExpertDriver.CanDecide is true only when this callback's PostStep will take the decision (the one
-    CanEvaluate test both make), so an admitted episode's first Decide never returns false (which ends the session).
+    CanEvaluate test both make), so an admitted episode's first Decide never returns false (which ends the session);
+  - crash events: no expert rollover (or collision) termination, the stuck event carries stuck_s (the DD-5-min reader's
+    check_payload accepts it against the contract's event_payloads), no ego SetWorldTransform without PrepareReposition
+    and no spawned vehicle without DC_CrashWatch.WatchSlot.
 """
 
+import importlib.util
 import math
 import os
 import re
@@ -25,6 +29,8 @@ SESSION_SOURCE = os.path.join(SOURCES, "DC_Session.c")
 EGO_SOURCE = os.path.join(SOURCES, "DC_EgoSession.c")
 RECORDER_SOURCE = os.path.join(SOURCES, "DC_StreamRecorder.c")
 DECISION_PERIOD_MS = 200                # 1000 / decision_hz at the frozen 5 Hz
+LAYER = os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC_Arland_Layers", "default.layer")
+DD7_SOURCES = (LLC_SOURCE, EXPERT_SOURCE)  # the Enforce files of DD-7-min
 STEP_DT = 1.0 / 30.0                    # the measured step dt on 1.8 (dc-2.0 section 6, D-A)
 RUN4_STEPS, RUN4_CALLBACKS = 18113, 10215   # T0-ENG run 4 E-10: steps and fixed-frame callbacks of one Play
 
@@ -386,6 +392,75 @@ class AdmissionTest(unittest.TestCase):
         base = AdmissionModel(ExpertDriverMirror(with_handshake=False))
         base.decision_callback(6, evaluable=False)
         self.assertEqual((base.episode, base.failed), (True, True))
+
+
+def load_reader():
+    spec = importlib.util.spec_from_file_location("dc2_reader_dd7", os.path.join(REPO, "data", "dc2", "reader.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def stuck_payload(world_ms, slow_since_ms):
+    """Mirror of DC_ExpertDriver.StuckPayload (float.ToString(-1, 2): fixed point, 2 decimals)."""
+    stuck_s = 0.0
+    if slow_since_ms >= 0:
+        stuck_s = max((world_ms - slow_since_ms) / 1000.0, 0.0)
+    return "stuck_s=%.2f;termination_reason=stuck" % stuck_s
+
+
+class CrashEventsTest(unittest.TestCase):
+    """(e) the crash watch is the only rollover source; stuck_s; repositioning and traffic rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.expert = read(EXPERT_SOURCE)
+
+    def test_no_expert_rollover_or_collision(self):
+        code = code_only(self.expert)
+        for gone in ('"rollover"', '"collision"', "m_fRolloverDeg", "up[1]"):
+            self.assertNotIn(gone, code)
+        self.assertNotIn("m_fRolloverDeg", read(LAYER))
+        check = enforce_body(self.expert, "DC_ExpertDriver", "CheckTermination")
+        self.assertTrue(check.startswith("protected string CheckTermination(float speed, notnull "
+                                         "VehicleWheeledSimulation simulation)"), check[:120])
+        returned = set(re.findall(r'return "(\w+)";', check)) | {"stuck"}
+        self.assertEqual(returned, {"route_complete", "route_deviation", "offroad", "engine_off", "stuck", "timeout"})
+
+    def test_stuck_event_carries_stuck_s(self):
+        post_step = enforce_body(self.expert, "DC_ExpertDriver", "PostStep")
+        self.assertIn("if (m_sReported == TERMINATION_STUCK && !m_Context.LogEvent(TERMINATION_STUCK, StuckPayload()))",
+                      post_step)
+        payload = enforce_body(self.expert, "DC_ExpertDriver", "StuckPayload")
+        self.assertIn("float stuckS = 0; if (m_iSlowSinceMs >= 0) { float stuckMs = m_Context.GetWorldMs() - "
+                      "m_iSlowSinceMs; stuckS = Math.Max(stuckMs / 1000, 0); } return \"stuck_s=\" + "
+                      "stuckS.ToString(-1, 2) + \";termination_reason=\" + TERMINATION_STUCK;", payload)
+        reader = load_reader()
+        payloads = reader.load_schema().payloads
+        self.assertEqual([k["key"] for k in payloads["stuck"]], ["stuck_s", "termination_reason"])
+        for world_ms, since in ((65432, 45400), (20000, 0), (100, -1)):
+            text = stuck_payload(world_ms, since)
+            values, problems = reader.check_payload("stuck", text, payloads)
+            self.assertEqual(problems, [], text)
+            self.assertEqual(values["termination_reason"], "stuck")
+            self.assertGreaterEqual(values["stuck_s"], 0.0)
+        self.assertEqual(stuck_payload(65432, 45400), "stuck_s=20.03;termination_reason=stuck")
+
+    def test_no_reposition_without_prepare_and_no_unwatched_traffic(self):
+        for path in DD7_SOURCES:
+            code = code_only(read(path))
+            # every SetWorldTransform / SetOrigin of an entity is preceded by ctx.PrepareReposition() in the same method
+            for match in re.finditer(r"\.(SetWorldTransform|SetOrigin|SetTransform)\(", code):
+                before = code[:match.start()].rsplit("\n\t//---", 1)[-1]
+                self.assertIn("PrepareReposition()", before, "%s: %s" % (os.path.basename(path), match.group(1)))
+            # a spawned vehicle (traffic) is watched by the crash watch
+            for match in re.finditer(r"SpawnEntityPrefab\(|SpawnEntity\(", code):
+                after = code[match.start():].split("\n\t//---", 1)[0]
+                self.assertIn("DC_CrashWatch", after, os.path.basename(path))
+        # today the driver moves and spawns nothing: the ego is the core's (spawned and parked by DC_EgoSession)
+        for path in DD7_SOURCES:
+            self.assertIsNone(re.search(r"SetWorldTransform|SetOrigin\(|SpawnEntityPrefab|SpawnEntity\(",
+                                        code_only(read(path))))
 
 
 if __name__ == "__main__":

@@ -128,7 +128,6 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_fStuckS 20
    m_fStuckKmh 1
    m_fEpisodeTimeoutS 480
-   m_fRolloverDeg 60
    m_fEngineOffS 2
    m_iMaxEpisodes 0
    m_fEpisodeGapS 3

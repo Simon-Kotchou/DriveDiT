@@ -26,12 +26,14 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     (F-11), complete plays and a usable E-02a fit with gains >= MIN_KAPPA_PER_STEER, and is checked as written
     against llc_v1's load rules (F-12); Everon inputs are refused;
   - the committed card tools/ident/cards/1.8.0.13/S105.json is exactly the generator's PLACEHOLDER (status
-    placeholder, no identification session, build_key null) with the S105's manual gearbox of T0-ENG probe run 2
-    (E-04: 6 gears, 4 forward -> scripted forward gears 2..5, neutral 1, reverse 0 by the vanilla rule);
+    placeholder, no identification session, build_key null, the TBD-5 signs dc-2.0 decided: steer_sign +1) with the
+    S105's manual gearbox of T0-ENG probe run 2 (E-04: 6 gears, 4 forward -> scripted forward gears 2..5, neutral 1,
+    reverse 0 by the vanilla rule);
   - llc_v1's scripted-gear policy (a Python mirror of DC_LLCv1 Reset / ScriptedGear / the clutch dip, tied to the
-    Enforce source) drives the placeholder's 4 forward gears: first gear at the start, one up and one down shift per
-    shift speed with hysteresis, never neutral or reverse, engine speeds within the prefab's range, the clutch dip
-    after every change; the gear-index rules (reverse below neutral, increasing scripted gears above neutral) and
+    Enforce source) drives the placeholder's 4 forward gears at the frozen dc-2.0 step dt (1/30 s, callbacks of 1 to
+    3 steps, D-A): first gear at the start, one up and one down shift per shift speed with hysteresis, never neutral
+    or reverse, engine speeds within the prefab's range, the clutch dip after every change, counted in covered steps;
+    the gear-index rules (reverse below neutral, increasing scripted gears above neutral) and
     E-04's indices in an identified card; llc_v1 refuses an automatic card on the manual ego (CheckEgoGearbox);
   - every card keeps the format llc_v1 reads: each scanned array key once, numbers without exponent, ASCII + LF, the
     keys DC_VehicleCard.Load requires; a Python mirror of DC_JsonScan.ReadNumbers reads the same arrays as json;
@@ -70,7 +72,8 @@ def load_module(name, path):
 fit = load_module("fit_steer_kappa", os.path.join(REPO, "tools", "ident", "fit_steer_kappa.py"))
 actuation_tests = load_module("test_t0eng_actuation", os.path.join(REPO, "tests", "test_t0eng_actuation.py"))
 
-DT = 1.0 / 60.0
+DT = 1.0 / 60.0             # the synthetic probe plays' fixed time slice (their headers carry it; the fit reads it)
+STEP_DT = 1.0 / 30.0        # the engine step dt of a dc-2.0 capture session on 1.8 (D-A), llc_v1's step time
 STEP_COLUMNS = actuation_tests.enforce_step_columns()
 PHASE_COLUMNS = actuation_tests.PHASE_COLUMNS
 CELL_COLUMNS = actuation_tests.CELL_COLUMNS
@@ -393,8 +396,9 @@ def engine_rpm(speed, gear):
 
 
 class LlcGears:
-    """Python mirror of llc_v1's scripted gearbox (DC_LLCv1.c: Init's dip steps, Reset's gear slot from the speed,
-    ScriptedGear's one-slot hysteresis, Step's clutch dip after each change of the commanded gear)."""
+    """Python mirror of llc_v1's scripted gearbox (DC_LLCv1.c: Init's dip steps from the measured step dt, Reset's gear
+    slot from the speed, ScriptedGear's one-slot hysteresis, Step's clutch dip after each change of the commanded gear,
+    counted in the steps each fixed-frame callback covers)."""
 
     def __init__(self, card, dt):
         gearbox = card["gearbox"]
@@ -407,7 +411,8 @@ class LlcGears:
         while self.slot < len(self.up) and speed >= self.up[self.slot]:
             self.slot += 1
 
-    def step(self, speed):
+    def step(self, speed, covered=1):
+        steps = covered if covered >= 1 else 1
         last = len(self.gears) - 1
         if self.slot < last and speed >= self.up[self.slot]:
             self.slot += 1
@@ -420,7 +425,9 @@ class LlcGears:
         clutch = 1.0
         if self.dip_left > 0:
             clutch = 0.0
-            self.dip_left -= 1
+            self.dip_left -= steps
+            if self.dip_left < 0:
+                self.dip_left = 0
         return gear, clutch
 
 
@@ -872,14 +879,21 @@ class FitTests(unittest.TestCase):
         self.assertIn("gear = ScriptedGear(speed); if (gear != m_iLastGear) m_iDipStepsLeft = m_iClutchDipSteps; "
                       "m_iLastGear = gear;", step)
         self.assertIn("m_Actuator.Apply(m_fSteerOut, throttle, brake, false, clutch, gear);", step)
+        # the dip counts the steps a callback covers (dc-2.0 D-A), its length the measured step dt
+        self.assertIn("if (m_iDipStepsLeft > 0) { clutch = 0; m_iDipStepsLeft -= steps; if (m_iDipStepsLeft < 0) "
+                      "m_iDipStepsLeft = 0; }", step)
+        self.assertIn("int steps = coveredSteps; if (steps < 1) steps = 1;", step)
+        self.assertIn("int dipSteps = Math.Round(card.m_fClutchDipS / m_fStepDtS);",
+                      enforce_body(source, "DC_LLCv1", "Init"))
         with open(CARD, "r", encoding="ascii") as f:
             card = json.load(f)
         neutral, reverse = card["gear_index_neutral"], card["gear_index_reverse"]
         up, down = card["gearbox"]["upshift_mps"], card["gearbox"]["downshift_mps"]
-        # ... over an episode from standstill: 0 -> 20 m/s at 1.5 m/s2, 2 s at 20 m/s, back to 0 at 2 m/s2
-        speeds = [min(20.0, 1.5 * DT * i) for i in range(int(20.0 / 1.5 / DT) + 120)]
-        speeds += [max(0.0, 20.0 - 2.0 * DT * i) for i in range(1, int(20.0 / 2.0 / DT) + 30)]
-        llc = LlcGears(card, DT)
+        # ... over an episode from standstill: 0 -> 20 m/s at 1.5 m/s2, 2 s at 20 m/s, back to 0 at 2 m/s2, one
+        # callback per step of the frozen step dt
+        speeds = [min(20.0, 1.5 * STEP_DT * i) for i in range(int(20.0 / 1.5 / STEP_DT) + 60)]
+        speeds += [max(0.0, 20.0 - 2.0 * STEP_DT * i) for i in range(1, int(20.0 / 2.0 / STEP_DT) + 15)]
+        llc = LlcGears(card, STEP_DT)
         llc.reset(speeds[0])
         trace = [(v,) + llc.step(v) for v in speeds]
         gears = [g for _, g, _ in trace]
@@ -910,15 +924,36 @@ class FitTests(unittest.TestCase):
         self.assertEqual(llc.step(12.0)[0], 4)
         # with a clutch dip (E-01's m_fGearClutchDipS), clutch 0 for the dip after the first SetGear and every change
         dipped = dict(card, gearbox=dict(card["gearbox"], clutch_dip_s=0.25))
-        llc = LlcGears(dipped, DT)
+        llc = LlcGears(dipped, STEP_DT)
         llc.reset(0.0)
         trace = [llc.step(v) for v in speeds]
-        steps = int(math.floor(0.25 / DT + 0.5))
+        steps = int(math.floor(0.25 / STEP_DT + 0.5))
         starts = [0] + [i for i in range(1, len(trace)) if trace[i][0] != trace[i - 1][0]]
         self.assertEqual(len(starts), 7)
         for start in starts:
             self.assertEqual([c for _, c in trace[start:start + steps + 1]], [0.0] * steps + [1.0])
         self.assertEqual(sum(1 for _, c in trace if c == 0.0), 7 * steps)
+        # the same episode in callbacks of 1, 2 and 3 steps (a capture session's shapes): the same gears, and each dip
+        # lasts its steps rounded up to whole callbacks (at least the card's, at most 2 steps more)
+        pattern = [1, 1, 2, 1, 3, 1, 2, 3, 1, 1]
+        llc = LlcGears(dipped, STEP_DT)
+        llc.reset(0.0)
+        merged, index = [], 0
+        while index < len(speeds):
+            covered = min(pattern[len(merged) % len(pattern)], len(speeds) - index)
+            merged.append((covered,) + llc.step(speeds[index], covered))      # the speed at the callback's top
+            index += covered
+        self.assertEqual(trace[0][0], merged[0][1])
+        changes = [i for i in range(1, len(merged)) if merged[i][1] != merged[i - 1][1]]
+        self.assertEqual([(merged[i - 1][1], merged[i][1]) for i in changes],
+                         [(2, 3), (3, 4), (4, 5), (5, 4), (4, 3), (3, 2)])
+        for start in [0] + changes:
+            run, dipped_steps = start, 0
+            while run < len(merged) and merged[run][2] == 0.0:
+                dipped_steps += merged[run][0]
+                run += 1
+            self.assertGreaterEqual(dipped_steps, steps)
+            self.assertLessEqual(dipped_steps, steps + 2)
 
     def test_gear_index_rules(self):
         # the card's gear indices as DC_VehicleCard.CheckGearbox checks them (gearbox_violations mirrors it)

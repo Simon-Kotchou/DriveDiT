@@ -795,14 +795,24 @@ SLOW_FRAMES = {"frame_ms": (40, 45, 38, 42, 36)}
 
 class C21Test(unittest.TestCase):
     """C21 per-frame FPS over the non-screenshot frames (the user's decision of 2026-11-04): 1 / frame time from
-    hf.world_time_ms, the rows at done_render_frame (the frame after the captured one) excluded."""
+    hf.world_time_ms, the rows after a decoded capture (done = C + 1) excluded, and the review of fa37e93
+    (t0/freeze/review/CODEX_C21.md): no mutation turns a FAIL into a PASS; missing or contradictory evidence gives
+    NOT_EVALUATED (a pass needs the evidence) or FAIL. A world-time FPS can only overstate the real one, so an FPS
+    failure is final."""
 
     @classmethod
     def setUpClass(cls):
         cls.tmp = temp_dir("dc2_c21_")
         cls.routes = os.path.join(cls.tmp, "r")
-        with mock.patch.dict(synth.SPECS["golden_10hz"], RUN_FRAMES):
-            cls.run_like = synth.generate(os.path.join(cls.tmp, "run"), kind="golden_10hz", routes_dir=cls.routes)
+
+        def make(name, kind, extra):
+            with mock.patch.dict(synth.SPECS[kind], extra):
+                return synth.generate(os.path.join(cls.tmp, name), kind=kind, routes_dir=cls.routes)
+
+        cls.run_like = make("run", "golden_10hz", RUN_FRAMES)
+        cls.run_long = make("runlong", "t0_loop", RUN_FRAMES)          # 108 s: a heartbeat span that bounds world/real
+        cls.slow45 = make("slow45", "golden", {"frame_ms": (45,) + (25,) * 9})        # Codex: 22.22 FPS
+        cls.slow50 = make("slow50", "golden", {"frame_ms": (10, 50) + (20,) * 8})     # Codex: 20 FPS
 
     @classmethod
     def tearDownClass(cls):
@@ -811,74 +821,245 @@ class C21Test(unittest.TestCase):
     def check(self, session, *extra):
         return run_json("--session", session, "--routes-dir", self.routes, "--vehicle-card", CARD, *extra)
 
+    def c21(self, session, *extra):
+        code, rep = self.check(session, *extra)
+        return by_id(rep)["C21"]
+
+    def copy(self, out, name):
+        dst = os.path.join(self.tmp, "m_" + name, out["session_id"])
+        shutil.copytree(out["session_dir"], dst)
+        return dst
+
     def golden(self, name):
         return copy_golden(os.path.join(self.tmp, name))
 
-    def test_golden_passes(self):
-        code, rep = run_json("--session", GOLDEN_DIR, "--routes-dir", ROUTES, "--vehicle-card", CARD)
-        c21 = by_id(rep)["C21"]
-        self.assertEqual((code, c21["status"], c21["value"]["excluded_rows"]), (0, "PASS", 68))
-        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 27, places=3)       # 24-27 ms ordinary frames
-        self.assertAlmostEqual(c21["value"]["fps_p5_all"], 12.5)                     # the 80 ms capture stalls
-        self.assertLess(abs(c21["value"]["world_real"] - 1.0), 0.02)
+    @staticmethod
+    def hf_rows(session):
+        rows = {}
+        for name in sorted(os.listdir(os.path.join(session, "hf"))):
+            if name.startswith("chunk_"):
+                lines = read_lines(os.path.join(session, "hf", name))
+                cols = lines[0].split(",")
+                for line in lines[1:]:
+                    vals = line.split(",")
+                    rows[int(vals[0])] = dict(zip(cols, vals))
+        return rows
 
-    def test_slow_screenshot_frames_only_pass(self):
-        """The run 3-4 shape: every capture's done row slow, ordinary frames fast; 38% of the rows are excluded at
-        10 Hz (no percentage rule: one excluded row per completed request)."""
-        code, rep = self.check(self.run_like["session_dir"])
-        c21 = by_id(rep)["C21"]
-        self.assertEqual((c21["status"], c21["severity"]), ("PASS", "SOFT"))
+    @staticmethod
+    def column(session, stream, column):
+        out = {}
+        for name in sorted(os.listdir(os.path.join(session, stream))):
+            if name.startswith("chunk_"):
+                lines = read_lines(os.path.join(session, stream, name))
+                cols = lines[0].split(",")
+                out.update((int(x.split(",")[0]), x.split(",")[cols.index(column)]) for x in lines[1:])
+        return out
+
+    def slow_rows(self, session, ms):
+        """hf render frames whose world delta is ms and that are not after a capture (done frames)."""
+        rows = self.hf_rows(session)
+        done = set(int(v) for v in self.column(session, "img", "done_render_frame").values() if v)
+        return sorted(f for f in rows if f - 1 in rows and f not in done and
+                      int(rows[f]["world_time_ms"]) - int(rows[f - 1]["world_time_ms"]) == ms)
+
+    @staticmethod
+    def edit_heartbeat(session, fn):
+        path = os.path.join(session, "heartbeat.csv")
+        lines = read_lines(path)
+        cols = lines[0].split(",")
+        rows = [dict(zip(cols, line.split(","))) for line in lines[1:]]
+        rows = fn(rows)
+        with open(path, "wb") as f:
+            f.write(("\n".join([lines[0]] + [",".join(r[c] for c in cols) for r in rows]) + "\n").encode("ascii"))
+
+    # --- valid sessions -------------------------------------------------------------------------------------------
+    def test_golden(self):
+        """13 s: PASS at T0 (p5 37.0, all 12.5, 68 excluded); from T1 a 5 s heartbeat span cannot bound world/real
+        within 2% (unix_s whole seconds), so the FPS pass is NOT_EVALUATED there (the long variant below passes)."""
+        c21 = self.c21(GOLDEN_DIR)
+        self.assertEqual((c21["status"], c21["value"]["excluded_rows"], c21["value"]["samples"]), ("PASS", 68, 323))
+        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 27, places=3)
+        self.assertAlmostEqual(c21["value"]["fps_p5_all"], 12.5)
+        c21 = self.c21(GOLDEN_DIR, "--trial", "T1")
+        self.assertEqual((c21["status"], c21["severity"]), ("NOT_EVALUATED", "HARD"))
+        self.assertIn("not bounded within 1 +- 0.02", c21["detail"])
+
+    def test_run_shaped_sessions_pass(self):
+        """The run 3-4 shape (frames 7-16 ms, every capture's done row 67-100 ms): 10 Hz at T0 (38% excluded) and the
+        108 s variant at T1, where the heartbeat span bounds world/real."""
+        c21 = self.c21(self.run_like["session_dir"])
+        self.assertEqual(c21["status"], "PASS")
         self.assertGreaterEqual(c21["value"]["fps_p5"], 60.0)
         self.assertLess(c21["value"]["fps_p5_all"], 12.0)
         self.assertGreater(c21["value"]["excluded_rows"] / float(c21["value"]["frames"]), 0.3)
-        code, rep = self.check(self.run_like["session_dir"], "--trial", "T1")
-        self.assertEqual((by_id(rep)["C21"]["status"], by_id(rep)["C21"]["severity"]), ("PASS", "HARD"))
+        c21 = self.c21(self.run_long["session_dir"], "--trial", "T1")
+        self.assertEqual((c21["status"], c21["severity"]), ("PASS", "HARD"))
+        self.assertGreaterEqual(c21["value"]["fps_p5"], 60.0)
+        lo, hi = c21["value"]["world_real_bounds"]
+        self.assertTrue(0.98 <= lo and hi <= 1.02, (lo, hi))
 
     def test_slow_ordinary_frames_fail(self):
-        with mock.patch.dict(synth.SPECS["golden"], SLOW_FRAMES):
-            out = synth.generate(os.path.join(self.tmp, "slow"), kind="golden", routes_dir=self.routes)
-        code, rep = self.check(out["session_dir"])
-        c21 = by_id(rep)["C21"]
-        self.assertEqual((code, failing(rep), c21["severity"]), (2, ["C21"], "SOFT"))
-        self.assertLess(c21["value"]["fps_p5"], 30.0)
+        c21 = self.c21(self.slow45["session_dir"])
+        self.assertEqual((c21["status"], c21["severity"]), ("FAIL", "SOFT"))
+        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 45, places=3)
         self.assertIn("non-screenshot frames < 30", c21["detail"])
+        c21 = self.c21(self.slow45["session_dir"], "--trial", "T1")
+        self.assertEqual((c21["status"], c21["severity"]), ("FAIL", "HARD"))
 
-    def test_world_real_off_is_not_evaluated(self):
-        """Heartbeat wall time 2 s longer than world time over a 5 s span: frames lost world time to the 100 ms
-        clamp, so world-time deltas do not measure frame time (never a PASS)."""
-        session = self.golden("wr")
-        path = os.path.join(session, "heartbeat.csv")
-        lines = read_lines(path)
-        parts = lines[-1].split(",")
-        parts[0] = str(int(parts[0]) + 2)
-        lines[-1] = ",".join(parts)
-        with open(path, "wb") as f:
-            f.write(("\n".join(lines) + "\n").encode("ascii"))
-        code, rep = self.check(session)
+    # --- review item 1: pause flags ---------------------------------------------------------------------------------
+    def test_pause_flags_do_not_hide_slow_frames(self):
+        """Codex: paused = 1 on the 31 slow ordinary rows (no pause events, clocks unchanged) gave 40 FPS and a full
+        PASS at T0 and T1; all rows but two paused gave a T1 PASS from one sample. World time does not advance
+        while paused, so a row whose world time advances is a sample whatever its flag."""
+        slow = set(self.slow_rows(self.slow45["session_dir"], 45))
+        self.assertEqual(len(slow), 31)
+        session = self.copy(self.slow45, "paused")
+        set_column(session, "hf", "paused", lambda key, v: "1" if key in slow else v)
+        for extra in ((), ("--trial", "T1")):
+            c21 = self.c21(session, *extra)
+            self.assertEqual(c21["status"], "FAIL", extra)
+            self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 45, places=3)
+            self.assertEqual(c21["value"]["paused_rows_advancing"], 31)
+        session = self.copy(self.slow45, "allpaused")
+        first_two = sorted(self.hf_rows(session))[:2]
+        set_column(session, "hf", "paused", lambda key, v: v if key in first_two else "1")
+        c21 = self.c21(session, "--trial", "T1")
+        self.assertEqual(c21["status"], "FAIL")
+        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 45, places=3)
+        self.assertGreater(c21["value"]["samples"], 200)
+
+    def test_too_few_samples_is_not_evaluated(self):
+        """The sample floor (max(30, 5 per world second)): a pass needs the evidence, a failure does not."""
+        health = dc_validate.checks.health
+        with mock.patch.object(health, "FPS_SAMPLES_PER_S", 1000):
+            c21 = self.c21(GOLDEN_DIR)
+            self.assertEqual(c21["status"], "NOT_EVALUATED")
+            self.assertIn("frame-time samples, at least", c21["detail"])
+            self.assertEqual(self.c21(self.slow45["session_dir"])["status"], "FAIL")
+
+    # --- review item 2: redistributed world times between callbacks (the documented limit) --------------------------
+    def test_known_limit_world_times_between_callbacks(self):
+        """Codex: frames (10, 50, 20 x 8) ms fail at 20 FPS; moving 25 world times of frames without a callback,
+        heartbeat or image request so that 10/50 ms pairs read 30/30 ms passes at 33.3 FPS. No sound cross-check
+        exists (hf.fps is a smoothed rate that sums over such frames; the fixed-step accumulator lags world time by
+        up to 250-310 ms while capturing): C21 trusts the writer's hf.world_time_ms between callbacks, as its
+        docstring states. This test pins the limit, not a wish."""
+        out = self.slow50
+        self.assertAlmostEqual(self.c21(out["session_dir"])["value"]["fps_p5"], 20.0)
+        session = self.copy(out, "reshape")
+        rows = self.hf_rows(session)
+        callbacks = set(int(v) for v in self.column(session, "ctl", "render_frame").values())
+        issued = set(int(v) for v in self.column(session, "img", "issue_render_frame").values() if v)
+        beats = set()
+        self.edit_heartbeat(session, lambda hb: [beats.add(int(r["render_frame"])) or r for r in hb])
+        moved = []
+        for f in sorted(rows):
+            if len(moved) == 25:
+                break
+            if f - 1 not in rows or f + 1 not in rows or f in callbacks | issued | beats:
+                continue
+            w0, w1, w2 = (int(rows[g]["world_time_ms"]) for g in (f - 1, f, f + 1))
+            if (w1 - w0, w2 - w1) == (10, 50):
+                moved.append(f)
+        self.assertEqual(len(moved), 25)
+        set_column(session, "hf", "world_time_ms", lambda key, v: str(int(v) + 20) if key in moved else v)
+        c21 = self.c21(session)
+        self.assertEqual(c21["status"], "PASS")
+        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 30, places=3)
+        self.assertIn("trusts the writer's hf.world_time_ms between callbacks",
+                      " ".join(dc_validate.checks.health.check_c21.__doc__.split()))
+
+    # --- review items 3 and 4: heartbeat integrity -------------------------------------------------------------------
+    def test_heartbeat_wall_time_cannot_erase_the_memory_check(self):
+        """Codex: +1000 KiB on the golden's second heartbeat fails T1 at 710 MB/h; equalising the two unix_s then
+        nulled ratio and slope and passed T1. World time cannot outrun wall time: FAIL."""
+        session = self.golden("mem")
+        self.edit_heartbeat(session, lambda hb: hb[:1] + [dict(hb[1], mem_kb=str(int(hb[1]["mem_kb"]) + 1000))])
+        c21 = self.c21(session, "--trial", "T1")
+        self.assertEqual(c21["status"], "FAIL")
+        self.assertIn("memory slope", c21["detail"])
+        self.assertAlmostEqual(c21["value"]["mem_slope_mb_per_h"], 710.16, places=1)
+        self.edit_heartbeat(session, lambda hb: hb[:1] + [dict(hb[1], unix_s=hb[0]["unix_s"])])
+        c21 = self.c21(session, "--trial", "T1")
+        self.assertEqual(c21["status"], "FAIL")
+        self.assertIn("world time outran wall time", c21["detail"])
+
+    def test_a_removed_heartbeat_fails(self):
+        """Codex: the second heartbeat removed and the seal count set to 1 passed T1 (the 2-period gap rule allows one
+        missing row). The writer's schedule puts one row in the first frame past every 5 s boundary: FAIL."""
+        session = self.golden("hb1")
+        self.edit_heartbeat(session, lambda hb: hb[:1])
+        edit_json(os.path.join(session, "session_end.json"), lambda o: o.update({"heartbeats": 1}))
+        for extra in ((), ("--trial", "T1")):
+            c21 = self.c21(session, *extra)
+            self.assertEqual(c21["status"], "FAIL", extra)
+            self.assertIn("do not follow the 5 s world-time schedule", c21["detail"])
+
+    def test_a_contradictory_heartbeat_world_time_fails(self):
+        """Codex: on the 22.22 FPS fixture the second heartbeat's world_ms 10015 -> 7000 (frame and hf unchanged)
+        turned the FPS failure into a T1 NOT_EVALUATED. A heartbeat must carry its frame's world time: FAIL."""
+        session = self.copy(self.slow45, "hbworld")
+        self.edit_heartbeat(session, lambda hb: hb[:1] + [dict(hb[1], world_ms="7000")] + hb[2:])
+        c21 = self.c21(session, "--trial", "T1")
+        self.assertEqual((c21["status"], c21["severity"]), ("FAIL", "HARD"))
+        self.assertIn("do not follow the 5 s world-time schedule", c21["detail"])
+
+    # --- review item 5: exclusions need decoded evidence --------------------------------------------------------------
+    def test_exclusions_need_decoded_captures(self):
+        """Codex: 31 bogus issued slots, no image files, whose done frames are the slow ordinary rows: C21 excluded
+        them (40 FPS, PASS alone). A row is excluded only after a decoded capture (done = C + 1)."""
+        session = self.copy(self.slow45, "bogus")
+        slow = self.slow_rows(session, 45)
+        names = sorted(n for n in os.listdir(os.path.join(session, "img")) if n.startswith("chunk_"))
+
+        def add(cols, rows):
+            last = rows[-1]
+            for k, frame in enumerate(slow):
+                r = list(last)
+                r[cols.index("slot_id")] = str(int(last[cols.index("slot_id")]) + 1 + k)
+                r[cols.index("issue_status")] = "issued"
+                r[cols.index("issue_render_frame")] = str(frame - 1)
+                r[cols.index("done_render_frame")] = str(frame)
+                r[cols.index("path")] = "frames/f_%08d" % int(r[cols.index("slot_id")])
+                rows.append(r)
+            return rows
+
+        rewrite_chunk(session, "img", int(names[-1][6:11]), add)
+        code, rep = run_json("--session", session, "--routes-dir", self.routes, "--vehicle-card", CARD,
+                             "--checks", "C21")
         c21 = by_id(rep)["C21"]
-        self.assertEqual(c21["status"], "NOT_EVALUATED")
-        self.assertIn("world/real", c21["detail"])
-        self.assertLess(c21["value"]["world_real"], 0.98)
+        self.assertEqual((code, c21["status"]), (2, "FAIL"))
+        self.assertAlmostEqual(c21["value"]["fps_p5"], 1000.0 / 45, places=3)
 
     def test_excluded_row_not_after_its_capture_fails(self):
-        """An excluded row must be the frame after its decoded capture (done = C + 1); slot 10's done moved two
-        frames later points at an ordinary frame."""
+        """A decoded slot whose done is not C + 1, and two completions in one frame, fail."""
         session = self.golden("off")
         set_column(session, "img", "done_render_frame", lambda key, v: str(int(v) + 2) if key == 10 else v)
         code, rep = self.check(session)
         self.assertIn("C21", failing(rep))
         self.assertIn("not the frame after their decoded capture", by_id(rep)["C21"]["detail"])
-        session = self.golden("dup")             # two completions in one frame: one request in flight at a time
-        done = {}
-        for name in sorted(os.listdir(os.path.join(GOLDEN_DIR, "img"))):
-            if name.startswith("chunk_"):
-                lines = read_lines(os.path.join(GOLDEN_DIR, "img", name))
-                cols = lines[0].split(",")
-                done.update((int(x.split(",")[0]), x.split(",")[cols.index("done_render_frame")]) for x in lines[1:])
+        session = self.golden("dup")
+        done = self.column(GOLDEN_DIR, "img", "done_render_frame")
         set_column(session, "img", "done_render_frame", lambda key, v: done[9] if key == 10 else v)
         code, rep = self.check(session)
         self.assertIn("C21", failing(rep))
         self.assertIn("share a done_render_frame", by_id(rep)["C21"]["detail"])
+
+    # --- review item 6: whole-second unix_s ---------------------------------------------------------------------------
+    def test_world_real_needs_a_bounding_heartbeat_span(self):
+        """Codex: +1 s on the golden's last heartbeat gives ratio 0.837 with bounds up to 1.0046: at T0 not certainly
+        outside 1 +- 2% (PASS, a short shakedown session), from T1 not bounded (NOT_EVALUATED); +2 s is certainly
+        outside: NOT_EVALUATED at every tier. A slow session still fails."""
+        for plus, t0, t1 in ((1, "PASS", "NOT_EVALUATED"), (2, "NOT_EVALUATED", "NOT_EVALUATED")):
+            session = self.golden("wr%d" % plus)
+            self.edit_heartbeat(session, lambda hb: hb[:-1] + [dict(hb[-1], unix_s=str(int(hb[-1]["unix_s"]) + plus))])
+            c21 = self.c21(session)
+            self.assertEqual(c21["status"], t0, plus)
+            self.assertEqual(self.c21(session, "--trial", "T1")["status"], t1, plus)
+            self.assertAlmostEqual(c21["value"]["world_real"], 1.0046 * 5 / (5 + plus), places=3)
+        session = self.copy(self.slow45, "wrslow")
+        self.edit_heartbeat(session, lambda hb: hb[:-1] + [dict(hb[-1], unix_s=str(int(hb[-1]["unix_s"]) + 2))])
+        self.assertEqual(self.c21(session)["status"], "FAIL")
 
 
 class SlowCaptureTest(unittest.TestCase):

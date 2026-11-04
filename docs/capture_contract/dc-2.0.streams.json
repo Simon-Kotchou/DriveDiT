@@ -105,8 +105,8 @@
     {
       "id": "TBD-10",
       "item": "collision detector and crash-event parameters (session.json events.*)",
-      "default_r2": "collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override",
-      "default": {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_window_tol_ms": 50, "collision_peak_ms": 200, "collision_refractory_ms": 1000, "episode_end_wait_ms": 250, "crash_cooldown_ms": 3000, "rollover_up_y": 0.5, "rollover_hold_ms": 500, "state_poll_ms": 100, "contact_source": "vanilla_process_collision", "provisional": true},
+      "default_r2": "collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, episode_block_max_ms 60000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override",
+      "default": {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_window_tol_ms": 50, "collision_peak_ms": 200, "collision_refractory_ms": 1000, "episode_end_wait_ms": 250, "crash_cooldown_ms": 3000, "episode_block_max_ms": 60000, "rollover_up_y": 0.5, "rollover_hold_ms": 500, "state_poll_ms": 100, "contact_source": "vanilla_process_collision", "provisional": true},
       "decided_by": "E-01 extension",
       "blocks_freeze": false,
       "results": "docs/trials/T0-ENG.md",
@@ -225,6 +225,7 @@
       "stop",
       "dc_stop",
       "ego_destroyed",
+      "ego_disabled",
       "script_error:write_fail",
       "script_error:other",
       "zero_ego",
@@ -632,7 +633,7 @@
         {"key": "by", "type": "enum", "unit": "-", "required": false, "enum": ["ai", "reseat", "spawn"], "desc": "Who seated the driver, when the writer knows it: ai (the vanilla AI got in), reseat (a director teleported the same character back), spawn (a director seated a new character)."}
       ],
       "rollover": [
-        {"key": "onset_step", "type": "int", "unit": "step", "required": true, "desc": "First physics_step of the hold: the first callback with up_y below events.rollover_up_y. The row is written once the hold of events.rollover_hold_ms is confirmed and belongs to the episode of this step, even when that episode has ended meanwhile (a driver may end it at the first tilted step)."},
+        {"key": "onset_step", "type": "int", "unit": "step", "required": true, "desc": "First physics_step of the hold: the first callback with up_y below events.rollover_up_y; never after the row's physics_step. The row is written once the hold of events.rollover_hold_ms is confirmed and belongs to the episode of this step, even when that episode has ended meanwhile."},
         {"key": "up_y", "type": "float", "unit": "1", "required": true, "range": [-1, 1], "desc": "up_y of the vehicle (GetWorldTransform row 1, y) when the hold was confirmed."}
       ],
       "stuck": [
@@ -815,6 +816,7 @@
         {"name": "events.collision_refractory_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Per-slot refractory after an onset: a further crossing or a contact with the same other entity belongs to the same impact (default 1000)."},
         {"name": "events.episode_end_wait_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Longest wait, from the onset, of an episode end for the ego's pending collision row (default 250)."},
         {"name": "events.crash_cooldown_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "No new episode begins until this long after the ego's last terminal crash event (default 3000: longer than the refractory 1000 ms plus the rollover hold 500 ms plus a poll period and the 250 ms row wait, so the late polls of one impact, a rollover after it and a merged second contact land before the next episode; 3 s also lets the vehicle come to rest, 20 m/s at 7 m/s2)."},
+        {"name": "events.episode_block_max_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Longest time, between episodes, for which the ego may stay tilted, immobile or burning without being destroyed: the session then ends through the planned end with end_reason ego_disabled (default 60000; the cool-down and a pending row do not count)."},
         {"name": "events.rollover_up_y", "type": "float", "unit": "1", "required": true, "tbd": "TBD-10", "desc": "rollover when up_y (GetWorldTransform row 1, y) stays below this (default 0.5, a tilt of 60 deg)."},
         {"name": "events.rollover_hold_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "How long up_y must stay below rollover_up_y (default 500)."},
         {"name": "events.state_poll_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Poll period of the damage, fire, driver and seat state of every slot (default 100)."},
@@ -853,8 +855,8 @@
       "fields": [
         {"name": "contract_version", "type": "str", "unit": "-", "required": true, "desc": "dc-2.0."},
         {"name": "session_id", "type": "str", "unit": "-", "required": true, "desc": "As in session.json."},
-        {"name": "status", "type": "enum", "unit": "-", "required": true, "enum": ["ok", "failed"], "desc": "ok only when every commit succeeded and no error ended the session (ego_destroyed is not an error); failed otherwise."},
-        {"name": "end_reason", "type": "enum", "unit": "-", "required": true, "enum": ["duration", "stop", "dc_stop", "ego_destroyed", "script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost"], "desc": "Why the session ended (ego_destroyed: the ego was destroyed after the first row, a normal end with status ok; section 5.3)."},
+        {"name": "status", "type": "enum", "unit": "-", "required": true, "enum": ["ok", "failed"], "desc": "ok only when every commit succeeded and no error ended the session (ego_destroyed and ego_disabled are not errors); failed otherwise."},
+        {"name": "end_reason", "type": "enum", "unit": "-", "required": true, "enum": ["duration", "stop", "dc_stop", "ego_destroyed", "ego_disabled", "script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost"], "desc": "Why the session ended (ego_destroyed: the ego was destroyed after the first row; ego_disabled: between episodes it stayed tilted, immobile or burning for events.episode_block_max_ms; both normal ends with status ok, section 5.3)."},
         {"name": "end.unix_s", "type": "int", "unit": "s", "required": true, "desc": "Wall time at end."},
         {"name": "end.utc", "type": "str", "unit": "-", "required": true, "desc": "ISO 8601 UTC at end."},
         {"name": "end.world_ms", "type": "int", "unit": "ms", "required": true, "desc": "world_time_ms at end."},

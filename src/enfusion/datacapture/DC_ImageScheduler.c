@@ -147,6 +147,7 @@ class DC_ImageScheduler : DC_SessionModule
 	//------------------------------------------------------------------------------------------------
 	override bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		if (!m_bImages || (m_Fiducial && m_Fiducial.IsCreated()))
 			return true;
 

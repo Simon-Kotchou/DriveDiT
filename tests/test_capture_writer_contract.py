@@ -23,6 +23,9 @@ LAYER = os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC
 INPUT_SUFFIXES = ("steer", "throttle", "brake", "clutch", "gear", "handbrake")
 WHEELS = 4
 # DC_CrashWatch attribute -> session.json events.* key (contract 10.1, TBD-10)
+# The dc-2.0 capture core (DC_Arland's modules): every out parameter is assigned on entry (review round 2)
+CORE_FILES = ("DC_Session.c", "DC_EgoSession.c", "DC_StreamRecorder.c", "DC_CrashWatch.c", "DC_HfRecorder.c",
+              "DC_ImageScheduler.c", "DC_ChunkWriter.c", "DC_VehicleRegistry.c")
 ATTRIBUTE_KEYS = {"m_fCollisionDvMps": "collision_dv_mps", "m_iCollisionWindowMs": "collision_window_ms",
                   "m_iCollisionWindowTolMs": "collision_window_tol_ms", "m_iCollisionPeakMs": "collision_peak_ms",
                   "m_iCollisionRefractoryMs": "collision_refractory_ms", "m_iEpisodeEndWaitMs": "episode_end_wait_ms",
@@ -184,6 +187,20 @@ class WriterContractTest(unittest.TestCase):
         step = body(self.crash, "protected void StepSlot(")
         self.assertIn("worldMs <= slot.m_iOnsetMs + m_iCollisionPeakMs", step)
         self.assertIn("slot.m_iOnsetEpisode = m_Session.GetEpisodeId()", step)
+
+
+    def test_out_parameters_are_assigned_on_entry(self):
+        sig = re.compile(r"^\t(?:[a-z]+ )*[\w<>]+ (\w+)\(([^)]*\bout\b[^)]*)\)\n\t\{", re.M)
+        checked = 0
+        for name in CORE_FILES:
+            text = source(name)
+            for m in sig.finditer(text):
+                outs = re.findall(r"\bout [\w<>]+ (\w+)", m.group(2))
+                head = body(text, m.group(0)).strip().split(";")[:len(outs)]
+                assigned = [re.match(r"\s*(\w+) = ", s).group(1) for s in head if re.match(r"\s*(\w+) = ", s)]
+                self.assertEqual(sorted(assigned), sorted(outs), "%s %s" % (name, m.group(1)))
+                checked += 1
+        self.assertGreaterEqual(checked, 20)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,7 @@ class DC_HfRecorder : DC_SessionModule
 	//! Attaches rig R1 as soon as the ego exists; ready while the camera is current and attached
 	override bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		IEntity ego = m_Session.GetEgo();
 		if (!ego)
 		{

@@ -781,6 +781,8 @@ class DC_DriverInterface : ScriptComponent
 	//! false = DC_EgoSession's attribute pose
 	bool GetSpawnPose(out vector position, out float headingDeg)
 	{
+		position = vector.Zero;
+		headingDeg = 0;
 		return false;
 	}
 
@@ -937,6 +939,7 @@ class DC_StreamRecorder : DC_SessionModule
 	//! Ready once the ego module handed over the actuator and the driver accepted it (BeginDriver)
 	override bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		if (!m_Actuator)
 		{
 			waitingFor = "the ego and its actuator";

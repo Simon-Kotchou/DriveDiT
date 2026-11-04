@@ -452,6 +452,7 @@ class DC_CrashWatch : DC_SessionModule
 	//! telemetry.dv_max_mps: the largest dv_h of the slot since the last call. false while none was evaluated
 	bool TakeDvMax(int slotId, out float value)
 	{
+		value = 0;
 		DC_CrashSlot slot = FindSlot(slotId);
 		if (!slot || !slot.m_bHasDvMax)
 			return false;

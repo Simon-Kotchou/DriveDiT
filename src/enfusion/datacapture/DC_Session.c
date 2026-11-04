@@ -323,6 +323,7 @@ class DC_SessionModule : ScriptComponent
 	//! Polled once per frame until every module is ready. waitingFor names what is missing (for the timeout ERROR)
 	bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		return true;
 	}
 
@@ -767,6 +768,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! -dcTrial <id>, else the ACTIVE pointer; then $profile:dc_trials/<id>.json (dc-2.0 section 5.2)
 	protected bool ResolveTrial(out string failure)
 	{
+		failure = string.Empty;
 		string cliTrial;
 		if (System.GetCLIParam(CLI_TRIAL, cliTrial) && !cliTrial.Trim().IsEmpty())
 		{
@@ -923,6 +925,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! A JSON number as float: written as a decimal or as an integer
 	protected bool ReadNumber(notnull JsonLoadContext context, string key, out float value)
 	{
+		value = 0;
 		if (!context.DoesKeyExist(key))
 			return false;
 
@@ -942,6 +945,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! pin.engine_version_expected; DD-14a). Without it the check is recorded as not done.
 	protected bool CheckBuild(out string failure)
 	{
+		failure = string.Empty;
 		m_sBuildVersion = GetGame().GetBuildVersion();
 		JsonLoadContext context = new JsonLoadContext(false);
 		if (!context.LoadFromFile(m_LaunchInfo.m_sRecordPath))
@@ -982,6 +986,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! extent) and the weather manager's latitude; never parsed from GetWorldFile() (CR-100)
 	protected bool CheckFingerprint(out string failure)
 	{
+		failure = string.Empty;
 		if (m_sMapId != "arland" && m_sMapId != "kolguyev")
 		{
 			failure = "map id '" + m_sMapId + "' is not a capture map of this component (arland, kolguyev)";
@@ -1025,6 +1030,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! k x slice <= m_fTelemetryMaxPeriodS (draft 50 ms, +1 us), at least 1. The decision rate is the image rate (TBD-2)
 	protected bool ComputeClocks(out string failure)
 	{
+		failure = string.Empty;
 		m_fFixedTimeSliceS = GetGame().GetWorld().GetFixedTimeSlice();
 		if (m_fFixedTimeSliceS <= 0 || m_fImageHz <= 0 || m_fTelemetryMaxPeriodS <= 0)
 		{
@@ -1235,6 +1241,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! Builds the session id and creates the directory; refuses an existing one (nothing written)
 	protected bool MakeSessionDir(out string failure)
 	{
+		failure = string.Empty;
 		m_sExeKind = GetExeKind();
 		m_sInstance = GetInstanceTag();
 		string utcCompact;
@@ -2897,6 +2904,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! is read on both sides of the time, so a read across midnight takes the time again with the later date
 	static string FormatUtc(out string compact)
 	{
+		compact = string.Empty;
 		int year;
 		int month;
 		int day;

@@ -195,6 +195,7 @@ class DC_EgoSession : DC_SessionModule
 	//! DC_ProbeActuator.Teleport)
 	protected bool SpawnEgo(vector position, float headingDeg, out string failure)
 	{
+		failure = string.Empty;
 		Resource resource = Resource.Load(m_sEgoPrefab);
 		if (!resource || !resource.IsValid())
 		{
@@ -231,6 +232,7 @@ class DC_EgoSession : DC_SessionModule
 	//! Ready after the settle with the ego alive and slow
 	override bool IsSessionReady(out string waitingFor)
 	{
+		waitingFor = string.Empty;
 		if (m_Session.GetFaultCase() == DC_Session.FAULT_READINESS_TIMEOUT)
 		{
 			waitingFor = "fault case readiness_timeout (never ready)";
@@ -522,6 +524,7 @@ class DC_EgoSession : DC_SessionModule
 	//! The ego is present (IsEgoPresent) and not destroyed
 	protected bool IsEgoAlive(out string failure)
 	{
+		failure = string.Empty;
 		if (!IsEgoPresent(failure))
 			return false;
 

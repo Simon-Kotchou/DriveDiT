@@ -2010,7 +2010,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		vector transform[4];
 		GetSpawnResetTransform(state, transform);
-		TeleportVehicle(state, transform);
+		TeleportVehicle(state, transform, "stuck reset to the spawn point after 30 s standing with a ready driver");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2048,7 +2048,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 			vector transform[4];
 			GetSpawnResetTransform(state, transform);
-			TeleportVehicle(state, transform);
+			TeleportVehicle(state, transform, "moved to the spawn point, every drive target it could take was avoided");
 		}
 
 		state.m_bAvoidListCleared = true;
@@ -2069,10 +2069,17 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! Teleports the vehicle, and whoever sits in it, to transform (IEntity.SetWorldTransform,
-	//! Core/generated/Entities/IEntity.c:290); the stuck clock and the distance accounting restart there.
-	protected void TeleportVehicle(SCR_MLDataCaptureGroupState state, vector transform[4])
+	//! Core/generated/Entities/IEntity.c:290); the stuck clock and the distance accounting restart there. A registered
+	//! car's jump is logged by the collector with its vehicle id, world time, frame and both poses
+	//! (SCR_MLDataCollector.NoteVehicleTeleport), which also keeps distance_total from counting it.
+	protected void TeleportVehicle(SCR_MLDataCaptureGroupState state, vector transform[4], string reason)
 	{
+		vector fromTransform[4];
+		state.m_Vehicle.GetWorldTransform(fromTransform);
 		state.m_Vehicle.SetWorldTransform(transform);
+		if (state.m_bRegistered && m_Collector)
+			m_Collector.NoteVehicleTeleport(state.m_Vehicle, fromTransform[3], fromTransform[2], transform[3], transform[2], string.Format("group %1: %2", state.m_iGroupId, reason));
+
 		vector position = transform[3];
 		state.m_fStuckTimeS = 0;
 		state.m_vStuckCheckPosition = position;
@@ -2256,6 +2263,16 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		ReleaseGroup(state, GetObserversSystem(), true);
 		DeleteWaypointEntities(state);
 
+		// No more telemetry rows for a retired car, without renumbering the other vehicle ids (and the camera moves on
+		// if it followed this car).
+		string captureText = "not in the collector session";
+		if (state.m_bRegistered && m_Collector && state.m_Vehicle)
+		{
+			captureText = "collector slot kept but no longer captured";
+			if (!m_Collector.DeactivateVehicle(state.m_Vehicle, string.Format("group %1 retired: %2", state.m_iGroupId, reason)))
+				captureText = "collector does not know the car";
+		}
+
 		string groupText = "AI group already gone";
 		if (group)
 		{
@@ -2278,7 +2295,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		if (lastTargetId > 0)
 			lastTarget = lastTargetId.ToString();
 
-		Print(string.Format("[DataCapture] WARNING: group %1 retired: %2 (%3 waypoints removed, last target %4, %5; no new waypoint, seat watchdog or move-failure counting from now on) %6", state.m_iGroupId, reason, removed, lastTarget, groupText, before), LogLevel.WARNING);
+		Print(string.Format("[DataCapture] WARNING: group %1 retired: %2 (%3 waypoints removed, last target %4, %5, %6; no new waypoint, seat watchdog or move-failure counting from now on) %7", state.m_iGroupId, reason, removed, lastTarget, groupText, captureText, before), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2541,7 +2558,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 
 		state.m_iLimitResets++;
 		state.m_iStuckResets++;
-		TeleportVehicle(state, transform);
+		TeleportVehicle(state, transform, string.Format("stuck reset %1/%2 after the reseat limit", state.m_iLimitResets, MAX_LIMIT_RESETS));
 		state.m_iReseatsWithoutProgress = 0;
 		state.m_vLastReseatPosition = transform[3];
 

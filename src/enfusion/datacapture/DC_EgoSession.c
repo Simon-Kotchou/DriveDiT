@@ -112,6 +112,8 @@ class DC_EgoSession : DC_SessionModule
 	protected string m_sStopTermination;		//!< latched when the planned end begins during an episode
 	protected string m_sBlockedNoted;			//!< the reason of the last "no new episode" line printed (once per reason)
 	protected bool m_bDestroyedAfterStep;		//!< destruction seen in OnStepPost: the session ends after this step's rows
+	protected bool m_bDisabledTiming;			//!< the ego blocks episodes as tilted, immobile or burning since m_iDisabledSinceMs
+	protected int m_iDisabledSinceMs;
 	protected string m_sEpisodeWeather;
 	protected float m_fEpisodeTodH;
 	protected float m_fEpisodeRain;
@@ -545,18 +547,39 @@ class DC_EgoSession : DC_SessionModule
 		if (!driver)
 			return;
 
-		// No episode after a crash until the cool-down passed and the ego can drive (dc-2.0 9.5.1)
+		// No episode after a crash until the cool-down passed and the ego can drive (dc-2.0 9.5.1). Tilted, immobile
+		// or burning can last forever: after events.episode_block_max_ms of it the session ends with ego_disabled (5.3)
 		string blocked;
-		if (m_CrashWatch && m_CrashWatch.IsEpisodeBlocked(m_iSlotId, blocked))
+		bool disabled;
+		if (m_CrashWatch && m_CrashWatch.IsEpisodeBlocked(m_iSlotId, blocked, disabled))
 		{
 			if (blocked != m_sBlockedNoted)
 				Print(LOG + "WARNING: no new episode: " + blocked, LogLevel.WARNING);
 
 			m_sBlockedNoted = blocked;
+			int now = m_Session.GetWorldMs();
+			if (!disabled)
+			{
+				m_bDisabledTiming = false;
+				return;
+			}
+
+			if (!m_bDisabledTiming)
+			{
+				m_bDisabledTiming = true;
+				m_iDisabledSinceMs = now;
+				return;
+			}
+
+			int blockedMs = now - m_iDisabledSinceMs;
+			if (blockedMs >= m_CrashWatch.GetEpisodeBlockMaxMs())
+				m_Session.EndPlanned(DC_Session.END_EGO_DISABLED, "the ego stayed " + blocked + " between episodes for " + blockedMs.ToString() + " ms");
+
 			return;
 		}
 
 		m_sBlockedNoted = string.Empty;
+		m_bDisabledTiming = false;
 		DC_EpisodeInfo info = new DC_EpisodeInfo();
 		info.m_iSeed = m_Session.GetTrialSeed() + m_iNextEpisodeId;
 		if (!driver.BeginEpisode(m_iNextEpisodeId, physicsStep, info))

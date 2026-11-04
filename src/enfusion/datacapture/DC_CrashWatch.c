@@ -47,15 +47,19 @@
 //
 // EPISODE OWNERSHIP: a row belongs to the episode of its occurrence (collision onset, contact report, first tilted
 //   step, poll), snapshotted when it occurs, even when it is written after that episode ended; event_seq and
-//   world_time_ms stay in write order.
+//   world_time_ms stay in write order. Step and episode are one pair: the last completed step
+//   (DC_Session.GetLastPostStep) and the episode that owns it (GetLastStepEpisodeId), also for a report between
+//   callbacks right after EndEpisode cleared the current episode.
 //
 // EGO TERMINATION (contract 9.5.1 / 9.6): a terminal ego event latches DC_StreamRecorder.LatchTermination when it is
 //   confirmed (collision at the onset; veh_damage not undamaged or immobile, veh_fire_start: collision; rollover at
 //   the end of the hold), only into its own episode and before the recorder's driver latch of that callback.
 //   DC_EgoSession holds the episode end while HoldEpisodeEnd (the ego's collision row is pending, at most
 //   m_iEpisodeEndWaitMs after the onset), refuses a new episode while IsEpisodeBlocked (a pending row, the
-//   m_iCrashCooldownMs cool-down after the last terminal ego event, tilted, immobile, burning), and calls
-//   FinishDestroyedSlot before it ends the session with ego_destroyed.
+//   m_iCrashCooldownMs cool-down after the last terminal ego event, tilted, immobile, burning; the last three
+//   "disabled" for at most m_iEpisodeBlockMaxMs, then the session ends with ego_disabled), and calls
+//   FinishDestroyedSlot before it ends the session with ego_destroyed. The core is the only source of the
+//   terminations collision and rollover (DC_StreamRecorder ignores them from a driver).
 //
 // REPOSITIONING: whoever moves a slot by SetWorldTransform calls PrepareReposition first (DC_DriverContext.
 //   PrepareReposition for the ego): the pending row is written with its peak so far, the held contacts are written,
@@ -179,6 +183,9 @@ class DC_CrashWatch : DC_SessionModule
 	[Attribute("3000", UIWidgets.Slider, "No new episode until this long after the ego's last terminal crash event [ms] (TBD-10: refractory + rollover hold + a poll + the row wait, and the car comes to rest)", "0 60000 100", category: "Crash")]
 	protected int m_iCrashCooldownMs;
 
+	[Attribute("60000", UIWidgets.Slider, "A session whose ego stays tilted, immobile or burning between episodes this long (not destroyed) ends with ego_disabled [ms] (TBD-10)", "1000 600000 1000", category: "Crash")]
+	protected int m_iEpisodeBlockMaxMs;
+
 	[Attribute("0.5", UIWidgets.Slider, "rollover when up_y stays below this (0.5 = 60 deg of tilt; TBD-10)", "-1 1 0.01", category: "Crash")]
 	protected float m_fRolloverUpY;
 
@@ -278,6 +285,7 @@ class DC_CrashWatch : DC_SessionModule
 			json.AddInt("collision_refractory_ms", m_iCollisionRefractoryMs);
 			json.AddInt("episode_end_wait_ms", m_iEpisodeEndWaitMs);
 			json.AddInt("crash_cooldown_ms", m_iCrashCooldownMs);
+			json.AddInt("episode_block_max_ms", m_iEpisodeBlockMaxMs);
 			json.AddFloat("rollover_up_y", m_fRolloverUpY, 3);
 			json.AddInt("rollover_hold_ms", m_iRolloverHoldMs);
 			json.AddInt("state_poll_ms", m_iStatePollMs);
@@ -484,9 +492,12 @@ class DC_CrashWatch : DC_SessionModule
 	//! true while no new episode may begin for the slot (contract 9.5.1): its collision row is pending, the ego's last
 	//! terminal crash event is younger than m_iCrashCooldownMs, or the vehicle is tilted, immobile or burning
 	//! \param[out] reason the first blocking condition, empty when none
-	bool IsEpisodeBlocked(int slotId, out string reason)
+	//! \param[out] disabled true when that condition is tilted, immobile or burning (unbounded by itself; the caller
+	//! ends the session after GetEpisodeBlockMaxMs of it)
+	bool IsEpisodeBlocked(int slotId, out string reason, out bool disabled)
 	{
 		reason = string.Empty;
+		disabled = false;
 		DC_CrashSlot slot = FindSlot(slotId);
 		if (!slot)
 			return false;
@@ -496,13 +507,21 @@ class DC_CrashWatch : DC_SessionModule
 		else if (slotId == m_Session.GetEgoSlotId() && m_bEgoTerminalSeen && m_Session.GetWorldMs() < m_iLastEgoTerminalMs + m_iCrashCooldownMs)
 			reason = "the crash cool-down runs";
 		else if (slot.m_bTilted)
-			reason = "it is tilted";
+			reason = "tilted";
 		else if (slot.m_Damage && slot.m_Damage.GetMovementDamage() >= 1)
-			reason = "it is immobile";
+			reason = "immobile";
 		else if (FireStateOf(slot) != SCR_EBurningState.NONE)
-			reason = "it burns";
+			reason = "burning";
 
+		disabled = reason == "tilted" || reason == "immobile" || reason == "burning";
 		return !reason.IsEmpty();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! session.json events.episode_block_max_ms: how long a disabled ego may block episodes
+	int GetEpisodeBlockMaxMs()
+	{
+		return m_iEpisodeBlockMaxMs;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -604,7 +623,7 @@ class DC_CrashWatch : DC_SessionModule
 		record.m_bHeld = true;
 		record.m_iWorldMs = m_Session.GetWorldMs();
 		record.m_iStep = m_Session.GetLastPostStep();
-		record.m_iEpisode = m_Session.GetEpisodeId();
+		record.m_iEpisode = m_Session.GetLastStepEpisodeId();		// the pair (last completed step, its episode)
 		record.m_Other = named;
 		record.m_iOtherKind = otherKind;
 		record.m_iOtherSlot = otherSlot;
@@ -679,7 +698,7 @@ class DC_CrashWatch : DC_SessionModule
 		slot.m_iOnsetStep = physicsStep;
 		slot.m_iOnsetMs = worldMs;
 		slot.m_iOnsetFrame = m_Session.GetRenderFrame();
-		slot.m_iOnsetEpisode = m_Session.GetEpisodeId();
+		slot.m_iOnsetEpisode = m_Session.GetLastStepEpisodeId();
 		slot.m_vOnsetPos = transform[3];
 		slot.m_fRefX = refX;
 		slot.m_fRefZ = refZ;
@@ -773,7 +792,7 @@ class DC_CrashWatch : DC_SessionModule
 				slot.m_bTilted = true;
 				slot.m_iTiltSinceMs = worldMs;
 				slot.m_iTiltSinceStep = physicsStep;
-				slot.m_iTiltEpisode = m_Session.GetEpisodeId();
+				slot.m_iTiltEpisode = m_Session.GetLastStepEpisodeId();
 			}
 
 			if (slot.m_bRollArmed && worldMs - slot.m_iTiltSinceMs >= m_iRolloverHoldMs)
@@ -1008,8 +1027,9 @@ class DC_CrashWatch : DC_SessionModule
 		if (!vehicle || vehicle.IsDeleted())
 			return;
 
+		// a poll inside OnStepPost or between callbacks (FinishDestroyedSlot): the last completed step and its episode
 		int worldMs = m_Session.GetWorldMs();
-		int episodeId = m_Session.GetEpisodeId();
+		int episodeId = m_Session.GetLastStepEpisodeId();
 		SCR_DamageManagerComponent damage = slot.m_Damage;
 		if (damage)
 		{

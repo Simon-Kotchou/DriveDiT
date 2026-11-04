@@ -27,7 +27,7 @@
 //      render frame. world_time_ms is WorldTimestamp.DiffMilliseconds against the open. warmup_end and the planned
 //      end are checked on every step; heartbeat.csv gets a row every m_fHeartbeatPeriodS of world time, and
 //      $profile:DC_STOP is checked at each heartbeat.
-//   7. End: duration, dc_stop: the modules stop (no new episode or image request) and drain (hf and ctl rows go on
+//   7. End: duration, dc_stop, ego_disabled (EndPlanned): the modules stop (no new episode or image request) and drain (hf and ctl rows go on
 //      until no image request is in flight or the in-flight timeout passed). Play stop, every failure and a destroyed
 //      ego (EndAtOnce: ego_destroyed, not an error, status ok; dc-2.0 5.3) seal at once. Sealing commits every registered stream and writes session_end.json last; status ok only when every
 //      commit succeeded and the reason is not an error. Shutdown is idempotent: the event mask is cleared and the
@@ -536,6 +536,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	static const string END_EGO_LOST = "ego_lost";
 	static const string END_CAMERA_LOST = "camera_lost";
 	static const string END_EGO_DESTROYED = "ego_destroyed";		//!< not an error: a crash is valid data (dc-2.0 5.3)
+	static const string END_EGO_DISABLED = "ego_disabled";		//!< not an error: tilted, immobile or burning between episodes too long (5.3)
 
 	static const string FAULT_READINESS_TIMEOUT = "readiness_timeout";
 	static const string FAULT_SESSION_DIR_EXISTS = "session_dir_exists";
@@ -598,6 +599,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected int m_iStartUnix;
 	protected int m_iPhysicsStep = -1;			//!< -1 at open, +1 at the top of every dispatched step
 	protected int m_iLastPostStep = -1;			//!< last step whose OnStepPost was dispatched
+	protected int m_iLastStepEpisodeId = -1;	//!< the episode that owns m_iLastPostStep (its ctl episode_id)
 	protected int m_iStepZeroWorldMs = -1;		//!< world_time_ms of physics step 0 (image grid anchor)
 	protected int m_iLastStepWorldMs = -1;
 	protected int m_iEpisodeId = -1;
@@ -1901,6 +1903,7 @@ class DC_Session : SCR_BaseGameModeComponent
 
 		m_iLastStepWorldMs = worldMs;
 		m_iLastPostStep = m_iPhysicsStep;
+		m_iLastStepEpisodeId = m_iEpisodeId;		// begun in OnStepPre of this step, ended only after its rows
 		if (m_iPhysicsStep == 0)
 			m_iStepZeroWorldMs = worldMs;
 
@@ -2270,11 +2273,11 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! true for every end reason but duration, stop, dc_stop and ego_destroyed (the session_end.json status is then
-	//! failed)
+	//! true for every end reason but duration, stop, dc_stop, ego_destroyed and ego_disabled (the session_end.json
+	//! status is then failed)
 	static bool IsErrorEndReason(string endReason)
 	{
-		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP && endReason != END_EGO_DESTROYED;
+		return endReason != END_DURATION && endReason != END_STOP && endReason != END_DC_STOP && endReason != END_EGO_DESTROYED && endReason != END_EGO_DISABLED;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2411,6 +2414,19 @@ class DC_Session : SCR_BaseGameModeComponent
 		m_sFailureReason = endReason;
 		m_sFailureDetail = detail;
 		Print(LOG + "session ends at once: " + endReason + ": " + detail, LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A planned end requested by a module with a non-error end reason (ego_disabled, dc-2.0 5.3): the same path as
+	//! duration and dc_stop (no new episode or image request, drain, seal). Ignored unless capturing; logs one WARNING
+	void EndPlanned(string endReason, string detail)
+	{
+		if (m_ePhase != DC_ESessionPhase.CAPTURING)
+			return;
+
+		Print(LOG + "WARNING: planned end " + endReason + ": " + detail, LogLevel.WARNING);
+		NoteObserved("planned_end_detail", detail);
+		BeginEnd(endReason);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2705,6 +2721,14 @@ class DC_Session : SCR_BaseGameModeComponent
 	int GetLastPostStep()
 	{
 		return m_iLastPostStep;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The episode that owns GetLastPostStep() (its ctl episode_id), -1 for none: the episode of a report between
+	//! callbacks (dc-2.0 9.5.1), also right after EndEpisode cleared the current one
+	int GetLastStepEpisodeId()
+	{
+		return m_iLastStepEpisodeId;
 	}
 
 	//------------------------------------------------------------------------------------------------

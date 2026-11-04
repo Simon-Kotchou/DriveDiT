@@ -29,7 +29,8 @@ CORE_FILES = ("DC_Session.c", "DC_EgoSession.c", "DC_StreamRecorder.c", "DC_Cras
 ATTRIBUTE_KEYS = {"m_fCollisionDvMps": "collision_dv_mps", "m_iCollisionWindowMs": "collision_window_ms",
                   "m_iCollisionWindowTolMs": "collision_window_tol_ms", "m_iCollisionPeakMs": "collision_peak_ms",
                   "m_iCollisionRefractoryMs": "collision_refractory_ms", "m_iEpisodeEndWaitMs": "episode_end_wait_ms",
-                  "m_iCrashCooldownMs": "crash_cooldown_ms", "m_fRolloverUpY": "rollover_up_y",
+                  "m_iCrashCooldownMs": "crash_cooldown_ms", "m_iEpisodeBlockMaxMs": "episode_block_max_ms",
+                  "m_fRolloverUpY": "rollover_up_y",
                   "m_iRolloverHoldMs": "rollover_hold_ms", "m_iStatePollMs": "state_poll_ms"}
 
 
@@ -128,7 +129,8 @@ class WriterContractTest(unittest.TestCase):
         values = dict(re.findall(r'static const string (END_\w+) = "([^"]+)";', self.session))
         self.assertTrue(set(values.values()) <= set(self.schema["enums"]["end_reason"]))
         normal = re.findall(r"endReason != (END_\w+)", body(self.session, "static bool IsErrorEndReason("))
-        self.assertEqual(sorted(values[n] for n in normal), ["dc_stop", "duration", "ego_destroyed", "stop"])
+        self.assertEqual(sorted(values[n] for n in normal),
+                         ["dc_stop", "duration", "ego_destroyed", "ego_disabled", "stop"])
 
     def test_stream_columns(self):
         self.assertEqual(columns_of(body(self.recorder, "static void AddCtlColumns(")), self.fields("ctl"))
@@ -186,8 +188,24 @@ class WriterContractTest(unittest.TestCase):
         self.assertIn("f = part / span", sample)                    # interpolation
         step = body(self.crash, "protected void StepSlot(")
         self.assertIn("worldMs <= slot.m_iOnsetMs + m_iCollisionPeakMs", step)
-        self.assertIn("slot.m_iOnsetEpisode = m_Session.GetEpisodeId()", step)
+        self.assertIn("slot.m_iOnsetEpisode = m_Session.GetLastStepEpisodeId()", step)
 
+
+    def test_round2_rules(self):
+        # reports between callbacks pair the last completed step with the episode that owns it (contract 9.5.1)
+        self.assertIn("m_iLastStepEpisodeId = m_iEpisodeId;", body(self.session, "protected void HandleStepPost("))
+        self.assertIn("record.m_iEpisode = m_Session.GetLastStepEpisodeId()", self.crash)
+        self.assertIn("int episodeId = m_Session.GetLastStepEpisodeId()", body(self.crash, "protected void PollSlot("))
+        self.assertNotIn("m_Session.GetEpisodeId();", self.crash.replace("episodeId == m_Session.GetEpisodeId()", ""))
+        # the crash watch is the only source of collision and rollover terminations
+        crash_terms = strings(re.search(r"s_aCrashTerminations = \{(.*?)\};", self.recorder).group(1))
+        self.assertEqual(sorted(crash_terms), ["collision", "rollover"])
+        self.assertIn("NoteIgnoredDriverTermination", body(self.recorder, "override void OnStepPost("))
+        # a disabled ego blocks episodes at most episode_block_max_ms, then the session ends with ego_disabled
+        begin = body(self.ego, "protected void TryBeginEpisode(")
+        self.assertIn("m_CrashWatch.GetEpisodeBlockMaxMs()", begin)
+        self.assertIn("m_Session.EndPlanned(DC_Session.END_EGO_DISABLED", begin)
+        self.assertIn("BeginEnd(endReason);", body(self.session, "void EndPlanned("))
 
     def test_out_parameters_are_assigned_on_entry(self):
         sig = re.compile(r"^\t(?:[a-z]+ )*[\w<>]+ (\w+)\(([^)]*\bout\b[^)]*)\)\n\t\{", re.M)

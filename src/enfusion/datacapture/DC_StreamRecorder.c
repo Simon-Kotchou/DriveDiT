@@ -874,6 +874,8 @@ class DC_StreamRecorder : DC_SessionModule
 
 	//! episodes.termination_reason values (dc-2.0 9.6)
 	protected static ref array<string> s_aTerminations = {"route_complete", "timeout", "offroad", "route_deviation", "stuck", "rollover", "collision", "engine_off", "script_error", "session_stop"};
+	//! the terminations only DC_CrashWatch latches (LatchTermination); a driver's are ignored (dc-2.0 9.5.1)
+	protected static ref array<string> s_aCrashTerminations = {"collision", "rollover"};
 
 	// === STATE ===
 	protected DC_Session m_Session;
@@ -890,6 +892,7 @@ class DC_StreamRecorder : DC_SessionModule
 	protected RoadNetworkManager m_Roads;
 	protected string m_sEndReason = "refused";
 	protected bool m_bCtlRowWritten;			//!< the first ctl row is buffered (an ego lost before it is zero_ego)
+	protected int m_iIgnoredDriverTerminations;	//!< collision / rollover reported by the driver (session_end observed)
 
 	// HL command state
 	protected ref DC_HLCommand m_Held = new DC_HLCommand();
@@ -1108,7 +1111,11 @@ class DC_StreamRecorder : DC_SessionModule
 					return;
 				}
 
-				m_sTermination = m_DriverPost.m_sTermination;
+				// collision and rollover come from DC_CrashWatch only (dc-2.0 9.5.1): a driver's is ignored
+				if (s_aCrashTerminations.Find(m_DriverPost.m_sTermination) >= 0)
+					NoteIgnoredDriverTermination(m_DriverPost.m_sTermination, physicsStep);
+				else
+					m_sTermination = m_DriverPost.m_sTermination;
 			}
 		}
 
@@ -1148,6 +1155,15 @@ class DC_StreamRecorder : DC_SessionModule
 	override void OnSessionClosing(string endReason)
 	{
 		m_sEndReason = endReason;
+		m_Session.NoteObserved("driver_crash_terminations_ignored", m_iIgnoredDriverTerminations.ToString());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A driver reported collision or rollover: ignored, the crash watch is their only source (one WARNING each)
+	protected void NoteIgnoredDriverTermination(string reason, int physicsStep)
+	{
+		m_iIgnoredDriverTerminations++;
+		Print(string.Format(LOG + "WARNING: the driver reported termination %1 at physics step %2: ignored, only the crash watch ends an episode with collision or rollover (dc-2.0 9.5.1)", reason, physicsStep), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------

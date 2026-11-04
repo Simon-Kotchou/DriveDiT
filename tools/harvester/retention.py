@@ -160,7 +160,7 @@ MAX_REPORT_BYTES = 256 << 20
 STAGING = harvest.RETENTION_STAGING
 KV_LIMIT = 1 << 20                  # run_footer.txt / run_header.txt larger than this hold the play
 QUIET_S = 600                       # --apply preflight: no file of a unit in scope modified in the last 10 minutes
-QUIET_ENV = "DD6_RETENTION_QUIET_S"     # tests only (--test-root): another preflight window, in seconds
+QUIET_ENV = "DD6_RETENTION_QUIET_S"     # tests only (--test-root): another preflight window in s; 0 turns it off
 KILL_ENV = "DD6_RETENTION_KILL_AT"
 HOOKS = ("record_renamed", "after_record", "before_stage", "after_stage", "before_unlink", "in_deletes",
          "before_done", "restore_linked", "restore_synced")
@@ -866,6 +866,8 @@ class Retention:
         unit in scope (a session or play directory, at any depth; not RETENTION.json) was modified within the last
         quiet_s seconds. Retention runs only on units nobody is writing; a recent write means the Workbench, the game or
         the harvester may still be at it."""
+        if self.quiet_s <= 0:               # tests only: off (drvfs mtimes may run slightly ahead of the WSL clock)
+            return
         now = time.time()
         for path in units:
             if not self.wanted(path):

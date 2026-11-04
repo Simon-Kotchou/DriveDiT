@@ -995,12 +995,13 @@ class C21Test(unittest.TestCase):
             self.assertEqual(c21["status"], "FAIL", extra)
             self.assertIn("do not follow the 5 s world-time schedule", c21["detail"])
 
-    def test_the_final_heartbeat_is_kept_by_a_normal_seal(self):
-        """Codex (CODEX_C21b): t0_loop with tail_ms 4714 ends at 115017 ms in frame 43292 with the 23rd heartbeat in its
-        last frame (duration, status ok). +100000 KiB on that row fails T1 at 771.3 MB/h; removing it with the seal
-        count set to 22 passed. The writer writes the heartbeat before it checks the drain (DC_Session.HandleFrame),
-        so after duration (and stop, dc_stop, ego_disabled) the final row must exist: FAIL. Only a seal inside the
-        frame before its heartbeat (ego_destroyed or an error end reason) may lack it."""
+    def test_the_final_heartbeat_cannot_be_dropped(self):
+        """Codex (CODEX_C21b, CODEX_C21c): t0_loop with tail_ms 4714 ends at 115017 ms in frame 43292 with the 23rd
+        heartbeat in its last frame (duration, status ok). +100000 KiB on that row fails T1 at 771.3 MB/h; removing it
+        with the seal count set to 22 passed, and with the exemption by end reason it still passed after a destroy
+        event in frame 43293 sealed with ego_destroyed. No status-ok path of the writer writes a frame's hf row and
+        then seals before that frame's heartbeat (a destroyed ego is seen in OnFrameStart, before the hf row, or in a
+        callback, after the heartbeat), so there is no exemption: FAIL for every end reason."""
         with mock.patch.dict(synth.SPECS["t0_loop"], {"tail_ms": 4714}):
             out = synth.generate(os.path.join(self.tmp, "tail4714"), kind="t0_loop", routes_dir=self.routes)
         with open(os.path.join(out["session_dir"], "session_end.json"), "rb") as f:
@@ -1017,20 +1018,57 @@ class C21Test(unittest.TestCase):
         edit_json(os.path.join(session, "session_end.json"), lambda o: o.update({"heartbeats": 22}))
         c21 = self.c21(session, "--trial", "T1")
         self.assertEqual((c21["status"], c21["severity"]), ("FAIL", "HARD"))
-        self.assertIn("the final row is missing after end_reason 'duration'", c21["detail"])
-        for reason in ("stop", "dc_stop", "ego_disabled"):
+        self.assertIn("the writer writes every scheduled row, the last frame's included", c21["detail"])
+        for reason, status in (("stop", "ok"), ("dc_stop", "ok"), ("ego_disabled", "ok"),
+                               ("script_error:other", "failed"), ("camera_lost", "failed")):
             edit_json(os.path.join(session, "session_end.json"),
-                      lambda o, reason=reason: o.update({"end_reason": reason}))
+                      lambda o, reason=reason, status=status: o.update({"end_reason": reason, "status": status}))
             self.assertEqual(self.c21(session, "--trial", "T1", "--checks", "C21")["status"], "FAIL", reason)
-        # an early seal in that frame (the writer's seal-at-once paths) may lack the row: C21 alone passes
-        session = self.copy(out, "early")
+        # Codex's ego_destroyed case: the ego's veh_damage state=destroyed in the next frame 43293 (115042 ms), the
+        # seal ego_destroyed, status ok, end.render_frame the last committed hf frame 43292
+        session = self.copy(out, "destroyed")
+        sdir = os.path.join(session, "events")
+        names = sorted(n for n in os.listdir(sdir) if n.startswith("chunk_"))
+
+        def destroy(cols, rows):
+            new = list(rows[-1])
+            new[cols.index("event_seq")] = str(int(rows[-1][cols.index("event_seq")]) + 1)
+            for col, value in (("kind", "veh_damage"), ("payload", "state=destroyed"), ("episode_id", "-1"),
+                               ("render_frame", "43293"), ("world_time_ms", "115042")):
+                new[cols.index(col)] = value
+            return rows + [new]
+
+        rewrite_chunk(session, "events", int(names[-1][6:11]), destroy)
         self.edit_heartbeat(session, lambda hb: hb[:-1])
-        for reason, status in (("ego_destroyed", "ok"), ("script_error:other", "failed"), ("camera_lost", "failed")):
-            edit_json(os.path.join(session, "session_end.json"),
-                      lambda o, reason=reason, status=status: o.update({"end_reason": reason, "status": status,
-                                                                        "heartbeats": 22}))
-            c21 = self.c21(session, "--trial", "T1", "--checks", "C21")
-            self.assertEqual(c21["status"], "PASS", reason)
+
+        def seal(o):
+            o.update({"end_reason": "ego_destroyed", "status": "ok", "heartbeats": 22})
+            o["end"]["world_ms"] = 115042
+            o["counts"]["events"].update({"rows": o["counts"]["events"]["rows"] + 1,
+                                          "last_key": o["counts"]["events"]["last_key"] + 1})
+
+        edit_json(os.path.join(session, "session_end.json"), seal)
+        code, rep = self.check(session, "--trial", "T1")
+        c21 = by_id(rep)["C21"]
+        self.assertEqual((code, c21["status"], c21["severity"]), (1, "FAIL", "HARD"))
+        self.assertIn("do not follow the 5 s world-time schedule", c21["detail"])
+
+    def test_crash_fixtures_write_the_last_frames_heartbeat(self):
+        """The generator follows the writer's order: a crash seals in a callback (after its frame's heartbeat), so
+        the last hf frame has its scheduled row; every crash variant passes C21 without any exemption (the two
+        negative ones fail C36 only)."""
+        for variant in ("crash", "crash_unexplained", "destroyed_unexplained"):
+            out = synth.generate(os.path.join(self.tmp, "cr_" + variant), variant=variant, routes_dir=self.routes)
+            s = reader.open_session(out["session_dir"], vehicle_card=CARD)
+            hb = [(r["render_frame"], r["world_ms"]) for r in s.heartbeat]
+            hf = list(zip(s.streams["hf"].col("render_frame"), s.streams["hf"].col("world_time_ms")))
+            expected, boundary = [], 5000
+            for frame, w in hf:
+                if w >= boundary:
+                    expected.append((frame, w))
+                    boundary = w - w % 5000 + 5000
+            self.assertEqual(hb, expected, variant)
+            self.assertEqual(self.c21(out["session_dir"])["status"], "PASS", variant)
 
     def test_a_contradictory_heartbeat_world_time_fails(self):
         """Codex: on the 22.22 FPS fixture the second heartbeat's world_ms 10015 -> 7000 (frame and hf unchanged)

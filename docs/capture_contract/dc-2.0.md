@@ -400,25 +400,27 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   timed out, skipped, refused, or the session sealed), in slot order, with `done_render_frame` the render frame in which
   the writer first saw the file. A seal that does not drain (`ego_destroyed`, a Play stop, an error) writes the row of a
   request still in flight with `done_render_frame` empty (`images.pending_at_end`); the engine may still write its file.
+  With one request in flight at a time `images.pending_at_end` is 0 or 1; more fails C13a (HARD).
 - **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`, drawn by the debug-Shape carrier) from each
   image and joins `hf` at that `captured_render_frame` C (C13a, exact). In Workbench 1.8 C = `img.done_render_frame`
   - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth.
   C37 measures each issued slot's capture stall at its decoded frame C (a dropped `done_render_frame` cannot remove a
   slow capture), refuses the evidence where `done_render_frame` contradicts C + 1, and assumes the worst case (u = 1)
-  for an issued slot it cannot measure. Writer integrity (C13a): the issued rows with `done_render_frame` empty and
-  no `img_timeout` event are exactly `images.pending_at_end` of them, the newest issued slots; any other such row is
-  a completion the writer dropped.
+  for an issued slot it cannot measure; only the one request the seal caught in flight (below) is left out. Writer
+  integrity (C13a): `images.pending_at_end` is 0 or 1, and the issued rows with `done_render_frame` empty and no
+  `img_timeout` event are that many, the newest issued slot when it is 1 (rows after it may be `skipped_busy` or
+  `make_failed`); any other such row is a completion the writer dropped.
   The image of render frame C shows the state logged in hf row C + 1 (run 3 E-06A: argmin k = +1 on 628 of 640 moving
   images, RMS 0.11-1.87 px against 2.6-5.6 px at k = 0): that row is the image's pose row. Its `cam_*` and `veh_*` are
   the pose at capture, its `last_physics_step` joins `ctl` and `telemetry` exactly (both have a row for every
   callback), and the pose belongs to the world time of hf row C. The one exemption from the exact joins is the request
-  a seal without drain caught in flight: its row is issued with `done_render_frame` empty and no `img_timeout` event,
-  it is counted in `images.pending_at_end`, its image shows the terminal render frame (C = `end.render_frame`, whose
-  hf row exists) and only its pose row C + 1 is missing; it is not joined and its decision masks are 0, like a
-  pending slot, never a join failure. A later frame cannot carry a decodable code (the seal releases the fiducial
-  carrier in the same frame), so any other capture without its hf rows is a join failure (C13a). These joins do not
-  prove the scene's age; E-06A (marker reprojection per rig x exe x build, at k = +1) and C13b do: C13b requires the
-  best lag to be +1 whenever the yaw signal suffices.
+  a seal without drain caught in flight: the unique newest issued slot, its row issued with `done_render_frame` empty
+  and no `img_timeout` event, `images.pending_at_end` 1, its image shows the terminal render frame (C =
+  `end.render_frame`, whose hf row exists) and only its pose row C + 1 is missing; it is not joined and its decision
+  masks are 0, like a pending slot, never a join failure. A later frame cannot carry a decodable code (the seal
+  releases the fiducial carrier in the same frame), so any other capture without its hf rows is a join failure (C13a).
+  These joins do not prove the scene's age; E-06A (marker reprojection per rig x exe x build, at k = +1) and C13b do:
+  C13b requires the best lag to be +1 whenever the yaw signal suffices.
 - **Sampling at the model boundary.** Decision step t at P_t uses the samples of the decision boundary above; obs_t is
   the newest image whose pose row (hf row C + 1) has `last_physics_step` <= P_t and whose captured frame C is at or
   before the render frame of C_t, so its world time (hf row C) is at or before that of C_t: a frame without a callback
@@ -1168,7 +1170,7 @@ the harvester, never treated as complete.
 | `pin.build_key` | str | - | yes, null ok | Repeated from session.json (same null rule; the harvester's harvest.json then carries it). |
 | `engine.build_version` | str | - | yes | GetBuildVersion() read again at the end; C02 requires it to equal the start value. |
 | `counts` | object | - | yes | Per stream: {rows, chunks, last_key} of committed data. |
-| `images` | object | - | yes | {requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3). |
+| `images` | object | - | yes | {requested, issued, skipped_busy, make_failed, timed_out, pending_at_end}: image slot counts; pending_at_end = requests still unresolved when the session sealed (section 5.3): 0 or 1, as one request is in flight at a time (C13a fails more). |
 | `episodes` | int | - | yes | Number of episode rows committed. |
 | `heartbeats` | int | - | yes | Number of heartbeat rows appended. |
 | `observed.decision_grid_points_skipped` | int | - | no | Decision grid points a hitch skipped, as the writer counted them (section 6); C08 compares it with its own rebuild of the grid. The observed object holds further run-time facts that are not contract fields. |

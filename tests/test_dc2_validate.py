@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -489,6 +490,43 @@ class FailLoudTest(unittest.TestCase):
         c13a = by_id(rep)["C13a"]
         self.assertEqual((c13a["value"]["join_failures"], c13a["value"]["pending_after_seal"]), (1, 0))
 
+    def test_declared_pending_requests_fail_c13a(self):                       # review round 3, N6
+        """Codex: the last 3 golden completions cleared and images.pending_at_end 3, no image edited. One request is
+        in flight at a time: more than 1 pending fails C13a."""
+        session = self.golden()
+        last3 = set(range(65, 68))
+        set_column(session, "img", "done_render_frame", lambda key, v: "" if key in last3 else v)
+        edit_json(os.path.join(session, "session_end.json"), lambda o: o["images"].update({"pending_at_end": 3}))
+        code, rep = self.check(session)
+        self.assertEqual(code, 1)
+        self.assertIn("C13a", failing(rep))
+        c13a = by_id(rep)["C13a"]
+        self.assertIn("at most 1 can be pending", c13a["detail"])
+        self.assertEqual((c13a["value"]["pending_after_seal"], c13a["value"]["dropped_completions"]), (0, 3))
+
+    def test_pending_integrity_rules(self):                                   # review round 3, N6
+        """The exemption is the unique newest issued slot: skipped_busy or make_failed rows may follow it (a seal
+        queue), an older pending row is a dropped completion, pending_at_end 2 fails."""
+        images = dc_validate.checks.images
+
+        def session(rows, pending_end):
+            end = {"images.pending_at_end": pending_end}
+            return types.SimpleNamespace(images=[{"slot_id": i, "issue_status": st, "pending_at_seal": int(p)}
+                                                 for i, (st, p) in enumerate(rows)],
+                                         end=end, end_get=lambda k, d=None: end.get(k, d))
+
+        queue = [("issued", False)] * 5 + [("issued", True), ("skipped_busy", False), ("skipped_busy", False)]
+        self.assertEqual(images._pending_integrity(session(queue, 1)), {"issues": [], "dropped": []})
+        self.assertEqual(images._pending_integrity(session(queue[:5], 0)), {"issues": [], "dropped": []})
+        older = [("issued", False), ("issued", True), ("issued", False), ("issued", True)]
+        result = images._pending_integrity(session(older, 1))
+        self.assertEqual(result["dropped"], [1])
+        result = images._pending_integrity(session(older, 2))
+        self.assertEqual(result["dropped"], [1, 3])
+        self.assertIn("at most 1", result["issues"][0])
+        result = images._pending_integrity(session(queue[:5], 1))       # declared 1, nothing pending
+        self.assertIn("is not pending", result["issues"][0])
+
     def test_hl_seq_before_the_first_command_fails_c07(self):                 # review round 2, N5
         session = self.golden()                  # Codex: +1 on every hl_seq after step 0 (0 during the warm-up)
         set_column(session, "ctl", "hl_seq", lambda key, v: str(int(v) + 1) if key > 0 else v)
@@ -764,6 +802,41 @@ class SlowCaptureTest(unittest.TestCase):
         self.assertIn("a completion the writer dropped", by_id(rep)["C13a"]["detail"])
         self.assertEqual(by_id(rep)["C13a"]["value"]["dropped_completions"], len(slow))
         self.assertAlmostEqual(by_id(rep)["C37"]["value"]["u95"], 0.9)
+
+    def test_twenty_declared_pending_captures_do_not_pass(self):              # review round 3, N6
+        """Codex: a 10 Hz session whose last 20 captures stall 90 ms; their completions cleared, images.pending_at_end
+        20 and their fiducials re-encoded to the terminal frame (cores unchanged). Before: full PASS with 20
+        exemptions and u95 0.8 over the rest. Now C13a fails (at most 1 pending, no exemption) and C37 counts the 20
+        as unmeasured at the worst case."""
+        spec = dict(synth.SPECS["golden_10hz"])
+        spec["stall_ms"] = (80,) * 112 + (90,) * 20
+        with mock.patch.dict(synth.SPECS["golden_10hz"], {"stall_ms": spec["stall_ms"]}):
+            out = synth.generate(os.path.join(self.tmp, "twenty_src"), kind="golden_10hz", routes_dir=self.routes)
+        code, rep = self.check(out["session_dir"])
+        self.assertEqual((code, failing(rep)), (2, ["C37"]))
+        self.assertAlmostEqual(by_id(rep)["C37"]["value"]["u95"], 0.9)
+        session = os.path.join(self.tmp, "twenty", out["session_id"])
+        shutil.copytree(out["session_dir"], session)
+        sim = synth.simulate(spec, synth.drivedit_nav.route_from_dict(synth.ROUTES[spec["route"]]()))
+        issued = [sl for sl in sim.slots if sl["issue_frame"] is not None]
+        self.assertEqual(len(issued), 132)
+        with open(os.path.join(session, "session_end.json"), "rb") as f:
+            end_frame = json.loads(f.read().decode("ascii"))["end"]["render_frame"]
+        last20 = set(sl["slot_id"] for sl in issued[-20:])
+        for sl in issued[-20:]:
+            state = sim.frames[sl["issue_frame"] + 1]["state"]          # the original core, a new code
+            with open(os.path.join(session, "frames", "f_%08d.png" % sl["slot_id"]), "wb") as f:
+                f.write(synth.png_bytes(synth.render_image(spec, state, synth.fiducial.code_for(end_frame))))
+        set_column(session, "img", "done_render_frame", lambda key, v: "" if key in last20 else v)
+        edit_json(os.path.join(session, "session_end.json"), lambda o: o["images"].update({"pending_at_end": 20}))
+        code, rep = self.check(session)
+        self.assertEqual(code, 1)
+        self.assertIn("C13a", failing(rep))
+        self.assertIn("C37", failing(rep))
+        c13a, c37 = by_id(rep)["C13a"], by_id(rep)["C37"]
+        self.assertEqual(c13a["value"]["pending_after_seal"], 0)
+        self.assertIn("at most 1 can be pending", c13a["detail"])
+        self.assertEqual(c37["value"]["unmeasured"], 20)
 
     def test_unmeasured_slow_captures_cannot_pass(self):
         session = self.copy("gone")              # the slow captures' files removed: assumed at the worst case

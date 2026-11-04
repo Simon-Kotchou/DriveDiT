@@ -1028,6 +1028,22 @@ class CrashTest(unittest.TestCase):
         with open(os.path.join(s.path, "_engine_logs", "console.log"), encoding="ascii") as f:
             self.assertIn("f_%08d" % last["slot_id"], f.read())
 
+    def test_the_exemption_needs_exactly_one_pending(self):
+        """Review round 3, N6: the exemption is the unique newest issued slot with images.pending_at_end 1; a session
+        declaring 2 pending exempts nothing."""
+        tmp = temp_dir("dc2_reader_pending_")
+        try:
+            dst = os.path.join(tmp, self.out["session_id"])
+            shutil.copytree(self.out["session_dir"], dst)
+            edit_json(os.path.join(dst, "session_end.json"), lambda o: o["images"].update({"pending_at_end": 2}))
+            s = reader.open_session(dst, vehicle_card=CARD)
+            self.assertEqual(sum(r["pose_after_seal"] for r in s.images), 0)
+            self.assertEqual(sum(r["pose_after_seal"] for r in self.session.images), 1)
+            self.assertEqual([r["slot_id"] for r in self.session.images if r["pose_after_seal"]],
+                             [max(r["slot_id"] for r in self.session.images if r["issue_status"] == "issued")])
+        finally:
+            shutil.rmtree(tmp)
+
     def test_first_terminal_ego_event(self):
         s = self.session
         self.assertEqual(sorted(s.terminal_ego), [1])

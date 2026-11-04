@@ -287,9 +287,12 @@ def check_c13a(ctx):
     """Fiducial pairing (r2 5.1 C13a): of the readable images, >= C13a.min_decode_frac decode in both bands with
     agreeing 18-bit codes (C13a.code_bits); every decoded captured_render_frame (the code unwrapped against
     issue_render_frame) joins an hf row exactly and has its pose row, hf row captured + 1 (the image of frame C shows
-    the state of hf row C + 1, contract section 6; 0 join failures); no capture offset (captured - issued frame) is
-    negative (a frame captured before its request is a stale or misnamed file). The offset p50 and p99 and how often
-    the captured frame equals img.done_render_frame - 1 (Workbench 1.8: always, run 4) are reported."""
+    the state of hf row C + 1, contract section 6; 0 join failures), except an image captured in the session's last
+    render frame (end.render_frame): a seal without drain caught its request in flight, its pose row never exists,
+    and it is counted as pending, never as a join failure (its decision masks are 0); no capture offset (captured -
+    issued frame) is negative (a frame captured before its request is a stale or misnamed file); no decision sample
+    uses a future image (obs_t captured after the decision's render frame, obs_age_ms < 0). The offset p50 and p99
+    and how often the captured frame equals img.done_render_frame - 1 (Workbench 1.8: always, run 4) are reported."""
     if ctx.load_error:
         return unreadable(ctx, "C13a")
     s = ctx.session
@@ -300,7 +303,9 @@ def check_c13a(ctx):
         return result(ctx, "C13a", HARD, NOT_EVALUATED, None, thr, "no readable image")
     decoded = [r for r in readable if r["fid_ok"]]
     frac = len(decoded) / float(len(readable))
-    unjoined = [r["slot_id"] for r in decoded if r["hf_index"] is None or r["pose_hf_index"] is None]
+    after_seal = [r["slot_id"] for r in decoded if r.get("pose_after_seal")]
+    unjoined = [r["slot_id"] for r in decoded if not r.get("pose_after_seal") and
+                (r["hf_index"] is None or r["pose_hf_index"] is None)]
     with_done = [r for r in decoded if r["done_render_frame"] is not None]
     done_agree = sum(1 for r in with_done if r["captured_render_frame"] == r["done_render_frame"] - 1)
     offsets = [r["captured_render_frame"] - r["issue_render_frame"] for r in decoded]
@@ -317,8 +322,15 @@ def check_c13a(ctx):
     if negative:
         issues.append("%d image(s) captured before their request was issued (slots %s): a stale or misnamed file"
                       % (len(negative), first(negative, 5)))
+    future = [d["decision_step"] for d in s.decisions if d["obs_valid"] and
+              (d["obs_age_ms"] is None or d["obs_age_ms"] < 0 or d["obs_captured_render_frame"] is None or
+               d["obs_captured_render_frame"] > d["render_frame"])]
+    if future:
+        issues.append("%d decision sample(s) whose obs_t is a future image (captured after the decision's render "
+                      "frame or obs_age_ms < 0; decision steps %s)" % (len(future), first(future, 5)))
     margins = [r["fid_margin"] for r in decoded if r["fid_margin"] is not None]
-    value = {"decode_frac": frac, "join_failures": len(unjoined), "offset_p50": percentile(offsets, 50),
+    value = {"decode_frac": frac, "join_failures": len(unjoined), "pending_after_seal": len(after_seal),
+             "future_obs": len(future), "offset_p50": percentile(offsets, 50),
              "offset_p99": percentile(offsets, 99), "negative_offsets": sum(1 for o in offsets if o < 0),
              "min_margin": min(margins) if margins else None,
              "done_minus_one_agree": (done_agree / float(len(with_done))) if with_done else None}
@@ -327,13 +339,17 @@ def check_c13a(ctx):
                   % (len(decoded), len(readable), value["offset_p50"], value["offset_p99"]))
 
 
+EXPECTED_LAG = 1      # contract section 6: the image of render frame C shows the state logged in hf row C + 1
+
+
 def check_c13b(ctx):
     """Motion lag (r2 5.1 C13b), independent of the fiducial: the horizontal shift of the upper core between
     consecutive slots (1-D normalised cross-correlation of column means) is fitted against the camera heading change
     hf cam_fwd(captured + L) - cam_fwd(previous captured + L) for L in E06A.shift_range; the best lag (smallest
-    residual) must satisfy |L| <= C13b.max_abs_lag_frames (the contract's pairing makes L = +1 the expected lag: the
-    image of frame C shows hf row C + 1). SOFT (CAPTURE_PROGRAM 4.4, T0-MIN and T1) when the
-    session's yaw-rate std >= C13b.min_yaw_rate_std_rps, else INFO."""
+    residual) must be L = +1, the contract's pairing (the image of frame C shows hf row C + 1, section 6), whenever the
+    yaw signal suffices: lags 0 and -1 fail although C13b.max_abs_lag_frames (1) admits them, a code rule on top of
+    the verbatim thresholds. SOFT (CAPTURE_PROGRAM 4.4, T0-MIN and T1) when the session's yaw-rate std >=
+    C13b.min_yaw_rate_std_rps, else INFO (then only |L| <= C13b.max_abs_lag_frames is reported)."""
     if ctx.load_error:
         return unreadable(ctx, "C13b")
     s = ctx.session
@@ -377,6 +393,8 @@ def check_c13b(ctx):
                       "no heading change between images")
     best = min(residuals, key=lambda L: (residuals[L], abs(L)))
     ok = abs(best) <= thr.get("max_abs_lag_frames", 1)
+    if severity != INFO:
+        ok = ok and best == EXPECTED_LAG
     value = {"lag_frames": best, "residual_px": {str(L): round(r, 4) for L, r in sorted(residuals.items())},
              "px_per_rad": gains[best], "pairs": len(pairs), "yaw_rate_std": yaw_std}
     return result(ctx, "C13b", severity, PASS if ok else FAIL, value, thr,

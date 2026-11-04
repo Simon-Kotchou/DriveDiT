@@ -81,9 +81,11 @@ headers, or --build-key when the headers carry none: dd-launch/1), a usable E-02
 otherwise nothing is written (exit 2). Every card is checked after serialization against the rules llc_v1 applies when
 it loads and accepts it (enforce_load_check: DC_VehicleCard.Check and the AcceptCard limiter rule), so a card that
 says usable is never one the engine refuses. --placeholder writes the PLACEHOLDER card instead: status placeholder, no
-identification session, build_key null, the TBD-5 decided signs (steer_sign +1, yaw_axis_sign +1; E-01 run 3) and
-guessed kappa_ss, and the S105's manual gearbox as E-04 measured it in T0-ENG probe run 2 (scripted forward gears
-2..5, neutral 1, reverse 0; guessed shift speeds);
+identification session, build_key null, signs.measured false, the TBD-5 decided signs (steer_sign +1, yaw_axis_sign
++1; E-01 run 3), kappa_ss and the scripted gears 2..4 with their shift speeds COPIED from the provisional run-3
+first-pass fit (PLACEHOLDER_SOURCE; it waits for the DD-14a build_key, so nothing is measured for this card's build),
+the S105's gear indices as E-04 measured them in T0-ENG probe run 2 (forward 2..5, neutral 1, reverse 0) and an
+unidentified actuator;
 llc_v1 accepts it only for qualification (use_class dev or probe) and refuses it at any other use_class, production
 included.
 
@@ -172,22 +174,35 @@ LLC_DEFAULTS = (
     ("stop_speed_mps", 0.3),
 )
 
-# The PLACEHOLDER card's guesses (no probe has run): E-02a grid speeds 15 / 30 / 50 km/h, curvature per contract steer
-# falling with speed (an engine steering reduction is expected on 1.8), and the TBD-5 signs as dc-2.0 decided them
-# (E-01 run 3: a positive SetSteering turns right, so steer_sign +1; the r2 draft -1 is refuted; yaw_axis_sign +1)
-PLACEHOLDER_SPEEDS_MPS = (4.17, 8.33, 13.89)
-PLACEHOLDER_KAPPA_PER_STEER = (0.2, 0.12, 0.07)
+# The PLACEHOLDER card's kappa_ss and scripted gears are COPIED from the first-pass fit of T0-ENG probe run 3
+# (2026-11-03, launch 20261103T061122Z-wb-86bd: E-01, E-02a and E-04 on 1.8.0.13, fitted by this tool with
+# --scripted-gears 2,3,4 --upshift-mps 7.0,12.5 --downshift-mps 5.0,7.5). That fit is provisional: its identified card
+# waits for the DD-14a build_key (a stand-in key would let llc_v1 accept it at production). So the values are not
+# measured for this card's build (build_key null), the card stays a qualification-only placeholder, and a re-run of
+# the fit with the real build_key replaces it.
+# kappa_ss: E-02a steady cells, flat at about 0.23 1/m per contract steer (R2 >= 0.99999 at 15 / 30 / 50 km/h with
+# 5 / 5 / 3 valid cells). Signs: TBD-5 as dc-2.0 decided it (E-01 run 3: a positive SetSteering turns right, so
+# steer_sign +1; the r2 draft -1 is refuted; yaw_axis_sign +1), not measured by this card.
+PLACEHOLDER_SOURCE = "the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03)"
+PLACEHOLDER_SPEEDS_MPS = (4.254893, 8.350237, 14.07005)
+PLACEHOLDER_KAPPA_PER_STEER = (0.230344, 0.228379, 0.229872)
+PLACEHOLDER_KAPPA_OFFSET = (-0.0001, 0.0, 0.0)
 PLACEHOLDER_SIGNS = (1, 1)
 
-# The S105's gearbox as E-04 read it in T0-ENG probe run 2 (1.8.0.13: has_automatic_gearbox 0, gearbox_gears 6,
-# gearbox_forward_gears 4): a manual gearbox, so the placeholder drives it with SetGear (scripted) over all 4 forward
-# gears, indices by the vanilla rule (reverse 0, neutral 1, forward 2..5). The shift speeds are GUESSED from the
-# prefab's ratios (S105_base.et Gearbox Forward 3.8 2.12 1.41 0.96, differential 5.25) at an assumed rolling radius
-# of 0.29 m (1.52 / 2.73 / 4.10 / 6.03 m/s per 1000 rpm): up near 4000 rpm, down near 1500-1800 rpm in the higher
-# gear. No clutch dip: vanilla VehicleCinematicTrack drives with SetGear at clutch 1 (VehicleCinematicTrack.c:149-159)
+# The S105's gearbox: E-04 of T0-ENG probe run 2 (1.8.0.13: has_automatic_gearbox 0, gearbox_gears 6,
+# gearbox_forward_gears 4), a manual gearbox driven by SetGear (scripted), indices by the vanilla rule (reverse 0,
+# neutral 1, forward 2..5). The scripted gears 2, 3, 4 and their shift speeds are run 3's: the probe policy, up at
+# 4500 rpm and down at 1800 rpm in the higher gear, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in gears
+# 2..4 (gear 5 was never driven in E-01, so it stays out of the scripted gears). No clutch dip: run 3 drove without
+# one, as vanilla VehicleCinematicTrack drives with SetGear at clutch 1 (VehicleCinematicTrack.c:149-159).
+# The actuator stays unidentified (input_echo null, input_shaping unknown): llc_v1 reads the raw engine path only for
+# its limiter rule (AcceptCard, CC-08), which matters only with an llc rate limit, and the placeholder keeps the
+# identity limiter (steer_rate_per_s 0); run 3's echo with 1 step of dead time and a 0.05-0.06 s lag would change
+# nothing in llc_v1 and is not claimed for an unbuilt key.
 PLACEHOLDER_E04 = {"has_automatic_gearbox": False, "gearbox_gears": 6, "gearbox_forward_gears": 4}
-PLACEHOLDER_UPSHIFT_MPS = (6.0, 11.0, 16.5)
-PLACEHOLDER_DOWNSHIFT_MPS = (4.0, 7.5, 11.0)
+PLACEHOLDER_SCRIPTED_GEARS = (2, 3, 4)
+PLACEHOLDER_UPSHIFT_MPS = (7.0, 12.5)
+PLACEHOLDER_DOWNSHIFT_MPS = (5.0, 7.5)
 PLACEHOLDER_CLUTCH_DIP_S = 0.0
 
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
@@ -993,12 +1008,13 @@ def build_placeholder(args):
         "identification_sessions": [],
         "use": "PLACEHOLDER: qualification only. llc_v1 accepts it at use_class dev or probe and refuses it at any "
                "other use_class, production included",
-        "note": "PLACEHOLDER card (DD-7-min): no identified card exists yet (T0-ENG probe run 2 found the S105 in "
-                "neutral; the run 3 fit waits for its build_key). Signs are the TBD-5 values dc-2.0 decided (E-01 "
-                "run 3: steer_sign +1), kappa_ss is guessed, the actuator is "
-                "unidentified; the gearbox is E-04's (manual, 4 forward gears) with guessed shift speeds. Replace it "
-                "with fit_steer_kappa.py --e01 --e02a --e04 once the plays exist; data driven with it is "
-                "qualification-only.",
+        "note": "PLACEHOLDER card (DD-7-min): kappa_ss and the scripted gears 2, 3, 4 with their shift speeds are "
+                "COPIED from " + PLACEHOLDER_SOURCE + ", which is provisional (its identified card waits for the "
+                "DD-14a build_key); they are not measured for this card's build (build_key null). Signs are the TBD-5 "
+                "values dc-2.0 decided (E-01 run 3: steer_sign +1), not measured by this card. The actuator stays "
+                "unidentified: llc_v1 keeps its identity limiter on a placeholder, so run 3's input echo is not used. "
+                "Replace it with fit_steer_kappa.py --e01 --e02a --e04 --build-key <the DD-14a key> on the run-3 plays "
+                "once DD-14a lands; data driven with it is qualification-only.",
         "generator": {"tool": GENERATOR, "version": GENERATOR_VERSION},
         "signs": {"steer_sign": PLACEHOLDER_SIGNS[0], "yaw_axis_sign": PLACEHOLDER_SIGNS[1], "measured": False,
                   "detail": "dc-2.0 TBD-5 decided (E-01 run 3): a positive SetSteering turns right (steer_sign +1); "
@@ -1009,16 +1025,20 @@ def build_placeholder(args):
         "gearbox": {"mode": "scripted",
                     "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, "
                              "so a manual gearbox driven by SetGear; indices by the vanilla rule "
-                             "(SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5 (not yet seen "
-                             "driving: E-01 is pending). Shift speeds GUESSED from the prefab ratios (3.8, 2.12, 1.41, "
-                             "0.96; differential 5.25) at an assumed 0.29 m rolling radius: up near 4000 rpm, down "
-                             "near 1500-1800 rpm. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1)",
+                             "(SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5. Scripted gears "
+                             "2, 3, 4 and shift speeds COPIED from " + PLACEHOLDER_SOURCE + ", provisional until the "
+                             "DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 "
+                             "rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in "
+                             "gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear "
+                             "at clutch 1)",
                     "has_automatic_gearbox": PLACEHOLDER_E04["has_automatic_gearbox"],
-                    "scripted_gears": indices["forward"], "upshift_mps": list(PLACEHOLDER_UPSHIFT_MPS),
+                    "scripted_gears": list(PLACEHOLDER_SCRIPTED_GEARS), "upshift_mps": list(PLACEHOLDER_UPSHIFT_MPS),
                     "downshift_mps": list(PLACEHOLDER_DOWNSHIFT_MPS), "clutch_dip_s": PLACEHOLDER_CLUTCH_DIP_S},
         "kappa_ss": {"speeds_mps": list(PLACEHOLDER_SPEEDS_MPS), "kappa_per_steer": list(PLACEHOLDER_KAPPA_PER_STEER),
-                     "kappa_offset": [0.0] * len(PLACEHOLDER_SPEEDS_MPS),
-                     "basis": "GUESSED (E-02a grid speeds 15 / 30 / 50 km/h); not a fit", "fits": [], "cells": []},
+                     "kappa_offset": list(PLACEHOLDER_KAPPA_OFFSET),
+                     "basis": "COPIED from " + PLACEHOLDER_SOURCE + ": E-02a steady cells, R2 >= 0.99999 at 15 / 30 / "
+                              "50 km/h with 5 / 5 / 3 valid cells; provisional until the DD-14a build_key, not "
+                              "measured for this card's build (no fit of this card)", "fits": [], "cells": []},
         "actuator": {
             "raw_engine_path": {"input_echo": None, "input_shaping": "unknown", "steer_rate_limit_per_s": None,
                                 "input_lag_tau_s": None, "input_max_slope_per_s": None, "shaping_fit": None,

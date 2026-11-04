@@ -8,7 +8,7 @@
   "build_key": null,
   "identification_sessions": [],
   "use": "PLACEHOLDER: qualification only. llc_v1 accepts it at use_class dev or probe and refuses it at any other use_class, production included",
-  "note": "PLACEHOLDER card (DD-7-min): no identified card exists yet (T0-ENG probe run 2 found the S105 in neutral; the run 3 fit waits for its build_key). Signs are the TBD-5 values dc-2.0 decided (E-01 run 3: steer_sign +1), kappa_ss is guessed, the actuator is unidentified; the gearbox is E-04's (manual, 4 forward gears) with guessed shift speeds. Replace it with fit_steer_kappa.py --e01 --e02a --e04 once the plays exist; data driven with it is qualification-only.",
+  "note": "PLACEHOLDER card (DD-7-min): kappa_ss and the scripted gears 2, 3, 4 with their shift speeds are COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03), which is provisional (its identified card waits for the DD-14a build_key); they are not measured for this card's build (build_key null). Signs are the TBD-5 values dc-2.0 decided (E-01 run 3: steer_sign +1), not measured by this card. The actuator stays unidentified: llc_v1 keeps its identity limiter on a placeholder, so run 3's input echo is not used. Replace it with fit_steer_kappa.py --e01 --e02a --e04 --build-key <the DD-14a key> on the run-3 plays once DD-14a lands; data driven with it is qualification-only.",
   "generator": {
     "tool": "tools/ident/fit_steer_kappa.py",
     "version": 1
@@ -29,43 +29,40 @@
   "gear_index_reverse": 0,
   "gearbox": {
     "mode": "scripted",
-    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, so a manual gearbox driven by SetGear; indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5 (not yet seen driving: E-01 is pending). Shift speeds GUESSED from the prefab ratios (3.8, 2.12, 1.41, 0.96; differential 5.25) at an assumed 0.29 m rolling radius: up near 4000 rpm, down near 1500-1800 rpm. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1)",
+    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, so a manual gearbox driven by SetGear; indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5. Scripted gears 2, 3, 4 and shift speeds COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03), provisional until the DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1)",
     "has_automatic_gearbox": false,
     "scripted_gears": [
       2,
       3,
-      4,
-      5
+      4
     ],
     "upshift_mps": [
-      6.0,
-      11.0,
-      16.5
+      7.0,
+      12.5
     ],
     "downshift_mps": [
-      4.0,
-      7.5,
-      11.0
+      5.0,
+      7.5
     ],
     "clutch_dip_s": 0.0
   },
   "kappa_ss": {
     "speeds_mps": [
-      4.17,
-      8.33,
-      13.89
+      4.254893,
+      8.350237,
+      14.07005
     ],
     "kappa_per_steer": [
-      0.2,
-      0.12,
-      0.07
+      0.230344,
+      0.228379,
+      0.229872
     ],
     "kappa_offset": [
-      0.0,
+      -0.0001,
       0.0,
       0.0
     ],
-    "basis": "GUESSED (E-02a grid speeds 15 / 30 / 50 km/h); not a fit",
+    "basis": "COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03): E-02a steady cells, R2 >= 0.99999 at 15 / 30 / 50 km/h with 5 / 5 / 3 valid cells; provisional until the DD-14a build_key, not measured for this card's build (no fit of this card)",
     "fits": [],
     "cells": []
   },

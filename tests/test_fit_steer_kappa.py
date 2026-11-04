@@ -26,13 +26,16 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     (F-11), complete plays and a usable E-02a fit with gains >= MIN_KAPPA_PER_STEER, and is checked as written
     against llc_v1's load rules (F-12); Everon inputs are refused;
   - the committed card tools/ident/cards/1.8.0.13/S105.json is exactly the generator's PLACEHOLDER (status
-    placeholder, no identification session, build_key null, the TBD-5 signs dc-2.0 decided: steer_sign +1) with the
-    S105's manual gearbox of T0-ENG probe run 2 (E-04: 6 gears, 4 forward -> scripted forward gears 2..5, neutral 1,
-    reverse 0 by the vanilla rule);
+    placeholder, no identification session, build_key null, signs.measured false, the TBD-5 signs dc-2.0 decided:
+    steer_sign +1) with kappa_ss and the scripted gears 2, 3, 4 and their shift speeds of the provisional run-3
+    first-pass fit (RUN3_*; compared with the fit's own card when DD_RUN3_CARD names it), an unidentified actuator,
+    and the S105's gear indices of T0-ENG probe run 2 (E-04: 6 gears, 4 forward -> forward 2..5, neutral 1, reverse 0
+    by the vanilla rule); llc_v1 still refuses it at production (AcceptCard, mirrored);
   - llc_v1's scripted-gear policy (a Python mirror of DC_LLCv1 Reset / ScriptedGear / the clutch dip, tied to the
-    Enforce source) drives the placeholder's 4 forward gears at the frozen dc-2.0 step dt (1/30 s, callbacks of 1 to
+    Enforce source) drives the placeholder's 3 scripted gears at the frozen dc-2.0 step dt (1/30 s, callbacks of 1 to
     3 steps, D-A): first gear at the start, one up and one down shift per shift speed with hysteresis, never neutral
-    or reverse, engine speeds within the prefab's range, the clutch dip after every change, counted in covered steps;
+    or reverse, engine speeds within the probe policy's range by E-01 run 3's measured speed per 1000 rpm, the clutch
+    dip after every change, counted in covered steps;
     the gear-index rules (reverse below neutral, increasing scripted gears above neutral) and
     E-04's indices in an identified card; llc_v1 refuses an automatic card on the manual ego (CheckEgoGearbox);
   - every card keeps the format llc_v1 reads: each scanned array key once, numbers without exponent, ASCII + LF, the
@@ -384,15 +387,29 @@ def build_e02a(play_dir, truth, starve_speed=None, starved=(), **head):
         "e02a_steps": (STEP_COLUMNS, truth.rows), "e02a_cells": (CELL_COLUMNS, cells)}, FOOTER)
 
 
-# The S105 drivetrain of the 1.8.0.13 prefab (S105_base.et: Gearbox Forward 3.8 2.12 1.41 0.96, Diff_02 Ratio 5.25)
-# per engine gear index of the vanilla rule, and the rolling radius the placeholder's shift speeds assume
-S105_RATIOS = {2: 3.8, 3: 2.12, 4: 1.41, 5: 0.96}
-S105_FINAL_DRIVE = 5.25
-S105_RADIUS_M = 0.29
+# The provisional run-3 first-pass fit (T0-ENG probe run 3, launch 20261103T061122Z-wb-86bd: E-01, E-02a, E-04 on
+# 1.8.0.13; its identified card waits for the DD-14a build_key) whose kappa_ss and scripted gearbox the placeholder
+# copies. DD_RUN3_CARD may name that fit's card (S105.provisional.json) to compare the two directly.
+RUN3_KAPPA_SS = {"speeds_mps": [4.254893, 8.350237, 14.07005], "kappa_per_steer": [0.230344, 0.228379, 0.229872],
+                 "kappa_offset": [-0.0001, 0.0, 0.0]}
+RUN3_GEARBOX = {"mode": "scripted", "has_automatic_gearbox": False, "scripted_gears": [2, 3, 4],
+                "upshift_mps": [7.0, 12.5], "downshift_mps": [5.0, 7.5], "clutch_dip_s": 0.0}
+RUN3_CARD = os.environ.get("DD_RUN3_CARD", "")
+# E-01 run 3's measured speed per 1000 engine rpm in the gears it drove (the fit's gearbox.detail.speed_per_krpm), the
+# basis of the shift speeds: the probe policy upshifts at 4500 rpm and downshifts at 1800 rpm in the higher gear
+RUN3_SPEED_PER_KRPM = {2: 1.54871, 3: 2.772066, 4: 4.169103}
 
 
 def engine_rpm(speed, gear):
-    return speed / (2.0 * math.pi * S105_RADIUS_M) * 60.0 * S105_RATIOS[gear] * S105_FINAL_DRIVE
+    return speed / RUN3_SPEED_PER_KRPM[gear] * 1000.0
+
+
+def accept_card(card, use_class, session_pin_id):
+    """Mirror of the first rules of DC_LLCv1.AcceptCard (asserted in test_placeholder_is_refused_at_production): a
+    placeholder only at a qualification use_class (dev, probe), and only for the session's pin."""
+    if card["status"] == "placeholder" and use_class not in ("dev", "probe"):
+        return False
+    return card["pin_id"] == session_pin_id
 
 
 class LlcGears:
@@ -839,16 +856,65 @@ class FitTests(unittest.TestCase):
         self.assertIn("\n   m_iSteerSign %d\n" % card["signs"]["steer_sign"], recorder)
         self.assertIn("production", card["use"])
         # the S105's manual gearbox (T0-ENG probe run 2, E-04: has_automatic_gearbox 0, 6 gears, 4 forward) by the
-        # vanilla rule: reverse 0, neutral 1, forward 2..5; driven by SetGear over all four forward gears
+        # vanilla rule: reverse 0, neutral 1, forward 2..5; SetGear drives the scripted gears among them
         self.assertEqual(fit.vanilla_gear_indices(6, 4), {"neutral": 1, "reverse": 0, "forward": [2, 3, 4, 5]})
         self.assertEqual((card["gear_indices_forward"], card["gear_index_neutral"], card["gear_index_reverse"]),
                          ([2, 3, 4, 5], 1, 0))
-        gearbox = card["gearbox"]
-        self.assertEqual((gearbox["mode"], gearbox["has_automatic_gearbox"], gearbox["scripted_gears"]),
-                         ("scripted", False, [2, 3, 4, 5]))
-        self.assertEqual((len(gearbox["upshift_mps"]), len(gearbox["downshift_mps"]), gearbox["clutch_dip_s"]),
-                         (3, 3, 0.0))
+        # kappa_ss and the scripted gearbox are run 3's first-pass fit, copied (provisional, not measured for this
+        # card's build): flat at about 0.23 1/m per contract steer; gears 2, 3, 4 (gear 5 was not driven in E-01)
+        self.assertEqual({k: card["kappa_ss"][k] for k in RUN3_KAPPA_SS}, RUN3_KAPPA_SS)
+        self.assertEqual({k: card["gearbox"][k] for k in RUN3_GEARBOX}, RUN3_GEARBOX)
+        self.assertEqual((card["kappa_ss"]["fits"], card["kappa_ss"]["cells"]), ([], []))   # no fit of this card
+        for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):
+            self.assertAlmostEqual(engine_rpm(RUN3_GEARBOX["upshift_mps"][slot], gear), 4500.0, delta=25.0)
+            self.assertAlmostEqual(engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1), 1800.0, delta=25.0)
+        for text in (card["note"], card["gearbox"]["basis"], card["kappa_ss"]["basis"]):
+            for word in ("COPIED", "run 3", "provisional", "DD-14a", "not measured for this card's build"):
+                self.assertIn(word, text)
+        # the actuator stays unidentified: llc_v1 reads the raw engine path only for the limiter rule, which the
+        # identity limiter (steer_rate_per_s 0) never needs
+        raw = card["actuator"]["raw_engine_path"]
+        self.assertEqual((raw["input_echo"], raw["input_shaping"], raw["steer_rate_limit_per_s"],
+                          raw["dead_time_steps"], raw["selected_structure"], raw["bins"]),
+                         (None, "unknown", None, None, None, []))
+        self.assertEqual(card["llc_v1"]["steer_rate_per_s"], 0.0)
+        self.assertEqual(card["llc_v1"], dict(fit.LLC_DEFAULTS))           # no longitudinal fit is copied
+        self.assertIsNone(card["longitudinal"])
+        if RUN3_CARD:
+            with open(RUN3_CARD, "r", encoding="ascii") as f:
+                run3 = json.load(f)
+            for key in ("speeds_mps", "kappa_per_steer", "kappa_offset"):
+                self.assertEqual(card["kappa_ss"][key], run3["kappa_ss"][key], key)
+            for key in RUN3_GEARBOX:
+                self.assertEqual(card["gearbox"][key], run3["gearbox"][key], key)
+            self.assertEqual((card["signs"]["steer_sign"], card["signs"]["yaw_axis_sign"]),
+                             (run3["signs"]["steer_sign"], run3["signs"]["yaw_axis_sign"]))
+            self.assertEqual({str(g): v for g, v in RUN3_SPEED_PER_KRPM.items()},
+                             run3["gearbox"]["detail"]["speed_per_krpm"])
+            self.assertEqual((card["gear_index_neutral"], card["gear_index_reverse"]),
+                             (run3["gear_index_neutral"], run3["gear_index_reverse"]))
         self.assertEqual(fit.enforce_load_check(card), [])
+
+    def test_placeholder_is_refused_at_production(self):
+        # DC_LLCv1.AcceptCard's first rule, and DC_VehicleCard's placeholder test, as the Enforce source has them
+        with open(LLC_SOURCE, "r", encoding="ascii") as f:
+            source = f.read()
+        self.assertIn('protected static ref array<string> s_aQualificationUseClasses = {"dev", "probe"};', source)
+        accept = enforce_body(source, "DC_LLCv1", "AcceptCard")
+        self.assertIn("warning = string.Empty; if (card.IsPlaceholder() && s_aQualificationUseClasses.Find(useClass) "
+                      "< 0) { failure =", accept)
+        self.assertIn("return m_sStatus == STATUS_PLACEHOLDER;",
+                      enforce_body(source, "DC_VehicleCard", "IsPlaceholder"))
+        with open(CARD, "r", encoding="ascii") as f:
+            card = json.load(f)
+        # the copied run-3 values do not make it identified: still a placeholder without sessions or build_key
+        self.assertEqual((card["status"], card["identification_sessions"], card["build_key"],
+                          card["signs"]["measured"]), ("placeholder", [], None, False))
+        self.assertFalse(accept_card(card, "production", "1.8.0.13"))
+        for use_class in ("dev", "probe"):
+            self.assertTrue(accept_card(card, use_class, "1.8.0.13"))
+        self.assertFalse(accept_card(card, "dev", "1.9.0.10"))
+        self.assertIn("production", card["use"])
 
     def test_vanilla_gear_indices(self):
         self.assertEqual(fit.vanilla_gear_indices(7, 4), {"neutral": 2, "reverse": 1, "forward": [3, 4, 5, 6]})
@@ -864,7 +930,7 @@ class FitTests(unittest.TestCase):
                           "m_iParkGear = m_iNeutralGear;"):
             self.assertIn(statement, init)
 
-    def test_placeholder_scripted_policy_drives_four_forward_gears(self):
+    def test_placeholder_scripted_policy_drives_its_three_gears(self):
         # llc_v1's scripted gearbox on the placeholder card: the mirror follows the Enforce statements ...
         with open(LLC_SOURCE, "r", encoding="ascii") as f:
             source = f.read()
@@ -889,39 +955,42 @@ class FitTests(unittest.TestCase):
             card = json.load(f)
         neutral, reverse = card["gear_index_neutral"], card["gear_index_reverse"]
         up, down = card["gearbox"]["upshift_mps"], card["gearbox"]["downshift_mps"]
-        # ... over an episode from standstill: 0 -> 20 m/s at 1.5 m/s2, 2 s at 20 m/s, back to 0 at 2 m/s2, one
-        # callback per step of the frozen step dt
-        speeds = [min(20.0, 1.5 * STEP_DT * i) for i in range(int(20.0 / 1.5 / STEP_DT) + 60)]
-        speeds += [max(0.0, 20.0 - 2.0 * STEP_DT * i) for i in range(1, int(20.0 / 2.0 / STEP_DT) + 15)]
+        # ... over an episode from standstill: 0 -> 16 m/s (above the expert's 40 km/h cruise and the 50 km/h E-02a
+        # cell) at 1.5 m/s2, 2 s at 16 m/s, back to 0 at 2 m/s2, one callback per step of the frozen step dt
+        speeds = [min(16.0, 1.5 * STEP_DT * i) for i in range(int(16.0 / 1.5 / STEP_DT) + 60)]
+        speeds += [max(0.0, 16.0 - 2.0 * STEP_DT * i) for i in range(1, int(16.0 / 2.0 / STEP_DT) + 15)]
         llc = LlcGears(card, STEP_DT)
         llc.reset(speeds[0])
         trace = [(v,) + llc.step(v) for v in speeds]
         gears = [g for _, g, _ in trace]
         self.assertEqual(gears[0], 2)                                   # first gear at the start
-        self.assertEqual(set(gears), {2, 3, 4, 5})                      # all four forward gears are used
+        self.assertEqual(set(gears), {2, 3, 4})                         # the three scripted gears (run 3's)
         self.assertTrue(all(g > neutral and g != reverse for g in gears))   # never neutral or reverse
         changes = [(trace[i][0], gears[i - 1], gears[i]) for i in range(1, len(trace)) if gears[i] != gears[i - 1]]
-        self.assertEqual([(a, b) for _, a, b in changes], [(2, 3), (3, 4), (4, 5), (5, 4), (4, 3), (3, 2)])
+        self.assertEqual([(a, b) for _, a, b in changes], [(2, 3), (3, 4), (4, 3), (3, 2)])
         for speed, before, after in changes:
             slot = card["gearbox"]["scripted_gears"].index(min(before, after))
             if after > before:
                 self.assertGreaterEqual(speed, up[slot])
             else:
                 self.assertLess(speed, down[slot])
-        # engine speeds the prefab's ratios give (rolling radius 0.29 m): never above 4200 rpm, and at least 1400 rpm
-        # whenever the car is above the lowest downshift speed
+        # engine speeds by E-01 run 3's measured speed per 1000 rpm: the probe policy's band, never above about
+        # 4500 rpm, and at least about 1800 rpm whenever the car is above the lowest downshift speed
         rpms = [(v, engine_rpm(v, g)) for v, g, _ in trace]
-        self.assertLessEqual(max(r for _, r in rpms), 4200.0)
-        self.assertGreaterEqual(min(r for v, r in rpms if v >= down[0]), 1400.0)
+        self.assertLessEqual(max(r for _, r in rpms), 4560.0)
+        self.assertGreaterEqual(min(r for v, r in rpms if v >= down[0]), 1790.0)
         # no dip on the placeholder (clutch 1, as vanilla VehicleCinematicTrack)
         self.assertTrue(all(c == 1.0 for _, _, c in trace))
         # hysteresis: speed jitter of +-0.3 m/s around an upshift speed shifts once
         llc.reset(up[0] - 0.5)
         jitter = [2] + [llc.step(up[0] + 0.3 * math.sin(i / 3.0))[0] for i in range(600)]
         self.assertEqual(sum(1 for a, b in zip(jitter, jitter[1:]) if a != b), 1)
-        # an episode that begins while rolling at 12 m/s starts in the gear for that speed (third: index 4)
+        # an episode that begins while rolling starts in the gear for that speed: 12 m/s second (index 3), 13 m/s
+        # third (index 4)
         llc.reset(12.0)
-        self.assertEqual(llc.step(12.0)[0], 4)
+        self.assertEqual(llc.step(12.0)[0], 3)
+        llc.reset(13.0)
+        self.assertEqual(llc.step(13.0)[0], 4)
         # with a clutch dip (E-01's m_fGearClutchDipS), clutch 0 for the dip after the first SetGear and every change
         dipped = dict(card, gearbox=dict(card["gearbox"], clutch_dip_s=0.25))
         llc = LlcGears(dipped, STEP_DT)
@@ -929,10 +998,10 @@ class FitTests(unittest.TestCase):
         trace = [llc.step(v) for v in speeds]
         steps = int(math.floor(0.25 / STEP_DT + 0.5))
         starts = [0] + [i for i in range(1, len(trace)) if trace[i][0] != trace[i - 1][0]]
-        self.assertEqual(len(starts), 7)
+        self.assertEqual(len(starts), 5)
         for start in starts:
             self.assertEqual([c for _, c in trace[start:start + steps + 1]], [0.0] * steps + [1.0])
-        self.assertEqual(sum(1 for _, c in trace if c == 0.0), 7 * steps)
+        self.assertEqual(sum(1 for _, c in trace if c == 0.0), 5 * steps)
         # the same episode in callbacks of 1, 2 and 3 steps (a capture session's shapes): the same gears, and each dip
         # lasts its steps rounded up to whole callbacks (at least the card's, at most 2 steps more)
         pattern = [1, 1, 2, 1, 3, 1, 2, 3, 1, 1]
@@ -945,8 +1014,7 @@ class FitTests(unittest.TestCase):
             index += covered
         self.assertEqual(trace[0][0], merged[0][1])
         changes = [i for i in range(1, len(merged)) if merged[i][1] != merged[i - 1][1]]
-        self.assertEqual([(merged[i - 1][1], merged[i][1]) for i in changes],
-                         [(2, 3), (3, 4), (4, 5), (5, 4), (4, 3), (3, 2)])
+        self.assertEqual([(merged[i - 1][1], merged[i][1]) for i in changes], [(2, 3), (3, 4), (4, 3), (3, 2)])
         for start in [0] + changes:
             run, dipped_steps = start, 0
             while run < len(merged) and merged[run][2] == 0.0:

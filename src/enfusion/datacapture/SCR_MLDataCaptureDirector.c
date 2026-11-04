@@ -74,6 +74,10 @@
 //     fire, or no seat watchdog to seat a new driver; a car that cannot move or is on fire once the seat watchdog's
 //     time is up; the deleted group or vehicle. Retiring removes its waypoints, deletes the empty group, ends its seat
 //     watchdog, move-failure counting and statistics, and logs one "group N retired: <reason>" line;
+//   - releases the waypoint of a group move that failed with UNKNOWN (OnMoveFailed -> ReleaseFailedWaypoint): vanilla
+//     would raise a node error (a VM-exception dialog in Workbench) and park the group for good
+//     (SCR_AIProcessFailedMovementResult.c:99-101). Its activities are cancelled as when a waypoint is deselected, the
+//     waypoint is removed, the group avoids that target from now on and gets the next one;
 //   - stops the collector session (SCR_MLDataCollector.StopSession) when the game mode or the game ends.
 //
 // LIFECYCLE (vanilla 1.8.0.13 Game/GameMode/SCR_BaseGameMode.c:428-458 and :499-521): the authority's first
@@ -197,9 +201,10 @@ class SCR_MLDataCaptureGroupState : Managed
 	int m_iSuspendedWaypoint = -1;	//!< index into m_aWaypoints taken away while the group had no AI agent, -1 = none
 
 	int m_iLimitResets;				//!< stuck resets after the reseat limit (ResetAfterReseatLimit), at most MAX_LIMIT_RESETS
-	ref array<int> m_aAvoidTargetIds = {};		//!< marker ids of the targets this group got stuck on: never assigned again
+	ref array<int> m_aAvoidTargetIds = {};		//!< marker ids of the targets this group got stuck on or failed to plan to: never assigned again
 	ref array<vector> m_aGoodPoses = {};		//!< vehicle transforms while it drove (RecordGoodPose): 4 vectors each, newest last
 	ref array<float> m_aGoodPoseTimesS = {};	//!< director time [s] of each good pose
+	int m_iReleasedWaypoints;		//!< waypoints taken away after an UNKNOWN failure of their move (ReleaseFailedWaypoint)
 
 	static const int MOVE_FAILURE_LOG_LIMIT = 50;
 
@@ -248,6 +253,7 @@ class SCR_MLDataCaptureGroupState : Managed
 	//! When the failed move used a vehicle and the result is STUCK, UNREACHABLE or ENTITY_NOT_MOVABLE, that node then
 	//! orders everybody out of the vehicle and retries the move (:136, SCR_AIGetOutActivity). STOPPED, UNKNOWN,
 	//! ENTITY_CANT_MOVE and a move without a vehicle order no get-out (:81-137); they are logged and counted all the same.
+	//! An UNKNOWN failure of a waypoint move releases that waypoint first (ReleaseFailedWaypoint), for every such failure.
 	void OnMoveFailed(int moveResult, IEntity vehicleUsed, bool isWaypointRelated, vector moveLocation)
 	{
 		string vehicleName = "none";
@@ -261,12 +267,73 @@ class SCR_MLDataCaptureGroupState : Managed
 		m_sLastMoveFailure = string.Format("%1 (vehicle %2)", result, vehicleName);
 		m_fLastMoveFailureMs = GetGame().GetWorld().GetWorldTime();
 
+		// Synchronously, before the node goes on at :81, and before the logging limit below.
+		string release;
+		if (moveResult == EMoveError.UNKNOWN && isWaypointRelated)
+			release = " - " + ReleaseFailedWaypoint();
+
 		// Logged for the first MOVE_FAILURE_LOG_LIMIT failures of the group, then every MOVE_FAILURE_LOG_LIMIT-th (the
 		// node retries the move at once, so a move that keeps failing could flood the log); the statistics count all.
 		if (m_iMoveFailures > MOVE_FAILURE_LOG_LIMIT && m_iMoveFailures % MOVE_FAILURE_LOG_LIMIT != 0)
 			return;
 
-		Print(string.Format("[DataCapture] WARNING: group %1: vanilla group move failed: %2, vehicle %3, waypoint move %4, move target %5 (move failure %6)", m_iGroupId, result, vehicleName, isWaypointRelated, moveLocation, m_iMoveFailures), LogLevel.WARNING);
+		Print(string.Format("[DataCapture] WARNING: group %1: vanilla group move failed: %2, vehicle %3, waypoint move %4, move target %5 (move failure %6)%7", m_iGroupId, result, vehicleName, isWaypointRelated, moveLocation, m_iMoveFailures, release), LogLevel.WARNING);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! OnMoveFailed of an UNKNOWN failure of a waypoint move, i.e. at SCR_AIProcessFailedMovementResult.c:78, before that
+	//! node decides (:81-101). If the current group activity (GetCurrentAction, :85) still has its related waypoint, the
+	//! node raises NodeErrorOnce (:99; a VM-exception dialog in Workbench, error.log 2026-11-03 17:53:01) and parks the
+	//! group by returning RUNNING for good (:100-101, "to allow us to debug it"); without one it only fails the action
+	//! (:87-94). So the activities of that waypoint are cancelled as vanilla cancels them when a group deselects a waypoint
+	//! (SCR_AIWaypointState.OnDeselected, Game/AI/Group/SCR_AIWaypointState.c:24-27):
+	//! SCR_AIGroupUtilityComponent.CancelActivitiesRelatedToWaypoint with doNotCompleteWaypoint
+	//! (Game/AI/Components/SCR_AIGroupUtilityComponent.c:761-781) calls SCR_AIActivityBase.Fail(true), which nulls
+	//! m_RelatedWaypoint on purpose (Game/AI/Behavior/SCR_AIActivity.c:75-83). A failed action stays the current one
+	//! until the group's next evaluation removes it (RemoveObsoleteActions, then SetCurrentAction,
+	//! SCR_AIGroupUtilityComponent.c:228-243), so :85-87 find it without its waypoint and fail it once more, the
+	//! sequence vanilla runs for a removed waypoint. Nothing in :79-101 reads the waypoint itself. The waypoint is then
+	//! removed from the group (AIGroup.RemoveWaypoint, not CompleteWaypoint, so no completion is counted), as the node
+	//! itself removes the current waypoint before it fails the action at :118-122, which the 2026-11-03 Play ran for G3
+	//! at 17:24:45. The target is avoided by this group from now on; the next one follows on the next monitor tick.
+	//! The waypoint entity is not deleted here. m_RelatedWaypoint is a weak AIWaypoint (SCR_AIActivity.c:15) that a
+	//! delete would null, but SCR_EntityHelper.DeleteEntityAndChildren goes through the native
+	//! RplComponent.DeleteRplEntity, whose timing script cannot see, and destroying the group's current waypoint inside
+	//! its own behaviour tree would leave the waypoint list and SCR_AIWaypointState to native clean-up.
+	//! \return what was done, for the move-failure line
+	protected string ReleaseFailedWaypoint()
+	{
+		if (!m_Group)
+			return "no AI group";
+
+		SCR_AIGroupUtilityComponent groupUtility = m_Group.GetGroupUtilityComponent(); // Game/Entities/SCR_AIGroup.c:258
+		if (!groupUtility)
+			return "no group utility component, the vanilla node error follows";
+
+		SCR_AIActivityBase activity = SCR_AIActivityBase.Cast(groupUtility.GetCurrentAction()); // Game/generated/AI/AIBaseUtilityComponent.c:38
+		if (!activity)
+			return "no current group activity, the vanilla node error follows";
+
+		AIWaypoint waypoint = activity.m_RelatedWaypoint;
+		if (!waypoint)
+			return "its activity has no waypoint any more, vanilla only fails it";
+
+		groupUtility.CancelActivitiesRelatedToWaypoint(waypoint, doNotCompleteWaypoint: true);
+		int index = FindWaypoint(waypoint);
+		if (index < 0)
+			return "not a director waypoint: its activities were cancelled, the group keeps it";
+
+		m_Group.RemoveWaypoint(waypoint);
+		int targetId = m_aWaypoints[index].m_iTargetId;
+		if (!m_aAvoidTargetIds.Contains(targetId))
+			m_aAvoidTargetIds.Insert(targetId);
+
+		if (m_iSuspendedWaypoint == index)
+			m_iSuspendedWaypoint = -1;
+
+		m_iReleasedWaypoints++;
+		m_fNextAssignAtMs = GetGame().GetWorld().GetWorldTime();
+		return string.Format("waypoint of target %1 released (activities cancelled without completing it, waypoint removed; release %2): this group avoids the target from now on, the next one follows on the next director tick", targetId, m_iReleasedWaypoints);
 	}
 }
 
@@ -1484,7 +1551,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (i == current)
 				continue;
 
-			// A target this group got stuck on (ResetAfterReseatLimit)
+			// A target this group got stuck on or failed to plan to (ResetAfterReseatLimit, ReleaseFailedWaypoint)
 			if (state.m_aAvoidTargetIds.Contains(state.m_aWaypoints[i].m_iTargetId))
 				continue;
 
@@ -1504,7 +1571,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			if (!state.m_bNoTargetWarned)
 			{
 				state.m_bNoTargetWarned = true;
-				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target (avoided after stuck resets:%3) - no new waypoint, retrying every %4 ms", groupId, exclusion, DescribeTargetIds(state.m_aAvoidTargetIds), retryMs), LogLevel.WARNING);
+				Print(string.Format("[DataCapture] WARNING: group %1: no drive target is %2 m or more away from the vehicle and the current target (avoided after stuck resets and failed waypoint moves:%3) - no new waypoint, retrying every %4 ms", groupId, exclusion, DescribeTargetIds(state.m_aAvoidTargetIds), retryMs), LogLevel.WARNING);
 			}
 
 			return;
@@ -2595,8 +2662,8 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 			}
 
 			// string.Format takes at most 9 arguments: the seat fields are formatted first.
-			string seat = string.Format("driver_seated=%1 driver_ready=%2 dismounts=%3 reseats=%4 move_failures=%5 limit_resets=%6 avoided_targets=%7",
-				state.m_bDriverSeated, state.m_bDriverReady, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures, state.m_iLimitResets, DescribeTargetIds(state.m_aAvoidTargetIds));
+			string seat = string.Format("driver_seated=%1 driver_ready=%2 dismounts=%3 reseats=%4 move_failures=%5 released_waypoints=%6 limit_resets=%7 avoided_targets=%8",
+				state.m_bDriverSeated, state.m_bDriverReady, state.m_iDismounts, state.m_iReseats, state.m_iMoveFailures, state.m_iReleasedWaypoints, state.m_iLimitResets, DescribeTargetIds(state.m_aAvoidTargetIds));
 			Print(string.Format("Group %1: distance=%2 m max_speed=%3 km/h waypoints=%4 stuck_resets=%5 target=%6 %7 %8",
 				state.m_iGroupId, state.m_fDistance.ToString(-1, 1), state.m_fMaxSpeed.ToString(-1, 1), state.m_iWaypointsCompleted,
 				state.m_iStuckResets, state.GetCurrentTargetId(), seat, DescribeGroup(state)), LogLevel.NORMAL);

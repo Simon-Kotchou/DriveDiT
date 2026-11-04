@@ -16,9 +16,10 @@ Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; u
 ## 0. How to read this
 
 - MUST, MUST NOT and "never" are contract rules: a session that breaks one fails validation.
-- **TBD-n** marks a value that a T0-ENG core probe decides. The default shown is the r2 value. DD-4-min, DD-5-min and
-  DD-7-min code against the default and keep the value in one constant or one session.json field, so the freeze changes
-  a value, never a field name. Section 1 lists every TBD.
+- **TBD-n** marks a value that a T0-ENG core probe decides. Section 1 lists every TBD with its r2 default, the value
+  decided at the freeze and the evidence. DD-4-min, DD-5-min and DD-7-min keep each value in one constant or one
+  session.json field. TBD-10 stays PROVISIONAL after the freeze: its values are session.json parameters, so measuring
+  them changes a value, never a field.
 - The JSON twins are normative for field names, order, types, units and keys. This document is normative for
   meaning. `tests/test_contract_dc2.py` checks that the field tables below equal the JSON, so a disagreement is a test
   failure, not a judgement call.
@@ -35,41 +36,46 @@ Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; u
 
 ## 1. Probe-dependent values (TBD-by-probe)
 
-Each item is decided by the named probe of the DD-4-probe kit. The results table goes in `docs/trials/T0-ENG.md`;
-the freeze copies the decided value into this document, `dc-2.0.streams.json` and `features_v1.json`. TBD-1 to TBD-5
-block the freeze. TBD-6 to TBD-10 change a value or a mechanism only, never a field, and may be settled after it.
+Each item is decided by the named probe of the DD-4-probe kit (results: `docs/trials/T0-ENG.md` and the program's
+probe-run notes named in the Evidence column). The freeze copied each decided value into this document,
+`dc-2.0.streams.json` (`tbd_by_probe[].decided`, `status`, `evidence`) and `features_v1.json`. TBD-1 to TBD-5 blocked
+the freeze and are decided; TBD-6 to TBD-9 are decided; TBD-10 stays PROVISIONAL (a value, never a field). The
+Default (r2) column is kept as history.
 
 <!-- dc2:tbd -->
-| Id | Item | Default (r2) | Decided by | Blocks freeze |
-|---|---|---|---|---|
-| TBD-1 | k rule: telemetry cadence and decision steps | physics_steps_per_decision = floor(100 ms / GetFixedTimeSlice() + 0.5), decided first (= 6 at a 60 Hz fixed step); telemetry_every_k = the largest divisor k of physics_steps_per_decision with k x GetFixedTimeSlice() <= 50 ms, at least 1 (= 3 at 60 Hz), so k always divides it; E-10 also logs the WorldTimestamp clock next to GetWorldTime per step | E-10 | yes |
-| TBD-2 | image_hz (10 or 5) and the one-request-in-flight rule | image_hz = 10 (world-time slot grid phase-locked to the decision steps, img_lead_ms = 0, one MakeScreenshot request in flight, in-flight timeout 2000 ms); fall back to 5 Hz first if E-05 shows misses or request-to-file latency that 10 Hz cannot sustain; at 5 Hz the HL decision rate drops to 5 Hz as well (the decision interval is the training interval, r2 3.5); img_lead_ms is set from the E-05/E-06 capture offsets | E-05 | yes |
-| TBD-3 | writer semantics (FileHandle.Write return values, Close durability, taskkill mid-commit) | FileHandle.Write returns the number of bytes written (FileHandle.c:93-103; WriteLine returns void and is never used); any return other than the expected byte count is a short or failed write; a closed file survives a process kill; one open-APPEND-write-close cycle per line adds exactly that line (commit.csv and heartbeat.csv; E-19 c11 and the e19kill e19_commit_append.csv log); no file is rewritten in place (E-19 c10 only records whether WRITE truncates) | E-19 | yes |
-| TBD-4 | engine-written screenshot file name | the request path has no extension (frames/f_<slot_id:08d>) and the engine appends .png, so the file is frames/f_<slot_id:08d>.png (1.8 evidence: a request ending .bmp produced *.bmp.png) | E-05 | yes |
-| TBD-5 | steer_sign normalisation (and the yaw-axis and local-axes checks) | steer_sign = -1: CarSteering is +1 for left, the contract is right-positive, so steer_contract = steer_sign * steer_engine; yaw_axis_sign = +1 [inference: Enfusion is left-handed with Y up, so +angvel_local_y is clockwise seen from above]; vehicle-local axes x right, y up, z forward; checked by tools/probes/t0eng/e01_actuation.py: steer_sign, yaw_axis_sign and local_axes (z forward: sign of vel_l_z on forward motion; x right: sign of corr(acc_l_x, v x heading rate)) | E-01 | yes |
-| TBD-6 | launch id visible in Workbench Play | System.GetCLIParam("dcLaunchId") returns Workbench's own -dcLaunchId argument in Play mode (launch_guard.launch_mode cli). Answered by DD-4-probe's E-11 console line (-dcLaunchId visible=0 or 1); DD-1's 'Capture output allowed' or 'capture output refused' line tests GetCLIParam("profile") and is only an inference about it. If the id is not visible, Workbench sessions pass through the escape (launch_guard.launch_mode wb_escape, section 5.1); the session.json fields exist either way | E-11 | no |
-| TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that | E-04, E-01 | no |
-| TBD-8 | render-settings dump keys | GetGame().GetEngineUserSettings() modules VideoUserSettings and DisplayUserSettings, keys from SCR_SettingsManagerVideoModule.c:12-56 | E-20 | no |
-| TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | E-08a | no |
-| TBD-10 | collision detector and crash-event parameters (session.json events.*) | collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, episode_block_max_ms 60000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override | E-01 extension | no |
+| Id | Item | Default (r2) | Decided (freeze) | Evidence | Decided by | Blocks freeze |
+|---|---|---|---|---|---|---|
+| TBD-1 | k rule: telemetry cadence and decision steps | physics_steps_per_decision = floor(100 ms / GetFixedTimeSlice() + 0.5), decided first (= 6 at a 60 Hz fixed step); telemetry_every_k = the largest divisor k of physics_steps_per_decision with k x GetFixedTimeSlice() <= 50 ms, at least 1 (= 3 at 60 Hz), so k always divides it; E-10 also logs the WorldTimestamp clock next to GetWorldTime per step | Frame-bound rows (D-A, adopted 2026-11-03): one ctl and one telemetry row per fixed-frame callback (EOnFixedFrame / EOnPostFixedFrame; EOnSimulate never reaches the game mode on 1.8) with physics_step = the index of the last engine fixed step it covers, covered_steps >= 1, render_frame and world_time_ms; the engine step dt is measured (1/30 s on 1.8), never GetFixedTimeSlice (it reports n/30 per frame); physics_steps_per_decision N = floor(1000 / decision_hz / step_dt_ms + 0.5) (6 at 5 Hz); decisions on a world-time grid every 1000 / decision_hz ms, taken at the first callback at or after the grid point, applied from the next physics step (R-01); no telemetry_every_k | probe run 4 E-10 (launch 20261103T191010Z-wb-04b6): 18113 engine steps of 1/30 s in 10215 EOnFixedFrame calls over 600 s, 44% merged, covered_steps > 1 on 5988 rows, 0 missed rows; run 3 E-10 and E-06A (20261103T061122Z-wb-86bd): GetFixedTimeSlice 0.1 s in a 3-step frame, world time per frame, pose on the frame clock (program notes t0/run4/RUN4_SUMMARY.md, t0/run3/RUN3_SUMMARY.md 5 and 8; decision memo t0/freeze/DECISIONS_dc2_freeze.md D-A) | E-10 | yes |
+| TBD-2 | image_hz (10 or 5) and the one-request-in-flight rule | image_hz = 10 (world-time slot grid phase-locked to the decision steps, img_lead_ms = 0, one MakeScreenshot request in flight, in-flight timeout 2000 ms); fall back to 5 Hz first if E-05 shows misses or request-to-file latency that 10 Hz cannot sustain; at 5 Hz the HL decision rate drops to 5 Hz as well (the decision interval is the training interval, r2 3.5); img_lead_ms is set from the E-05/E-06 capture offsets | image_hz = decision_hz = 5 as the production default (D-B, adopted 2026-11-03): a 200 ms grid, N = 6 at 1/30 s steps, img_lead_ms 0, one request in flight, in-flight timeout 2000 ms; 10 Hz only as an explicit non-default session setting (trial conf key image_hz, recorded as clocks.image_hz_setting trial_conf) with decision_hz 10 and N = 3, and the validator warns (C37, SOFT) unless the session's own capture utilisation u95 <= 0.85 is shown | E-05 run 3 (latency p95 101 ms at 10 Hz on the runway, 0.13% missing) and run 4 (p95 99 ms, 5999 of 6000 files); run 1 forest 7.85% missing at 10 Hz; cost model 35 ms + 31 ms/MB caps forest scenes at about 9.2 Hz (decision memo D-B) | E-05 | yes |
+| TBD-3 | writer semantics (FileHandle.Write return values, Close durability, taskkill mid-commit) | FileHandle.Write returns the number of bytes written (FileHandle.c:93-103; WriteLine returns void and is never used); any return other than the expected byte count is a short or failed write; a closed file survives a process kill; one open-APPEND-write-close cycle per line adds exactly that line (commit.csv and heartbeat.csv; E-19 c11 and the e19kill e19_commit_append.csv log); no file is rewritten in place (E-19 c10 only records whether WRITE truncates) | The r2 default stands: Write returns the exact byte count (1 B to 1 MiB) and 0 through a READ handle; a missing directory, a directory used as a file and a read-only target give a null open; WRITE truncates; one open-APPEND-write-close cycle per line adds exactly that line, and after a process kill during commits both commit logs list every committed chunk; commit.csv and heartbeat.csv stay append-per-line (no keep-open fallback) | E-19 run 3 play_01 and e19kill play_01 (launch 20261103T061122Z-wb-86bd): e19_write.py --kill PASS, 212 of 212 committed chunks in both commit logs (re-run 2026-11-04, t0/freeze/e19_kill_2026-11-04.txt) | E-19 | yes |
+| TBD-4 | engine-written screenshot file name | the request path has no extension (frames/f_<slot_id:08d>) and the engine appends .png, so the file is frames/f_<slot_id:08d>.png (1.8 evidence: a request ending .bmp produced *.bmp.png) | The engine appends .png to the extension-less request: the file is frames/f_<slot_id:08d>.png (Workbench 1.8.0.13; the client exe is checked by C11 at its first session) | E-05 run 3: .png appended on 5992/5992 files, E-06A 821/821; run 4 5999/5999 | E-05 | yes |
+| TBD-5 | steer_sign normalisation (and the yaw-axis and local-axes checks) | steer_sign = -1: CarSteering is +1 for left, the contract is right-positive, so steer_contract = steer_sign * steer_engine; yaw_axis_sign = +1 [inference: Enfusion is left-handed with Y up, so +angvel_local_y is clockwise seen from above]; vehicle-local axes x right, y up, z forward; checked by tools/probes/t0eng/e01_actuation.py: steer_sign, yaw_axis_sign and local_axes (z forward: sign of vel_l_z on forward motion; x right: sign of corr(acc_l_x, v x heading rate)) | steer_sign = +1: a positive SetSteering turns right (the r2 default -1 is refuted); yaw_axis_sign = +1; vehicle-local axes x right, y up, z forward | E-01 run 3: corr(command, heading rate) 0.954 at lag 2, all 15 E-02a cells give kappa > 0 and acc_l_x > 0 for a positive steer; corr(angvel_l_y, heading rate) 0.980; vel_l_z sign agrees with forward travel on 2089/2089 steps | E-01 | yes |
+| TBD-6 | launch id visible in Workbench Play | System.GetCLIParam("dcLaunchId") returns Workbench's own -dcLaunchId argument in Play mode (launch_guard.launch_mode cli). Answered by DD-4-probe's E-11 console line (-dcLaunchId visible=0 or 1); DD-1's 'Capture output allowed' or 'capture output refused' line tests GetCLIParam("profile") and is only an inference about it. If the id is not visible, Workbench sessions pass through the escape (launch_guard.launch_mode wb_escape, section 5.1); the session.json fields exist either way | Visible: System.GetCLIParam sees Workbench's own -dcLaunchId in a Play (launch_guard.launch_mode cli); wb_escape stays for a Play without a visible command line | E-11 run 3: -dcLaunchId visible=1, uptime_s=35 (counted from the process start), mode cli | E-11 | no |
+| TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that | Manual gearbox (HasAutomaticGearbox() 0); the S105 has 6 gears, 4 forward: index 0 reverse, 1 neutral, 2..5 first to fourth. General rule (vanilla gear computation): neutral = GearboxGearsCount() - GearboxForwardGearsCount() - 1, first = neutral + 1, top = GearboxGearsCount() - 1, reverse below neutral. The S105 card names gear_indices_forward [2, 3, 4, 5], gear_index_neutral 1, gear_index_reverse 0; reverse is not driven yet, so no session commands hl_dir -1 before a probe drives it (DD-7-ident) | E-04 runs 2-3 (HasAutomaticGearbox 0, 6 gears, 4 forward); E-01 run 3 (gears 2-4 driven and honoured, scripted 2-3-4-3-2, ratio steps 3.8 / 2.12 / 1.41); vanilla 1.8.0.13 SCR_ToggleHandbrakeAction.c:100-108, SCR_VehicleGearCondition.c:32-44 | E-04, E-01 | no |
+| TBD-8 | render-settings dump keys | GetGame().GetEngineUserSettings() modules VideoUserSettings and DisplayUserSettings, keys from SCR_SettingsManagerVideoModule.c:12-56 | VideoUserSettings and DisplayUserSettings as E-20 dumps them (33 + 2 engine variables; the capture is the Workbench workspace); the client compare and the PPQuality recursion are checked at the first client session (a value, never a field) | E-20 runs 2-3 | E-20 | no |
+| TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | road_key text unchanged (<n_pts>/<x0>:<z0>/<x1>:<z1>) and valid within a session only; cross-session joins match by the unordered endpoint pair, both endpoints within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break (D-C, adopted 2026-11-03) | E-08a runs 1-3: n_pts changes by +-1 on 10-12 of 181 roads between launches, 3 roads move an endpoint 0.1-0.9 m, 13 of 181 keys differ between runs 2 and 3; the endpoints alone are unique (181/181) (t0d/decoder/E08B.md 7, decision memo D-C) | E-08a | no |
+| TBD-10 | collision detector and crash-event parameters (session.json events.*) | collision_dv_mps = 4.0 over collision_window_ms = 100 of world time (gap tolerance collision_window_tol_ms 50), PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, crash_cooldown_ms 3000, episode_block_max_ms 60000, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. Rows are frame-bound (D-A: one callback per fixed frame, 1 to 3 physics steps of 1/30 s on 1.8), so every window is world time, never a count of steps or callbacks. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt with 10 Hz images on, so frames merge up to 3 steps, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs dv_h per callback and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override | PROVISIONAL, not decided by the freeze: the defaults stand until the TBD-10 probe measures them (a value, never a field; per build_key) | crash-event design and its two review rounds (t0d/crash_events/IMPL.md) | E-01 extension | no |
 
-Consequences the freeze must apply:
-- TBD-1: the rule is applied in this order: `physics_steps_per_decision` N = floor(100 ms / slice + 0.5) first (an
-  explicit half-up rounding, the same in Python and Enforce), then k = the largest divisor of N with k x slice <= 50 ms
-  (compared with a 1 us tolerance; at least 1). k therefore always divides N: (N, k) = (6, 3) at a 60 Hz slice,
-  (5, 1) at 50 Hz and (3, 1) at 30 Hz. If k x slice is not 50 ms, the telemetry period is k x slice and is recorded
-  through `clocks.telemetry_every_k`; C08 and C28 keep counting steps. E-10 logs the WorldTimestamp clock (the
-  `world_time_ms` source) next to `GetWorldTime`, so "world time advances per step" is answered for the right clock.
-- TBD-2: at 5 Hz the HL decision rate drops to 5 Hz as well, because the decision interval is the training interval
-  (r2 3.5): `clocks.decision_hz` 5, `physics_steps_per_decision` 12 at a 60 Hz slice. The tensors keep their names;
-  `action_cmd` stays [T,3] and `action_exec` becomes [T,12,4] (`features_v1.json` `offsets.fallback_5hz`).
-- TBD-3: if `Write` does not report short writes reliably, the writer re-checks each closed chunk's size with the
-  1.8 file API chosen at E-19 before writing the commit line. If E-19 c11 or the e19kill append log shows that the
-  open-APPEND-write-close cycle loses or duplicates lines, commit.csv and heartbeat.csv are kept open for the session
-  instead (the e19kill `e19_commit.csv` pattern).
-- TBD-4: the img stream keeps the request path; only the harvester's `img_resolved.file` rule changes.
-- TBD-5: `steer_sign` and `yaw_axis_sign` are recorded per session in `control.*` and per vehicle card; export always
-  normalises to the contract sign (section 7).
+Decisions applied at the freeze (what changed where):
+- TBD-1 (D-A, frame-bound rows): `ctl` and `telemetry` gain `covered_steps` and `render_frame`; `physics_step` is the
+  engine's fixed-step clock and advances by `covered_steps` per row; `clocks.telemetry_every_k` is withdrawn (one
+  telemetry row per callback); `session.json engine.step_dt_s` / `engine.step_dt_source` record the measured step;
+  decisions follow the world-time grid of section 6; every check that assumed rows on every k-th step (C06, C07, C08,
+  C15, C17, C28, C31) is re-specified on callbacks, world time and covered steps (DD-5-min).
+- TBD-2 (D-B, 5 Hz): `clocks.image_hz` and `clocks.decision_hz` default to 5 and N = 6 at the 1/30 s step, so
+  `action_exec` is [T,6,4]; the 10 Hz override is `clocks.image_hz_setting` `trial_conf` with N = 3 and `action_exec`
+  [T,3,4] (`features_v1.json` `offsets.override_10hz`); C37 (SOFT) asks for the session's capture utilisation.
+- TBD-3: no change (append per line; the writer's keep-open and length re-check fallbacks stay off).
+- TBD-4: the harvester's and reader's image name is `frames/f_<slot_id:08d>.png`; the img stream keeps the request
+  path.
+- TBD-5: `control.steer_sign` +1 (the r2 draft had -1); `steer_sign` and `yaw_axis_sign` stay per session and per
+  vehicle card, and export always normalises to the contract sign (section 7).
+- TBD-7: the vehicle card's gear indices of section 7.
+- TBD-9 (D-C): the cross-session road join of 9.8 `road`; no field changes.
+- Folded facts (no choice needed): the logged pose follows the frame clock and the image of render frame C shows the
+  state of hf row C + 1 (section 6); the fiducial carrier is the debug-Shape carrier at 0.05 m (`rig.fiducial`
+  `carrier`, `depth_m`), the widget carrier is a diagnostic only; `img.done_render_frame` records the frame the file
+  was first seen in (captured frame = done_render_frame - 1 in Workbench).
 - TBD-10: the values live in `session.json` `events.*`, so a measured threshold never changes a field; the optional
   `dv_max_mps` columns (9.2, 9.7) let a new threshold be re-applied offline without capturing again.
 
@@ -86,8 +92,9 @@ later), what the harvester, reader and validator read, and what the dataset buil
   survives only as the deprecated `drivedit_nav.to_legacy_6d` (section 14).
 - One session has one ego entity for its whole life. Every `ctl` and `telemetry` row describes a live ego; a step
   without a live ego is a C05 failure, so any later ego replacement (DD-4) must switch atomically between episodes.
-- The capture code is build-agnostic: no 1.8-only constant appears in code or in this contract. Physics rate, k,
-  `steer_sign`, gear maps and actuator dynamics are measured per build and recorded per session and per vehicle card.
+- The capture code is build-agnostic: no 1.8-only constant appears in code or in this contract. The fixed step dt,
+  the steps a callback covers, `steer_sign`, gear maps and actuator dynamics are measured per build and recorded per
+  session and per vehicle card (the 1.8 values in section 1 are the decided values of build 1.8.0.13).
 
 ## 3. Map identity, splits and the sealed test map
 
@@ -167,20 +174,20 @@ $profile:DC_Sessions/<session_id>/
   events/ ...
   episodes/ ...
   traffic/ ...              reserved: written from DD-4 (T2); absent before
-  frames/f_00000000         screenshot requests; engine-written name TBD-4 (default frames/f_00000000.png)
+  frames/f_00000000.png     screenshots: the request path has no extension, the engine appends .png (TBD-4)
 ```
 
 Stream summary:
 
 | Stream | Status | Written in | Cadence | Key | Key step | Chunk rows |
 |---|---|---|---|---|---|---|
-| `ctl` | required | EOnPostSimulate | every physics step | `physics_step` | 1 | 600 |
-| `telemetry` | required | EOnPostSimulate | every k-th physics step (k = telemetry_every_k, TBD-1) | `physics_step` | k | 200 |
+| `ctl` | required | EOnPostFixedFrame | one row per fixed-frame callback (1 to 3 physics steps on 1.8, TBD-1) | `physics_step` | `covered_steps` | 600 |
+| `telemetry` | required | EOnPostFixedFrame | one row per fixed-frame callback, the same rows as ctl (TBD-1) | `physics_step` | `covered_steps` | 200 |
 | `hf` | required | EOnFrame | every render frame | `render_frame` | 1 | 600 |
-| `img` | required | EOnFrame | image_hz world-time grid (TBD-2) | `slot_id` | 1 | 100 |
+| `img` | required | EOnFrame | image_hz world-time grid (TBD-2: 5 Hz), each row written when its slot resolves | `slot_id` | 1 | 100 |
 | `events` | required | as they occur | irregular | `event_seq` | 1 | 100 |
 | `episodes` | required | at episode end | one row per episode | `episode_id` | 1 | 1 |
-| `traffic` | reserved | EOnPostSimulate | telemetry steps, one row per live traffic vehicle (from DD-4, T2; absent before) | `physics_step`, `veh_slot_id` | - | 2000 |
+| `traffic` | reserved | EOnPostFixedFrame | the telemetry callbacks, one row per live traffic vehicle (from DD-4, T2; absent before) | `physics_step`, `veh_slot_id` | - | 2000 |
 
 The camera description of the review's camera.json lives in `session.json` `rig` (R12). A stream directory holds only
 chunks with at least one row: a stream with no row in a chunk period (events, episodes) writes no chunk and no
@@ -288,53 +295,93 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   and the termination already latched (`collision`); `session_end.json` `end.physics_step` is L. Its `end.world_ms`
   stays the time of the seal, as for every session.
 
-## 6. Clocks, keys and monotonicity (r2 3.5; R01, R03)
+## 6. Clocks, keys and monotonicity (r2 3.5; R01, R03; freeze decisions D-A and D-B)
 
 | Counter | Stream | Rule | Checked by |
 |---|---|---|---|
-| `physics_step` | `ctl` | own counter; -1 at open, +1 at the top of `EOnSimulate`; first step 0; row written in `EOnPostSimulate` of the same step; +1 per row | C06, C07 |
-| `physics_step` | `telemetry` | rows on steps with `physics_step mod k == 0` (TBD-1); +k per row, 0 missed rows | C06, C07, C08 |
+| `physics_step` | `ctl`, `telemetry` | The engine's fixed-step clock: the 0-based index of the last engine fixed step the row's callback covers, counted from the session open (the first row has `physics_step` = `covered_steps` - 1); each row advances it by its own `covered_steps`; ctl and telemetry hold the same keys | C06, C07, C08 |
+| `covered_steps` | `ctl`, `telemetry` | Engine fixed steps the callback covers, >= 1: `BaseWorld.GetFixedSteps()` of its render frame (1 to 3 on 1.8); 1 per call when the engine delivers `EOnSimulate` | C06 |
+| `render_frame` | `ctl`, `telemetry` | `GetFrameNumber()` at the callback; non-decreasing (one fixed-frame callback per render frame at most, so strictly increasing on 1.8) | C07 |
 | `render_frame` | `hf` | `GetFrameNumber()`, one row per render frame, +1 per row | C06, C07 |
 | `slot_id` | `img` | 0-based, +1 per row; advances only while the ego is live and the camera current | C06, C07, C10 |
 | `event_seq` | `events` | 0-based, +1 per row | C06, C19 |
 | `episode_id` | `episodes` | 0-based, +1 per episode; -1 in other streams outside an episode | C06 |
-| `world_time_ms` | all | `WorldTimestamp.DiffMilliseconds` against the session start, integer ms, non-decreasing; equal values only across frames with no physics step or while `paused` = 1 (r2 3.5). E-10 also shows whether world time advances per fixed step or per frame; if per frame, ctl rows of one frame share a value and `physics_step` stays the clock (TBD-1) | C07 |
+| `world_time_ms` | all | `WorldTimestamp.DiffMilliseconds` against the session start, integer ms, non-decreasing. It is the frame clock: one value per render frame, shared by the hf row of frame F and the ctl and telemetry row of the callback of frame F (E-10 run 3: 21296 of 21296 rows); equal values in consecutive hf rows only while paused or within one frame's world-time resolution | C07 |
 
-- **No CallLater clock.** ctl and telemetry are written from `EOnPostSimulate`, which fires once per fixed step and may
-  fire several times per engine update (VERIFIED-r2 `IEntity.c:53-64`). Telemetry therefore sits on an exact
-  k x slice grid (50 ms at 60 Hz) whatever the FPS (R01).
-- **Decision steps.** Decision step t is the physics step P_t with `P_t mod physics_steps_per_decision == 0` (N = 6
-  at 60 Hz, TBD-1). Because k divides N, every decision step is also a telemetry step.
-- **Decision boundary** (machine-readable in the streams JSON `timing`). In step P_t, `EOnSimulate` applies the
-  command held so far and `EOnPostSimulate` writes the ctl and telemetry rows of P_t: they describe the state after
-  step P_t. Then, still in `EOnPostSimulate` of P_t, the HL driver decides on that state. The new command applies in
-  `EOnSimulate` of steps P_t + 1 .. P_t + N, so:
-  - `ctl.hl_*` of a step is the command applied in that step, and `hl_seq` increments at P_t + 1;
-  - `ctl.exp_*_now` of a step is the expert re-evaluated after that step; at P_t it is the label of decision t;
-  - `action_cmd_t` = `ctl.hl_*` at P_t + 1 (applied over steps (P_t, P_t + N]); `action_label_t` = `ctl.exp_*_now`
-    at P_t; `action_exec_t` = the ctl rows P_t + 1 .. P_t + N; `state_t` = telemetry at P_t, which holds no step of
-    `action_cmd_t`; obs_t+1 at P_t + N holds exactly N steps of it;
-  - the closed-loop bridge (DD-8) pauses after `EOnPostSimulate` of P_t, sends state_t and obs_t, and applies the
-    returned command from step P_t + 1, so training and test see the same boundary.
-- **Images.** The slot grid runs in world time at `image_hz` (TBD-2), phase-locked to the decision steps: grid point
-  g = 0, 1, 2, ... is due at the `world_time_ms` of physics_step 0 + g x 1000 / image_hz - `clocks.img_lead_ms`
-  (default 0; at image_hz = decision_hz grid point g is due `img_lead_ms` before decision step g). Each grid point
-  reached while the ego is live and the camera current becomes the next `slot_id`. The request is issued in the
-  first frame whose world time is at or past the due time (C08: jitter <= 1 render frame at p99). One request is in
-  flight at a time: a slot that arrives while one is in flight is written `skipped_busy`, a request that
-  `MakeScreenshot` refuses is written `make_failed`, and both count as missing (C10). A request whose file is not
-  seen within `clocks.img_inflight_timeout_ms` (real time) stops blocking the next slot; it is logged as an `events`
-  row `img_timeout` (payload `img_slot_id=<n>`) and in heartbeat `img_fail`. The request path is extension-less (R06).
-- **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`) from each image and joins `hf` at that
-  `captured_render_frame` (C13a, exact). `hf.last_physics_step` joins `ctl` exactly (ctl has every step). Telemetry
-  exists only on every k-th step, so `hf` joins `telemetry` as-of: the newest telemetry step <= `last_physics_step`,
-  whose age is below k steps when no telemetry row is missing (otherwise the frame is not joined and its masks are
-  0). The pose at capture is `hf`'s own `cam_*` and `veh_*`. These joins do not prove the scene's age; E-06A (marker
-  reprojection per rig x exe x build) and C13b do.
-- **Sampling at the model boundary.** Decision step t at physics step P_t uses the samples of the decision boundary
-  above; obs_t is the newest image whose captured frame has `last_physics_step <= P_t`, dropped (masks 0) when it is
-  older than one image period; nav comes from `drivedit_nav.nav_v1` at the pose of P_t. The builder writes the
-  realised image age of every decision step (`decision_index`, section 9.8).
+- **Callbacks (D-A).** On 1.8 the game mode entity gets no `EOnSimulate` / `EOnPostSimulate`. It gets one
+  `EOnFixedFrame` / `EOnPostFixedFrame` pair per render frame that runs at least one engine fixed step, after that
+  frame's `EOnFrame`, and the pair covers all of the frame's steps: probe run 4 (600 s with 10 Hz screenshots) counted
+  18113 engine steps of 1/30 s in 10215 callbacks, 44% of the steps merged, `covered_steps` > 1 on 5988 rows, almost
+  exactly the 5999 screenshot frames. Per-step rows from the game mode are therefore impossible while capturing, and
+  `ctl` and `telemetry` are frame-bound: one ctl and one telemetry row per callback with `physics_step`,
+  `covered_steps`, `render_frame` and `world_time_ms`. The core applies the held command once per callback (in
+  `EOnFixedFrame`), so all covered steps run with the same inputs; the rows are written in `EOnPostFixedFrame`, after
+  the covered steps. An engine build that delivers `EOnSimulate` to the game mode gives one callback per step
+  (`covered_steps` 1) and every rule below holds unchanged.
+- **Step dt.** The engine fixed step dt is measured during readiness: the `EOnFixedFrame` time slice of a frame with
+  exactly one fixed step when it lies within 5% of the measured fixed step (sum of `EOnFrame` time slices / sum of
+  `GetFixedSteps()`), else the measured value; 1/30 s on 1.8 (`session.json engine.step_dt_s`, `step_dt_source`).
+  `BaseWorld.GetFixedTimeSlice()` reports n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is never
+  the step dt; `engine.fixed_time_slice_s` keeps its raw value at the open for provenance only. A module that needs
+  the physics time of a callback uses `covered_steps` x `step_dt`.
+- **Decision grid (D-A, D-B).** `physics_steps_per_decision` N = floor(1000 / `decision_hz` / step_dt_ms + 0.5) (an
+  explicit half-up rounding, the same in Python and Enforce): 6 at the 5 Hz default and 3 at the 10 Hz override with
+  1/30 s steps. N is the nominal length of a decision interval and of `action_exec`; the real interval varies.
+  Decisions lie on a world-time grid: grid point g = 0, 1, 2, ... is due at anchor + g x 1000 / `decision_hz` ms
+  (integer ms: `decision_hz` is 5 or 10), anchor = the `world_time_ms` of the session's first ctl row. The decision
+  callback of grid point g is the first callback whose `world_time_ms` is at or past its due time. A callback that
+  reaches several grid points (a hitch longer than one grid period) takes one decision, for the newest of them; the
+  skipped grid points are counted (`session_end.json observed.decision_grid_points_skipped`). P_t is the
+  `physics_step` of decision callback t.
+- **Decision boundary** (R-01, machine-readable in the streams JSON `timing`). In decision callback C_t the held
+  command is applied (`EOnFixedFrame`), the covered steps run, the ctl and telemetry rows of C_t are written
+  (`EOnPostFixedFrame`) and then, still in that callback, the HL driver decides on the state of that row. The new
+  command applies from physics step P_t + 1, the first step of the next callback, and is held through the next
+  decision callback C_t+1, so:
+  - `ctl.hl_*` of a row is the command applied in that row's covered steps, and `hl_seq` increments on the first row
+    after a decision callback in which the driver gave a command;
+  - the decision interval of t is the steps (P_t, P_t+1] of n_t = P_t+1 - P_t steps: nominally N, but the fixed-step
+    clock lags world time by up to about 250-310 ms while capturing (runs 3-4) and catches up, so n_t varies around N;
+  - `ctl.exp_*_now` of a row is the expert re-evaluated after its callback; at C_t it is the label of decision t;
+  - `action_cmd_t` = `ctl.hl_*` of the row after C_t; `action_label_t` = `ctl.exp_*_now` of C_t; `state_t` = the
+    telemetry row of C_t, which holds no step of `action_cmd_t`; `action_exec_t` = the executed llc values of steps
+    P_t + 1 .. P_t + N, step q taken from the ctl row that covers it (a row covers `physics_step` - `covered_steps` + 1
+    .. `physics_step`), an entry left empty when q lies past P_t+1 (the interval was shorter than N; steps of a longer
+    interval past P_t + N are not in the tensor); obs_t+1 at C_t+1 holds exactly the n_t steps of `action_cmd_t`;
+  - the closed-loop bridge (DD-8) pauses after the rows of C_t, sends state_t and obs_t, and applies the returned
+    command from step P_t + 1, so training and test see the same boundary.
+- **Clock of the logged state (frame clock).** The logged pose follows world time, not the fixed-step clock: the pose
+  in hf row n is the pose at the world time of frame n - 1 (run 3 E-06A: between consecutive hf rows the displacement
+  equals speed x world dt of the frame, corr 1.0000 over 15,304 pairs, |difference| p95 0.1 ms; against the fixed
+  steps run after `EOnFrame` the corr is 0.91), and the poses of the step rows follow world time too (e01 and e02a,
+  corr 0.998-1.000). Time differences between rows are therefore `world_time_ms` differences; `covered_steps` x
+  step_dt is the fixed-step clock, which lags. That velocities and accelerations, read in the same callback, follow
+  the same clock is an inference [unverified; the C15 tolerances cover one step].
+- **Images.** The slot grid runs in world time at `image_hz` (TBD-2: 5 Hz; 10 Hz only as the session setting
+  `clocks.image_hz_setting` `trial_conf`), on the anchor of the decision grid: grid point g is due at anchor +
+  g x 1000 / `image_hz` - `clocks.img_lead_ms` (default 0; at `image_hz` = `decision_hz` grid point g is due
+  `img_lead_ms` before decision grid point g). Each grid point reached while the ego is live and the camera current
+  becomes the next `slot_id`. The request is issued in `EOnFrame` of the first frame whose world time is at or past the
+  due time (C08: jitter <= 1 render frame at p99). One request is in flight at a time: a slot that arrives while one is
+  in flight is written `skipped_busy`, a request that `MakeScreenshot` refuses is written `make_failed`, and both count
+  as missing (C10). A request whose file is not seen within `clocks.img_inflight_timeout_ms` (real time) stops
+  blocking the next slot; it is logged as an `events` row `img_timeout` (payload `img_slot_id=<n>`) and in heartbeat
+  `img_fail`. The request path is extension-less (R06). The img row of a slot is written once the slot resolves (its
+  file seen, timed out, skipped, refused, or the session sealed), in slot order, with `done_render_frame` the render
+  frame in which the writer first saw the file.
+- **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`, drawn by the debug-Shape carrier) from each
+  image and joins `hf` at that `captured_render_frame` C (C13a, exact). In Workbench 1.8 C = `img.done_render_frame`
+  - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth.
+  The image of render frame C shows the state logged in hf row C + 1 (run 3 E-06A: argmin k = +1 on 628 of 640 moving
+  images, RMS 0.11-1.87 px against 2.6-5.6 px at k = 0): that row is the image's pose row. Its `cam_*` and `veh_*` are
+  the pose at capture, its `last_physics_step` joins `ctl` and `telemetry` exactly (both have a row for every
+  callback), and the pose belongs to the world time of hf row C. These joins do not prove the scene's age; E-06A
+  (marker reprojection per rig x exe x build, at k = +1) and C13b do.
+- **Sampling at the model boundary.** Decision step t at P_t uses the samples of the decision boundary above; obs_t is
+  the newest image whose pose row (hf row C + 1) has `last_physics_step` <= P_t, dropped (masks 0) when it is older
+  than one image period (`world_time_ms` of C_t minus that of hf row C); nav comes from `drivedit_nav.nav_v1` at the
+  pose of P_t. The builder writes the realised image age and the interval length of every decision step
+  (`decision_index`, section 9.8).
 - Sessions are at most 30 min (the fiducial code is unique for 73 min at 60 FPS).
 
 ## 7. Units, axes and sign convention
@@ -353,11 +400,12 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   y to the right. A point 20 m straight ahead is (20, 0); a point on the right is y > 0.
 - **Right-positive rule** (unchanged from dc-1.0). Positive steering, positive curvature (`kappa_*`), positive yaw
   rate, positive lateral and heading errors and positive `p*_y` all mean right (clockwise seen from above).
-- **Engine-native steering.** `CarSteering` is +1 for left. `llc_steer_*` and `input_*_steer` are logged exactly as
-  passed to `SetSteering` or returned by `GetSteering`. Export normalises: `steer_cmd = steer_sign * llc_steer_lim`,
-  `steer_input = steer_sign * input_post_steer`, with `steer_sign` from `session.json` `control.steer_sign` (TBD-5,
-  default -1). `yaw_rate_rps = yaw_axis_sign * angvel_local_y` (TBD-5, default +1). The vehicle card records both
-  per build.
+- **Engine-native steering.** `llc_steer_*` and `input_*_steer` are logged exactly as passed to `SetSteering` or
+  returned by `GetSteering`. On 1.8 a positive `SetSteering` turns right (TBD-5 decided, E-01 run 3), so
+  `control.steer_sign` is +1; the field stays because a build or vehicle may differ. Export normalises: `steer_cmd =
+  steer_sign * llc_steer_lim`, `steer_input = steer_sign * input_post_steer`, with `steer_sign` from `session.json`
+  `control.steer_sign` (TBD-5: +1). `yaw_rate_rps = yaw_axis_sign * angvel_local_y` (TBD-5: +1). The vehicle card
+  records both per build.
 - **Steering channels** (MIGRATION_1_9 8.3, CRIT F-09). `steer_cmd` is the command in [-1, 1]; `steer_input` the input
   readback (`input_post`); `wheel_angle_l_rad` and `wheel_angle_r_rad` the applied road-wheel angles; `delta_eff_rad`
   their bicycle equivalent; `kappa_realised` = yaw rate / forward speed above 3 m/s. On 1.8 the wheel angles are
@@ -367,10 +415,13 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
 - **Getters mean inputs.** `GetSteering`, `GetThrottle`, `GetBrake` return simulation inputs, not wheel angle or force
   (`VehicleWheeledSimulation.c:18-37`): they are `input_*`, never "applied".
 - **Gear.** `gear` and `llc_gear` are engine indices; the vehicle card maps them to reverse, neutral and forward
-  (TBD-7) for `dir_state`. T0-MIN is forward-only: the card names only `gear_indices_forward` (from E-01), so
-  `dir_state` is +1 in those gears and 0 otherwise (standstill in an unmapped gear), never -1; `gear_index_neutral`
-  and `gear_index_reverse` stay null until a probe phase measures them (DD-7-ident), and no session commands
-  `hl_dir` -1 before that.
+  (TBD-7) for `dir_state`. The S105 has a manual gearbox with 6 gears, 4 forward: 0 reverse, 1 neutral, 2..5 first to
+  fourth (E-04, E-01 run 3). The general rule is vanilla's gear computation (1.8.0.13
+  `SCR_ToggleHandbrakeAction.c:100-108`, `SCR_VehicleGearCondition.c:32-44`): neutral = `GearboxGearsCount()` -
+  `GearboxForwardGearsCount()` - 1, first = neutral + 1, top = `GearboxGearsCount()` - 1, reverse below neutral. The
+  card names `gear_indices_forward`, `gear_index_neutral` and `gear_index_reverse`, so `dir_state` is +1 in a forward
+  gear, 0 in neutral and -1 in reverse. T0-MIN stays forward-only: reverse is not driven yet, and no session commands
+  `hl_dir` -1 before a probe phase drives it (DD-7-ident).
 - **Sun.** `sun_elev_deg` comes from `GetCurrentSunMoonDirAndPhase`; the direction convention of `sun_dir` is checked
   at T0-MIN (a noon session gives a positive elevation).
 
@@ -434,23 +485,25 @@ Field order in each table is the CSV column order. Tags in brackets: `right+` ri
 engine sign, frame names, `build-scoped` (raw engine input, never pooled across `build_key`s), `reserved` (always
 empty until the named step fills it; null on 1.8), `eval-only` (never a model input), and the TBD that decides a value.
 
-### 9.1 Stream `ctl` (every physics step)
+### 9.1 Stream `ctl` (one row per fixed-frame callback)
 
 <!-- dc2:fields stream=ctl -->
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
-| `physics_step` | int (key) | step | yes | Own physics-step counter: -1 when the session opens, +1 at the top of EOnSimulate, so the first step is 0. The row is written in EOnPostSimulate of the same step. |
-| `world_time_ms` | int | ms | yes | World time since the session start: WorldTimestamp.DiffMilliseconds against the session-start timestamp (R03). Non-decreasing. |
+| `physics_step` | int (key) | step | yes | Engine fixed-step clock: the 0-based index of the last engine fixed step this callback covers, counted from the session open (the first row has covered_steps - 1); each row adds its own covered_steps (section 6). The row is written in EOnPostFixedFrame, after the covered steps. [TBD-1] |
+| `covered_steps` | int | step | yes | Engine fixed steps this callback covers, >= 1: BaseWorld.GetFixedSteps() of its render frame (1 to 3 on 1.8); 1 per call when the engine delivers EOnSimulate (section 6). [TBD-1] |
+| `render_frame` | int | frame | yes | GetFrameNumber() at the callback: the render frame whose fixed steps this row covers; its EOnFrame (hf row) precedes the callback (section 6). |
+| `world_time_ms` | int | ms | yes | World time of the callback's render frame since the session start: WorldTimestamp.DiffMilliseconds against the session-start timestamp (R03), the frame clock of section 6. Non-decreasing. |
 | `episode_id` | int | - | yes | Current episode; -1 outside an episode (warm-up, settle, between episodes). |
-| `mode` | enum | - | yes | Capture mode of this step (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle). Values: E, N, R, X, D, H, A, I. |
+| `mode` | enum | - | yes | Capture mode of this callback (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle). Values: E, N, R, X, D, H, A, I. |
 | `driver` | enum | - | yes | Who produced the executed HL command of this step (C18, C27). Values: expert, policy, human, ai, none. |
-| `hl_seq` | int | - | yes | Counter of the HL decision applied in this step: -1 before the first decision; it increments on the first step after each decision step (physics_step mod physics_steps_per_decision == 1), because the decision of P_t is taken in EOnPostSimulate of P_t and applies from step P_t + 1 (section 6, TBD-1). [TBD-1] |
-| `hl_kappa` | float | 1/m | no | Held HL curvature target applied in this step's EOnSimulate (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision step), right-positive. Empty in mode I. [right+] |
-| `hl_accel` | float | m/s2 | no | Held HL acceleration target applied in this step (action_cmd.a_target, desired). |
-| `hl_dir` | int | - | no | Held HL direction command applied in this step: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
-| `exp_kappa_now` | float | 1/m | no | Expert HL curvature re-evaluated on the true state after this step (EOnPostSimulate, r2 3.2): a 60 Hz diagnostic; at a decision step P_t it is the label of decision t, which in mode E is the command applied from P_t + 1. Empty when no expert is attached. [right+] |
-| `exp_accel_now` | float | m/s2 | no | Expert HL acceleration re-evaluated after this step. |
-| `exp_dir_now` | int | - | no | Expert HL direction re-evaluated after this step (added to r2's exp_{kappa,accel}_now so the label has all three action channels). Values: -1, 0, 1. |
+| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1 before the first decision; it increments on the first row after a decision callback in which the driver gave a command, because the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1 (section 6, TBD-1). [TBD-1] |
+| `hl_kappa` | float | 1/m | no | Held HL curvature target applied in this callback's covered steps (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision callback), right-positive. Empty in mode I. [right+] |
+| `hl_accel` | float | m/s2 | no | Held HL acceleration target applied in this callback (action_cmd.a_target, desired). |
+| `hl_dir` | int | - | no | Held HL direction command applied in this callback: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
+| `exp_kappa_now` | float | 1/m | no | Expert HL curvature re-evaluated on the true state after this callback (r2 3.2): a per-callback diagnostic; at a decision callback C_t it is the label of decision t, which in mode E is the command applied from P_t + 1. Empty when no expert is attached. [right+] |
+| `exp_accel_now` | float | m/s2 | no | Expert HL acceleration re-evaluated after this callback. |
+| `exp_dir_now` | int | - | no | Expert HL direction re-evaluated after this callback (added to r2's exp_{kappa,accel}_now so the label has all three action channels). Values: -1, 0, 1. |
 | `llc_steer_raw` | float | 1 | no | llc_v1 steering before its rate limiter and lag, engine-native sign (contract sign: multiply by session.json control.steer_sign, TBD-5). Empty when llc_v1 is not driving. [engine-native, build-scoped, TBD-5] |
 | `llc_steer_lim` | float | 1 | no | llc_v1 steering after the explicit rate limiter and first-order lag, as passed to SetSteering, engine-native sign. Range [-1, 1]. [engine-native, build-scoped, TBD-5] |
 | `llc_throttle` | float | 1 | no | llc_v1 throttle as passed to SetThrottle; never non-zero together with llc_brake. Range [0, 1]. [build-scoped] |
@@ -458,18 +511,18 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `llc_handbrake` | bool | - | no | Handbrake flag passed to SetBreak. [build-scoped] |
 | `llc_gear` | int | - | no | Gear index passed to SetGear (engine index; mapping in the vehicle card, TBD-7). Empty when no gear is set this step. [build-scoped, TBD-7] |
 | `llc_clutch` | float | 1 | no | Clutch passed to SetClutch; empty unless a scripted gearbox sets it (TBD-7). Range [0, 1]. [build-scoped, TBD-7] |
-| `input_pre_steer` | float | 1 | yes | GetSteering() read in EOnSimulate right after the setters (an input readback, not a wheel angle; r2 3.2), engine-native sign. Range [-1, 1]. [engine-native, build-scoped, TBD-5] |
-| `input_pre_throttle` | float | 1 | yes | GetThrottle() read in EOnSimulate right after the setters (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
-| `input_pre_brake` | float | 1 | yes | GetBrake() read in EOnSimulate right after the setters (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
-| `input_pre_clutch` | float | 1 | yes | GetClutch() read in EOnSimulate right after the setters (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
-| `input_pre_gear` | int | - | yes | GetGear() read in EOnSimulate right after the setters (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
-| `input_pre_handbrake` | bool | - | yes | IsHandbrakeOn() read in EOnSimulate right after the setters (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
-| `input_post_steer` | float | 1 | yes | GetSteering() read in EOnPostSimulate after integration (an input readback, not a wheel angle; r2 3.2), engine-native sign. Range [-1, 1]. [engine-native, build-scoped, TBD-5] |
-| `input_post_throttle` | float | 1 | yes | GetThrottle() read in EOnPostSimulate after integration (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
-| `input_post_brake` | float | 1 | yes | GetBrake() read in EOnPostSimulate after integration (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
-| `input_post_clutch` | float | 1 | yes | GetClutch() read in EOnPostSimulate after integration (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
-| `input_post_gear` | int | - | yes | GetGear() read in EOnPostSimulate after integration (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
-| `input_post_handbrake` | bool | - | yes | IsHandbrakeOn() read in EOnPostSimulate after integration (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
+| `input_pre_steer` | float | 1 | yes | GetSteering() read in EOnFixedFrame right after the setters, before the covered steps (an input readback, not a wheel angle; r2 3.2), engine-native sign. Range [-1, 1]. [engine-native, build-scoped, TBD-5] |
+| `input_pre_throttle` | float | 1 | yes | GetThrottle() read in EOnFixedFrame right after the setters, before the covered steps (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
+| `input_pre_brake` | float | 1 | yes | GetBrake() read in EOnFixedFrame right after the setters, before the covered steps (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
+| `input_pre_clutch` | float | 1 | yes | GetClutch() read in EOnFixedFrame right after the setters, before the covered steps (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
+| `input_pre_gear` | int | - | yes | GetGear() read in EOnFixedFrame right after the setters, before the covered steps (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
+| `input_pre_handbrake` | bool | - | yes | IsHandbrakeOn() read in EOnFixedFrame right after the setters, before the covered steps (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
+| `input_post_steer` | float | 1 | yes | GetSteering() read in EOnPostFixedFrame after the covered steps (an input readback, not a wheel angle; r2 3.2), engine-native sign. Range [-1, 1]. [engine-native, build-scoped, TBD-5] |
+| `input_post_throttle` | float | 1 | yes | GetThrottle() read in EOnPostFixedFrame after the covered steps (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
+| `input_post_brake` | float | 1 | yes | GetBrake() read in EOnPostFixedFrame after the covered steps (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
+| `input_post_clutch` | float | 1 | yes | GetClutch() read in EOnPostFixedFrame after the covered steps (an input readback, not a wheel angle; r2 3.2). Range [0, 1]. [build-scoped] |
+| `input_post_gear` | int | - | yes | GetGear() read in EOnPostFixedFrame after the covered steps (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
+| `input_post_handbrake` | bool | - | yes | IsHandbrakeOn() read in EOnPostFixedFrame after the covered steps (an input readback, not a wheel angle; r2 3.2). [build-scoped] |
 | `noise_active` | bool | - | yes | 1 while an N-mode disturbance is applied to the executed command. |
 | `noise_id` | int | - | yes | Disturbance id (events perturb_start/perturb_end); -1 when none. |
 | `steer_signal_raw` | float | 1 | no | Reserved, post-GO (DD-4-probe (d)): the simulation's steering0 signal, a raw candidate for the applied steering. Empty until CC-07 step 0 validates it. [build-scoped, reserved] |
@@ -478,12 +531,14 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `react_veh_slot_id` | int | - | no | Reserved until DD-4/DD-7 (empty before): vehicle slot of the actor the expert reacts to in this step (perception-limited reactions, r2 3.1); empty when it reacts to no actor. [reserved] |
 | `react_visible` | bool | - | no | Reserved until DD-4/DD-7: 1 when that actor passes the in-engine visibility test of r2 3.1 (camera FOV + 10 deg, raycast line of sight, or within 15 m), 0 when not; the builder sets policy_valid 0 while a reaction to an invisible actor lasts. [reserved] |
 
-### 9.2 Stream `telemetry` (every k-th physics step)
+### 9.2 Stream `telemetry` (one row per fixed-frame callback, the keys of ctl)
 
 <!-- dc2:fields stream=telemetry -->
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
-| `physics_step` | int (key) | step | yes | Physics step of the row; rows are written in EOnPostSimulate on every step with physics_step mod k == 0 (k = telemetry_every_k, TBD-1), so consecutive rows differ by exactly k. [TBD-1] |
+| `physics_step` | int (key) | step | yes | physics_step of the callback, as in ctl: one telemetry row per callback (the same keys as ctl), the state after its covered steps, the pose on the frame clock (section 6). [TBD-1] |
+| `covered_steps` | int | step | yes | As in ctl. [TBD-1] |
+| `render_frame` | int | frame | yes | As in ctl. |
 | `world_time_ms` | int | ms | yes | As in ctl. |
 | `episode_id` | int | - | yes | As in ctl. |
 | `ego_slot_id` | int | - | yes | Slot id of the ego (monotonic, never reused; r2 3.9). |
@@ -510,7 +565,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `acc_local_y` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), y component. [vehicle_local] |
 | `acc_local_z` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), z component. [vehicle_local] |
 | `speed_engine_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 as reported by the engine (unsigned; the signed forward speed is telemetry_export.speed_fwd_mps, the registry channel speed_mps). |
-| `dv_max_mps` | float | m/s | no | Largest dv_h of the ego (the collision detector's quantity of section 9.5.1: horizontal world-frame delta-v over events.collision_window_ms of world time, with the same interpolation and gap rule) over the callbacks since the previous telemetry row, so the TBD-10 threshold can be re-applied offline per build_key; empty when no callback since that row was evaluated (history shorter than the window, a gap, a reset). [eval-only, build-scoped, TBD-10] |
+| `dv_max_mps` | float | m/s | no | Largest dv_h of the ego (the collision detector's quantity of section 9.5.1: horizontal world-frame delta-v over events.collision_window_ms of world time, with the same interpolation and gap rule) over the callbacks since the previous telemetry row, which with one row per callback is this callback's dv_h, so the TBD-10 threshold can be re-applied offline per build_key; empty when it was not evaluated (history shorter than the window, a gap, a reset). [eval-only, build-scoped, TBD-10, eval-only, build-scoped, TBD-10] |
 | `gear` | int | - | yes | GetGear() (engine index, TBD-7). [TBD-7] |
 | `rpm` | float | rpm | yes | EngineGetRPM(). |
 | `engine_on` | bool | - | yes | EngineIsOn(). |
@@ -537,7 +592,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `w3_slip_lat` | float | 1 | no | Wheel 3 lateral slip (WheelGetLateralSlip), raw engine value. [build-scoped] |
 | `w3_material` | str | - | no | Wheel 3 contact material name (WheelGetContactMaterial); empty without contact or without a 1.8 name getter. |
 | `w3_temp_c` | float | degC | no | Reserved, null on 1.8: wheel 3 tyre temperature (MIGRATION_1_9 8.3). [reserved] |
-| `road_key` | str | - | no | Key of the closest engine road, <n_pts>/<x0>:<z0>/<x1>:<z1> exactly as the E-08a dump writes it (TBD-9); empty when no road is found. [TBD-9] |
+| `road_key` | str | - | no | Key of the closest engine road, <n_pts>/<x0>:<z0>/<x1>:<z1> exactly as the E-08a dump writes it; valid within the session only: a join across sessions matches the unordered endpoint pair within 2 m, never this text (TBD-9, section 9.8 road); empty when no road is found. [TBD-9] |
 | `road_dist_m` | float | m | no | Distance to the closest road (RoadNetworkManager.GetClosestRoad). |
 | `road_width_m` | float | m | no | BaseRoad.GetWidth() of the closest road. |
 | `lane_lat_err_m` | float | m | no | Lane-relative signed lateral error: ego offset from the active route's driving line, positive = ego right of the line. Computed by the driver interface; empty without an active route. [right+] |
@@ -563,8 +618,8 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `render_frame` | int (key) | frame | yes | BaseWorld.GetFrameNumber() of this render frame; written every frame in EOnFrame, so +1 per row. |
-| `world_time_ms` | int | ms | yes | As in ctl; may repeat across frames without a physics step or while paused. |
-| `last_physics_step` | int | step | yes | physics_step of the most recent EOnPostSimulate; -1 before the first. |
+| `world_time_ms` | int | ms | yes | As in ctl (the frame clock); equal in consecutive rows only while paused or within one ms. |
+| `last_physics_step` | int | step | yes | physics_step of the most recent fixed-frame callback, always of an earlier render frame (a frame's callback runs after its EOnFrame); -1 before the first. Joins ctl and telemetry exactly; the image of render frame C is paired with hf row C + 1 (section 6). |
 | `paused` | bool | - | yes | 1 while the game time is paused. |
 | `cam_pos_x` | float | m | yes | Camera position (from the camera entity's world transform), x component. [world, eval-only] |
 | `cam_pos_y` | float | m | yes | Camera position (from the camera entity's world transform), y component. [world, eval-only] |
@@ -600,14 +655,15 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `slot_id` | int (key) | slot | yes | Image slot, 0-based, +1 per row. Slots advance only while the ego is live and the camera current. |
 | `episode_id` | int | - | yes | As in ctl. |
 | `ego_slot_id` | int | - | yes | As in telemetry. |
-| `requested_world_ms` | int | ms | yes | Due time of the slot's grid point: world_time_ms of physics_step 0 + g x 1000 / image_hz - clocks.img_lead_ms (section 6, TBD-2). [TBD-2] |
+| `requested_world_ms` | int | ms | yes | Due time of the slot's grid point: anchor + g x 1000 / image_hz - clocks.img_lead_ms, anchor = world_time_ms of the first ctl row (section 6, TBD-2). [TBD-2] |
 | `issue_status` | enum | - | yes | issued; skipped_busy when the previous request was still in flight and younger than clocks.img_inflight_timeout_ms at the slot; make_failed when System.MakeScreenshot returned false (the issue fields are kept). Skipped and failed slots count as missing in C10 (TBD-2). Values: issued, skipped_busy, make_failed. [TBD-2] |
 | `issue_world_ms` | int | ms | no | World time of the frame the request was issued in (the first frame at or after the slot). Empty when skipped. |
 | `issue_render_frame` | int | frame | no | render_frame of that frame. Empty when skipped. |
 | `issue_physics_step` | int | step | no | last_physics_step at issue. Empty when skipped. |
-| `path` | str | - | no | Request path relative to the session directory, without extension: frames/f_<slot_id:08d> (TBD-4). Empty when skipped. [TBD-4] |
+| `path` | str | - | no | Request path relative to the session directory, without extension: frames/f_<slot_id:08d>; the engine writes frames/f_<slot_id:08d>.png (TBD-4). Empty when skipped. [TBD-4] |
 | `cam_current` | bool | - | yes | 1 when the rig camera is the current camera at issue (C18). |
 | `cam_attached` | bool | - | yes | 1 when the rig camera is attached to the ego at issue (C18). |
+| `done_render_frame` | int | frame | no | render_frame in which the writer first saw the engine-written file (the request resolved); empty when the slot was not issued, timed out or was still pending at the seal. In Workbench 1.8 the captured frame is done_render_frame - 1 (run 4 E-06: 5999 of 5999); the fiducial stays the truth (section 6). |
 
 ### 9.5 Stream `events`
 
@@ -624,7 +680,7 @@ logged with this kind).
 |---|---|---|---|---|
 | `event_seq` | int (key) | - | yes | Event counter, 0-based, +1 per row. |
 | `episode_id` | int | - | yes | Episode the event belongs to; -1 outside episodes. |
-| `physics_step` | int | step | yes | physics_step of the last completed step when the event was recorded. |
+| `physics_step` | int | step | yes | physics_step of the last completed callback when the event was recorded. |
 | `render_frame` | int | frame | yes | render_frame when the event was recorded. |
 | `world_time_ms` | int | ms | yes | As in ctl. |
 | `kind` | enum | - | yes | Event kind (veh_cfg_override is reserved, null on 1.8; the crash events veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount and rollover are section 9.5.1). Values: session_start, warmup_end, episode_start, settle_end, episode_end, perturb_start, perturb_end, nav_command, style_set, teleport, respawn, env_change, pause, resume, stuck, collision, veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount, rollover, camera_reset, img_timeout, dc_stop, script_error, veh_cfg_override. |
@@ -674,9 +730,9 @@ missing required key fails).
 | `stuck` | `termination_reason` | enum | - | no | Present when the stuck ends the episode (the expert's stuck termination). Values: stuck. |
 | `teleport` | `reason` | str | - | yes | Why the slot was moved by a scripted SetWorldTransform (for example episode_reset, stuck_reset, probe_reset). |
 
-Collision detector (every registered slot, in every physics callback, `EOnPostSimulate` or the `EOnPostFixedFrame`
-fallback). Rows are frame-bound (dc-2.0 freeze decision D-A): one callback covers 1 to 3 merged physics steps of
-1/30 s on 1.8, so every window below is world time, never a count of steps or callbacks.
+Collision detector (every registered slot, in every fixed-frame callback: `EOnPostFixedFrame`, or `EOnPostSimulate`
+when the engine delivers it). Rows are frame-bound (dc-2.0 freeze decision D-A): one callback covers 1 to 3 merged
+physics steps of 1/30 s on 1.8, so every window below is world time, never a count of steps or callbacks.
 - Each callback stores a sample `(world_time_ms, v_h)` per slot, `v_h` the horizontal (world x, z) part of
   `Physics.GetVelocity()`. The world frame, never the local one: a spin turns the local velocity vector with no force
   acting.
@@ -768,8 +824,8 @@ rollover, the poll of the others).
   destruction: after `events.episode_block_max_ms` (60 s) of them between episodes the session ends with
   `ego_disabled` (5.3).
 - A destroyed ego ends the session with `ego_destroyed` (5.3).
-- The builder sets `policy_valid` 0 for every decision step whose action window (P_t, P_t + N] contains or follows
-  the earliest onset of the episode's terminal ego events; `wm_valid` is not changed, because crash dynamics are
+- The builder sets `policy_valid` 0 for every decision step whose decision interval (P_t, P_t+1] contains or
+  follows the earliest onset of the episode's terminal ego events; `wm_valid` is not changed, because crash dynamics are
   world-model data. Its `teleport` mask uses only the `teleport` and `respawn` rows of the ego slot and of no vehicle
   (`veh_slot_id` -1): a traffic reset never masks ego samples.
 
@@ -779,8 +835,8 @@ rollover, the poll of the others).
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `episode_id` | int (key) | - | yes | Episode id, 0-based, +1 per episode; one row written at episode end. |
-| `start_physics_step` | int | step | yes | First physics step of the episode (after the settle). |
-| `end_physics_step` | int | step | yes | Last physics step of the episode. |
+| `start_physics_step` | int | step | yes | physics_step of the episode's first ctl row (a decision callback after the settle). |
+| `end_physics_step` | int | step | yes | physics_step of the episode's last ctl row. |
 | `start_world_ms` | int | ms | yes | world_time_ms at start. |
 | `end_world_ms` | int | ms | yes | world_time_ms at end. |
 | `ego_slot_id` | int | - | yes | Ego slot, constant within the episode (C35). |
@@ -825,7 +881,7 @@ Absent in T0-MIN to T1 sessions; readers accept its absence.
 <!-- dc2:fields stream=traffic -->
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
-| `physics_step` | int (key) | step | yes | Telemetry step of the row (same cadence as telemetry). |
+| `physics_step` | int (key) | step | yes | physics_step of the callback (the telemetry rows). |
 | `veh_slot_id` | int (key) | - | yes | Traffic vehicle slot (never reused). |
 | `entity_id` | str | - | yes | IEntity.GetID() token, constant per slot (C35). |
 | `prefab` | str | - | yes | Prefab resource name. |
@@ -853,7 +909,7 @@ Harvester, per img row (`img_resolved`; completion and `captured_render_frame` f
 | `png_w` | int | px | no | Image width (C11: exactly 1408 for the client class). |
 | `png_h` | int | px | no | Image height (C11: exactly 720 for the client class). |
 | `fid_ok` | bool | - | yes | 1 when fiducial v2 decodes in both bands and they agree (C13a). |
-| `captured_render_frame` | int | frame | no | Decoded render_frame mod 2^18 unwrapped against issue_render_frame; joins hf (r2 3.3: completion and captured_render_frame come from the fiducial). |
+| `captured_render_frame` | int | frame | no | Decoded render_frame mod 2^18 unwrapped against issue_render_frame (C): joins hf exactly; the image shows the state of hf row C + 1, its pose row (section 6; r2 3.3: completion and captured_render_frame come from the fiducial). |
 | `fid_margin` | float | 1 | no | Smallest nearest-colour margin over the decoded patches. |
 | `deriv_path` | str | - | no | 512x288 JPEG q95 derivative path, once built. |
 
@@ -911,7 +967,7 @@ Road matching (E-08b) and region (C24), per telemetry row (`road`):
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
 | `physics_step` | int (key) | step | yes | telemetry.physics_step. |
-| `matched_road_id` | str | - | no | Generator polyline matched to road_key by E-08b (Hausdorff <= 2 m); empty when unmatched. [TBD-9] |
+| `matched_road_id` | str | - | no | Generator polyline matched to road_key by E-08b (per 1 m piece, Hausdorff <= 2 m); across sessions roads are joined by the unordered endpoint pair of road_key within 2 m (n_pts excluded), the per-piece Hausdorff distance breaking ties, never by the key text (TBD-9, D-C); empty when unmatched. [TBD-9] |
 | `road_class` | enum | - | yes | Class inherited from the matched generator; unmatched roads are not drivable. Values: asphalt_e01, asphalt_e02, asphalt_e03, dirt, trail, cobblestone, concrete, unmatched. |
 | `region` | enum | - | yes | Region of the ego position per splits_v2 (C24). Values: train, val_l, buffer, k_val, k_rep, everon. [eval-only] |
 
@@ -920,13 +976,14 @@ Dataset builder, per decision step (`decision_index`; the decision boundary and 
 <!-- dc2:fields derived=decision_index -->
 | Field | Type | Unit | Req | Description |
 |---|---|---|---|---|
-| `decision_step` | int (key) | step | yes | P_t: physics_step of decision step t (P_t mod physics_steps_per_decision == 0). |
-| `hl_seq` | int | - | yes | ctl.hl_seq at P_t + 1: the decision applied over steps (P_t, P_t + physics_steps_per_decision]. |
+| `decision_step` | int (key) | step | yes | P_t: physics_step of decision callback t (the first callback at or past its world-time grid point, section 6). |
+| `hl_seq` | int | - | yes | ctl.hl_seq of the row after C_t: the decision applied over the steps (P_t, P_t+1]. |
+| `interval_steps` | int | step | no | n_t = P_t+1 - P_t, the steps of the decision interval (nominally physics_steps_per_decision; it varies with the frame clock); empty for the session's last decision callback. |
 | `obs_slot_id` | int | slot | no | img.slot_id of obs_t; empty when no image qualifies. |
 | `obs_captured_render_frame` | int | frame | no | img_resolved.captured_render_frame of obs_t. |
-| `obs_last_physics_step` | int | step | no | hf.last_physics_step of that frame (<= P_t). |
+| `obs_last_physics_step` | int | step | no | hf.last_physics_step of the image's pose row (captured_render_frame + 1), <= P_t. |
 | `obs_age_steps` | int | step | no | P_t - obs_last_physics_step: the realised image age in physics steps. |
-| `obs_age_ms` | int | ms | no | world_time_ms of P_t minus hf.world_time_ms of the captured frame. |
+| `obs_age_ms` | int | ms | no | world_time_ms of C_t minus hf.world_time_ms of the captured frame (the world time of the image's pose). |
 | `obs_valid` | bool | - | yes | 1 when an image qualifies and is at most one image period old; 0 sets wm_valid and policy_valid to 0. |
 
 ## 10. Session files
@@ -964,7 +1021,9 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `exe.cli` | object | - | yes | The named -dc* parameters read with System.GetCLIParam, name -> value: dcLaunchId, dcTrial (and any later named -dc* parameter). 1.8 cannot list command-line parameters, so unnamed ones are never recorded. |
 | `engine.build_version` | str | - | yes | GetGame().GetBuildVersion() at start (repeated at end). |
 | `engine.build_time` | str | - | yes | GetGame().GetBuildTime(). |
-| `engine.fixed_time_slice_s` | float | s | yes | BaseWorld.GetFixedTimeSlice() (TBD-1). [TBD-1] |
+| `engine.fixed_time_slice_s` | float | s | yes | BaseWorld.GetFixedTimeSlice() at the open, for provenance only: it reports n/30 for a frame of n fixed steps on 1.8 and is never the step dt (D-A, TBD-1). [TBD-1] |
+| `engine.step_dt_s` | float | s | yes | Engine fixed step dt measured during readiness (section 6): 1/30 s on 1.8. [TBD-1] |
+| `engine.step_dt_source` | enum | - | yes | engine: the EOnFixedFrame time slice of a one-step frame, within 5% of the measurement; measured: the sum of EOnFrame time slices / the sum of GetFixedSteps() over the readiness. Values: engine, measured. [TBD-1] |
 | `pin.pin_id` | str | - | yes | Pin id from the launch record (e.g. 1.8.0.13; 1.9 later). |
 | `pin.pin_sha256` | str | - | yes | sha256 of the pin file, from the launch record. |
 | `pin.build_key` | str | - | yes, null ok | Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a) from a dd-launch/2 record; null while launch records are dd-launch/1. session.json is never edited after it is written: the harvester then writes build_key (from the pin) into its sidecar harvest.json, and C02 reads it from there and refuses a session that has neither. |
@@ -988,20 +1047,20 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `control.expert_sha` | str | - | yes, null ok | Expert source hash; null without an expert. |
 | `control.vehicle_card_id` | str | - | yes, null ok | tools/ident/cards/<pin_id>/<vehicle>.json id; null before the card exists (probe sessions). |
 | `control.vehicle_card_sha` | str | - | yes, null ok | sha256 of that card; null with it. |
-| `control.steer_sign` | int | - | yes | Engine-to-contract steering sign (TBD-5; default -1). Values: -1, 1. [TBD-5] |
-| `control.yaw_axis_sign` | int | - | yes | Engine-to-contract yaw-rate sign (TBD-5; default +1). Values: -1, 1. [TBD-5] |
+| `control.steer_sign` | int | - | yes | Engine-to-contract steering sign (TBD-5 decided: +1, a positive SetSteering turns right on 1.8). Values: -1, 1. [TBD-5] |
+| `control.yaw_axis_sign` | int | - | yes | Engine-to-contract yaw-rate sign (TBD-5 decided: +1). Values: -1, 1. [TBD-5] |
 | `control.steering_geometry` | str | - | yes | unknown_on_1.8 until CC-07 validates wheel angles. |
 | `authority.standalone` | bool | - | yes | Standalone authority stamp (MIGRATION_1_9 8.3). |
 | `authority.rpl_ok` | bool | - | yes | Replication check stamp. |
 | `versions.features_version` | str | - | yes | features_v1. |
 | `versions.nav_version` | str | - | yes | nav_v1. |
 | `versions.streams_schema_sha256` | str | - | no | sha256 of dc-2.0.streams.json, stamped by the deploy tool when it supports it. |
-| `clocks.telemetry_every_k` | int | step | yes | k (TBD-1). [TBD-1] |
-| `clocks.physics_steps_per_decision` | int | step | yes | Physics steps per HL decision (TBD-1). [TBD-1] |
-| `clocks.decision_hz` | float | 1/s | yes | HL decision rate (10). |
-| `clocks.image_hz` | float | 1/s | yes | Image slot rate (TBD-2; default 10). [TBD-2] |
-| `clocks.img_inflight_timeout_ms` | int | ms | yes | Real-time limit after which a request in flight stops blocking the next slot (TBD-2; default 2000). [TBD-2] |
-| `clocks.img_lead_ms` | int | ms | yes | Image grid lead: grid point g is due img_lead_ms before the world time of decision step g at image_hz = decision_hz (TBD-2; default 0, set from the E-05/E-06 capture offsets). [TBD-2] |
+| `clocks.physics_steps_per_decision` | int | step | yes | N = floor(1000 / decision_hz / step_dt_ms + 0.5) with engine.step_dt_s: the nominal steps of a decision interval and the length of action_exec (6 at 5 Hz, 3 at 10 Hz with 1/30 s steps; section 6, TBD-1). [TBD-1] |
+| `clocks.decision_hz` | float | 1/s | yes | HL decision rate, equal to image_hz (TBD-2: 5; 10 only with clocks.image_hz_setting trial_conf). [TBD-2] |
+| `clocks.image_hz` | float | 1/s | yes | Image slot rate (TBD-2 decided: 5; 10 only as the non-default session setting of clocks.image_hz_setting). [TBD-2] |
+| `clocks.image_hz_setting` | enum | - | yes | default: the production default 5 Hz; trial_conf: the trial conf's key image_hz set the non-default 10 Hz (C08 refuses 10 Hz without it; C37 warns unless the session's capture utilisation u95 <= 0.85). Values: default, trial_conf. [TBD-2] |
+| `clocks.img_inflight_timeout_ms` | int | ms | yes | Real-time limit after which a request in flight stops blocking the next slot (TBD-2: 2000). [TBD-2] |
+| `clocks.img_lead_ms` | int | ms | yes | Image grid lead: grid point g is due img_lead_ms before decision grid point g at image_hz = decision_hz (TBD-2: 0). [TBD-2] |
 | `clocks.chunk_max_s` | float | s | yes | World-time bound on a chunk (10). |
 | `events.collision_dv_mps` | float | m/s | yes | Collision onset threshold on dv_h, the horizontal world-frame delta-v over events.collision_window_ms of world time (section 9.5.1; default 4.0, PROVISIONAL until the TBD-10 probe, measured per build_key and again on 1.9). [TBD-10] |
 | `events.collision_window_ms` | int | ms | yes | Delta-v window in world time: dv_h at a sample is measured against the velocity at t - collision_window_ms, linearly interpolated between the two samples around that instant (section 9.5.1; default 100). Rows are frame-bound (one callback covers 1 to 3 physics steps of 1/30 s on 1.8), so the window is never a count of steps or callbacks. [TBD-10] |
@@ -1030,7 +1089,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `rig.band_px` | int | px | yes | Side band width (64). |
 | `rig.derivative_wh` | array | px | yes | [512, 288]. |
 | `rig.derivative_codec` | str | - | yes | jpeg_q95. |
-| `rig.fiducial` | object | - | yes | {version: v2, bits: 18, patches: 6, bits_per_patch: 3, patch_px: 32, mirrored: true}. |
+| `rig.fiducial` | object | - | yes | {version: v2, bits: 18, patches: 6, bits_per_patch: 3, patch_px: 32, margin_px: 16, gap_px: 8, mirrored: true, carrier: shape, depth_m: 0.05}: the debug-Shape carrier (12 flat boxes depth_m in front of the rig camera) is the production carrier; the widget carrier never reaches MakeScreenshot files (run 4: 0 of 5999) and is a diagnostic only (carrier widget, depth_m null). |
 | `rig.dpi_scale` | float | 1 | yes | User DPI scale forced by the fiducial (1.0). |
 | `rig.render_settings` | object | - | yes | VideoUserSettings + DisplayUserSettings dump (TBD-8). [TBD-8] |
 | `rig.render_settings_hash` | str | - | yes | Hash of that dump (C30). |
@@ -1117,8 +1176,10 @@ input or a target).
 
 Rules (r2 3.3, R35):
 - Offsets are decision steps and follow the decision boundary of section 6: offset 0 of `state`, `nav` and `image`
-  is the state after step P_t; offset 0 of `action_cmd` and `action_exec` is the command applied over steps
-  (P_t, P_t + N]. At the 5 Hz fallback (TBD-2) the decision rate drops to 5 Hz; `action_exec` is then [T,12,4].
+  is the state of decision callback C_t; offset 0 of `action_cmd` is the command applied over its decision interval
+  (P_t, P_t+1], and `action_exec` holds the executed values of the steps P_t + 1 .. P_t + N (N =
+  `physics_steps_per_decision`; entries past P_t+1 empty). At the 5 Hz default N = 6 and `action_exec` is [T,6,4];
+  at the 10 Hz override (TBD-2) N = 3 and `action_exec` is [T,3,4] (`features_v1.json` `offsets.override_10hz`).
 - The world model conditions on `action_cmd` at offset 0, the command executed over [t, t+dt) through `llc_v1`, plus
   state history. It is never conditioned on realised future state (acceleration, speed, yaw at t+1 ...).
 - The policy predicts `action_label` (the expert's HL command at t) and sees `action_cmd` and `action_exec` only as
@@ -1164,13 +1225,15 @@ Rules (r2 3.3, R35):
   and DD-12 merge, CLAUDE.md's Tensor Contracts, ENFCAP, BMP, Rust streaming and navigation sections are stale; this
   contract governs.
 
-## 15. Open items before the freeze
+## 15. Freeze items
 
-- TBD-1 to TBD-5 from `docs/trials/T0-ENG.md` (E-10, E-05, E-19, E-01).
+- TBD-1 to TBD-9 are decided (section 1); TBD-10 stays PROVISIONAL (session.json values, measured per build_key).
 - User decision D15 (adopt dc-2.0 and the CLAUDE.md tensor-contract change): adopted 2026-10-22. The CLAUDE.md
   update stays with DD-11.
+- Freeze decisions D-A to D-E adopted by the user on 2026-11-03 (D-D and D-E concern routes and road-km, not this
+  contract's fields).
 - Sign-off by the DD-4-min, DD-5-min and DD-7-min authors.
-- Proposed here and to be confirmed at the freeze (none of these is r2 text):
+- Proposed in the draft and confirmed at the freeze (none of these is r2 text):
   - trial selection: the `ACTIVE` trial pointer when `-dcTrial` is absent (5.2);
   - splits: the VAL-C hash rule `int(sha256(session_id)[:8], 16) mod 10 == 0` (3.2);
   - session root `$profile:DC_Sessions/` beside the dc-1.0 `DrivingData` and the probes' `DC_Probes` (4.3);
@@ -1187,16 +1250,17 @@ Rules (r2 3.3, R35):
     crash cool-down before the next episode, the reposition protocol, the `ego_destroyed` end at one terminal step,
     the optional `dv_max_mps` columns and the builder's `policy_valid` and ego-only `teleport` rules after a crash;
   - the launch-guard escape `wb_escape`, its process-start binding and its C02 use-class rule (5.1);
-  - the decision boundary: decide in `EOnPostSimulate` of P_t, apply from P_t + 1 (6);
-  - the decision phase lock `physics_step mod physics_steps_per_decision == 0`, the TBD-1 resolution order, and the
-    image grid phase lock with `img_lead_ms` (6);
-  - the obs_t rule: newest image with `last_physics_step <= P_t`, dropped when older than one image period (6);
+  - the decision boundary: decide after the rows of decision callback C_t, apply from physics step P_t + 1 (6);
+  - frame-bound rows with `covered_steps`, the measured step dt, the world-time decision grid on the first ctl row's
+    world time and the image grid on the same anchor with `img_lead_ms` (6, D-A);
+  - the obs_t rule: newest image whose pose row (hf row C + 1) has `last_physics_step <= P_t`, dropped when older
+    than one image period (6);
   - the `skipped_busy`, `make_failed` and `img_timeout` image rules and the end-of-session drain (5.3, 6);
-  - the 5 Hz fallback dropping the decision rate to 5 Hz (TBD-2);
+  - 5 Hz images and decisions as the default, 10 Hz only as a trial-conf session setting (TBD-2, D-B);
   - chunk rules: close at `chunk_max_rows` or 10 s of world time, at least one row per chunk; commit.csv and
     heartbeat.csv grow only by open-APPEND-write-close (8);
   - the ego frame x forward, y right, and the heading convention `atan2(fwd_x, fwd_z)`, clockwise positive (7);
-  - T0-MIN forward-only `dir_state` (7, TBD-7);
+  - T0-MIN forward-only driving with the full S105 gear map (7, TBD-7);
   - `exp_dir_now` (9.1), the reserved `react_veh_slot_id` and `react_visible` (9.1), `veh_slot_id` (9.5, 9.7), the
     reserved `traffic` stream (9.7) and the `privileged_route` teacher inputs (12);
   - nav_v1 rules: progress None = episode start (0 m), the 30 m progress window, horizontal arc length, the lookahead

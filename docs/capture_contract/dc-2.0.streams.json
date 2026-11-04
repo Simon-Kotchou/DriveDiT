@@ -101,6 +101,16 @@
       "blocks_freeze": false,
       "results": "docs/trials/T0-ENG.md",
       "affects": ["telemetry.road_key", "road.matched_road_id"]
+    },
+    {
+      "id": "TBD-10",
+      "item": "collision detector and crash-event parameters (session.json events.*)",
+      "default_r2": "collision_dv_mps = 4.0 over collision_window_ms = 100, PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs the per-step 100 ms delta-v and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override",
+      "default": {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_peak_ms": 200, "collision_refractory_ms": 1000, "episode_end_wait_ms": 250, "rollover_up_y": 0.5, "rollover_hold_ms": 500, "state_poll_ms": 100, "contact_source": "vanilla_process_collision", "provisional": true},
+      "decided_by": "E-01 extension",
+      "blocks_freeze": false,
+      "results": "docs/trials/T0-ENG.md",
+      "affects": ["events collision onset and rollover", "session.json events.*", "telemetry.dv_max_mps", "traffic.dv_max_mps", "C36"]
     }
   ],
   "maps": [
@@ -214,6 +224,7 @@
       "duration",
       "stop",
       "dc_stop",
+      "ego_destroyed",
       "script_error:write_fail",
       "script_error:other",
       "zero_ego",
@@ -249,6 +260,13 @@
       "resume",
       "stuck",
       "collision",
+      "veh_damage",
+      "veh_fire_start",
+      "veh_fire_end",
+      "driver_state",
+      "dismount",
+      "remount",
+      "rollover",
       "camera_reset",
       "img_timeout",
       "dc_stop",
@@ -259,7 +277,8 @@
     "launch_mode": ["cli", "wb_escape"],
     "road_class": ["asphalt_e01", "asphalt_e02", "asphalt_e03", "dirt", "trail", "cobblestone", "concrete", "unmatched"],
     "actuation_mode": ["A", "B"],
-    "source_class": ["wb_viewport", "client_1408x720"]
+    "source_class": ["wb_viewport", "client_1408x720"],
+    "contact_source": ["vanilla_process_collision", "none"]
   },
   "types": {
     "int": "decimal integer",
@@ -290,6 +309,7 @@
     "px": "pixels",
     "B": "bytes",
     "KiB": "kibibytes",
+    "Ns": "newton seconds (impulse)",
     "1": "dimensionless number",
     "-": "identifier, flag, enum or text"
   },
@@ -379,6 +399,7 @@
         {"name": "acc_local_y", "type": "float", "unit": "m/s2", "required": true, "frame": "vehicle_local", "source": "VehicleBaseSimulation.GetAccelerationLocal", "desc": "Ego acceleration in the vehicle-local frame (GetAccelerationLocal), y component."},
         {"name": "acc_local_z", "type": "float", "unit": "m/s2", "required": true, "frame": "vehicle_local", "source": "VehicleBaseSimulation.GetAccelerationLocal", "desc": "Ego acceleration in the vehicle-local frame (GetAccelerationLocal), z component."},
         {"name": "speed_engine_mps", "type": "float", "unit": "m/s", "required": true, "source": "VehicleBaseSimulation.GetSpeedKmh", "desc": "GetSpeedKmh() / 3.6 as reported by the engine (unsigned; the signed forward speed is telemetry_export.speed_fwd_mps, the registry channel speed_mps)."},
+        {"name": "dv_max_mps", "type": "float", "unit": "m/s", "required": false, "eval_only": true, "build_scoped": true, "tbd": "TBD-10", "desc": "Largest W-step horizontal world-frame delta-v of the ego (the collision detector's quantity, section 9.5.1) over the k steps since the previous row, so the TBD-10 threshold can be re-tuned offline per build_key; empty while the detector has fewer than W + 1 samples."},
         {"name": "gear", "type": "int", "unit": "-", "required": true, "source": "VehicleWheeledSimulation.GetGear", "tbd": "TBD-7", "desc": "GetGear() (engine index, TBD-7)."},
         {"name": "rpm", "type": "float", "unit": "rpm", "required": true, "source": "VehicleWheeledSimulation.EngineGetRPM", "desc": "EngineGetRPM()."},
         {"name": "engine_on", "type": "bool", "unit": "-", "required": true, "source": "VehicleWheeledSimulation.EngineIsOn", "desc": "EngineIsOn()."},
@@ -502,9 +523,9 @@
         {"name": "physics_step", "type": "int", "unit": "step", "required": true, "desc": "physics_step of the last completed step when the event was recorded."},
         {"name": "render_frame", "type": "int", "unit": "frame", "required": true, "desc": "render_frame when the event was recorded."},
         {"name": "world_time_ms", "type": "int", "unit": "ms", "required": true, "desc": "As in ctl."},
-        {"name": "kind", "type": "enum", "unit": "-", "required": true, "enum": ["session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"], "desc": "Event kind (veh_cfg_override is reserved, null on 1.8)."},
+        {"name": "kind", "type": "enum", "unit": "-", "required": true, "enum": ["session_start", "warmup_end", "episode_start", "settle_end", "episode_end", "perturb_start", "perturb_end", "nav_command", "style_set", "teleport", "respawn", "env_change", "pause", "resume", "stuck", "collision", "veh_damage", "veh_fire_start", "veh_fire_end", "driver_state", "dismount", "remount", "rollover", "camera_reset", "img_timeout", "dc_stop", "script_error", "veh_cfg_override"], "desc": "Event kind (veh_cfg_override is reserved, null on 1.8; the crash events veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount and rollover are section 9.5.1)."},
         {"name": "veh_slot_id", "type": "int", "unit": "-", "required": true, "desc": "Subject vehicle slot (ego_slot_id or a traffic slot), -1 when none; named veh_slot_id so a join by column name never meets img.slot_id."},
-        {"name": "payload", "type": "str", "unit": "-", "required": false, "desc": "Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason, img_timeout img_slot_id."}
+        {"name": "payload", "type": "str", "unit": "-", "required": false, "desc": "Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason, img_timeout img_slot_id, and the keys of section 9.5.1 (event_payloads) for collision, veh_damage, veh_fire_start, driver_state, dismount, remount, rollover, stuck and teleport."}
       ]
     },
     "episodes": {
@@ -567,7 +588,58 @@
         {"name": "fwd_x", "type": "float", "unit": "1", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle forward axis, x component."},
         {"name": "fwd_y", "type": "float", "unit": "1", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle forward axis, y component."},
         {"name": "fwd_z", "type": "float", "unit": "1", "required": true, "frame": "world", "eval_only": true, "desc": "Vehicle forward axis, z component."},
-        {"name": "speed_engine_mps", "type": "float", "unit": "m/s", "required": true, "desc": "GetSpeedKmh() / 3.6 (unsigned)."}
+        {"name": "speed_engine_mps", "type": "float", "unit": "m/s", "required": true, "desc": "GetSpeedKmh() / 3.6 (unsigned)."},
+        {"name": "dv_max_mps", "type": "float", "unit": "m/s", "required": false, "eval_only": true, "build_scoped": true, "tbd": "TBD-10", "desc": "As telemetry.dv_max_mps, for this traffic vehicle."}
+      ]
+    }
+  },
+  "event_payloads": {
+    "spec": "section 9.5.1",
+    "format": "key=value pairs joined by ';' in events.payload; a key without a value is left out; floats with 2 decimals, finite, no exponent; speeds horizontal in m/s; prefabs without their {GUID} prefix; no ',', '=' or ';' inside a value; bool 0 or 1",
+    "checked_by": "C36",
+    "kinds": {
+      "collision": [
+        {"key": "onset_step", "type": "int", "unit": "step", "required": true, "desc": "Physics step at which the detector first crossed events.collision_dv_mps (src dv or dv_contact); for src contact the last completed step when the contact was seen. Never after the row's physics_step."},
+        {"key": "dv_mps", "type": "float", "unit": "m/s", "required": true, "desc": "Horizontal world-frame delta-v: the peak of the norm of v_h(t) - v_h(onset - W) over events.collision_peak_ms after the onset, >= events.collision_dv_mps unless src is contact; for src contact the vanilla momentum change of the vehicle over its mass (SCR_CollisionDamageContainer.m_fTotalMomentumOwner / Physics.GetMass)."},
+        {"key": "dv_lon_mps", "type": "float", "unit": "m/s", "required": false, "desc": "That delta-v along the horizontal forward axis of the vehicle at the onset (local z, forward-positive: a frontal hit is negative); empty for src contact."},
+        {"key": "dv_lat_mps", "type": "float", "unit": "m/s", "required": false, "sign": "right+", "desc": "That delta-v along the horizontal right axis at the onset (local x, right-positive); empty for src contact."},
+        {"key": "v_mps", "type": "float", "unit": "m/s", "required": true, "desc": "Horizontal speed W steps before the onset; for src contact the speed before the contact (SCR_CollisionDamageContainer.GetOwnerVelocityBefore)."},
+        {"key": "other", "type": "enum", "unit": "-", "required": true, "enum": ["vehicle", "character", "tree", "building", "rock", "terrain", "static", "dynamic", "unknown"], "desc": "What was hit, classified in the order of section 9.5.1 from the vanilla contact (src dv_contact or contact) or from a registered vehicle with an onset within 3 steps and 10 m; unknown without either."},
+        {"key": "other_slot", "type": "int", "unit": "-", "required": false, "desc": "veh_slot_id of the other vehicle when it is a registered slot (C35)."},
+        {"key": "other_prefab", "type": "str", "unit": "-", "required": false, "desc": "Prefab of the other (root) entity when it is not a registered vehicle, without its {GUID} prefix."},
+        {"key": "impulse_ns", "type": "float", "unit": "Ns", "required": false, "desc": "Largest vanilla contact impulse of the matched contacts (src dv_contact or contact)."},
+        {"key": "src", "type": "enum", "unit": "-", "required": true, "enum": ["dv", "dv_contact", "contact"], "desc": "dv: the delta-v detector alone; dv_contact: the detector and a vanilla contact; contact: a vanilla contact without a detector onset (a hit below the threshold, never terminal)."}
+      ],
+      "veh_damage": [
+        {"key": "state", "type": "enum", "unit": "-", "required": true, "enum": ["undamaged", "intermediary", "destroyed"], "desc": "Damage state of the vehicle (DamageManagerComponent.GetState; the EDamageState values STATE1 to STATE3 are written intermediary)."},
+        {"key": "health", "type": "float", "unit": "1", "required": true, "range": [0, 1], "desc": "GetHealthScaled() of the vehicle."},
+        {"key": "movement_damage", "type": "float", "unit": "1", "required": true, "range": [0, 1], "desc": "GetMovementDamage() of the vehicle; 1.0 is the AI's cannot-move limit."}
+      ],
+      "veh_fire_start": [
+        {"key": "fire_state", "type": "enum", "unit": "-", "required": true, "enum": ["smoking_light", "smoking_heavy", "smoking_igniting", "burning"], "desc": "Highest SCR_EBurningState over the flammable hit zones of the vehicle (SCR_FlammableHitZone.GetFireState) when the first of them reaches the prefab's minimum burning state (SCR_DamageManagerComponent.IsOnFire)."}
+      ],
+      "veh_fire_end": [],
+      "driver_state": [
+        {"key": "state", "type": "enum", "unit": "-", "required": true, "enum": ["alive", "incapacitated", "dead"], "desc": "Life state of the slot's driver (CharacterControllerComponent.GetLifeState): the pilot-seat occupant, or the last one after the seat emptied."},
+        {"key": "in_seat", "type": "bool", "unit": "-", "required": true, "desc": "1 while that driver occupies the pilot seat."}
+      ],
+      "dismount": [
+        {"key": "driver", "type": "enum", "unit": "-", "required": true, "enum": ["alive", "incapacitated", "dead"], "desc": "Life state of the driver who left the pilot seat."},
+        {"key": "v_mps", "type": "float", "unit": "m/s", "required": true, "desc": "Horizontal speed of the vehicle at the dismount."}
+      ],
+      "remount": [
+        {"key": "driver", "type": "enum", "unit": "-", "required": true, "enum": ["alive", "incapacitated", "dead"], "desc": "Life state of the new pilot-seat occupant."},
+        {"key": "by", "type": "enum", "unit": "-", "required": false, "enum": ["ai", "reseat", "spawn"], "desc": "Who seated the driver, when the writer knows it: ai (the vanilla AI got in), reseat (a director teleported the same character back), spawn (a director seated a new character)."}
+      ],
+      "rollover": [
+        {"key": "up_y", "type": "float", "unit": "1", "required": true, "desc": "up_y of the vehicle (GetWorldTransform row 1, y) when the hold ended."}
+      ],
+      "stuck": [
+        {"key": "stuck_s", "type": "float", "unit": "s", "required": false, "desc": "How long the vehicle had been stuck when the expert or a director reported it."},
+        {"key": "termination_reason", "type": "enum", "unit": "-", "required": false, "enum": ["stuck"], "desc": "Present when the stuck ends the episode (the expert's stuck termination)."}
+      ],
+      "teleport": [
+        {"key": "reason", "type": "str", "unit": "-", "required": true, "desc": "Why the slot was moved by a scripted SetWorldTransform (for example episode_reset, stuck_reset, probe_reset)."}
       ]
     }
   },
@@ -735,6 +807,15 @@
         {"name": "clocks.img_inflight_timeout_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-2", "desc": "Real-time limit after which a request in flight stops blocking the next slot (TBD-2; default 2000)."},
         {"name": "clocks.img_lead_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-2", "desc": "Image grid lead: grid point g is due img_lead_ms before the world time of decision step g at image_hz = decision_hz (TBD-2; default 0, set from the E-05/E-06 capture offsets)."},
         {"name": "clocks.chunk_max_s", "type": "float", "unit": "s", "required": true, "desc": "World-time bound on a chunk (10)."},
+        {"name": "events.collision_dv_mps", "type": "float", "unit": "m/s", "required": true, "tbd": "TBD-10", "desc": "Collision onset threshold on the W-step horizontal world-frame delta-v (section 9.5.1; default 4.0, PROVISIONAL until the TBD-10 probe, measured per build_key and again on 1.9)."},
+        {"name": "events.collision_window_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Delta-v window; W = floor(collision_window_ms / (1000 x engine.fixed_time_slice_s) + 0.5) physics steps, at least 1 (default 100, W = 6 at 60 Hz)."},
+        {"name": "events.collision_peak_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Window after the onset over which the collision dv_mps is the peak (default 200)."},
+        {"name": "events.collision_refractory_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Per-slot refractory after an onset: a further crossing or a contact with the same other entity belongs to the same impact (default 1000)."},
+        {"name": "events.episode_end_wait_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Longest wait, from the onset, of an episode end for the ego's pending collision row (default 250)."},
+        {"name": "events.rollover_up_y", "type": "float", "unit": "1", "required": true, "tbd": "TBD-10", "desc": "rollover when up_y (GetWorldTransform row 1, y) stays below this (default 0.5, a tilt of 60 deg)."},
+        {"name": "events.rollover_hold_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "How long up_y must stay below rollover_up_y (default 500)."},
+        {"name": "events.state_poll_ms", "type": "int", "unit": "ms", "required": true, "tbd": "TBD-10", "desc": "Poll period of the damage, fire, driver and seat state of every slot (default 100)."},
+        {"name": "events.contact_source", "type": "enum", "unit": "-", "required": true, "enum": ["vanilla_process_collision", "none"], "desc": "Where collision rows get other, other_slot, other_prefab and impulse_ns: vanilla_process_collision (DD-4-min's modded SCR_VehicleDamageManagerComponent.ProcessCollision forwarder) or none (the registry match only)."},
         {"name": "rig.rig_id", "type": "str", "unit": "-", "required": true, "desc": "vehicle + mount + vFOV + writer + source class + render-settings hash (r2 3.4)."},
         {"name": "rig.rig_name", "type": "str", "unit": "-", "required": true, "desc": "e.g. R1-S105."},
         {"name": "rig.ego_prefab", "type": "str", "unit": "-", "required": true, "desc": "Ego prefab resource name."},
@@ -769,8 +850,8 @@
       "fields": [
         {"name": "contract_version", "type": "str", "unit": "-", "required": true, "desc": "dc-2.0."},
         {"name": "session_id", "type": "str", "unit": "-", "required": true, "desc": "As in session.json."},
-        {"name": "status", "type": "enum", "unit": "-", "required": true, "enum": ["ok", "failed"], "desc": "ok only when every commit succeeded and no error ended the session; failed otherwise."},
-        {"name": "end_reason", "type": "enum", "unit": "-", "required": true, "enum": ["duration", "stop", "dc_stop", "script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost"], "desc": "Why the session ended."},
+        {"name": "status", "type": "enum", "unit": "-", "required": true, "enum": ["ok", "failed"], "desc": "ok only when every commit succeeded and no error ended the session (ego_destroyed is not an error); failed otherwise."},
+        {"name": "end_reason", "type": "enum", "unit": "-", "required": true, "enum": ["duration", "stop", "dc_stop", "ego_destroyed", "script_error:write_fail", "script_error:other", "zero_ego", "ego_lost", "camera_lost"], "desc": "Why the session ended (ego_destroyed: the ego was destroyed after the first row, a normal end with status ok; section 5.3)."},
         {"name": "end.unix_s", "type": "int", "unit": "s", "required": true, "desc": "Wall time at end."},
         {"name": "end.utc", "type": "str", "unit": "-", "required": true, "desc": "ISO 8601 UTC at end."},
         {"name": "end.world_ms", "type": "int", "unit": "ms", "required": true, "desc": "world_time_ms at end."},

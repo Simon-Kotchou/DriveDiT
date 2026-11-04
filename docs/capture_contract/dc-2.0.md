@@ -37,7 +37,7 @@ Status: DRAFT 2026-10-22, freezes at T0-ENG core GO after E-01/E-05/E-10/E-19; u
 
 Each item is decided by the named probe of the DD-4-probe kit. The results table goes in `docs/trials/T0-ENG.md`;
 the freeze copies the decided value into this document, `dc-2.0.streams.json` and `features_v1.json`. TBD-1 to TBD-5
-block the freeze. TBD-6 to TBD-9 change a value or a mechanism only, never a field, and may be settled after it.
+block the freeze. TBD-6 to TBD-10 change a value or a mechanism only, never a field, and may be settled after it.
 
 <!-- dc2:tbd -->
 | Id | Item | Default (r2) | Decided by | Blocks freeze |
@@ -51,6 +51,7 @@ block the freeze. TBD-6 to TBD-9 change a value or a mechanism only, never a fie
 | TBD-7 | gearbox and gear index semantics | HasAutomaticGearbox() is true on the S105 and the automatic gearbox works driverless; gear indices map to reverse/neutral/forward through the vehicle card (VehicleCinematicTrack defaults to index 2, so the mapping is read back, never assumed). T0-MIN is forward-only: the card's gear_indices_forward come from E-01 (gear_indices seen while moving forward); gear_index_neutral and gear_index_reverse stay null until a probe phase holds neutral and drives in reverse (an E-01 extension or E-02Q, DD-7-ident); no session commands hl_dir -1 before that | E-04, E-01 | no |
 | TBD-8 | render-settings dump keys | GetGame().GetEngineUserSettings() modules VideoUserSettings and DisplayUserSettings, keys from SCR_SettingsManagerVideoModule.c:12-56 | E-20 | no |
 | TBD-9 | road key of the in-engine road dump | road_key = <n_pts>/<x0>:<z0>/<x1>:<z1> of the road's GetPoints: n_pts in decimal, the first and last point's x and z each formatted by Enforce float.ToString(-1, 2) (fixed point, 2 decimals), 0 for a road without points (DD-4-probe DC_RoadDump.MakeKey); E-08a dedupes by it and telemetry.road_key writes the same text, so offline matching (E-08b) joins on the logged text and never re-formats coordinates | E-08a | no |
+| TBD-10 | collision detector and crash-event parameters (session.json events.*) | collision_dv_mps = 4.0 over collision_window_ms = 100, PROVISIONAL: 2.0 x the E-01 S105 full-braking maximum (2.01 m/s per 100 ms) and 0.56 x the weakest of the 7 vehicle impacts of the dc-1.0 session_10423 (7.2 m/s); collision_peak_ms 200, collision_refractory_ms 1000, episode_end_wait_ms 250, rollover_up_y 0.5 held rollover_hold_ms 500, state_poll_ms 100. The TBD-10 probe (an E-01 extension: full brake from 60 km/h on asphalt and dirt, a curb strike, a 1 m drop, scripted 10 and 30 km/h wall hits) logs the per-step 100 ms delta-v and sets the threshold at 2 x its non-collision p99.99; measured again for every build_key, on 1.9 before production data and after any veh_cfg_override | E-01 extension | no |
 
 Consequences the freeze must apply:
 - TBD-1: the rule is applied in this order: `physics_steps_per_decision` N = floor(100 ms / slice + 0.5) first (an
@@ -69,6 +70,8 @@ Consequences the freeze must apply:
 - TBD-4: the img stream keeps the request path; only the harvester's `img_resolved.file` rule changes.
 - TBD-5: `steer_sign` and `yaw_axis_sign` are recorded per session in `control.*` and per vehicle card; export always
   normalises to the contract sign (section 7).
+- TBD-10: the values live in `session.json` `events.*`, so a measured threshold never changes a field; the optional
+  `dv_max_mps` columns (9.2, 9.7) let a new threshold be re-applied offline without capturing again.
 
 ## 2. Scope and invariants
 
@@ -270,7 +273,12 @@ A refusal logs one ERROR line naming the failed condition. Edit mode never captu
 Checks that fail before step 4 (guard, trial, fingerprint, build, readiness) create no directory, so they have no
 `end_reason`; they log one ERROR line. After step 4: an ego lost before the first row ends the session `failed`
 with `end_reason` `zero_ego`, 0 rows and 0 images; an ego or camera lost later ends it `failed` with `ego_lost` or
-`camera_lost` (a camera that fails to initialise fails readiness).
+`camera_lost` (a camera that fails to initialise fails readiness). An ego destroyed after the first row
+(`DamageManagerComponent.IsDestroyed()`) ends the session at once with `end_reason` `ego_destroyed`, which is not an
+error: status stays `ok`, because a crash is valid data. Before the seal the core writes the ego's pending `collision`
+row, `veh_damage` `state=destroyed` and, when it burns, `veh_fire_start` (9.5.1); no ctl or telemetry row follows the
+`veh_damage` row, and the open episode ends with the termination already latched (`collision`). `ego_lost` stays for
+an ego that vanishes or changes identity.
 
 ## 6. Clocks, keys and monotonicity (r2 3.5; R01, R03)
 
@@ -494,6 +502,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `acc_local_y` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), y component. [vehicle_local] |
 | `acc_local_z` | float | m/s2 | yes | Ego acceleration in the vehicle-local frame (GetAccelerationLocal), z component. [vehicle_local] |
 | `speed_engine_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 as reported by the engine (unsigned; the signed forward speed is telemetry_export.speed_fwd_mps, the registry channel speed_mps). |
+| `dv_max_mps` | float | m/s | no | Largest W-step horizontal world-frame delta-v of the ego (the collision detector's quantity, section 9.5.1) over the k steps since the previous row, so the TBD-10 threshold can be re-tuned offline per build_key; empty while the detector has fewer than W + 1 samples. [eval-only, build-scoped, TBD-10] |
 | `gear` | int | - | yes | GetGear() (engine index, TBD-7). [TBD-7] |
 | `rpm` | float | rpm | yes | EngineGetRPM(). |
 | `engine_on` | bool | - | yes | EngineIsOn(). |
@@ -596,9 +605,11 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 
 Event kinds: `session_start`, `warmup_end`, `episode_start`, `settle_end`, `episode_end`, `perturb_start`,
 `perturb_end`, `nav_command`, `style_set`, `teleport`, `respawn`, `env_change`, `pause`, `resume`, `stuck`,
-`collision`, `camera_reset`, `img_timeout` (an image request in flight longer than `clocks.img_inflight_timeout_ms`;
-payload `img_slot_id=<n>`), `dc_stop`, `script_error`, and `veh_cfg_override` (reserved, null on 1.8; a 1.9
-`Update*Configuration` call must be logged with this kind).
+`collision`, the crash events `veh_damage`, `veh_fire_start`, `veh_fire_end`, `driver_state`, `dismount`, `remount`
+and `rollover` (section 9.5.1, which also defines the `collision`, `stuck` and `teleport` payloads), `camera_reset`,
+`img_timeout` (an image request in flight longer than `clocks.img_inflight_timeout_ms`; payload `img_slot_id=<n>`),
+`dc_stop`, `script_error`, and `veh_cfg_override` (reserved, null on 1.8; a 1.9 `Update*Configuration` call must be
+logged with this kind).
 
 <!-- dc2:fields stream=events -->
 | Field | Type | Unit | Req | Description |
@@ -608,9 +619,106 @@ payload `img_slot_id=<n>`), `dc_stop`, `script_error`, and `veh_cfg_override` (r
 | `physics_step` | int | step | yes | physics_step of the last completed step when the event was recorded. |
 | `render_frame` | int | frame | yes | render_frame when the event was recorded. |
 | `world_time_ms` | int | ms | yes | As in ctl. |
-| `kind` | enum | - | yes | Event kind (veh_cfg_override is reserved, null on 1.8). Values: session_start, warmup_end, episode_start, settle_end, episode_end, perturb_start, perturb_end, nav_command, style_set, teleport, respawn, env_change, pause, resume, stuck, collision, camera_reset, img_timeout, dc_stop, script_error, veh_cfg_override. |
+| `kind` | enum | - | yes | Event kind (veh_cfg_override is reserved, null on 1.8; the crash events veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount and rollover are section 9.5.1). Values: session_start, warmup_end, episode_start, settle_end, episode_end, perturb_start, perturb_end, nav_command, style_set, teleport, respawn, env_change, pause, resume, stuck, collision, veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount, rollover, camera_reset, img_timeout, dc_stop, script_error, veh_cfg_override. |
 | `veh_slot_id` | int | - | yes | Subject vehicle slot (ego_slot_id or a traffic slot), -1 when none; named veh_slot_id so a join by column name never meets img.slot_id. |
-| `payload` | str | - | no | Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason, img_timeout img_slot_id. |
+| `payload` | str | - | no | Kind-specific 'key=value' pairs joined by ';' (ASCII, no ',' or '='-in-values): termination reasons, perturbation parameters (noise_id, kind, amplitude, duration_s), nav commands (route_id, maneuver, s_m, stop s_m), style_v1 values, script_error reason, img_timeout img_slot_id, and the keys of section 9.5.1 (event_payloads) for collision, veh_damage, veh_fire_start, driver_state, dismount, remount, rollover, stuck and teleport. |
+
+### 9.5.1 Crash events
+
+Collisions, vehicle damage, fire, the driver's life state, the pilot seat and rollovers are discrete state changes,
+so they are `events` rows, not telemetry columns: their value at any step is the last event of the kind for the slot.
+Every crash row names its subject vehicle in `veh_slot_id` (>= 0), the ego or a traffic slot; a vehicle-vehicle
+collision gives two `collision` rows, one per slot, each naming the other in `other_slot`. The writer is DD-4-min's
+`DC_CrashWatch` (a capture module); its values are session parameters in `session.json` `events.*` (TBD-10).
+
+Payload rules, in addition to 9.5: a key without a value is left out (no empty values); floats have 2 decimals;
+speeds are horizontal, in m/s; prefab paths are written without their `{GUID}` prefix; no value holds `,`, `=` or
+`;`. The keys of each kind are machine-readable in the streams JSON `event_payloads`; C36 checks them (an unknown or
+missing required key fails).
+
+<!-- dc2:payloads -->
+| Kind | Key | Type | Unit | Req | Description |
+|---|---|---|---|---|---|
+| `collision` | `onset_step` | int | step | yes | Physics step at which the detector first crossed events.collision_dv_mps (src dv or dv_contact); for src contact the last completed step when the contact was seen. Never after the row's physics_step. |
+| `collision` | `dv_mps` | float | m/s | yes | Horizontal world-frame delta-v: the peak of the norm of v_h(t) - v_h(onset - W) over events.collision_peak_ms after the onset, >= events.collision_dv_mps unless src is contact; for src contact the vanilla momentum change of the vehicle over its mass (SCR_CollisionDamageContainer.m_fTotalMomentumOwner / Physics.GetMass). |
+| `collision` | `dv_lon_mps` | float | m/s | no | That delta-v along the horizontal forward axis of the vehicle at the onset (local z, forward-positive: a frontal hit is negative); empty for src contact. |
+| `collision` | `dv_lat_mps` | float | m/s | no | That delta-v along the horizontal right axis at the onset (local x, right-positive); empty for src contact. [right+] |
+| `collision` | `v_mps` | float | m/s | yes | Horizontal speed W steps before the onset; for src contact the speed before the contact (SCR_CollisionDamageContainer.GetOwnerVelocityBefore). |
+| `collision` | `other` | enum | - | yes | What was hit, classified in the order of section 9.5.1 from the vanilla contact (src dv_contact or contact) or from a registered vehicle with an onset within 3 steps and 10 m; unknown without either. Values: vehicle, character, tree, building, rock, terrain, static, dynamic, unknown. |
+| `collision` | `other_slot` | int | - | no | veh_slot_id of the other vehicle when it is a registered slot (C35). |
+| `collision` | `other_prefab` | str | - | no | Prefab of the other (root) entity when it is not a registered vehicle, without its {GUID} prefix. |
+| `collision` | `impulse_ns` | float | Ns | no | Largest vanilla contact impulse of the matched contacts (src dv_contact or contact). |
+| `collision` | `src` | enum | - | yes | dv: the delta-v detector alone; dv_contact: the detector and a vanilla contact; contact: a vanilla contact without a detector onset (a hit below the threshold, never terminal). Values: dv, dv_contact, contact. |
+| `veh_damage` | `state` | enum | - | yes | Damage state of the vehicle (DamageManagerComponent.GetState; the EDamageState values STATE1 to STATE3 are written intermediary). Values: undamaged, intermediary, destroyed. |
+| `veh_damage` | `health` | float | 1 | yes | GetHealthScaled() of the vehicle. Range [0, 1]. |
+| `veh_damage` | `movement_damage` | float | 1 | yes | GetMovementDamage() of the vehicle; 1.0 is the AI's cannot-move limit. Range [0, 1]. |
+| `veh_fire_start` | `fire_state` | enum | - | yes | Highest SCR_EBurningState over the flammable hit zones of the vehicle (SCR_FlammableHitZone.GetFireState) when the first of them reaches the prefab's minimum burning state (SCR_DamageManagerComponent.IsOnFire). Values: smoking_light, smoking_heavy, smoking_igniting, burning. |
+| `veh_fire_end` | - | - | - | - | No payload (empty). |
+| `driver_state` | `state` | enum | - | yes | Life state of the slot's driver (CharacterControllerComponent.GetLifeState): the pilot-seat occupant, or the last one after the seat emptied. Values: alive, incapacitated, dead. |
+| `driver_state` | `in_seat` | bool | - | yes | 1 while that driver occupies the pilot seat. |
+| `dismount` | `driver` | enum | - | yes | Life state of the driver who left the pilot seat. Values: alive, incapacitated, dead. |
+| `dismount` | `v_mps` | float | m/s | yes | Horizontal speed of the vehicle at the dismount. |
+| `remount` | `driver` | enum | - | yes | Life state of the new pilot-seat occupant. Values: alive, incapacitated, dead. |
+| `remount` | `by` | enum | - | no | Who seated the driver, when the writer knows it: ai (the vanilla AI got in), reseat (a director teleported the same character back), spawn (a director seated a new character). Values: ai, reseat, spawn. |
+| `rollover` | `up_y` | float | 1 | yes | up_y of the vehicle (GetWorldTransform row 1, y) when the hold ended. |
+| `stuck` | `stuck_s` | float | s | no | How long the vehicle had been stuck when the expert or a director reported it. |
+| `stuck` | `termination_reason` | enum | - | no | Present when the stuck ends the episode (the expert's stuck termination). Values: stuck. |
+| `teleport` | `reason` | str | - | yes | Why the slot was moved by a scripted SetWorldTransform (for example episode_reset, stuck_reset, probe_reset). |
+
+Collision detector (every registered slot, every physics step, in `EOnPostSimulate`):
+- `dv_h(P) = |v_h(P) - v_h(P - W)|`, with `v_h` the horizontal (world x, z) part of `Physics.GetVelocity()` and
+  `W = floor(events.collision_window_ms / (1000 x GetFixedTimeSlice()) + 0.5)` steps, at least 1 (6 at 60 Hz). The
+  world frame, never the local one: a spin turns the local velocity vector with no force acting.
+- Onset: the first step with `dv_h >= events.collision_dv_mps` while the slot is neither in refractory nor suppressed.
+  `dv_mps` is the peak of `|v_h(t) - v_h(onset - W)|` over `events.collision_peak_ms` after the onset; further
+  crossings within `events.collision_refractory_ms` belong to the same impact. Suppressed for 1000 ms after a slot is
+  registered and for 500 ms after a `teleport` or `respawn` of it (a scripted reset is a one-step jump).
+- The row is written later than its onset (`physics_step >= onset_step`): once a contact matched it and the peak
+  window passed, else once `events.episode_end_wait_ms` and 2 render frames have passed since the onset (the vanilla
+  contact arrives 1 to 2 render frames after its physics step, and at a low frame rate one frame holds several steps).
+- Contact source (`events.contact_source` `vanilla_process_collision`): vanilla's
+  `SCR_VehicleDamageManagerComponent.ProcessCollision`, called once per new (vehicle, other entity) contact after
+  vanilla's impulse filters and its continued-contact filter, forwarded by a modded class that changes nothing else.
+  A contact whose world time lies in
+  [onset - 100 ms, onset + 250 ms] completes that onset's row (`src` `dv_contact`; the largest impulse names `other`;
+  contacts with the same other entity merge into it). A contact without an onset becomes its own row (`src`
+  `contact`) unless the slot's last row, within the refractory, has the same other entity (or none). With `none`, no
+  contact rows exist and `other` comes from the registry match only.
+- `other`, tested on the other's root entity in this order: a registered slot (`vehicle` with `other_slot`),
+  `Vehicle` (`vehicle`), `ChimeraCharacter` (`character`), `BaseTree` (`tree`, bushes included), `Building`
+  (`building`, `SCR_DestructibleBuildingEntity` included), `SCR_IndestructibleEnvironmentalEntity` (`rock`: granite
+  rocks, breakwaters), `GenericTerrainEntity` (`terrain`; vanilla's water entry is a terrain contact), else `dynamic`
+  or `static` by `Physics.IsDynamic()`, and `unknown` without a contact or physics. Without a contact, another slot
+  with an onset within 3 steps whose origin is within 10 m gives `vehicle` and `other_slot`.
+
+Polled state (every slot, every `events.state_poll_ms` of world time, so its timing is +- one period):
+- `veh_damage`: the damage state changes, or `movement_damage` crosses 1.0 in either direction;
+- `veh_fire_start` / `veh_fire_end`: the start and the end of the interval in which any flammable hit zone is on fire
+  (at or above the prefab's minimum burning state);
+- `driver_state`: the life state of the slot's driver changes. The driver is the pilot-seat occupant; after the seat
+  empties the slot keeps the last one until someone else sits in, so a death after an ejection is still seen;
+- `dismount`: the pilot seat goes from occupied to empty, whatever the driver's state; `remount`: it is occupied again
+  after a dismount. The first occupancy of a seat that was empty at registration writes no row (a Mode A ego has no
+  driver, so these kinds and `driver_state` never occur for it);
+- at registration the default is undamaged, not burning, and a driver (when seated) alive and in the seat; the first
+  poll writes a row only where the vehicle differs from that default.
+
+`rollover`: up_y below `events.rollover_up_y` for `events.rollover_hold_ms`; re-armed once up_y has stayed above 0.8
+for 2 s.
+
+Pairs: per slot `veh_fire_start` and `veh_fire_end` alternate, start first, and so do `dismount` and `remount`; the
+last of a slot may stay open at the session end (C36).
+
+Ego crashes (9.6): the first terminal ego event of an episode, ordered by step (`onset_step` for `collision`), is its
+`termination_reason`: `collision` for a `collision` with `src` `dv` or `dv_contact`, a `veh_damage` with a state other
+than `undamaged` or `movement_damage` >= 1, or a `veh_fire_start`; `rollover` for a `rollover`. The capture core
+latches it in the step of the event, before the driver's own termination of that step, and ends the episode at the
+next decision step; that end waits until the ego's pending `collision` row is written, at most
+`events.episode_end_wait_ms` after its onset, so the row carries the episode id and precedes `episode_end`. No new
+episode begins while the ego is immobile (`movement_damage` >= 1) or burning. A destroyed ego ends the session with
+`ego_destroyed` (5.3). The builder sets `policy_valid` 0 for every decision step whose action window
+(P_t, P_t + N] contains or follows the `onset_step` of the episode's first terminal ego event; `wm_valid` is not
+changed, because crash dynamics are world-model data.
 
 ### 9.6 Stream `episodes` (one row per episode, written at its end)
 
@@ -648,6 +756,12 @@ payload `img_slot_id=<n>`), `dc_stop`, `script_error`, and `veh_cfg_override` (r
 | `veh_dirt_body` | float | 1 | no | Reserved, null on 1.8 (MIGRATION_1_9 8.3). [reserved] |
 | `veh_dirt_glass` | float | 1 | no | Reserved, null on 1.8 (MIGRATION_1_9 8.3). [reserved] |
 
+Crash terminations: `collision` and `rollover` come from the first terminal ego crash event of the episode as
+defined in 9.5.1 (a collision row with `src` `dv` or `dv_contact`, a `veh_damage` with a state other than `undamaged`
+or `movement_damage` >= 1, a `veh_fire_start`; a `rollover`). The core latches the reason in the step of the event;
+a termination the driver reported in an earlier step wins (first terminal event, r2 1.3). No new reason value exists
+for crashes; a destroyed ego still ends its episode with `collision`.
+
 ### 9.7 Stream `traffic` (reserved for T2)
 
 Written from DD-4 on, at the telemetry cadence, one row per live traffic vehicle; key (`physics_step`,
@@ -668,6 +782,7 @@ Absent in T0-MIN to T1 sessions; readers accept its absence.
 | `fwd_y` | float | 1 | yes | Vehicle forward axis, y component. [world, eval-only] |
 | `fwd_z` | float | 1 | yes | Vehicle forward axis, z component. [world, eval-only] |
 | `speed_engine_mps` | float | m/s | yes | GetSpeedKmh() / 3.6 (unsigned). |
+| `dv_max_mps` | float | m/s | no | As telemetry.dv_max_mps, for this traffic vehicle. [eval-only, build-scoped, TBD-10] |
 
 ### 9.8 Offline-derived columns
 
@@ -834,6 +949,15 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `clocks.img_inflight_timeout_ms` | int | ms | yes | Real-time limit after which a request in flight stops blocking the next slot (TBD-2; default 2000). [TBD-2] |
 | `clocks.img_lead_ms` | int | ms | yes | Image grid lead: grid point g is due img_lead_ms before the world time of decision step g at image_hz = decision_hz (TBD-2; default 0, set from the E-05/E-06 capture offsets). [TBD-2] |
 | `clocks.chunk_max_s` | float | s | yes | World-time bound on a chunk (10). |
+| `events.collision_dv_mps` | float | m/s | yes | Collision onset threshold on the W-step horizontal world-frame delta-v (section 9.5.1; default 4.0, PROVISIONAL until the TBD-10 probe, measured per build_key and again on 1.9). [TBD-10] |
+| `events.collision_window_ms` | int | ms | yes | Delta-v window; W = floor(collision_window_ms / (1000 x engine.fixed_time_slice_s) + 0.5) physics steps, at least 1 (default 100, W = 6 at 60 Hz). [TBD-10] |
+| `events.collision_peak_ms` | int | ms | yes | Window after the onset over which the collision dv_mps is the peak (default 200). [TBD-10] |
+| `events.collision_refractory_ms` | int | ms | yes | Per-slot refractory after an onset: a further crossing or a contact with the same other entity belongs to the same impact (default 1000). [TBD-10] |
+| `events.episode_end_wait_ms` | int | ms | yes | Longest wait, from the onset, of an episode end for the ego's pending collision row (default 250). [TBD-10] |
+| `events.rollover_up_y` | float | 1 | yes | rollover when up_y (GetWorldTransform row 1, y) stays below this (default 0.5, a tilt of 60 deg). [TBD-10] |
+| `events.rollover_hold_ms` | int | ms | yes | How long up_y must stay below rollover_up_y (default 500). [TBD-10] |
+| `events.state_poll_ms` | int | ms | yes | Poll period of the damage, fire, driver and seat state of every slot (default 100). [TBD-10] |
+| `events.contact_source` | enum | - | yes | Where collision rows get other, other_slot, other_prefab and impulse_ns: vanilla_process_collision (DD-4-min's modded SCR_VehicleDamageManagerComponent.ProcessCollision forwarder) or none (the registry match only). Values: vanilla_process_collision, none. |
 | `rig.rig_id` | str | - | yes | vehicle + mount + vFOV + writer + source class + render-settings hash (r2 3.4). |
 | `rig.rig_name` | str | - | yes | e.g. R1-S105. |
 | `rig.ego_prefab` | str | - | yes | Ego prefab resource name. |
@@ -871,8 +995,8 @@ the harvester, never treated as complete.
 |---|---|---|---|---|
 | `contract_version` | str | - | yes | dc-2.0. |
 | `session_id` | str | - | yes | As in session.json. |
-| `status` | enum | - | yes | ok only when every commit succeeded and no error ended the session; failed otherwise. Values: ok, failed. |
-| `end_reason` | enum | - | yes | Why the session ended. Values: duration, stop, dc_stop, script_error:write_fail, script_error:other, zero_ego, ego_lost, camera_lost. |
+| `status` | enum | - | yes | ok only when every commit succeeded and no error ended the session (ego_destroyed is not an error); failed otherwise. Values: ok, failed. |
+| `end_reason` | enum | - | yes | Why the session ended (ego_destroyed: the ego was destroyed after the first row, a normal end with status ok; section 5.3). Values: duration, stop, dc_stop, ego_destroyed, script_error:write_fail, script_error:other, zero_ego, ego_lost, camera_lost. |
 | `end.unix_s` | int | s | yes | Wall time at end. |
 | `end.utc` | str | - | yes | ISO 8601 UTC at end. |
 | `end.world_ms` | int | ms | yes | world_time_ms at end. |
@@ -994,8 +1118,14 @@ Rules (r2 3.3, R35):
   - splits: the VAL-C hash rule `int(sha256(session_id)[:8], 16) mod 10 == 0` (3.2);
   - session root `$profile:DC_Sessions/` beside the dc-1.0 `DrivingData` and the probes' `DC_Probes` (4.3);
   - one ego per session; every ctl and telemetry row describes a live ego (2);
-  - `end_reason` values duration, stop, dc_stop, script_error:write_fail, script_error:other, zero_ego, ego_lost,
-    camera_lost; failures before the directory exists have none; status ok or failed only (5.3, 10.2);
+  - `end_reason` values duration, stop, dc_stop, ego_destroyed (not an error), script_error:write_fail,
+    script_error:other, zero_ego, ego_lost, camera_lost; failures before the directory exists have none; status ok or
+    failed only (5.3, 10.2);
+  - crash events (9.5.1): the kinds veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount, remount and
+    rollover, the collision, stuck and teleport payloads, the world-frame delta-v detector and its TBD-10 values, the
+    vanilla ProcessCollision contact source (the addon's first modded class), the core's ego termination latch, the
+    episode end waiting up to `events.episode_end_wait_ms` for the ego's collision row, the `ego_destroyed` end, the
+    optional `dv_max_mps` columns and the builder's `policy_valid` rule after a crash;
   - the launch-guard escape `wb_escape`, its process-start binding and its C02 use-class rule (5.1);
   - the decision boundary: decide in `EOnPostSimulate` of P_t, apply from P_t + 1 (6);
   - the decision phase lock `physics_step mod physics_steps_per_decision == 0`, the TBD-1 resolution order, and the

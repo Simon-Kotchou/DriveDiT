@@ -68,7 +68,9 @@ Variants (negative fixtures; each breaks one check):
   destroyed_unexplained  the crash session below without its veh_damage state=destroyed row: ego_destroyed is
                          unexplained (C36)
 and one positive variant, crash (contract 9.5.1), in the shape DD-4-min writes it: in episode 1 the ego stops dead
-against a rock (its speed drops to 0 in one frame) and is destroyed two callbacks after the detector's onset. The
+against a rock (its speed drops to 0 in one frame) and is destroyed at the first callback, two or more after the
+detector's onset, of a frame that issued an image request: the seal (no drain) leaves that request pending, its file
+is still written and its pose row never exists (contract section 6). The
 crash watch's rows at that terminal callback L: the collision (onset_step = the onset callback, dv_mps and v_mps from
 the reference detector data/dc2/crash_dv.py on the simulated velocities, src dv_contact, other rock), veh_damage
 state=destroyed and veh_fire_start; then the seal closes the open episode at L with termination collision and the
@@ -387,6 +389,7 @@ def simulate(spec, route):
         # ---------------- EOnFrame f
         frame = {"index": f, "render_frame": spec["render_frame0"] + f, "world": world, "lps": step, "cb": None,
                  "issued": False}
+        issued_slot = None
         if teleport_ms is not None and world >= teleport_ms:
             st.update({"x": p0[0], "z": p0[1], "psi": psi0, "v": 0.0, "yaw": 0.0, "acc": 0.0})
             steer_c, progress = 0.0, 0.0
@@ -408,6 +411,7 @@ def simulate(spec, route):
                     slot["issue_frame"] = f
                     frame["issued"] = True
                     inflight = slot
+                    issued_slot = slot
                 sim.slots.append(slot)
                 grid_i += 1
         sim.frames.append(frame)
@@ -473,6 +477,8 @@ def simulate(spec, route):
         st["z"] += v_new * math.cos(st["psi"]) * dt
         st["dist"] += v_new * dt
         st["v"], st["yaw"], st["acc"] = v_new, yaw, acc_ach
+        if issued_slot is not None:
+            issued_slot["capture_state"] = dict(st)     # frame C is rendered after its physics: hf row C + 1's state
         if cb is not None:
             # ---------------- EOnPostFixedFrame: the rows of the callback, then warm-up, end and the decision
             step += covered
@@ -490,12 +496,14 @@ def simulate(spec, route):
                 warmup_done = True
                 _event(sim, step, -1, f, world, "warmup_end")
                 phase, phase_end_ms = "between", world
-            # the crash: the terminal callback L, two callbacks after the detector's onset and in a frame without
-            # an image request (the seal leaves nothing in flight); the destroyed ego ends the session after its rows
+            # the crash: the terminal callback L, two callbacks after the detector's onset and in the frame of an
+            # image request, so the seal (no drain) catches it in flight: its row is pending, the engine still writes
+            # the file, and its pose row (C + 1) never exists (contract section 6, review round 1); the destroyed ego
+            # ends the session after its rows
             crash_onsets = [o for o in det.onsets if crash_ms is not None and o["t_ms"] >= crash_ms]
             if crash_hit and crash_onset_cb is None and crash_onsets:
                 crash_onset_cb = [c["index"] for c in sim.callbacks if c["p"] == crash_onsets[0]["step"]][0]
-            if crash_onset_cb is not None and cb["index"] >= crash_onset_cb + 2 and inflight is None:
+            if crash_onset_cb is not None and cb["index"] >= crash_onset_cb + 2 and inflight is not None:
                 _end_episode(sim, episode, ep_start_cb, cb["index"], "collision", step, f, world)
                 sim.crash = {"onset_cb": crash_onset_cb, "stop_cb": cb["index"], "onset": crash_onsets[0]}
                 break
@@ -873,8 +881,10 @@ def session_json(spec, start_unix, card_sha):
                    "image_hz_setting": image_hz_setting(spec), "img_inflight_timeout_ms": 2000, "img_lead_ms": 0,
                    "chunk_max_s": 10.0},
         "events": dict(EVENT_PARAMS),
-        "rig": {"rig_id": "R1-S105-synthetic-%dx%d" % (w, h), "rig_name": "R1-S105", "ego_prefab": "synthetic/S105.et",
+        "rig": {"rig_id": "R1-S105-synthetic-%dx%d-n0.03" % (w, h), "rig_name": "R1-S105",
+                "ego_prefab": "synthetic/S105.et",
                 "mount": {"fwd_m": 1.8, "up_m": 1.5, "right_m": 0.0, "pitch_deg": -4.0}, "vfov_deg": 50.0,
+                "near_plane_m": 0.03,
                 "writer": "MakeScreenshot", "source_class": spec.get("source_class", "wb_viewport"),
                 "capture_wh": [w, h], "core_wh": [w - 2 * band, h], "band_px": band, "derivative_wh": [512, 288],
                 "derivative_codec": "jpeg_q95",
@@ -954,15 +964,18 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
         quantised[name], counts[name] = write_stream(
             os.path.join(session_dir, sspec["dir"]), sspec, srows, 10.0,
             drop_last_commit=(variant == "missing_commit" and name == "ctl"))
-    # images: the image captured in frame C shows the state of hf row C + 1 (written only once the request is done)
+    # images: the image captured in frame C shows the state after its physics (hf row C + 1); the engine writes the file
+    # of every issued request, also of one a seal without drain left pending
     os.makedirs(os.path.join(session_dir, "frames"))
     pixels = {}
     done = [sl for sl in sim.slots if sl["done_frame"] is not None]
+    written = [sl for sl in sim.slots if sl.get("capture_state") is not None]
     pixel_slots = _pixel_slots([sl["slot_id"] for sl in done])
-    for sl in done:
+    for sl in written:
         captured = sim.frames[sl["issue_frame"]]
-        img = render_image(spec, sim.frames[sl["issue_frame"] + 1]["state"],
-                           fiducial.code_for(captured["render_frame"]))
+        pose_frame = sl["issue_frame"] + 1         # the pose row; none for a request the seal caught in flight
+        state = sim.frames[pose_frame]["state"] if pose_frame < len(sim.frames) else sl["capture_state"]
+        img = render_image(spec, state, fiducial.code_for(captured["render_frame"]))
         with open(os.path.join(session_dir, "frames", "f_%08d.png" % sl["slot_id"]), "wb") as f:
             f.write(png_bytes(img))
         if sl["slot_id"] in pixel_slots:
@@ -999,7 +1012,9 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
            "images": {"requested": len(sim.slots), "issued": len(issued),
                       "skipped_busy": len(sim.slots) - len(issued), "make_failed": 0, "timed_out": 0,
                       "pending_at_end": len(issued) - len(done)},
-           "episodes": len(sim.episodes), "heartbeats": n_hb}
+           "episodes": len(sim.episodes), "heartbeats": n_hb,
+           "observed": {"decision_grid_points_skipped": sum(b["grid"] - a["grid"] - 1 for a, b in
+                                                            zip(sim.decisions, sim.decisions[1:]))}}
     with open(os.path.join(session_dir, "session.json"), "wb") as f:
         f.write(_json_text(meta).encode("ascii"))
     with open(os.path.join(session_dir, "harvest.json"), "wb") as f:
@@ -1007,7 +1022,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
                             "build_key": _hex("synthetic build_key 1.8.0.13"),
                             "note": "DD-6-min writes harvest.json; this synthetic one carries only build_key"}
                            ).encode("ascii"))
-    _write_logs(session_dir, spec, start_unix, done, sim.end_reason, end_world)
+    _write_logs(session_dir, spec, start_unix, written, sim.end_reason, end_world)
     os.makedirs(os.path.join(session_dir, "_launch"))
     with open(os.path.join(session_dir, "_launch", "launch_%s.json" % meta["pin"]["launch_id"]), "wb") as f:
         f.write(_json_text(launch_record(meta)).encode("ascii"))
@@ -1133,7 +1148,7 @@ def golden_truth(spec, sim, q, card, pixels):
                               r["llc_throttle"], r["llc_brake"], STEER_SIGN * r["input_post_steer"]])
         inside = exec_rows[:min(n, p_next - p)] if p_next is not None else []
         exec_ok = bool(inside) and all(e is not None and None not in e for e in inside)
-        eligible = [c for c in cands if c[1] <= p]
+        eligible = [c for c in cands if c[1] <= p and c[0] <= spec["render_frame0"] + c0["frame"]]
         obs = max(eligible) if eligible else None
         obs_valid = 1 if obs is not None and world - obs[2] <= period else 0
         same_ep = obs_valid == 1 and obs[4] == episode

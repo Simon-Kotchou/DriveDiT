@@ -58,5 +58,8 @@
     "pending_at_end": 0
   },
   "episodes": 2,
-  "heartbeats": 2
+  "heartbeats": 2,
+  "observed": {
+    "decision_grid_points_skipped": 0
+  }
 }

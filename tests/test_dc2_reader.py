@@ -418,12 +418,52 @@ class TenHzTest(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+def repose_slot(session_dir, slot, captured):
+    """Codex's X1 mutation: slot's file shows render frame `captured` (its fiducial and the state of hf row captured
+    + 1, as the engine renders it) and was first seen in frame captured + 1."""
+    spec = dict(synth.SPECS["golden"])
+    sim = synth.simulate(spec, synth.drivedit_nav.route_from_dict(synth.ROUTES[spec["route"]]()))
+    state = sim.frames[captured + 1 - spec["render_frame0"]]["state"]
+    img = synth.render_image(spec, state, synth.fiducial.code_for(captured))
+    with open(os.path.join(session_dir, "frames", "f_%08d.png" % slot), "wb") as f:
+        f.write(synth.png_bytes(img))
+    for name in sorted(os.listdir(os.path.join(session_dir, "img"))):
+        if name.startswith("chunk_"):
+            set_column(session_dir, "img", int(name[6:11]), "done_render_frame",
+                       lambda key, v: str(captured + 1) if key == slot else v)
+
+
 class DefectTest(unittest.TestCase):
     def setUp(self):
         self.tmp = temp_dir("dc2_reader_")
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
+
+    def test_obs_t_is_never_a_future_image(self):
+        """Review round 1, X1: decision 93 is taken in frame 261989 (world 3139 ms); frame 261990 (3166 ms) has no
+        callback, so its pose row 261991 still has last_physics_step 93. Slot 15 re-posed to frame 261990 meets the
+        step bound but lies in the decision's future: it must not be obs_t, and no obs_age_ms is negative."""
+        session = copy_golden(self.tmp)
+        g = reader.open_session(golden_source(), vehicle_card=CARD)
+        hf = g.streams["hf"]
+        at = {f: (w, lps) for f, w, lps in zip(hf.col("render_frame"), hf.col("world_time_ms"),
+                                                hf.col("last_physics_step"))}
+        before = [d for d in g.decisions if d["decision_step"] == 93][0]
+        self.assertEqual((before["render_frame"], at[261989][0], at[261990][0], at[261991][1]),
+                         (261989, 3139, 3166, 93))
+        self.assertEqual(before["obs_slot_id"], 15)
+        repose_slot(session, 15, 261990)
+        s = reader.open_session(session, vehicle_card=CARD)
+        self.assertEqual([(r["captured_render_frame"], r["done_render_frame"]) for r in s.images if r["slot_id"] == 15],
+                         [(261990, 261991)])
+        d = [d for d in s.decisions if d["decision_step"] == 93][0]
+        self.assertEqual((d["obs_slot_id"], d["obs_captured_render_frame"]), (14, 261983))
+        self.assertGreaterEqual(d["obs_age_ms"], 0)
+        self.assertTrue(all(x["obs_age_ms"] is None or x["obs_age_ms"] >= 0 for x in s.decisions))
+        self.assertTrue(all(x["obs_captured_render_frame"] is None or
+                            x["obs_captured_render_frame"] <= x["render_frame"] for x in s.decisions))
+        self.assertTrue(all(x["render_frame"] >= 261990 for x in s.decisions if x["obs_slot_id"] == 15))
 
     def test_parse_by_header_name(self):
         session = copy_golden(self.tmp)
@@ -882,8 +922,10 @@ class CrashDetectorTest(unittest.TestCase):
 
 class CrashTest(unittest.TestCase):
     """Contract 9.5.1 on the crash variant of make_synthetic, in the shape DD-4-min writes it (frame-bound rows, D-A):
-    in episode 1 the ego stops dead against a rock and is destroyed two callbacks after the detector's onset; the crash
-    rows, the episode end and the seal share the terminal step L; the session ends with ego_destroyed, status ok."""
+    in episode 1 the ego stops dead against a rock and is destroyed at least two callbacks after the detector's onset,
+    in a frame that issued an image request; the crash rows, the episode end and the seal share the terminal step L;
+    the session ends with ego_destroyed, status ok; the seal (no drain) leaves that request pending while the engine
+    still writes its file, whose pose row never exists (contract section 6, review round 1)."""
 
     @classmethod
     def setUpClass(cls):
@@ -914,15 +956,32 @@ class CrashTest(unittest.TestCase):
         self.assertEqual([(c["physics_step"], c["episode_id"], c["in_episode"]) for c in crash], [(last, 1, True)] * 3)
         collision = crash[0]
         steps = s.streams["ctl"].col("physics_step")
-        self.assertEqual(collision["values"]["onset_step"], steps[-3])      # two callbacks before L
+        onset = collision["values"]["onset_step"]
+        self.assertIn(onset, steps[:-2])                                   # at least two callbacks before L
         self.assertEqual((collision["values"]["src"], collision["values"]["other"]), ("dv_contact", "rock"))
         self.assertGreaterEqual(collision["values"]["dv_mps"], 4.0)
         # telemetry.dv_max_mps carries the same quantity at the impact (one telemetry row per callback)
         tel = s.streams["telemetry"]
         dv = dict(zip(tel.col("physics_step"), tel.col("dv_max_mps")))
-        self.assertGreaterEqual(dv[steps[-3]], 4.0)
-        self.assertLess(max(v for p, v in dv.items() if v is not None and p < steps[-3]), 4.0)
+        self.assertGreaterEqual(dv[onset], 4.0)
+        self.assertLess(max(v for p, v in dv.items() if v is not None and p < onset), 4.0)
         self.assertEqual(crash[1]["values"]["state"], "destroyed")
+
+    def test_the_seal_leaves_an_image_in_flight(self):
+        """C-H1: the request of L's frame is pending at the seal; its file exists (the engine writes it) and decodes
+        to the last render frame, which has no pose row: not joined, never obs_t."""
+        s = self.session
+        end_frame = s.end_get("end.render_frame")
+        self.assertEqual(s.end_get("images.pending_at_end"), 1)
+        last = s.images[-1]
+        self.assertEqual((last["issue_status"], last["done_render_frame"]), ("issued", None))
+        self.assertTrue(last["fid_ok"])
+        self.assertEqual((last["captured_render_frame"], last["pose_after_seal"]), (end_frame, 1))
+        self.assertIsNone(last["pose_hf_index"])
+        self.assertEqual(sum(r["pose_after_seal"] for r in s.images), 1)
+        self.assertNotIn(last["slot_id"], [d["obs_slot_id"] for d in s.decisions])
+        with open(os.path.join(s.path, "_engine_logs", "console.log"), encoding="ascii") as f:
+            self.assertIn("f_%08d" % last["slot_id"], f.read())
 
     def test_first_terminal_ego_event(self):
         s = self.session

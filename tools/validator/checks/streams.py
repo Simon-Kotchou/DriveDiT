@@ -1,5 +1,7 @@
 """C05 (header-based parse), C06 (keys), C07 (monotonicity), C34 (writer integrity), C35 (entity identity)."""
 
+import bisect
+
 from .base import FAIL, HARD, PASS, first, load_reader, result, unreadable
 
 # Streams with their own counter (C06, C07). ctl and telemetry are frame-bound (contract section 6, freeze decision
@@ -87,6 +89,14 @@ def check_c06(ctx):
     if only_ctl or only_tel:
         issues.append("ctl and telemetry keys differ: %d ctl row(s) without telemetry (%s), %d telemetry row(s) "
                       "without ctl (%s)" % (len(only_ctl), first(only_ctl, 3), len(only_tel), first(only_tel, 3)))
+    # one callback writes both rows of a key: same render_frame, same world time (the frame clock)
+    ctl, tel = s.streams["ctl"], s.streams["telemetry"]
+    ctl_clock = dict(zip(ctl_steps, zip(ctl.col("render_frame"), ctl.col("world_time_ms"))))
+    split = [k for k, f, w in zip(tel_steps, tel.col("render_frame"), tel.col("world_time_ms"))
+             if k in ctl_clock and ctl_clock[k] != (f, w)]
+    if split:
+        issues.append("%d key(s) whose ctl and telemetry rows differ in render_frame or world_time_ms (%s): one "
+                      "callback, one frame clock" % (len(split), first(split, 3)))
     last_ctl = max(ctl_steps) if ctl_steps else -1
     joins, past = [], 0
     for i, lps in enumerate(s.streams["hf"].col("last_physics_step")):
@@ -102,8 +112,9 @@ def check_c06(ctx):
                       % (len(joins), first(joins, 3)))
     return result(ctx, "C06", HARD, FAIL if issues else PASS,
                   {"duplicates": dups_total, "gaps": gaps_total, "ctl_telemetry_key_mismatch": len(only_ctl) +
-                   len(only_tel), "hf_join_failures": len(joins), "hf_rows_past_ctl": past},
-                  "0 duplicates, 0 gaps, 0 key mismatches, 0 hf join failures",
+                   len(only_tel), "ctl_telemetry_clock_mismatch": len(split), "hf_join_failures": len(joins),
+                   "hf_rows_past_ctl": past},
+                  "0 duplicates, 0 gaps, 0 key or clock mismatches, 0 hf join failures",
                   first(issues) if issues else "all stream counters unique and contiguous (ctl and telemetry by "
                   "covered_steps); every hf row joins")
 
@@ -111,14 +122,15 @@ def check_c06(ctx):
 def check_c07(ctx):
     """Monotonic counters and clocks (dc-2.0.md section 6, D-A): every key strictly increasing in row order;
     world_time_ms non-decreasing in ctl, telemetry, hf and events; ctl render_frame non-decreasing, and ctl rows of
-    one render frame share one world time (the frame clock); two hf rows share a world time only with no physics step
-    between them or while paused; hf.last_physics_step non-decreasing and always the callback of an earlier render
-    frame (a frame's callback runs after its EOnFrame, which the image pairing of section 6 relies on); img
-    requested_world_ms and issue_render_frame increasing, done_render_frame after issue_render_frame; episodes ordered,
-    not overlapping, and begun at a decision callback. The writer's R-01 decision boundary on the world-time grid
-    (streams JSON timing.decision): ctl hl_seq is -1 until the first decision and changes only on the row right after
-    a decision callback, by +1; within a decision interval the held command hl_kappa, hl_accel and hl_dir stays the
-    same (it may change at an episode boundary). 0 violations."""
+    one render frame share one world time, the world time of the hf row of that frame (the frame clock); two hf rows
+    share a world time only with no physics step between them or while paused; hf.last_physics_step non-decreasing
+    and exactly the newest callback of an earlier render frame (a frame's callback runs after its EOnFrame, which the
+    image pairing of section 6 relies on; a stale value pairs an image with an older state); img requested_world_ms
+    and issue_render_frame increasing, done_render_frame after issue_render_frame; episodes ordered, not overlapping,
+    and begun at a decision callback. The writer's R-01 decision boundary on the world-time grid (streams JSON
+    timing.decision): ctl hl_seq is -1 until the first command and advances by 1 exactly on the row right after every
+    decision callback of an episode that goes on (a kept command is numbered again) and on no other row; a command
+    (hl_kappa, hl_accel, hl_dir) changes only together with that increment or at an episode boundary. 0 violations."""
     if ctx.load_error:
         return unreadable(ctx, "C07")
     s = ctx.session
@@ -141,6 +153,11 @@ def check_c07(ctx):
     split = sum(1 for i in range(1, len(w)) if frames[i] == frames[i - 1] and w[i] != w[i - 1])
     if split:
         issues.append("ctl: %d row(s) of one render frame with different world times (the frame clock)" % split)
+    hf_world = dict(zip(s.streams["hf"].col("render_frame"), s.streams["hf"].col("world_time_ms")))
+    off_clock = [k for k, f, ww in zip(ctl.col("physics_step"), frames, w) if f in hf_world and hf_world[f] != ww]
+    if off_clock:
+        issues.append("%d ctl row(s) whose world_time_ms differs from the hf row of their render frame (keys %s): "
+                      "the frame clock" % (len(off_clock), first(off_clock, 3)))
     issues += _decision_boundary(s)
     hf = s.streams["hf"]
     hw, lps, paused, hframe = hf.col("world_time_ms"), hf.col("last_physics_step"), hf.col("paused"), \
@@ -157,6 +174,20 @@ def check_c07(ctx):
     if late:
         issues.append("%d hf row(s) whose last_physics_step is a callback of the same or a later render frame "
                       "(frames %s): the callback must follow its frame's EOnFrame" % (len(late), first(late, 3)))
+    # exactly the newest callback of an earlier frame; an hf row naming a missing ctl key is C06's, a row past the last
+    # committed ctl key C34's
+    ctl_keys = ctl.col("physics_step")
+    last_ctl = max(ctl_keys) if ctl_keys else -1
+    stale = []
+    for frame, step in zip(hframe, lps):
+        if step is None or step > last_ctl or (step >= 0 and step not in cb_frame):
+            continue
+        j = bisect.bisect_left(frames, frame) - 1
+        if step != (ctl_keys[j] if j >= 0 else -1):
+            stale.append(frame)
+    if stale:
+        issues.append("%d hf row(s) whose last_physics_step is not the newest callback of an earlier render frame "
+                      "(frames %s): a stale join pairs images with an older state" % (len(stale), first(stale, 3)))
     img = s.streams["img"]
     req = img.col("requested_world_ms")
     bad = sum(1 for a, b in zip(req, req[1:]) if not b > a)
@@ -194,23 +225,30 @@ def _decision_boundary(s):
     steps, seq, ep = ctl.col("physics_step"), ctl.col("hl_seq"), ctl.col("episode_id")
     callbacks, _ = reader.decision_callbacks(ctl.col("world_time_ms"), s.clocks["decision_hz"])
     after_decision = set(i + 1 for i, _ in callbacks)
-    seq_bad, held_bad = [], []
+    seq_bad, held_bad, unnumbered = [], [], []
     if seq and seq[0] != -1:
         seq_bad.append(steps[0])
     for i in range(1, len(steps)):
-        if i in after_decision:
-            if seq[i] not in (seq[i - 1], seq[i - 1] + 1):
+        changed = any(ctl.col(c)[i] != ctl.col(c)[i - 1] for c in HL_COMMAND)
+        # every decision callback of an episode that goes on numbers its command (a kept command is numbered again)
+        due = i in after_decision and ep[i - 1] is not None and ep[i - 1] >= 0 and ep[i] == ep[i - 1]
+        if seq[i] == seq[i - 1] + 1:
+            if i not in after_decision:
                 seq_bad.append(steps[i])
-            continue
-        if seq[i] != seq[i - 1]:
+        elif seq[i] != seq[i - 1]:
             seq_bad.append(steps[i])
-        elif ep[i] == ep[i - 1] and any(ctl.col(c)[i] != ctl.col(c)[i - 1] for c in HL_COMMAND):
+        elif due:
+            unnumbered.append(steps[i])
+        elif changed and ep[i] == ep[i - 1]:
             held_bad.append(steps[i])
     issues = []
     if seq_bad:
         issues.append("ctl.hl_seq changes off the decision boundary (only on the row after a decision callback of "
                       "the world-time grid, by +1; -1 at the first row) at %d row(s): %s"
                       % (len(seq_bad), first(seq_bad, 4)))
+    if unnumbered:
+        issues.append("ctl: no hl_seq increment on %d row(s) after a decision callback inside an episode (every "
+                      "decision is numbered, a kept command too): %s" % (len(unnumbered), first(unnumbered, 4)))
     if held_bad:
         issues.append("ctl hl_kappa/hl_accel/hl_dir change inside a decision interval at %d row(s): %s"
                       % (len(held_bad), first(held_bad, 4)))

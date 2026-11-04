@@ -28,7 +28,8 @@ def check_c08(ctx):
       * telemetry: one row per callback: 0 ctl rows without a telemetry row (C08.max_missed_telemetry_rows) and no
         telemetry row after the session's last step;
       * decisions: the grid callbacks of the world-time grid (anchor = world time of the first ctl row) are rebuilt;
-        grid points a hitch skipped are reported, not failed;
+        grid points a hitch skipped are reported, not failed, and must equal the writer's count
+        session_end.json observed.decision_grid_points_skipped when it is present;
       * image grid: every slot's requested_world_ms on grid point g (anchor + g x 1000 / image_hz - img_lead_ms, the
         same anchor), the grid points of the slots 0, 1, 2, ... without a hole, and every grid point due before the
         session end (less the clocks.img_inflight_timeout_ms drain) has a slot row;
@@ -71,6 +72,10 @@ def check_c08(ctx):
         issues.append("%d ctl row(s) without their telemetry row (max %d): telemetry is one row per callback"
                       % (missed, max_missed))
     callbacks, skipped = reader.decision_callbacks(ctl.col("world_time_ms"), dhz)
+    written_skipped = s.end_get("observed.decision_grid_points_skipped") if s.end is not None else None
+    if isinstance(written_skipped, int) and not isinstance(written_skipped, bool) and written_skipped != skipped:
+        issues.append("session_end observed.decision_grid_points_skipped %d, the rebuilt grid skips %d"
+                      % (written_skipped, skipped))
     anchor = ctl.col("world_time_ms")[0] if len(ctl) else None
     img = s.streams["img"]
     period = reader.grid_period_ms(image_hz) or 1000.0 / float(image_hz)
@@ -125,7 +130,8 @@ def check_c08(ctx):
     if p99 is not None and p99 > limit:
         issues.append("image slot jitter p99 %.2f frames > %s" % (p99, limit))
     value = {"missed_telemetry_rows": missed, "decision_callbacks": len(callbacks),
-             "decision_grid_points_skipped": skipped, "img_jitter_p99_frames": p99,
+             "decision_grid_points_skipped": skipped, "writer_grid_points_skipped": written_skipped,
+             "img_jitter_p99_frames": p99,
              "missing_grid_points": holes + tail, "image_hz": image_hz, "image_hz_setting": setting,
              "decision_hz": dhz, "N": n, "step_dt_s": dt}
     if not steps and not jitters:
@@ -204,8 +210,11 @@ def check_c37(ctx):
     non-default 10 Hz setting warns unless it shows its own capture utilisation u95 <= 0.85: u95 is the p95 over the
     issued slots with a done_render_frame of the capture stall (the world time of the captured frame C = done - 1,
     hf row C + 1 minus hf row C; world/real 1.000 in probe runs 3-4, and the engine caps one frame's world time at
-    100 ms, so a longer stall reads as u = 1 at 10 Hz) divided by the slot period. Without done_render_frame or the hf
-    rows the evidence is missing (a warning). Telemetry-only sessions are N/A."""
+    100 ms, so a longer stall reads as u = 1 at 10 Hz) divided by the slot period. done_render_frame is evidence only
+    where the decoded fiducial confirms it (captured frame = done - 1): a slot whose decoded frame contradicts it
+    makes the evidence untrustworthy (a warning, never a pass), and without a decoded image it cannot be confirmed
+    (NOT_EVALUATED). Without done_render_frame or the hf rows the evidence is missing (a warning). Telemetry-only
+    sessions are N/A."""
     if ctx.load_error:
         return unreadable(ctx, "C37", SOFT)
     s = ctx.session
@@ -219,12 +228,27 @@ def check_c37(ctx):
         return result(ctx, "C37", SOFT, NA, {"image_hz": image_hz}, thr, "no image request (telemetry only)")
     hf_world = dict(zip(s.streams["hf"].col("render_frame"), s.streams["hf"].col("world_time_ms")))
     period = 1000.0 / image_hz
+    decoded = {r["slot_id"]: r["captured_render_frame"] for r in s.images if r["fid_ok"]}
+    contradicted = []
     stalls = []
     for i in issued:
-        done = img.col("done_render_frame")[i]
-        if done is None or done - 1 not in hf_world or done not in hf_world:
+        done, slot = img.col("done_render_frame")[i], img.col("slot_id")[i]
+        if done is None or slot not in decoded:
+            continue
+        if decoded[slot] != done - 1:
+            contradicted.append(slot)
+            continue
+        if done - 1 not in hf_world or done not in hf_world:
             continue
         stalls.append((hf_world[done] - hf_world[done - 1]) / period)
+    if contradicted:
+        return result(ctx, "C37", SOFT, FAIL, {"image_hz": image_hz, "contradicted_slots": len(contradicted),
+                                              "issued": len(issued)}, thr,
+                      "done_render_frame contradicted by the decoded frame on %d slot(s) (%s): the utilisation "
+                      "evidence is refused" % (len(contradicted), first(contradicted, 5)))
+    if not decoded:
+        return result(ctx, "C37", SOFT, NOT_EVALUATED, {"image_hz": image_hz, "issued": len(issued)}, thr,
+                      "no decoded image confirms done_render_frame")
     if len(stalls) < max(1, len(issued) // 2):
         return result(ctx, "C37", SOFT, FAIL, {"image_hz": image_hz, "slots_with_evidence": len(stalls),
                                               "issued": len(issued)}, thr,

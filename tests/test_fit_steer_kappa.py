@@ -78,6 +78,7 @@ CARD = os.path.join(REPO, "tools", "ident", "cards", "1.8.0.13", "S105.json")
 ROUTE = os.path.join(REPO, "addons", "DataCapture", "Configs", "routes", "arland_t0_loop.json")
 LLC_SOURCE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_LLCv1.c")
 ACTUATOR_SOURCE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_StreamRecorder.c")
+LAYER = os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC_Arland_Layers", "default.layer")
 LLC_KEYS = [name for name, _ in fit.LLC_DEFAULTS]
 LAUNCH_ID = "20261023T101500Z-wb-00a1"
 
@@ -819,6 +820,16 @@ class FitTests(unittest.TestCase):
                          ("placeholder", [], None))
         self.assertEqual((card["card_id"], card["pin_id"]), ("S105", "1.8.0.13"))
         self.assertIn("PLACEHOLDER", card["note"])
+        # TBD-5 as dc-2.0 decided it (E-01 run 3: a positive SetSteering turns right): steer_sign +1, yaw_axis_sign
+        # +1, not measured by an identification session of this card; the same sign as the capture core's own
+        # session.json control.steer_sign fallback on DC_Arland (DC_StreamRecorder m_iSteerSign 1)
+        self.assertEqual((card["signs"]["steer_sign"], card["signs"]["yaw_axis_sign"], card["signs"]["measured"]),
+                         (1, 1, False))
+        self.assertEqual(fit.PLACEHOLDER_SIGNS, (1, 1))
+        with open(LAYER, "r", encoding="ascii") as f:
+            layer = f.read()
+        recorder = layer.split('DC_StreamRecorder "{', 1)[1].split("\n  }", 1)[0]
+        self.assertIn("\n   m_iSteerSign %d\n" % card["signs"]["steer_sign"], recorder)
         self.assertIn("production", card["use"])
         # the S105's manual gearbox (T0-ENG probe run 2, E-04: has_automatic_gearbox 0, 6 gears, 4 forward) by the
         # vanilla rule: reverse 0, neutral 1, forward 2..5; driven by SetGear over all four forward gears

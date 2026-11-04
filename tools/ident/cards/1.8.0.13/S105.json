@@ -8,16 +8,16 @@
   "build_key": null,
   "identification_sessions": [],
   "use": "PLACEHOLDER: qualification only. llc_v1 accepts it at use_class dev or probe and refuses it at any other use_class, production included",
-  "note": "PLACEHOLDER card (DD-7-min): no usable E-01 / E-02a play exists yet (T0-ENG probe run 2 found the S105 in neutral). Signs are the TBD-5 draft defaults, kappa_ss is guessed, the actuator is unidentified; the gearbox is E-04's (manual, 4 forward gears) with guessed shift speeds. Replace it with fit_steer_kappa.py --e01 --e02a --e04 once the plays exist; data driven with it is qualification-only.",
+  "note": "PLACEHOLDER card (DD-7-min): no identified card exists yet (T0-ENG probe run 2 found the S105 in neutral; the run 3 fit waits for its build_key). Signs are the TBD-5 values dc-2.0 decided (E-01 run 3: steer_sign +1), kappa_ss is guessed, the actuator is unidentified; the gearbox is E-04's (manual, 4 forward gears) with guessed shift speeds. Replace it with fit_steer_kappa.py --e01 --e02a --e04 once the plays exist; data driven with it is qualification-only.",
   "generator": {
     "tool": "tools/ident/fit_steer_kappa.py",
     "version": 1
   },
   "signs": {
-    "steer_sign": -1,
+    "steer_sign": 1,
     "yaw_axis_sign": 1,
     "measured": false,
-    "detail": "dc-2.0 TBD-5 draft: CarSteering +1 = left (steer_sign -1); +angvel_local_y clockwise"
+    "detail": "dc-2.0 TBD-5 decided (E-01 run 3): a positive SetSteering turns right (steer_sign +1); +angvel_local_y clockwise (yaw_axis_sign +1)"
   },
   "gear_indices_forward": [
     2,

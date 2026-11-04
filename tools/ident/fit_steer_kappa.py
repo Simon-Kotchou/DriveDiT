@@ -81,8 +81,9 @@ headers, or --build-key when the headers carry none: dd-launch/1), a usable E-02
 otherwise nothing is written (exit 2). Every card is checked after serialization against the rules llc_v1 applies when
 it loads and accepts it (enforce_load_check: DC_VehicleCard.Check and the AcceptCard limiter rule), so a card that
 says usable is never one the engine refuses. --placeholder writes the PLACEHOLDER card instead: status placeholder, no
-identification session, build_key null, the TBD-5 draft signs and guessed kappa_ss, and the S105's manual gearbox as
-E-04 measured it in T0-ENG probe run 2 (scripted forward gears 2..5, neutral 1, reverse 0; guessed shift speeds);
+identification session, build_key null, the TBD-5 decided signs (steer_sign +1, yaw_axis_sign +1; E-01 run 3) and
+guessed kappa_ss, and the S105's manual gearbox as E-04 measured it in T0-ENG probe run 2 (scripted forward gears
+2..5, neutral 1, reverse 0; guessed shift speeds);
 llc_v1 accepts it only for qualification (use_class dev or probe) and refuses it at any other use_class, production
 included.
 
@@ -172,10 +173,11 @@ LLC_DEFAULTS = (
 )
 
 # The PLACEHOLDER card's guesses (no probe has run): E-02a grid speeds 15 / 30 / 50 km/h, curvature per contract steer
-# falling with speed (an engine steering reduction is expected on 1.8), the TBD-5 draft signs
+# falling with speed (an engine steering reduction is expected on 1.8), and the TBD-5 signs as dc-2.0 decided them
+# (E-01 run 3: a positive SetSteering turns right, so steer_sign +1; the r2 draft -1 is refuted; yaw_axis_sign +1)
 PLACEHOLDER_SPEEDS_MPS = (4.17, 8.33, 13.89)
 PLACEHOLDER_KAPPA_PER_STEER = (0.2, 0.12, 0.07)
-PLACEHOLDER_SIGNS = (-1, 1)
+PLACEHOLDER_SIGNS = (1, 1)
 
 # The S105's gearbox as E-04 read it in T0-ENG probe run 2 (1.8.0.13: has_automatic_gearbox 0, gearbox_gears 6,
 # gearbox_forward_gears 4): a manual gearbox, so the placeholder drives it with SetGear (scripted) over all 4 forward
@@ -991,14 +993,16 @@ def build_placeholder(args):
         "identification_sessions": [],
         "use": "PLACEHOLDER: qualification only. llc_v1 accepts it at use_class dev or probe and refuses it at any "
                "other use_class, production included",
-        "note": "PLACEHOLDER card (DD-7-min): no usable E-01 / E-02a play exists yet (T0-ENG probe run 2 found the "
-                "S105 in neutral). Signs are the TBD-5 draft defaults, kappa_ss is guessed, the actuator is "
+        "note": "PLACEHOLDER card (DD-7-min): no identified card exists yet (T0-ENG probe run 2 found the S105 in "
+                "neutral; the run 3 fit waits for its build_key). Signs are the TBD-5 values dc-2.0 decided (E-01 "
+                "run 3: steer_sign +1), kappa_ss is guessed, the actuator is "
                 "unidentified; the gearbox is E-04's (manual, 4 forward gears) with guessed shift speeds. Replace it "
                 "with fit_steer_kappa.py --e01 --e02a --e04 once the plays exist; data driven with it is "
                 "qualification-only.",
         "generator": {"tool": GENERATOR, "version": GENERATOR_VERSION},
         "signs": {"steer_sign": PLACEHOLDER_SIGNS[0], "yaw_axis_sign": PLACEHOLDER_SIGNS[1], "measured": False,
-                  "detail": "dc-2.0 TBD-5 draft: CarSteering +1 = left (steer_sign -1); +angvel_local_y clockwise"},
+                  "detail": "dc-2.0 TBD-5 decided (E-01 run 3): a positive SetSteering turns right (steer_sign +1); "
+                            "+angvel_local_y clockwise (yaw_axis_sign +1)"},
         "gear_indices_forward": indices["forward"],
         "gear_index_neutral": indices["neutral"],
         "gear_index_reverse": indices["reverse"],

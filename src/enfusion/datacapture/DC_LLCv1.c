@@ -3,12 +3,19 @@
 // ============================================================================
 //
 // Turns the held HL command (contract action_cmd: kappa [1/m] right-positive, accel [m/s2], dir) into the setter
-// inputs of one physics step. The driver interface (DC_StreamRecorder.c) calls it from ApplyStep, i.e. in EOnSimulate
-// of every physics step with a held command (the step source DD-4-min uses; no CallLater clock), and records exactly
-// what it passed in the ctl llc_* fields. It never calls a setter itself: everything goes through DC_Actuator.Apply
-// (Mode A now, Mode B later, r3 P1).
+// inputs of one fixed-frame callback. The driver interface (DC_StreamRecorder.c) calls it from ApplyStep, once in
+// every callback with a held command (EOnFixedFrame; no CallLater clock), and records exactly what it passed in the ctl
+// llc_* fields. It never calls a setter itself: everything goes through DC_Actuator.Apply (Mode A now, Mode B later,
+// r3 P1).
 //
-// PER PHYSICS STEP (inputs: speed, yaw rate and gear only, read back from the simulation; r2 3.2)
+// STEP TIME (dc-2.0 section 6, freeze decision D-A): a callback covers 1 to 3 engine fixed steps of the measured step dt
+// (1/30 s on 1.8), and the inputs it passes hold over all of them. Every integrator therefore advances by the
+// callback's timeSlice = covered_steps x step dt (ApplyStep's argument): the curvature trim, the rate limiter's step,
+// the lag (alpha = 1 - exp(-timeSlice / tau), the exact discrete lag over the covered steps), the speed reference and
+// the speed integral. The clutch dip counts covered steps (DC_DriverContext.GetCoveredSteps), never callbacks.
+// GetFixedTimeSlice() (n/30 for a frame of n merged steps) is never used as a step dt.
+//
+// PER CALLBACK (inputs: speed, yaw rate and gear only, read back from the simulation; r2 3.2)
 //   steering   contract steer = inverse identified map of the vehicle card: (kappa - kappa_offset(v)) /
 //              kappa_per_steer(v), interpolated linearly in speed and clamped at the end bins; plus an optional
 //              curvature trim (integral of kappa - yaw_rate / v, card gain, 0 = off); clamped to +-steer_max;
@@ -22,10 +29,11 @@
 //              brake from -accel, brake_hold below stop_speed_mps. dir -1 is never commanded while T0-MIN is
 //              forward-only (the core fails the session first); llc_v1 brakes.
 //   gearbox    the card's gearbox mode (E-04 / E-01): "automatic" = no SetGear and clutch 1 (llc_gear and llc_clutch
-//              empty), as the probe kit's speed hold; "scripted" = SetGear every step to the card's forward gears
+//              empty), as the probe kit's speed hold; "scripted" = SetGear every callback to the card's forward gears
 //              by speed with hysteresis; every scripted gear must be one of the card's measured
-//              gear_indices_forward. The clutch is 1, dipped to 0 for the card's clutch_dip_s after each change of
-//              the commanded gear (the first SetGear of an episode included), as the probe kit's E-01 gear_scripted
+//              gear_indices_forward. The clutch is 1, dipped to 0 for the card's clutch_dip_s (rounded to whole steps
+//              of the step dt, counted by covered steps) after each change of the
+//              commanded gear (the first SetGear of an episode included), as the probe kit's E-01 gear_scripted
 //              phase dips it at the start of every gear hold (m_fGearClutchDipS); llc_clutch records the value
 //              passed. Forward gears only (TBD-7): the scripted gears increase (the episode starts in the first one,
 //              Reset picks the slot from the speed), lie above the card's gear_index_neutral and are never neutral
@@ -1028,8 +1036,8 @@ class DC_VehicleCard
 }
 
 //------------------------------------------------------------------------------------------------
-//! llc_v1 of one ego (see the header). Init once per session, Reset at every episode start, Step every physics step
-//! with a held command
+//! llc_v1 of one ego (see the header). Init once per session, Reset at every episode start, Step in every fixed-frame
+//! callback with a held command, over the time the callback covers
 class DC_LLCv1
 {
 	static const string VERSION = "llc_v1";
@@ -1041,8 +1049,7 @@ class DC_LLCv1
 	protected DC_VehicleCard m_Card;
 	protected DC_Actuator m_Actuator;
 	protected VehicleWheeledSimulation m_Simulation;
-	protected float m_fTimeSlice;
-	protected float m_fLagAlpha;			//!< 1 - exp(-dt / tau); 1 = identity
+	protected float m_fStepDtS;				//!< the measured engine fixed step dt [s] (DC_DriverContext.GetStepDtS)
 
 	// steering state (engine-native sign)
 	protected float m_fSteerLimited;
@@ -1055,7 +1062,7 @@ class DC_LLCv1
 	protected int m_iGearSlot;
 	protected int m_iLastGear;				//!< the last scripted gear passed to SetGear; -1 = none yet this episode
 	protected int m_iClutchDipSteps;		//!< card clutch_dip_s in physics steps (the probe kit's StepsFor rounding)
-	protected int m_iDipStepsLeft;
+	protected int m_iDipStepsLeft;			//!< covered physics steps the clutch stays dipped
 
 	//------------------------------------------------------------------------------------------------
 	//! The r3 card rules (see the header) for this session. false (failure) refuses the card; warning is a line to
@@ -1169,34 +1176,31 @@ class DC_LLCv1
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Binds llc_v1 to the ego's actuator with an accepted card. false (failure) without a simulation or a fixed time
-	//! slice
-	bool Init(notnull DC_VehicleCard card, notnull DC_Actuator actuator, float timeSlice, out string failure)
+	//! Binds llc_v1 to the ego's actuator with an accepted card. stepDtS is the measured engine fixed step dt
+	//! (DC_DriverContext.GetStepDtS; the core measures it before BeginDriver). false (failure) without a simulation or a
+	//! step dt
+	bool Init(notnull DC_VehicleCard card, notnull DC_Actuator actuator, float stepDtS, out string failure)
 	{
 		m_Card = card;
 		m_Actuator = actuator;
 		m_Simulation = actuator.GetSimulation();
-		m_fTimeSlice = timeSlice;
+		m_fStepDtS = stepDtS;
 		if (!m_Simulation)
 		{
 			failure = "the actuator has no VehicleWheeledSimulation";
 			return false;
 		}
 
-		if (m_fTimeSlice <= 0)
+		if (m_fStepDtS <= 0)
 		{
-			failure = "no fixed time slice";
+			failure = "no measured step dt";
 			return false;
 		}
 
 		if (!CheckEgoGearbox(card, actuator, failure))
 			return false;
 
-		m_fLagAlpha = 1;
-		if (card.m_fSteerLagTauS > 0)
-			m_fLagAlpha = 1 - Math.Pow(Math.E, -m_fTimeSlice / card.m_fSteerLagTauS);
-
-		int dipSteps = Math.Round(card.m_fClutchDipS / m_fTimeSlice);
+		int dipSteps = Math.Round(card.m_fClutchDipS / m_fStepDtS);
 		m_iClutchDipSteps = dipSteps;
 		Reset();
 		failure = string.Empty;
@@ -1275,29 +1279,41 @@ class DC_LLCv1
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One physics step: the inputs for the held command, passed through the actuator and recorded in llc
-	void Step(notnull DC_HLCommand held, notnull DC_LLCOutput llc)
+	//! One fixed-frame callback: the inputs for the held command, held over the coveredSteps engine steps the callback
+	//! covers, passed through the actuator and recorded in llc. timeSlice is the physics time it covers (ApplyStep's
+	//! argument: covered_steps x the step dt): every integrator advances by it, the clutch dip by coveredSteps
+	void Step(notnull DC_HLCommand held, notnull DC_LLCOutput llc, float timeSlice, int coveredSteps)
 	{
 		if (!m_Card || !m_Actuator || !m_Simulation)
 			return;
+
+		// the core never passes fewer than 1 step or a slice <= 0 inside an episode (the step dt is measured before
+		// BeginDriver); the fallback keeps every integrator finite if it ever did
+		int steps = coveredSteps;
+		if (steps < 1)
+			steps = 1;
+
+		float sliceS = timeSlice;
+		if (sliceS <= 0)
+			sliceS = m_fStepDtS * steps;
 
 		float speed = GetSpeed();
 		vector angularVelocity = m_Simulation.GetAngularVelocityLocal();
 		float yawRate = m_Card.m_iYawAxisSign * angularVelocity[1];
 
-		// steering: inverse map, trim, sign, rate limiter, lag
+		// steering: inverse map, trim, sign, rate limiter, lag (each over sliceS)
 		float steerContract = SteerOfKappa(held.m_fKappa, speed);
 		if (m_Card.m_fKappaTrimGain > 0 && speed >= m_Card.m_fTrimMinSpeedMps && speed > 0)
 		{
 			float kappaError = held.m_fKappa - yawRate / speed;
-			m_fKappaTrim = Math.Clamp(m_fKappaTrim + m_Card.m_fKappaTrimGain * kappaError * m_fTimeSlice, -m_Card.m_fKappaTrimMax, m_Card.m_fKappaTrimMax);
+			m_fKappaTrim = Math.Clamp(m_fKappaTrim + m_Card.m_fKappaTrimGain * kappaError * sliceS, -m_Card.m_fKappaTrimMax, m_Card.m_fKappaTrimMax);
 		}
 
 		steerContract = Math.Clamp(steerContract + m_fKappaTrim, -m_Card.m_fSteerMax, m_Card.m_fSteerMax);
 		float steerRaw = m_Card.m_iSteerSign * steerContract;
 		if (m_Card.m_fSteerRatePerS > 0)
 		{
-			float maxDelta = m_Card.m_fSteerRatePerS * m_fTimeSlice;
+			float maxDelta = m_Card.m_fSteerRatePerS * sliceS;
 			m_fSteerLimited += Math.Clamp(steerRaw - m_fSteerLimited, -maxDelta, maxDelta);
 		}
 		else
@@ -1305,18 +1321,24 @@ class DC_LLCv1
 			m_fSteerLimited = steerRaw;
 		}
 
-		m_fSteerOut = Math.Clamp(m_fSteerOut + (m_fSteerLimited - m_fSteerOut) * m_fLagAlpha, -1, 1);
+		// first-order lag over sliceS: exactly the per-step lag applied steps times to an input held over them
+		float lagAlpha = 1;
+		if (m_Card.m_fSteerLagTauS > 0)
+			lagAlpha = 1 - Math.Pow(Math.E, -sliceS / m_Card.m_fSteerLagTauS);
+
+		m_fSteerOut = Math.Clamp(m_fSteerOut + (m_fSteerLimited - m_fSteerOut) * lagAlpha, -1, 1);
 
 		// longitudinal: throttle or brake, never both
 		float throttle;
 		float brake;
 		if (held.m_iDir > 0)
-			Longitudinal(held.m_fAccel, speed, throttle, brake);
+			Longitudinal(held.m_fAccel, speed, sliceS, throttle, brake);
 		else
 			Stop(held.m_fAccel, speed, throttle, brake);
 
 		// gearbox: automatic = no SetGear, clutch 1; scripted = forward gears by speed, the clutch dipped to 0 for
-		// clutch_dip_s after each change of the commanded gear (E-01 gear_scripted), recorded as passed
+		// clutch_dip_s after each change of the commanded gear (E-01 gear_scripted), recorded as passed. The dip
+		// counts covered steps: a callback with any dip step left passes clutch 0 for all the steps it covers
 		int gear = -1;
 		float clutch = 1;
 		float clutchRecorded = -1;
@@ -1330,7 +1352,9 @@ class DC_LLCv1
 			if (m_iDipStepsLeft > 0)
 			{
 				clutch = 0;
-				m_iDipStepsLeft--;
+				m_iDipStepsLeft -= steps;
+				if (m_iDipStepsLeft < 0)
+					m_iDipStepsLeft = 0;
 			}
 
 			clutchRecorded = clutch;
@@ -1349,18 +1373,19 @@ class DC_LLCv1
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! dir +1: speed reference from the accel target, PI on its error plus the accel feedforward
-	protected void Longitudinal(float accel, float speed, out float throttle, out float brake)
+	//! dir +1: speed reference from the accel target, PI on its error plus the accel feedforward; the reference and the
+	//! integral advance by sliceS, the physics time the callback covers
+	protected void Longitudinal(float accel, float speed, float sliceS, out float throttle, out float brake)
 	{
 		throttle = 0;
 		brake = 0;
-		m_fSpeedRef = Math.Clamp(m_fSpeedRef + accel * m_fTimeSlice, Math.Max(0, speed - m_Card.m_fSpeedWindowMps), speed + m_Card.m_fSpeedWindowMps);
+		m_fSpeedRef = Math.Clamp(m_fSpeedRef + accel * sliceS, Math.Max(0, speed - m_Card.m_fSpeedWindowMps), speed + m_Card.m_fSpeedWindowMps);
 		float error = m_fSpeedRef - speed;
 		float effort = accel + m_Card.m_fSpeedKp * error + m_Card.m_fSpeedKi * m_fIntegral;
 		bool saturatedUp = effort * m_Card.m_fThrottlePerMps2 >= m_Card.m_fThrottleMax && error > 0;
 		bool saturatedDown = -effort * m_Card.m_fBrakePerMps2 >= 1 && error < 0;
 		if (!saturatedUp && !saturatedDown)
-			m_fIntegral += error * m_fTimeSlice;
+			m_fIntegral += error * sliceS;
 
 		if (m_Card.m_fSpeedKi > 0)
 			m_fIntegral = Math.Clamp(m_fIntegral, -m_Card.m_fIntegralMaxMps2 / m_Card.m_fSpeedKi, m_Card.m_fIntegralMaxMps2 / m_Card.m_fSpeedKi);
@@ -1462,6 +1487,7 @@ class DC_LLCv1
 		if (!m_Card)
 			return VERSION + " (no card)";
 
-		return string.Format("%1: card %2 (%3, pin %4, build_key '%5', sessions %6) steer_sign %7 yaw_axis_sign %8 (measured %9)", VERSION, m_Card.m_sCardId, m_Card.m_sStatus, m_Card.m_sPinId, m_Card.m_sBuildKey, m_Card.GetSessionsText(), m_Card.m_iSteerSign, m_Card.m_iYawAxisSign, m_Card.m_bSignsMeasured) + string.Format(", gearbox %1 (clutch dip %2 s), limiter %3 /s, lag %4 s, engine input %5 (limit %6 /s), kappa_ss bins %7", m_Card.m_sGearbox, m_Card.m_fClutchDipS, m_Card.m_fSteerRatePerS, m_Card.m_fSteerLagTauS, m_Card.m_sInputShaping, m_Card.m_fEngineSteerRateLimit, m_Card.m_aSpeedsMps.Count());
+		string timing = string.Format(", integrated over each callback's covered steps x step dt %1 s (clutch dip %2 steps)", m_fStepDtS.ToString(-1, 6), m_iClutchDipSteps);
+		return string.Format("%1: card %2 (%3, pin %4, build_key '%5', sessions %6) steer_sign %7 yaw_axis_sign %8 (measured %9)", VERSION, m_Card.m_sCardId, m_Card.m_sStatus, m_Card.m_sPinId, m_Card.m_sBuildKey, m_Card.GetSessionsText(), m_Card.m_iSteerSign, m_Card.m_iYawAxisSign, m_Card.m_bSignsMeasured) + string.Format(", gearbox %1 (clutch dip %2 s), limiter %3 /s, lag %4 s, engine input %5 (limit %6 /s), kappa_ss bins %7", m_Card.m_sGearbox, m_Card.m_fClutchDipS, m_Card.m_fSteerRatePerS, m_Card.m_fSteerLagTauS, m_Card.m_sInputShaping, m_Card.m_fEngineSteerRateLimit, m_Card.m_aSpeedsMps.Count()) + timing;
 	}
 }

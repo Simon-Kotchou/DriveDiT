@@ -17,7 +17,8 @@
 //                  control.*;
 //   BeginEpisode   at a decision step after the warm-up, when the ego stands at the route start (distance, heading,
 //                  speed), at most m_iMaxEpisodes, m_fEpisodeGapS after the previous one: mode E, driver expert;
-//   ApplyStep      every physics step with a held command: llc_v1 (EOnSimulate);
+//   ApplyStep      every fixed-frame callback with a held command (EOnFixedFrame): llc_v1 over the callback's
+//                  timeSlice = covered_steps x the measured step dt (dc-2.0 D-A: 1 to 3 steps of 1/30 s per callback);
 //   PostStep       every physics step of the episode (EOnPostSimulate): ordered route progress and lane errors on
 //                  the state after the step, the expert evaluated on that state (exp_*_now), terminations;
 //   Decide         every decision step (P mod N == 0; N = 6 at 60 Hz, 10 Hz): the command evaluated in PostStep of
@@ -886,7 +887,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		}
 
 		m_LLC = new DC_LLCv1();
-		if (!m_LLC.Init(m_Card, ctx.GetActuator(), ctx.GetFixedTimeSliceS(), failure))
+		if (!m_LLC.Init(m_Card, ctx.GetActuator(), ctx.GetStepDtS(), failure))
 		{
 			ctx.Error("llc_v1: " + failure);
 			return false;
@@ -1000,13 +1001,14 @@ class DC_ExpertDriver : DC_DriverInterface
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! llc_v1 for the held command (EOnSimulate)
+	//! llc_v1 for the held command, once per fixed-frame callback (EOnFixedFrame) over the time it covers: timeSlice =
+	//! covered_steps x the measured step dt (dc-2.0 D-A); a callback is never counted as one step
 	override void ApplyStep(int physicsStep, float timeSlice, notnull DC_HLCommand held, notnull DC_LLCOutput llc)
 	{
 		if (!m_bInEpisode || !m_LLC)
 			return;
 
-		m_LLC.Step(held, llc);
+		m_LLC.Step(held, llc, timeSlice, m_Context.GetCoveredSteps());
 	}
 
 	//------------------------------------------------------------------------------------------------

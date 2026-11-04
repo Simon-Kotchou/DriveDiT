@@ -186,17 +186,24 @@ def age(path, days):
             os.utime(os.path.join(dirpath, name), (t, t), follow_symlinks=False)
 
 
-def run(root, *argv):
-    """(exit code, stdout) of retention.main in this process."""
+def run(root, *argv, quiet="0"):
+    """(exit code, stdout) of retention.main in this process. The fixtures are fresh, so the --apply preflight
+    window is 0 s unless quiet says otherwise (None: the default 10 minutes)."""
     out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        code = ret.main(["--test-root", root] + list(argv))
+    with mock.patch.dict(os.environ):
+        if quiet is None:
+            os.environ.pop(ret.QUIET_ENV, None)
+        else:
+            os.environ[ret.QUIET_ENV] = quiet
+        with contextlib.redirect_stdout(out):
+            code = ret.main(["--test-root", root] + list(argv))
     return code, out.getvalue()
 
 
 def run_subprocess(root, kill_at, *argv):
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     env.pop(ret.KILL_ENV, None)
+    env[ret.QUIET_ENV] = "0"
     if kill_at:
         env[ret.KILL_ENV] = kill_at
     return subprocess.run([sys.executable, "-I", "-B", RETENTION, "--test-root", root] + list(argv),
@@ -416,7 +423,7 @@ class SessionRetentionTest(unittest.TestCase):
         self.assertTrue(harvest.verify_sums(dest)[0])
 
     def test_kill_at_each_hook_then_the_next_run_completes(self):
-        for hook in ret.HOOKS:
+        for hook in [h for h in ret.HOOKS if not h.startswith("restore_")]:     # restores: Round3FindingsTest
             with self.subTest(hook):
                 root = os.path.join(self.root, hook)
                 os.mkdir(root)
@@ -1161,7 +1168,8 @@ class ReReviewFindingsTest(unittest.TestCase):
         before = th.snapshot(self.root)
         code, out = run(self.root, "--apply")
         self.assertEqual(code, 2, out)
-        self.assertIn("is both in frames/ and in frames/%s/; nothing touched" % ret.STAGING, out)
+        self.assertIn("is both in frames/ and in frames/%s/ as different files; nothing touched" % ret.STAGING,
+                      out)
         self.assertEqual(th.snapshot(self.root), before)
 
     # -- 5: eligibility inputs re-checked before the first mutation -------------------------------------

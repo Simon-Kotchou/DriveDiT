@@ -1166,7 +1166,10 @@ def verify_sums_snapshot(session_dir):
             present[rel] = full
     for rel, full in staged:
         if rel in present:
-            return False, "%s is both in frames/ and in frames/%s/" % (rel, RETENTION_STAGING), snap
+            a, b = os.lstat(present[rel]), os.lstat(full)
+            if (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino):
+                continue                    # one inode under both names: an interrupted restore, counted once
+            return False, "%s is both in frames/ and in frames/%s/ as different files" % (rel, RETENTION_STAGING), snap
         present[rel] = full
     retained = (set(listed) - set(present)) & set(deleted)
     if set(present) != set(listed) - retained:

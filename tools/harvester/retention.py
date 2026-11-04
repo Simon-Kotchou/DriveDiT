@@ -74,10 +74,16 @@ them; the next --apply restores every staged file to frames/ first (deterministi
 it cannot re-verify) and then plans the unit again from scratch; a dry run reports such a unit as held. Only
 regular files named f_<8 digits>.png / .bmp.png / .bmp (the whole name, no control character) are ever deleted.
 
-Operational constraint. Retention must not run while capture or probe directories are moved or renamed by hand
-(or by anything else that does not take catalog/harvest.lock); the harvester is excluded by the lock. The checks
-above catch a directory that was moved or replaced before a unit's first mutation, but not one moved while that
-unit is being deleted from.
+Operational constraint. Retention runs only on units nobody is writing: complete probe plays at least
+--min-age-days old and harvested sessions, with neither the Workbench, the game nor the harvester writing them. It
+must not run while capture or probe directories are moved or renamed by hand, nor while any program holds a
+screenshot, record or metadata file of a unit open for writing (anything that does not take catalog/harvest.lock;
+the harvester is excluded by the lock). The checks above catch what changed before a unit's first mutation; a
+writer that changes a unit while its deletes run (a descriptor opened earlier, metadata rewritten mid-loop) is not
+caught, and that is what the constraint excludes. --apply enforces the precondition it can see: a read-only
+preflight refuses the whole run (exit 3, nothing written) when any file of a unit in scope was modified within the
+last 10 minutes.
+On E: (drvfs) Windows also refuses to rename a directory that retention holds open.
 
 Re-runs and kills. A valid record is completed: it is made durable again, its remaining deletes are checked as
 above, then it is marked done. A kill at any point leaves every file the record lists in frames/ (checked again on
@@ -95,7 +101,7 @@ on the way holds what lies below it. run_footer.txt and run_header.txt larger th
 Exit codes: 0 done or nothing to do (skips are normal: unsealed, too new, not PASS, not catalogued); 2 a session or
 play was held or refused (checksum mismatch, symlink, bad record, a play whose footer is not status=complete, not
 Arland, dc-1.0) and nothing more of it deleted; 3 the run was refused (arguments, roots, --under outside the root,
-the lock); 4 an unexpected error.
+the lock, the --apply preflight); 4 an unexpected error.
 
 --test-root DIR (tests only) replaces /mnt/e/DriveDiT by DIR, as in harvest.py; only then does
 DD6_RETENTION_KILL_AT=<hook> (HOOKS) kill the run at that hook, for the kill-mid-run test.
@@ -153,9 +159,11 @@ PASSING = ("PASS", "PASS_WITH_WARNINGS")
 MAX_REPORT_BYTES = 256 << 20
 STAGING = harvest.RETENTION_STAGING
 KV_LIMIT = 1 << 20                  # run_footer.txt / run_header.txt larger than this hold the play
+QUIET_S = 600                       # --apply preflight: no file of a unit in scope modified in the last 10 minutes
+QUIET_ENV = "DD6_RETENTION_QUIET_S"     # tests only (--test-root): another preflight window, in seconds
 KILL_ENV = "DD6_RETENTION_KILL_AT"
 HOOKS = ("record_renamed", "after_record", "before_stage", "after_stage", "before_unlink", "in_deletes",
-         "before_done")
+         "before_done", "restore_linked", "restore_synced")
 EXIT_OK, EXIT_HELD, EXIT_REFUSED, EXIT_ERROR = 0, 2, 3, 4
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -240,6 +248,26 @@ def read_at(dir_fd, name, limit):
         os.close(fd)
 
 
+def newest_mtime(dir_fd):
+    """The newest mtime of any regular file below a directory descriptor, at any depth, every directory opened
+    O_DIRECTORY | O_NOFOLLOW (symlinks are not followed and not counted); RETENTION.json and its .dd6tmp are
+    retention's own and left out. 0.0 for no file."""
+    newest = 0.0
+    for name in os.listdir(dir_fd):
+        if name in (RECORD_NAME, RECORD_TMP):
+            continue
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if stat.S_ISREG(st.st_mode):
+            newest = max(newest, st.st_mtime)
+        elif stat.S_ISDIR(st.st_mode):
+            sub = os.open(name, DIR_FLAGS, dir_fd=dir_fd)
+            try:
+                newest = max(newest, newest_mtime(sub))
+            finally:
+                os.close(sub)
+    return newest
+
+
 def json_object(data):
     """The JSON object of bytes, or None."""
     try:
@@ -307,6 +335,7 @@ class Plan:
         self.ids = {}
         self.stats = {}
         self.inputs = {}                    # what made the unit eligible, re-checked before its first mutation
+        self.inputs_age = None              # a play's newest file mtime at planning
         self.listed = {}
         self.kept = []
         self.delete = []
@@ -351,6 +380,9 @@ class Retention:
         self.under = None
         self.is_locked = False
         self.to_recover = []
+        self.quiet_s = QUIET_S
+        if test_mode and os.environ.get(QUIET_ENV) is not None:
+            self.quiet_s = float(os.environ[QUIET_ENV])
 
     # -- output -----------------------------------------------------------------------------------
     def report(self, status, rel, detail):
@@ -601,24 +633,23 @@ class Retention:
                       "play": rel.split("/")[-1], "footer_status": status}
         plan.inputs = {"run_footer.txt": harvest.sha256_bytes(footer_bytes),
                        "run_header.txt": harvest.sha256_bytes(header_bytes)}
-        newest = 0.0
-        for name in os.listdir(path):
-            st = os.lstat(os.path.join(path, name))
-            if stat.S_ISREG(st.st_mode) and name not in (RECORD_NAME, RECORD_TMP):
-                newest = max(newest, st.st_mtime)
+        pfd = os.open(path, DIR_FLAGS)
+        try:
+            newest = newest_mtime(pfd)          # every file of the play, at any depth (not RETENTION.json)
+        finally:
+            os.close(pfd)
         present = {}                        # f_rel -> (slot, lstat) of the raw frames on disk
         others = 0
         for name in sorted(os.listdir(frames)):
             st = os.lstat(os.path.join(frames, name))
             slot = raw_shot_slot(name)
-            if stat.S_ISREG(st.st_mode):
-                newest = max(newest, st.st_mtime)
             if slot is not None and stat.S_ISREG(st.st_mode):
                 present["%s/%s" % (FRAMES, name)] = (slot, st)
             else:
                 others += 1
         if others:
             plan.notes.append("%d other entr%s in frames/ left alone" % (others, "y" if others == 1 else "ies"))
+        plan.inputs_age = newest
         age = now - newest
         if age < self.args.min_age_days * 86400.0:
             raise Skip("skipped", "newer than --min-age-days %g (last written %.1f h ago); nothing is deleted" % (
@@ -806,6 +837,7 @@ class Retention:
             for plan in self.plan_all([]):
                 raise AssertionError("%s planned without a catalog" % plan.rel)
             return self.finish()
+        self.preflight(self.session_dirs()[0])         # read-only: a refused run writes nothing, not even the lock
         with self.locked():
             for plan in self.plan_all(self.h.catalog_rows()):
                 self.apply_one(plan)
@@ -821,12 +853,36 @@ class Retention:
             return self.finish()
         paths = sorted(set([p.path for p in plans] + self.to_recover))
         if paths:
+            self.preflight(self.play_dirs()[0])         # read-only: a refused run writes nothing, not even the lock
             with self.locked():
                 for path in paths:
                     plan = self.plan_unit(path, None, time.time())
                     if plan is not None:
                         self.apply_one(plan)
         return self.finish()
+
+    def preflight(self, units):
+        """--apply only, before the lock is taken and anything is planned for deletion: Refused when any file of a
+        unit in scope (a session or play directory, at any depth; not RETENTION.json) was modified within the last
+        quiet_s seconds. Retention runs only on units nobody is writing; a recent write means the Workbench, the game or
+        the harvester may still be at it."""
+        now = time.time()
+        for path in units:
+            if not self.wanted(path):
+                continue
+            try:
+                fd = os.open(path, DIR_FLAGS)
+                try:
+                    newest = newest_mtime(fd)
+                finally:
+                    os.close(fd)
+            except OSError as e:
+                raise Refused("--apply preflight: %s cannot be read (%s)" % (self.rel(path), e))
+            if now - newest < self.quiet_s:
+                raise Refused("--apply preflight: a file of %s was modified %.0f s ago; retention runs only on units "
+                              "nobody is writing (no Workbench, game or harvester at work on them), so nothing was "
+                              "done; run again once nothing in scope has changed for %d minutes" % (
+                                  self.rel(path), now - newest, int(self.quiet_s // 60)))
 
     @contextlib.contextmanager
     def locked(self):
@@ -933,10 +989,12 @@ class Retention:
                            "deleted" % (sub or plan.rel))
 
     def recheck_inputs(self, plan, ufd, ffd, rfd):
-        """Right before a unit's first mutation, read again through the pinned descriptors what made it eligible:
-        a play's run_footer.txt and run_header.txt; a session's result.json, dc_validate.json, SHA256SUMS (the
-        same bytes), catalog rows (read again, under the lock), img and events files and the derivative of every
-        slot still to delete (their SHA256SUMS sha256). Every kept file must still be there. Skip held on any
+        """Right before a unit's first mutation, read again through the pinned descriptors what made it eligible.
+        A play: run_footer.txt and run_header.txt (the same bytes), and --min-age-days recomputed over every file of
+        the play (newest_mtime). A session: session.json admitted again (the same bytes, still Arland dc-2.0 under
+        this id), result.json, dc_validate.json and SHA256SUMS (the same bytes), its catalog rows (read again, under
+        the lock), and every file SHA256SUMS lists that is not a delete of this run (kept frames, derivatives,
+        streams, metadata) hashed to its SHA256SUMS sha256. Every kept frame must still be there. Skip held on any
         change."""
         def unchanged(dir_fd, name, limit, what):
             data = read_at(dir_fd, name, limit)
@@ -946,7 +1004,18 @@ class Retention:
         if plan.kind == "probe_play":
             for name in ("run_footer.txt", "run_header.txt"):
                 unchanged(ufd, name, KV_LIMIT, name)
+            newest = newest_mtime(ufd)
+            if newest > plan.inputs_age or time.time() - newest < self.args.min_age_days * 86400.0:
+                raise Skip("held", "a file of the play was written after it was planned (--min-age-days %g no "
+                           "longer holds); nothing was written or deleted" % self.args.min_age_days)
         else:
+            data = read_at(ufd, "session.json", harvest.MAX_JSON_BYTES)
+            meta = json_object(data)
+            if data is None or harvest.sha256_bytes(data) != plan.listed.get("session.json") or meta is None \
+                    or not harvest.is_arland(meta) or meta.get("session_id") != plan.ident["session_id"] \
+                    or meta.get("contract_version") != reader.CONTRACT_VERSION:
+                raise Skip("held", "session.json changed after the session was planned (admission: Arland, its id, "
+                           "dc-2.0, its SHA256SUMS sha256); nothing was written or deleted")
             for name in ("result.json", "dc_validate.json"):
                 unchanged(rfd, name, MAX_REPORT_BYTES, name)
             unchanged(rfd, harvest.SUMS_NAME, harvest.RETENTION_MAX_BYTES, harvest.SUMS_NAME)
@@ -954,13 +1023,6 @@ class Retention:
             if json.dumps(rows, sort_keys=True) != plan.inputs["catalog"]:
                 raise Skip("held", "the session's catalog rows changed after it was planned; nothing was written "
                            "or deleted")
-            checks = [rel for rel in sorted(plan.listed) if rel.split("/")[0] in ("img", "events")]
-            checks += ["%s/deriv/f_%08d.jpg" % (harvest.HARVEST_DIR, raw_shot_slot(frame_name(e["file"])))
-                       for e in plan.todo()]
-            for rel in checks:
-                if self.hash_rel(ufd, rel) != plan.listed.get(rel):
-                    raise Skip("held", "%s is gone or changed after the session was planned (its SHA256SUMS sha256 "
-                               "no longer matches); nothing was written or deleted" % rel)
         for e in plan.kept:
             name = frame_name(e.get("file"))
             try:
@@ -970,6 +1032,12 @@ class Retention:
             if st is None or not stat.S_ISREG(st.st_mode):
                 raise Skip("held", "kept file %s is gone after the unit was planned; nothing was written or "
                            "deleted" % e.get("file"))
+        if plan.kind == "session":
+            deletes = set(e["file"] for e in plan.delete)           # this run's, and those a record already did
+            for rel in sorted(plan.listed):
+                if rel not in deletes and self.hash_rel(ufd, rel) != plan.listed[rel]:
+                    raise Skip("held", "%s is gone or changed after the session was planned (its SHA256SUMS sha256 "
+                               "no longer matches); nothing was written or deleted" % rel)
 
     def hash_rel(self, ufd, rel):
         """sha256 of the regular file rel below the pinned unit descriptor, every component opened O_NOFOLLOW; None
@@ -1129,7 +1197,12 @@ class Retention:
         self.hook("after_stage")
         why = self.check_staged(sfd, name, e, plan)
         if why:
-            if self.restore_one(ffd, sfd, name):
+            try:
+                restored = self.restore_one(ffd, sfd, name)
+            except OSError as err:
+                raise Skip("held", "%s; putting it back failed (%s), so its staging copy is kept and the next --apply "
+                           "restores it" % (why, err))
+            if restored:
                 raise Skip("held", "%s; it was put back in frames/" % why)
             raise Skip("held", "%s; frames/%s exists again, so it stays in frames/%s/ (the next --apply restores "
                        "or holds it)" % (why, name, STAGING))
@@ -1160,23 +1233,41 @@ class Retention:
                 e["file"], "SHA256SUMS" if plan.kind == "session" else "recorded in %s" % RECORD_NAME)
         return None
 
+    def same_file(self, ffd, sfd, name):
+        """True when frames/<name> and its staging entry are one regular file (the same device and inode): a restore
+        that was interrupted between its link and the removal of the staging alias."""
+        try:
+            a = os.stat(name, dir_fd=ffd, follow_symlinks=False)
+            b = os.stat(name, dir_fd=sfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return stat.S_ISREG(a.st_mode) and (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
     def restore_one(self, ffd, sfd, name):
-        """Put a staged file back at its frames/ name, never over an existing file (a hard link, then the staged
-        name is removed). False when frames/ already holds that name again."""
+        """Put a staged file back at its frames/ name, never over another file: a hard link into frames/, then
+        frames/ is fsynced (strictly), and only then is the staging entry removed and staging fsynced, so the
+        staging copy exists until the frames/ name is durable. A frames/ name that is already the same inode (an
+        interrupted restore) is made durable the same way. False when frames/ holds a different file under that
+        name (the staging copy stays); OSError on any failure (the staging copy stays unless its removal itself
+        failed after the frames/ name was durable)."""
         try:
             os.link(name, name, src_dir_fd=sfd, dst_dir_fd=ffd, follow_symlinks=False)
         except FileExistsError:
-            return False
+            if not self.same_file(ffd, sfd, name):
+                return False
+        self.hook("restore_linked")
+        os.fsync(ffd)
+        self.hook("restore_synced")
         os.unlink(name, dir_fd=sfd)
         os.fsync(sfd)
-        os.fsync(ffd)
         return True
 
     def recover(self, path):
         """Restore every file an interrupted run left in frames/.retention_staging/ to frames/ (restore_one), then
-        remove the staging directory; under the lock, through pinned descriptors, after the location check. A name
-        that is not a raw screenshot, not a regular file, or already in frames/ again holds the unit with nothing
-        touched. The unit is planned again from scratch afterwards."""
+        remove the staging directory; under the lock, through pinned descriptors, after the location check. A frames/
+        name that is the same inode as its staging entry (a restore interrupted after its link) is completed the
+        same way. A name that is not a raw screenshot, not a regular file, or a different file in frames/ holds the
+        unit with nothing touched. The unit is planned again from scratch afterwards."""
         rel = self.rel(path)
         frames = os.path.join(path, FRAMES)
         if not harvest.real_below(path, self.root) or os.path.islink(frames) \
@@ -1198,10 +1289,11 @@ class Retention:
                                    "touched" % (STAGING, name))
                     try:
                         os.stat(name, dir_fd=ffd, follow_symlinks=False)
-                        raise Skip("held", "frames/%s is both in frames/ and in frames/%s/; nothing touched" % (
-                            name, STAGING))
                     except FileNotFoundError:
-                        pass
+                        continue
+                    if not self.same_file(ffd, sfd, name):         # the same inode is an interrupted restore
+                        raise Skip("held", "frames/%s is both in frames/ and in frames/%s/ as different files; "
+                                   "nothing touched" % (name, STAGING))
                 self.check_location(pseudo, pinned)
                 for name in names:
                     if not self.restore_one(ffd, sfd, name):

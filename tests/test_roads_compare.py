@@ -188,6 +188,82 @@ class RoadsCompareTests(unittest.TestCase):
         code, text = run_tool([os.path.join(self.base, "EVERON_play"), "--decoder", self.decoder])
         self.assertEqual(code, 2, text)
 
+    def test_default_expected_km_is_the_engine_network(self):
+        """D-D: Arland's engine-network drivable road is 34.5 km (runway, taxiway and trails not counted)."""
+        self.assertEqual(compare.DEFAULT_EXPECT_KM, 34.5)
+        play = os.path.join(self.base, "default_km")
+        write_dump(play, engine_roads(False))
+        code, text = run_tool([play, "--decoder", self.decoder])
+        self.assertIn("expected 34.50", text)
+
+    def test_cross_session_join_by_endpoints(self):
+        """D-C: road keys join across sessions by the unordered endpoint pair within 2 m, never by the key text."""
+        self.assertTrue(compare.endpoint_match("12/100.00:200.00/150.00:260.00", "13/150.40:259.70/100.30:200.10"))
+        self.assertFalse(compare.endpoint_match("12/100.00:200.00/150.00:260.00", "12/100.00:200.00/150.00:262.50"))
+        self.assertIsNone(compare.parse_road_key("0"))
+        self.assertFalse(compare.endpoint_match("0", "0"))
+        keys_a = ["12/100.00:200.00/150.00:260.00", "8/400.00:400.00/420.00:400.00", "5/900.00:900.00/950.00:900.00"]
+        keys_b = ["13/150.40:259.70/100.30:200.10", "8/400.00:400.00/420.00:400.00", "9/400.50:400.00/419.20:400.30"]
+        joins, ties = compare.join_keys(keys_a, keys_b)
+        self.assertEqual(joins[keys_a[0]], keys_b[0])           # n_pts changed and the pair is reversed
+        self.assertEqual(joins[keys_a[1]], keys_b[1])           # the identical key is the closer candidate
+        self.assertIsNone(joins[keys_a[2]])
+        self.assertEqual(ties, [keys_a[1]])
+        # with shapes, the Hausdorff distance breaks the tie: the other road bends away
+        shapes_a = {keys_a[1]: [(400.0, 400.0), (410.0, 400.0), (420.0, 400.0)]}
+        shapes_b = {keys_b[1]: [(400.0, 400.0), (410.0, 409.0), (420.0, 400.0)],
+                    keys_b[2]: [(400.5, 400.0), (410.0, 400.1), (419.2, 400.3)]}
+        joins, _ = compare.join_keys(keys_a[1:2], keys_b, shapes_a, shapes_b)
+        self.assertEqual(joins[keys_a[1]], keys_b[2])
+        # the CLI reports the join of two dumps whose key texts differ
+        play_a, play_b = os.path.join(self.base, "join_a"), os.path.join(self.base, "join_b")
+        roads = engine_roads(False)
+        write_dump(play_a, roads)
+        write_dump(play_b, [(w, [pts[0]] + [(x + 0.3, z) for x, z in pts[1:-1]] + [pts[-1]] if len(pts) > 2 else pts)
+                            for w, pts in roads])
+        code, text = run_tool([play_a, "--decoder", self.decoder, "--expect-km", str(DRIVABLE_KM),
+                               "--join-play", play_b])
+        self.assertIn("cross_session", text)
+        self.assertIn("%d of %d road keys join" % (len(roads), len(roads)), text)
+
+    def test_join_is_one_to_one_by_segment_hausdorff(self):
+        """Review round 1 (X4, C-L7): the tie-break measures samples against segments, the join is one-to-one and
+        ambiguous keys are reported; the 2 m boundary is inclusive."""
+        # Codex's case: the same road with one more vertex beats a parallel road 0.1 m away (sample-to-sample
+        # distances at 1 m picked the parallel road)
+        a_key, b1, b2 = "2/0.00:0.00/10.00:0.00", "3/0.00:0.00/10.00:0.00", "2/0.00:0.10/10.00:0.10"
+        shapes_a = {a_key: [(0.0, 0.0), (10.0, 0.0)]}
+        shapes_b = {b1: [(0.0, 0.0), (0.5, 0.0), (10.0, 0.0)], b2: [(0.0, 0.1), (10.0, 0.1)]}
+        self.assertEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b1]), 0.0)
+        self.assertAlmostEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b2]), 0.1)
+        joins, ties = compare.join_keys([a_key], [b1, b2], shapes_a, shapes_b)
+        self.assertEqual((joins[a_key], ties), (b1, [a_key]))
+        # resampling: the distance does not depend on the sample step when only the vertices differ
+        for step in (0.3, 1.0, 7.0):
+            self.assertAlmostEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b1], step), 0.0)
+            self.assertAlmostEqual(compare.segment_hausdorff(shapes_a[a_key], shapes_b[b2], step), 0.1)
+        # a real Arland twin pair (E-08a: endpoints 0.49 m apart) present in both sessions: kept apart one-to-one
+        x_key, y_key = "3/3149.50:1221.33/3150.99:1216.22", "3/3149.58:1221.81/3150.76:1215.95"
+        self.assertTrue(compare.endpoint_match(x_key, y_key))
+        x_pts = [(3149.50, 1221.33), (3150.60, 1218.70), (3150.99, 1216.22)]
+        y_pts = [(3149.58, 1221.81), (3149.70, 1218.90), (3150.76, 1215.95)]
+        x_b, y_b = "4/3149.56:1221.52/3150.90:1216.10", "3/3149.60:1221.70/3150.80:1216.05"
+        shapes_a = {x_key: x_pts, y_key: y_pts}
+        shapes_b = {x_b: [(px + 0.05, pz) for px, pz in x_pts], y_b: [(px - 0.05, pz) for px, pz in y_pts]}
+        joins, ties = compare.join_keys([x_key, y_key], [x_b, y_b], shapes_a, shapes_b)
+        self.assertEqual((joins[x_key], joins[y_key]), (x_b, y_b))
+        self.assertEqual(ties, sorted([x_key, y_key]))
+        joins, ties = compare.join_keys([x_key, y_key], [x_b], shapes_a, shapes_b)      # one partner for two twins
+        self.assertEqual((joins[x_key], joins[y_key]), (x_b, None))
+        self.assertEqual(ties, [y_key])                                     # its only candidate went to x
+        joins, _ = compare.join_keys([x_key, y_key], [x_b, y_b])            # without shapes: still one-to-one
+        self.assertEqual(len(set(v for v in joins.values() if v is not None)), 2)
+        # the 2 m boundary: 2.000 m joins, 2.008 m does not
+        self.assertTrue(compare.endpoint_match("2/0.00:0.00/100.00:0.00", "2/1.20:1.60/100.00:0.00"))
+        self.assertFalse(compare.endpoint_match("2/0.00:0.00/100.00:0.00", "2/1.20:1.61/100.00:0.00"))
+        joins, _ = compare.join_keys(["2/0.00:0.00/100.00:0.00"], ["2/1.20:1.61/100.00:0.00"])
+        self.assertEqual(joins, {"2/0.00:0.00/100.00:0.00": None})
+
     def test_missing_dump_is_input_error(self):
         play = os.path.join(self.base, "empty")
         probe_common.write_synthetic_play(play, {"world.map_id": "arland"}, {})

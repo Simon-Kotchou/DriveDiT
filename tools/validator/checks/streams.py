@@ -209,21 +209,24 @@ def check_c34(ctx):
                   % sum(len(st.commits) for st in s.streams.values()))
 
 
-def traffic_slot_ids(text):
-    """Slot ids of a telemetry.traffic_slots value ('veh_slot_id:entity_id' pairs joined by ';'); malformed pairs
-    are skipped."""
-    out = set()
-    for pair in (text or "").split(";"):
-        head = pair.split(":", 1)[0]
-        if head.lstrip("-").isdigit():
-            out.add(int(head))
-    return out
+def traffic_slot_pairs(text):
+    """([(veh_slot_id, entity_id)], [malformed pair texts]) of a telemetry.traffic_slots value: 'veh_slot_id:entity_id'
+    pairs joined by ';', the slot a non-negative integer and the entity id non-empty (contract 9.2)."""
+    pairs, bad = [], []
+    for pair in (text or "").split(";") if text else []:
+        head, sep, entity = pair.partition(":")
+        if not sep or not head.isdigit() or not entity or ":" in entity:
+            bad.append(pair)
+            continue
+        pairs.append((int(head), entity))
+    return pairs, bad
 
 
 def check_c35(ctx):
     """Entity identity (r2 5.1 C35): one entity id per vehicle slot id (ego slots in telemetry and episodes, traffic
     slots), no slot shared by the ego and a traffic vehicle, and one ego slot per episode (telemetry, img and the
-    episodes row agree). Every events.veh_slot_id >= 0 and every crash payload other_slot (contract 9.5.1) is a known
+    episodes row agree). telemetry.traffic_slots pairs parse as veh_slot_id:entity_id and take part in the identity
+    and overlap checks. Every events.veh_slot_id >= 0 and every crash payload other_slot (contract 9.5.1) is a known
     ego or traffic slot (the traffic stream or telemetry.traffic_slots). Exact."""
     if ctx.load_error:
         return unreadable(ctx, "C35")
@@ -236,16 +239,27 @@ def check_c35(ctx):
     for slot, ent in zip(ep.col("ego_slot_id"), ep.col("ego_entity_id")):
         entities.setdefault(slot, set()).add(ent)
     ego_slots = set(entities)
+    traffic_slots = set()
     traffic = s.streams.get("traffic")
     if traffic is not None and len(traffic):
         for slot, ent in zip(traffic.col("veh_slot_id"), traffic.col("entity_id")):
             entities.setdefault(slot, set()).add(ent)
+            traffic_slots.add(slot)
+    malformed = []
+    for step, text in zip(tel.col("physics_step"), tel.col("traffic_slots")):
+        pairs, bad = traffic_slot_pairs(text)
+        malformed += ["step %s: %r" % (step, b) for b in bad]
+        for slot, ent in pairs:
+            entities.setdefault(slot, set()).add(ent)
+            traffic_slots.add(slot)
     issues = ["slot %s carries %d entity ids (%s)" % (slot, len(ents), ", ".join(sorted(ents)))
               for slot, ents in sorted(entities.items()) if len(ents) > 1]
-    if traffic is not None and len(traffic):
-        shared = ego_slots & set(traffic.col("veh_slot_id"))
-        if shared:
-            issues.append("slot(s) %s used by the ego and by traffic" % sorted(shared))
+    if malformed:
+        issues.append("%d malformed telemetry.traffic_slots pair(s) (veh_slot_id:entity_id): %s"
+                      % (len(malformed), first(malformed, 2)))
+    shared = ego_slots & traffic_slots
+    if shared:
+        issues.append("slot(s) %s used by the ego and by traffic" % sorted(shared))
     per_episode = {}
     for e, slot in zip(tel.col("episode_id"), tel.col("ego_slot_id")):
         if e is not None and e >= 0:
@@ -260,8 +274,6 @@ def check_c35(ctx):
         if len(slots) > 1:
             issues.append("episode %d has ego slots %s" % (e, sorted(slots)))
     known = set(entities)
-    for text in tel.col("traffic_slots"):
-        known |= traffic_slot_ids(text)
     ev = s.streams["events"]
     unknown = sorted(set(slot for slot in ev.col("veh_slot_id") if slot is not None and slot >= 0) - known)
     if unknown:

@@ -41,11 +41,15 @@ between the image's last physics step and P_t + N. Segments are the maximal runs
 steps of one episode, so they split at gaps, episode boundaries and masks.
 
 Crash events (section 9.5.1): the rows of the kinds that event_payloads defines are parsed into Session.crash_events
-(payload values typed by their key spec, with the problems C36 reports). The first terminal ego event of an episode
+(payload values typed by their key spec, ranges and minimums included, with the problems C36 reports). A row belongs
+to its episode_id (episode ownership); its step is the onset (onset_step of a collision or rollover, else
+physics_step) and must lie inside that episode, a row with episode_id -1 outside every episode. Terminal ego events
 (a collision with src dv or dv_contact, a veh_damage with a state other than undamaged or movement_damage >= 1, a
-veh_fire_start, a rollover; ordered by onset_step for a collision, else physics_step) is Session.terminal_ego[e]; a
-decision step whose window (P_t, P_t + N] contains or follows its step is not policy-valid (wm_valid unchanged:
-crash dynamics are world-model data).
+veh_fire_start, a rollover) count only inside their episode: Session.terminal_ego[e] is the first by onset,
+Session.terminal_ego_confirmed[e] the first by confirmation (a rollover is confirmed at its row, the end of the hold).
+A decision step whose window (P_t, P_t + N] contains or follows the earliest onset is not policy-valid (wm_valid
+unchanged: crash dynamics are world-model data). The teleport mask uses only teleport and respawn rows of the ego slot
+or of no vehicle (veh_slot_id -1).
 
 Files: every file the reader opens (stream directories, chunks, session files, images) must resolve inside the
 session directory (symlinks followed), and img.path must be exactly frames/f_<slot_id:08d> (TBD-4); anything else
@@ -604,7 +608,8 @@ class Session:
     images                   img_resolved rows (one per img row, in img order)
     ctl_export, telemetry_export   per-row derived views (dicts of numpy arrays)
     decisions                decision samples (list of dicts; see _build_decisions)
-    crash_events, terminal_ego   parsed crash-event rows and each episode's first terminal ego event (9.5.1)
+    crash_events, terminal_ego, terminal_ego_confirmed   parsed crash-event rows and each episode's first terminal
+                             ego event by onset and by confirmation (9.5.1)
     segments                 list of {episode_id, first_decision_step, last_decision_step, n_steps}
     problems                 list of Problem (check, where, message)
     salvageable              the problems that salvage=True excuses (an unsealed or failed seal and its tail)
@@ -625,6 +630,7 @@ class Session:
         self.vehicle_card = None
         self.crash_events = []
         self.terminal_ego = {}
+        self.terminal_ego_confirmed = {}
 
     # -- small helpers --------------------------------------------------------------------------
     def meta_get(self, dotted, default=None):
@@ -1118,12 +1124,16 @@ def parse_payload(text):
 
 
 def payload_value(spec, text):
-    """Typed value of one payload key (event_payloads key spec); ValueError when it does not parse."""
+    """Typed value of one payload key (event_payloads key spec: type, enum, range, min); ValueError when it does not
+    parse or lies outside its range or below its minimum."""
     t = spec["type"]
-    if t == "int":
-        return _conv_int(text)
-    if t == "float":
-        return _conv_float(text)
+    if t in ("int", "float"):
+        value = _conv_int(text) if t == "int" else _conv_float(text)
+        if "range" in spec and not spec["range"][0] <= value <= spec["range"][1]:
+            raise ValueError("%s is outside [%s, %s]" % (text, spec["range"][0], spec["range"][1]))
+        if "min" in spec and value < spec["min"]:
+            raise ValueError("%s is below the minimum %s" % (text, spec["min"]))
+        return value
     if t == "bool":
         return _conv_bool(text)
     if "=" in text or ";" in text or "," in text or '"' in text:
@@ -1161,6 +1171,16 @@ def check_payload(kind, text, payloads):
     return values, problems
 
 
+def onset_and_confirmation(kind, values, physics_step):
+    """(onset, confirmation) steps of a crash row: a collision is latched at its onset, a rollover when its hold ends
+    (the row's physics_step) after an onset at the first tilted step, a polled kind at its poll (section 9.5.1)."""
+    onset = physics_step
+    if kind in ("collision", "rollover") and isinstance(values.get("onset_step"), int):
+        onset = values["onset_step"]
+    confirmation = onset if kind == "collision" else physics_step
+    return onset, confirmation
+
+
 def terminal_reason(kind, values):
     """The episodes.termination_reason an ego crash event makes ('collision', 'rollover'), or None (9.5.1)."""
     if kind == "collision":
@@ -1183,36 +1203,51 @@ def ego_slots(s):
     return slots
 
 
+def episode_bounds(s):
+    """{episode_id: (start_physics_step, end_physics_step)} of the committed episodes rows."""
+    ep = s.streams["episodes"]
+    return {e: (a, b) for e, a, b in zip(ep.col("episode_id"), ep.col("start_physics_step"),
+                                         ep.col("end_physics_step")) if a is not None and b is not None}
+
+
 def _read_crash_events(s):
     """Session.crash_events: one dict per events row of a kind in event_payloads, in row order: event_seq, episode_id,
-    physics_step, world_time_ms, kind, veh_slot_id, values, problems, step (onset_step of a collision when it parses,
-    else physics_step), ego (the row names an ego slot) and terminal (terminal_reason of an ego row). terminal_ego:
-    {episode_id: the episode's first terminal ego event by step}."""
+    physics_step, world_time_ms, kind, veh_slot_id, values, problems, step (the onset), confirm_step, in_episode (the
+    onset lies inside its episode_id's bounds, or inside none for episode_id -1), ego (the row names an ego slot) and
+    terminal (terminal_reason of an ego row). terminal_ego / terminal_ego_confirmed: {episode_id: the episode's first
+    terminal ego event inside it, by onset / by confirmation}."""
     ev = s.streams["events"]
     payloads = s.schema.payloads
     egos = ego_slots(s)
+    bounds = episode_bounds(s)
     s.crash_events = []
     for i in range(len(ev)):
         kind = ev.data["kind"][i]
         if kind not in payloads:
             continue
         values, problems = check_payload(kind, ev.data["payload"][i], payloads)
-        step = ev.data["physics_step"][i]
-        if kind == "collision" and isinstance(values.get("onset_step"), int):
-            step = values["onset_step"]
+        step, confirm = onset_and_confirmation(kind, values, ev.data["physics_step"][i])
+        e = ev.data["episode_id"][i]
+        if e is not None and e >= 0:
+            inside = e in bounds and bounds[e][0] <= step <= bounds[e][1]
+        else:
+            inside = not any(a <= step <= b for a, b in bounds.values())
         ego = ev.data["veh_slot_id"][i] in egos
-        s.crash_events.append({"event_seq": ev.data["event_seq"][i], "episode_id": ev.data["episode_id"][i],
+        s.crash_events.append({"event_seq": ev.data["event_seq"][i], "episode_id": e,
                                "physics_step": ev.data["physics_step"][i],
                                "world_time_ms": ev.data["world_time_ms"][i], "kind": kind,
                                "veh_slot_id": ev.data["veh_slot_id"][i], "values": values, "problems": problems,
-                               "step": step, "ego": ego, "terminal": terminal_reason(kind, values) if ego else None})
-    s.terminal_ego = {}
+                               "step": step, "confirm_step": confirm, "in_episode": inside, "ego": ego,
+                               "terminal": terminal_reason(kind, values) if ego else None})
+    s.terminal_ego, s.terminal_ego_confirmed = {}, {}
     for c in s.crash_events:
         e = c["episode_id"]
-        if c["terminal"] is None or e is None or e < 0:
+        if c["terminal"] is None or e is None or e < 0 or not c["in_episode"]:
             continue
         if e not in s.terminal_ego or c["step"] < s.terminal_ego[e]["step"]:
             s.terminal_ego[e] = c
+        if e not in s.terminal_ego_confirmed or c["confirm_step"] < s.terminal_ego_confirmed[e]["confirm_step"]:
+            s.terminal_ego_confirmed[e] = c
 
 
 def _build_decisions(s):
@@ -1236,7 +1271,11 @@ def _build_decisions(s):
     warm = _event_times(s, ("warmup_end",))
     warmup_end_ms = warm[0][1] if warm else float(s.meta_get("trial.warmup_s", 0.0) or 0.0) * 1000.0
     env_ms = [w for _, w in _event_times(s, ("env_change",))]
-    tele_steps = [p for p, _ in _event_times(s, ("teleport", "respawn"))]
+    # a reset of a traffic vehicle never masks ego samples: the ego's rows and the vehicle-independent ones (-1)
+    tele_slots = ego_slots(s) | {-1}
+    ev = s.streams["events"]
+    tele_steps = [ev.data["physics_step"][i] for i in range(len(ev))
+                  if ev.data["kind"][i] in ("teleport", "respawn") and ev.data["veh_slot_id"][i] in tele_slots]
     crash_step = {e: c["step"] for e, c in s.terminal_ego.items()}
     s.decisions = []
     steps = ctl.data["physics_step"]

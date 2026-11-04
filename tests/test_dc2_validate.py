@@ -31,6 +31,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -581,7 +582,7 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(code, 0, [(c["id"], c["detail"]) for c in rep["checks"] if c["status"] != "PASS"])
         c36 = by_id(rep)["C36"]
         self.assertEqual((c36["severity"], c36["status"]), ("HARD", "PASS"))
-        self.assertEqual(c36["value"], {"crash_events": 5, "crash_terminations": 1, "terminal_ego_episodes": 1,
+        self.assertEqual(c36["value"], {"crash_events": 4, "crash_terminations": 1, "terminal_ego_episodes": 1,
                                         "ego_destroyed": True})
         self.assertTrue(c36["provisional"])                    # TBD-10 while dc-2.0 is a DRAFT
         self.assertEqual(by_id(rep)["C01"]["status"], "PASS")  # ego_destroyed is a normal end
@@ -592,12 +593,12 @@ class CrashTest(unittest.TestCase):
 
     def test_collision_below_the_threshold_fails(self):
         session = self.copy("dv")
-        self.payloads(session, "collision", lambda v: v.replace("dv_mps=7.42", "dv_mps=3.10"))
+        self.payloads(session, "collision", lambda v: re.sub(r";dv_mps=[0-9.]+", ";dv_mps=3.10", v))
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C36"]))
         self.assertIn("below events.collision_dv_mps", by_id(rep)["C36"]["detail"])
         session = self.copy("contact")                         # a contact-only row may lie below the threshold
-        self.payloads(session, "collision", lambda v: v.replace("dv_mps=7.42", "dv_mps=3.10").replace(
+        self.payloads(session, "collision", lambda v: re.sub(r";dv_mps=[0-9.]+", ";dv_mps=3.10", v).replace(
             "src=dv_contact", "src=contact"))
         code, rep = self.check(session, "--checks", "C36")
         self.assertEqual((code, by_id(rep)["C36"]["status"]), (0, "PASS"))   # veh_damage still explains the end
@@ -612,8 +613,8 @@ class CrashTest(unittest.TestCase):
     def test_bad_payloads_fail(self):
         for name, fn in (("enum", lambda v: v.replace("other=rock", "other=moon")),
                          ("unknown", lambda v: v + ";colour=red"),
-                         ("missing", lambda v: v.replace("v_mps=7.91;", "")),
-                         ("exponent", lambda v: v.replace("dv_mps=7.42", "dv_mps=7e0"))):
+                         ("missing", lambda v: re.sub(r";v_mps=[0-9.]+", "", v)),
+                         ("exponent", lambda v: re.sub(r";dv_mps=[0-9.]+", ";dv_mps=7e0", v))):
             session = self.copy("payload_" + name)
             self.payloads(session, "collision", fn)
             code, rep = self.check(session, "--checks", "C36")
@@ -658,10 +659,32 @@ class CrashTest(unittest.TestCase):
         self.assertEqual((code, failing(rep)), (1, ["C35"]))
         self.assertIn("unknown other_slot(s) [7]", by_id(rep)["C35"]["detail"])
         session = self.copy("veh")
-        add_event(session, 0, "rollover", "up_y=0.20", 9, physics_step=0)
+        add_event(session, 0, "rollover", "onset_step=0;up_y=0.20", 9, physics_step=0)
         code, rep = self.check(session)
         self.assertEqual((code, failing(rep)), (1, ["C35"]))
         self.assertIn("unknown vehicle slot(s) [9]", by_id(rep)["C35"]["detail"])
+
+    def test_an_onset_outside_its_episode_fails(self):
+        session = self.copy("outside")
+        self.payloads(session, "collision", lambda v: re.sub(r"^onset_step=[0-9]+;", "onset_step=-100;", v))
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("its step -100 lies outside episode 1", by_id(rep)["C36"]["detail"])
+        session = self.copy("between")                      # a row of no episode at a step inside episode 0
+        s = dc_validate.base.load_reader().open_session(session, decode_images=False)
+        start = s.streams["episodes"].col("start_physics_step")[0]
+        add_event(session, 0, "veh_damage", "state=intermediary;health=0.80;movement_damage=0.10", 1,
+                  physics_step=start + 30)
+        code, rep = self.check(session, "--checks", "C36")
+        self.assertEqual(by_id(rep)["C36"]["status"], "FAIL")
+        self.assertIn("episode_id -1, but its step", by_id(rep)["C36"]["detail"])
+
+    def test_payload_ranges_fail(self):
+        session = self.copy("range")
+        self.payloads(session, "veh_damage", lambda v: v.replace("health=0.00", "health=2.00"))
+        code, rep = self.check(session)
+        self.assertEqual((code, failing(rep)), (1, ["C36"]))
+        self.assertIn("outside [0, 1]", by_id(rep)["C36"]["detail"])
 
     def test_c15_masks_only_the_egos_events(self):
         dynamics = dc_validate.checks.dynamics
@@ -675,6 +698,51 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(len(dynamics.eligible_rows(s, 3, 0.8)), base)          # a traffic slot's crash
         ev.append_rows([dict(row, event_seq=len(ev), veh_slot_id=tel.col("ego_slot_id")[0])])
         self.assertLess(len(dynamics.eligible_rows(s, 3, 0.8)), base)           # the ego's crash
+
+class CrashRulesOnGoldenTest(unittest.TestCase):
+    """C36 and C35 rules that need an intact episode: the golden session with injected rows."""
+
+    def setUp(self):
+        self.tmp = temp_dir("dc2_crash_golden_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_a_rollover_ended_at_its_onset_validates(self):
+        # DD-7's expert ends the episode at the first tilted step; the core confirms the rollover 500 ms later and
+        # writes its row into that episode after episode_end (contract 9.5.1, episode ownership)
+        session = copy_golden(self.tmp)
+        set_column(session, "episodes", "termination_reason", lambda key, v: "rollover" if key == 0 else v)
+        s = dc_validate.base.load_reader().open_session(session, decode_images=False)
+        ev = s.streams["events"]
+        i = [j for j, (k, e) in enumerate(zip(ev.col("kind"), ev.col("episode_id")))
+             if k == "episode_end" and e == 0][0]
+        end = s.streams["episodes"].col("end_physics_step")[0]
+        add_event(session, ev.col("event_seq")[i], "rollover", "onset_step=%d;up_y=0.31" % (end - 3), 1,
+                  physics_step=end + 30)
+        code, rep = run_json("--session", session, "--routes-dir", ROUTES, "--checks", "C35,C36")
+        self.assertEqual((code, by_id(rep)["C36"]["status"]), (0, "PASS"), by_id(rep)["C36"])
+        set_column(session, "episodes", "termination_reason", lambda key, v: "collision" if key == 0 else v)
+        code, rep = run_json("--session", session, "--routes-dir", ROUTES, "--checks", "C36")
+        self.assertIn("termination_reason collision, but its first terminal ego event", by_id(rep)["C36"]["detail"])
+
+    def test_traffic_slot_pairs_are_checked(self):
+        for name, fn, word in (
+                ("identity", lambda key, v: "9:0x00010000C1" if key < 300 else "9:0x00010000C2", "slot 9 carries 2"),
+                ("overlap", lambda key, v: "1:0x00010000C1", "used by the ego and by traffic"),
+                ("malformed", lambda key, v: "9", "malformed telemetry.traffic_slots")):
+            session = copy_golden(os.path.join(self.tmp, name))
+            set_column(session, "telemetry", "traffic_slots", fn)
+            set_column(session, "telemetry", "traffic_n", lambda key, v: "1")
+            code, rep = run_json("--session", session, "--routes-dir", ROUTES, "--checks", "C35")
+            c35 = by_id(rep)["C35"]
+            self.assertEqual(c35["status"], "FAIL", name)
+            self.assertIn(word, c35["detail"], name)
+        session = copy_golden(os.path.join(self.tmp, "fine"))
+        set_column(session, "telemetry", "traffic_slots", lambda key, v: "9:0x00010000C1;12:0x00010000C2")
+        code, rep = run_json("--session", session, "--routes-dir", ROUTES, "--checks", "C35")
+        self.assertEqual(by_id(rep)["C35"]["status"], "PASS")
+
 
 class ReportTest(unittest.TestCase):
     def test_default_report_root(self):
@@ -862,19 +930,22 @@ class C17LoopTest(unittest.TestCase):
         shutil.copytree(self.session, dst)
         return dst
 
-    def test_an_ego_collision_fails_c17(self):
-        session = self.copy("collision")
-        s = dc_validate.base.load_reader().open_session(session, decode_images=False)
-        ev, ego = s.streams["events"], s.streams["telemetry"].col("ego_slot_id")[0]
-        start = ev.col("kind").index("episode_start")
-        step = ev.col("physics_step")[start] + 60
-        add_event(session, ev.col("event_seq")[start], "collision",
-                  "onset_step=%d;dv_mps=1.20;v_mps=2.00;other=static;src=contact" % step, ego, physics_step=step)
-        code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"))
-        c17 = by_id(rep)["C17"]
-        self.assertEqual((c17["status"], c17["value"]["collision_per_30min_max"]), ("FAIL", 0), c17)
-        self.assertIn("1 ego collision(s)", c17["detail"])
-        self.assertEqual(failing(rep), ["C17"])                # the contact row itself is consistent (C36)
+    def test_an_ego_crash_fails_c17_a_touch_does_not(self):
+        for name, payload, fails in (
+                ("touch", "onset_step=%d;dv_mps=1.20;v_mps=2.00;other=static;src=contact", []),
+                ("crash", "onset_step=%d;dv_mps=6.20;v_mps=7.00;other=static;src=dv", ["C17"])):
+            session = self.copy(name)
+            s = dc_validate.base.load_reader().open_session(session, decode_images=False)
+            ev, ego = s.streams["events"], s.streams["telemetry"].col("ego_slot_id")[0]
+            start = ev.col("kind").index("episode_start")
+            step = ev.col("physics_step")[start] + 60
+            add_event(session, ev.col("event_seq")[start], "collision", payload % step, ego, physics_step=step)
+            code, rep = run_json("--session", session, "--routes-dir", os.path.join(self.tmp, "r"))
+            c17 = by_id(rep)["C17"]
+            self.assertEqual(failing(rep), fails, (name, c17))       # the rows are consistent (C36)
+            self.assertEqual(c17["value"]["collision_per_30min_max"], 0)
+            if fails:
+                self.assertIn("1 terminal ego collision(s)", c17["detail"])
 
     def test_route_hash_mismatch_fails(self):                                 # F-15
         session = self.copy("hash")

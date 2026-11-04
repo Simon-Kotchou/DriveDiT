@@ -12,14 +12,18 @@ def check_c36(ctx):
     """Crash events against the streams JSON event_payloads and the episode and session ends (contract 9.5.1):
       * every row of a payload kind (collision, veh_damage, veh_fire_start, veh_fire_end, driver_state, dismount,
         remount, rollover, stuck, teleport) names a vehicle (veh_slot_id >= 0) and its payload parses: no repeated,
-        unknown or missing required key, every value of its type and enum, numbers finite without exponent;
+        unknown or missing required key, every value of its type and enum and inside its range and minimum, numbers
+        finite without exponent;
+      * episode ownership: a row's onset (onset_step of a collision or rollover, else physics_step) lies inside the
+        bounds of its episode_id, and a row with episode_id -1 lies inside no episode;
       * collision: onset_step <= the row's physics_step; with src dv or dv_contact, dv_mps >=
         session.json events.collision_dv_mps (within the 2-decimal rounding);
       * per slot, veh_fire_start / veh_fire_end and dismount / remount alternate, start first (the last may stay
         open at the session end);
-      * termination_reason collision or rollover: the episode has a terminal ego event (reader terminal_ego: a
-        collision with src dv or dv_contact, a veh_damage not undamaged or with movement_damage >= 1, a
-        veh_fire_start, a rollover) and its first one by step gives that reason;
+      * termination_reason collision or rollover: the episode has a terminal ego event inside it (a collision with
+        src dv or dv_contact, a veh_damage not undamaged or with movement_damage >= 1, a veh_fire_start, a rollover)
+        and its first one by onset or its first one by confirmation gives that reason (the core latches at the
+        confirmation, a driver may report the same event at its onset, e.g. a rollover at the first tilted step);
       * end_reason ego_destroyed: an ego veh_damage state=destroyed row exists and no ctl or telemetry row is later
         than it; an ego destroyed row in a session that ended duration, stop or dc_stop is a contradiction.
     Exact."""
@@ -34,6 +38,11 @@ def check_c36(ctx):
         if c["veh_slot_id"] is None or c["veh_slot_id"] < 0:
             issues.append("%s: names no vehicle (veh_slot_id %s)" % (where, c["veh_slot_id"]))
         issues += ["%s: %s" % (where, p) for p in c["problems"]]
+        if not c["in_episode"]:
+            if c["episode_id"] is not None and c["episode_id"] >= 0:
+                issues.append("%s: its step %s lies outside episode %d" % (where, c["step"], c["episode_id"]))
+            else:
+                issues.append("%s: episode_id -1, but its step %s lies inside an episode" % (where, c["step"]))
         v = c["values"]
         if c["kind"] != "collision":
             continue
@@ -61,12 +70,14 @@ def check_c36(ctx):
         if reason not in CRASH_TERMINATIONS:
             continue
         crash_ends += 1
-        terminal = s.terminal_ego.get(e)
-        if terminal is None:
+        by_onset, by_confirmation = s.terminal_ego.get(e), s.terminal_ego_confirmed.get(e)
+        if by_onset is None:
             issues.append("episode %d: termination_reason %s without a terminal ego crash event" % (e, reason))
-        elif terminal["terminal"] != reason:
-            issues.append("episode %d: termination_reason %s, but its first terminal ego event (%s at step %d) "
-                          "gives %s" % (e, reason, terminal["kind"], terminal["step"], terminal["terminal"]))
+        elif reason not in (by_onset["terminal"], by_confirmation["terminal"]):
+            issues.append("episode %d: termination_reason %s, but its first terminal ego event by onset (%s at step "
+                          "%d) and by confirmation (%s at step %d) give %s" % (
+                              e, reason, by_onset["kind"], by_onset["step"], by_confirmation["kind"],
+                              by_confirmation["confirm_step"], by_onset["terminal"]))
     destroyed = [c for c in events
                  if c["ego"] and c["kind"] == "veh_damage" and c["values"].get("state") == "destroyed"]
     end_reason = s.end_get("end_reason") if s.sealed else None

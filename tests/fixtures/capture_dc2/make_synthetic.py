@@ -48,14 +48,20 @@ Variants (negative fixtures; each breaks one check):
                          termination collision has no terminal ego event (C36)
   destroyed_unexplained  the crash session below without its veh_damage state=destroyed row: ego_destroyed is
                          unexplained (C36)
-and one positive variant, crash (contract section 9.5.1), which every check passes: episode 1 ends with termination
-collision after an ego collision row (onset 300 ms before the episode end, src dv_contact against a rock) and a
-veh_damage intermediary row; in the tail the ego is destroyed and burns (veh_damage state=destroyed and veh_fire_start
-at the last physics step) and the session ends with ego_destroyed, status ok. The kinematics are those of the golden
-session: the crash rows are injected events, so only the event and termination rules see them.
+and one positive variant, crash (contract 9.5.1), in the shape DD-4-min writes it: in episode 1 the ego stops dead
+against a rock (its speed drops to 0 in one physics step) and is destroyed 4 steps later. The crash watch's rows at
+that terminal step L: the collision (onset_step = the impact step, dv_mps and v_mps from the reference detector
+data/dc2/crash_dv.py on the simulated velocities, src dv_contact, other rock), veh_damage state=destroyed and
+veh_fire_start; then the seal closes the open episode at L with termination collision and the session ends with
+ego_destroyed, status ok. Nothing is written after L.
 
-telemetry.dv_max_mps is the simulation's largest 100 ms (W = 6 steps) horizontal world-frame delta-v over the k steps
-up to each row, empty while fewer than W + 1 steps exist.
+Kind crash_30hz is the same crash on frame-bound rows (freeze decision D-A): 30 Hz physics, each row one callback
+that covers 1 to 3 physics steps (a fixed pattern, about 1.7 steps per row as in probe run 4), world time from the
+covered steps, k = 1 and N = 3. The tests run the crash-relevant checks on it; C08, C15 and C28 keep their
+per-step semantics until the freeze pass rewrites them for frame-bound rows.
+
+telemetry.dv_max_mps is the reference detector's largest delta-v (contract 9.5.1: 100 ms of world time, interpolated,
+gap rule) over the rows since the previous telemetry row, empty while none of them was evaluated.
 
 Writes only under /mnt/e/ or /dev/shm/ (never /mnt/c or /tmp). Stdlib, numpy and drivedit_nav; PNGs are written by
 a small zlib PNG writer, so no cv2 is needed here.
@@ -88,25 +94,25 @@ WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
 FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
 VARIANTS = ("gap", "missing_commit", "reused_slot", "crash", "crash_unexplained", "destroyed_unexplained")
 CRASH_VARIANTS = ("crash", "crash_unexplained", "destroyed_unexplained")
-DV_WINDOW_STEPS = 6             # events.collision_window_ms 100 at 60 Hz (contract 9.5.1)
 # session.json events.* (contract 10.1, TBD-10 defaults)
-EVENT_PARAMS = {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_peak_ms": 200,
-                "collision_refractory_ms": 1000, "episode_end_wait_ms": 250, "rollover_up_y": 0.5,
-                "rollover_hold_ms": 500, "state_poll_ms": 100, "contact_source": "vanilla_process_collision"}
-KINDS = ("golden", "t0_loop", "golden_5hz")
+EVENT_PARAMS = {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_window_tol_ms": 50,
+                "collision_peak_ms": 200, "collision_refractory_ms": 1000, "episode_end_wait_ms": 250,
+                "crash_cooldown_ms": 3000, "rollover_up_y": 0.5, "rollover_hold_ms": 500, "state_poll_ms": 100,
+                "contact_source": "vanilla_process_collision"}
+KINDS = ("golden", "t0_loop", "golden_5hz", "crash_30hz")
 
-SLICE_S = 1.0 / 60.0
 STEER_SIGN = -1                 # TBD-5 default: CarSteering +1 is left, the contract is right-positive
 YAW_AXIS_SIGN = 1
 KAPPA_PER_STEER = 0.15          # synthetic vehicle: curvature (1/m) per unit contract steering
 STEER_RATE = 2.0                # llc stand-in rate limit (1/s)
-STEER_ALPHA = SLICE_S / (0.08 + SLICE_S)   # first-order lag, tau 0.08 s
+STEER_TAU_S = 0.08              # llc stand-in first-order lag
 GEAR_FORWARD = 3                # S105_synthetic card: gear_indices_forward [3]
 GEAR_IDLE = 1                   # unmapped gear while no command is held (dir_state 0)
 RAD_PER_PX = 0.004              # synthetic camera: azimuth per core pixel column
 DECIMALS = {"m": 4, "m/s": 4, "m/s2": 4, "rad": 6, "rad/s": 6, "1/m": 6, "1": 6, "deg": 4, "degC": 2, "rpm": 2,
             "1/s": 3, "h": 6, "s": 3}
 FIDUCIAL_PATH = os.path.join(REPO, "data", "dc2", "fiducial.py")
+CRASH_DV_PATH = os.path.join(REPO, "data", "dc2", "crash_dv.py")
 
 
 def _load_fiducial():
@@ -117,6 +123,43 @@ def _load_fiducial():
 
 
 fiducial = _load_fiducial()
+
+
+def _load_crash_dv():
+    spec = importlib.util.spec_from_file_location("dc2_crash_dv", CRASH_DV_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+crash_dv = _load_crash_dv()
+
+
+class Timebase:
+    """Physics time of the rows of one session: hz engine steps per second, each row (callback) covering
+    covered[p % len(covered)] steps (1 for the per-step kinds; 1 to 3 for frame-bound rows, D-A)."""
+
+    def __init__(self, hz=60, covered=(1,)):
+        self.hz, self.covered = hz, tuple(covered)
+        self.cycle = sum(self.covered)
+
+    def steps(self, p):
+        """Engine steps of rows 0..p (p >= -1)."""
+        full, rest = divmod(p + 1, len(self.covered))
+        return full * self.cycle + sum(self.covered[:rest])
+
+    def world_ms(self, p):
+        return self.steps(p) * 1000 // self.hz
+
+    def dt(self, p):
+        return self.covered[p % len(self.covered)] / float(self.hz)
+
+
+_TIMEBASE = [Timebase()]
+
+
+def timebase():
+    return _TIMEBASE[0]
 
 
 def _hex(text, n=64):
@@ -152,6 +195,17 @@ SPECS = {
         "warmup_steps": 120, "route": "golden_s_curve_v1", "v_ref": 8.0,
         "episodes": [{"max_steps": 300}, {"max_steps": 300}], "between_steps": 30, "teleport_offset": 15,
         "tail_steps": 30, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
+    },
+    # The crash on frame-bound rows (D-A): 30 Hz physics, 1 to 3 steps per row (about 1.7, as in probe run 4), k = 1,
+    # N = 3; 1 s warm-up, a mode-E episode 0 and the crash in episode 1 (generated in the tests, not committed).
+    "crash_30hz": {
+        "session_id": "arland_T0b_20261025T094500Z_wb_i00_5e30", "trial_id": "T0b", "seed": 0, "hz": 30,
+        "covered": (1, 2, 1, 3, 1, 1, 2, 1, 3, 2), "k": 1,
+        "start_utc": (2026, 10, 25, 9, 45, 0), "render_frame0": 261900, "lead_frames": 2,
+        "warmup_steps": 40, "route": "golden_s_curve_v1", "v_ref": 8.0,
+        "episodes": [{"max_steps": 120}, {"max_steps": 400}], "between_steps": 12, "teleport_offset": 6,
+        "tail_steps": 12, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
+        "crash": True, "crash_onset_rows": 60, "crash_stop_rows": 2,
     },
     # 108 s: the 60 s C17 warm-up standing, then one mode-E lap of the synthetic loop (trial T1, so C17 is SOFT).
     "t0_loop": {
@@ -268,8 +322,8 @@ def wrap(a):
 
 
 def world_ms(step):
-    """World time of physics step p since the session start: (p + 1) slices, integer ms (floor)."""
-    return (step + 1) * 1000 // 60
+    """World time of row p since the session start: the engine steps of rows 0..p, integer ms (floor)."""
+    return timebase().world_ms(step)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -299,7 +353,7 @@ def expert(route, x, z, psi, v, progress, v_ref):
 
 def n_per_decision(spec):
     """Physics steps per decision at the spec's decision rate (6 at 10 Hz, 12 at the 5 Hz fallback)."""
-    return int(round(1.0 / spec.get("decision_hz", 10.0) / SLICE_S))
+    return int(round(1.0 / spec.get("decision_hz", 10.0) * spec.get("hz", 60)))
 
 
 def simulate(spec, route):
@@ -320,8 +374,10 @@ def simulate(spec, route):
     phase_end = spec["warmup_steps"] - 1
     max_steps = None
     teleport_step = None
+    crash_onset = crash_stop = None
     p = 0
     while True:
+        dt = timebase().dt(p)
         if pending:
             hl_count += 1
             pending = False
@@ -332,8 +388,8 @@ def simulate(spec, route):
         cmd = held if in_ep and p > ep_start else None
         if cmd is not None:
             raw_c = max(-1.0, min(1.0, cmd[0] / KAPPA_PER_STEER))
-            limited = steer_c + max(-STEER_RATE * SLICE_S, min(STEER_RATE * SLICE_S, raw_c - steer_c))
-            steer_c = steer_c + (limited - steer_c) * STEER_ALPHA
+            limited = steer_c + max(-STEER_RATE * dt, min(STEER_RATE * dt, raw_c - steer_c))
+            steer_c = steer_c + (limited - steer_c) * (dt / (STEER_TAU_S + dt))
             throttle = min(1.0, cmd[1] / 3.0) if cmd[1] >= 0 else 0.0
             brake = min(1.0, -cmd[1] / 6.0) if cmd[1] < 0 else 0.0
         else:
@@ -343,12 +399,14 @@ def simulate(spec, route):
         kappa_act = KAPPA_PER_STEER * steer_c
         yaw = v * kappa_act
         acc = 3.0 * throttle - 6.0 * brake - 0.05 * v
-        v_new = max(0.0, v + acc * SLICE_S)
-        acc_ach = (v_new - v) / SLICE_S
-        psi = wrap(psi + yaw * SLICE_S)
-        x += v_new * math.sin(psi) * SLICE_S
-        z += v_new * math.cos(psi) * SLICE_S
-        dist += v_new * SLICE_S
+        v_new = max(0.0, v + acc * dt)
+        if crash_onset is not None and p >= crash_onset:
+            v_new = 0.0                 # the crash: stopped dead against the rock (contract 9.5.1 crash rows)
+        acc_ach = (v_new - v) / dt
+        psi = wrap(psi + yaw * dt)
+        x += v_new * math.sin(psi) * dt
+        z += v_new * math.cos(psi) * dt
+        dist += v_new * dt
         v_before, v = v, v_new
         exp = None
         if in_ep:
@@ -365,6 +423,11 @@ def simulate(spec, route):
                 "x": x, "z": z, "psi": psi, "v": v, "dist": dist, "yaw": yaw, "acc": acc_ach,
                 "progress": progress if in_ep else None, "world": world_ms(p)}
         sim.steps.append(step)
+        # the crash variants: the destroyed ego ends the session after this step's rows (contract 5.3, step L)
+        if crash_stop is not None and p == crash_stop:
+            _end_episode(sim, spec, route, episode, ep_start, p, "collision")
+            sim.crash = {"onset": crash_onset, "stop": crash_stop}
+            break
         # decision in EOnPostSimulate of P_t (R-01): applies from P_t + 1
         if in_ep and p % n_dec == 0:
             complete = route.length_m - progress <= 1.5 and v < 0.5
@@ -391,6 +454,9 @@ def simulate(spec, route):
             ep_start = p + 1
             max_steps = spec["episodes"][episode]["max_steps"]
             progress = 0.0
+            if spec.get("crash") and episode == 1:
+                crash_onset = ep_start + spec["crash_onset_rows"]
+                crash_stop = crash_onset + spec["crash_stop_rows"]
             sim.events.append((p + 1, "episode_start", "route_id=%s" % route.route_id))
         if phase == "tail" and p >= phase_end:
             break
@@ -398,33 +464,54 @@ def simulate(spec, route):
     return sim
 
 
+def velocity_samples(sim):
+    """(world_ms, vx, vz) of every row: the horizontal world-frame velocity the crash watch samples."""
+    return [(st["world"], st["v"] * math.sin(st["psi"]), st["v"] * math.cos(st["psi"])) for st in sim.steps]
+
+
+def detector_dv(sim):
+    """{row: dv_h or None} of the reference detector over the rows (history cleared at a teleport, 9.5.1)."""
+    det = crash_dv.Detector()
+    resets = set(p + 1 for p, kind, _ in sim.events if kind in ("teleport", "respawn"))
+    out = {}
+    for st, (w, vx, vz) in zip(sim.steps, velocity_samples(sim)):
+        if st["p"] in resets:
+            det.reset()
+        out[st["p"]] = det.step(w, vx, vz, st["p"])
+    return out, det
+
+
 def inject_crash(sim, variant):
-    """The crash variants (module docstring): crash rows of episode 1 and of the tail, inserted into sim.events in
-    step order after the rows already there. Returns the session end_reason."""
-    if variant not in CRASH_VARIANTS:
+    """The crash rows of the crash variants and kind (module docstring) at the terminal step L, before the seal's
+    episode_end, in DD-4-min's order. Returns the session end_reason."""
+    crash = getattr(sim, "crash", None)
+    if crash is None:
         return "duration"
-    ep = sim.episodes[1]
-    end = ep["end"]
-    onset = end - 18                    # 300 ms before the decision step that ends the episode
-    last = sim.steps[-1]["p"]
+    _, det = detector_dv(sim)
+    onset = [o for o in det.onsets if o["step"] == crash["onset"]]
+    if not onset:
+        raise AssertionError("the reference detector saw no onset at the crash step %d" % crash["onset"])
+    o = onset[0]
+    st = sim.steps[crash["onset"]]
+    fwd = (math.sin(st["psi"]), math.cos(st["psi"]))
+    right = (math.cos(st["psi"]), -math.sin(st["psi"]))
+    dlon = o["peak_vec"][0] * fwd[0] + o["peak_vec"][1] * fwd[1]
+    dlat = o["peak_vec"][0] * right[0] + o["peak_vec"][1] * right[1]
+    stop = crash["stop"]
     rows = []
     if variant != "crash_unexplained":
-        rows.append((onset + 6, "veh_damage", "state=intermediary;health=0.62;movement_damage=0.40"))
-        rows.append((onset + 12, "collision", "onset_step=%d;dv_mps=7.42;dv_lon_mps=-7.05;dv_lat_mps=2.31;v_mps=7.91;"
+        rows.append((stop, "collision", "onset_step=%d;dv_mps=%.2f;dv_lon_mps=%.2f;dv_lat_mps=%.2f;v_mps=%.2f;"
                      "other=rock;other_prefab=Prefabs/Rocks/Granite/GraniteStone_03.et;impulse_ns=15210.40;"
-                     "src=dv_contact" % onset))
-    if variant != "destroyed_unexplained":
-        rows.append((last, "veh_damage", "state=destroyed;health=0.00;movement_damage=1.00"))
-    rows.append((last, "veh_fire_start", "fire_state=burning"))
-    ep["termination"] = "collision"
-    for i, (pstep, kind, payload) in enumerate(sim.events):
-        if pstep == end and kind == "episode_end" and payload.startswith("termination_reason="):
-            sim.events[i] = (pstep, kind, "termination_reason=collision")
-    for row in rows:
-        at = len(sim.events)
-        while at > 0 and sim.events[at - 1][0] > row[0]:
-            at -= 1
-        sim.events.insert(at, row)
+                     "src=dv_contact" % (crash["onset"], o["peak"], dlon, dlat, math.hypot(*o["ref"]))))
+        if variant != "destroyed_unexplained":
+            rows.append((stop, "veh_damage", "state=destroyed;health=0.00;movement_damage=1.00"))
+        rows.append((stop, "veh_fire_start", "fire_state=burning"))
+    end = sim.events.pop()
+    assert end[1] == "episode_end" and end[0] == stop, end
+    sim.events.extend(rows)
+    sim.events.append(end)
+    if variant == "crash_unexplained":
+        return "stop"
     return "ego_destroyed"
 
 
@@ -525,6 +612,8 @@ def build_rows(spec, sim, route, frames, slots, schema, variant):
     entity_b = "0x00010000B7"
     rows = {name: [] for name in schema["streams"]}
     steps = sim.steps
+    k = spec.get("k", 3)
+    dv_row, _ = detector_dv(sim)
     for st in steps:
         cmd, exp = st["cmd"], st["exp"]
         lim_e = None if st["lim_c"] is None else STEER_SIGN * st["lim_c"]
@@ -547,10 +636,11 @@ def build_rows(spec, sim, route, frames, slots, schema, variant):
                         "input_%s_brake" % when: st["brake"], "input_%s_clutch" % when: 0.0,
                         "input_%s_gear" % when: st["gear"], "input_%s_handbrake" % when: st["handbrake"]})
         rows["ctl"].append(ctl)
-        if st["p"] % 3 == 0:
+        if st["p"] % k == 0:
+            since = [dv_row[q] for q in range(st["p"] - k + 1, st["p"] + 1) if q >= 0 and dv_row[q] is not None]
             rows["telemetry"].append(_telemetry_row(st, route, ego_slot,
                                                     entity_b if (variant == "reused_slot" and st["p"] >= 450)
-                                                    else entity, _dv_max(steps, st["p"], 3)))
+                                                    else entity, max(since) if since else None))
     for fr in frames:
         st = steps[fr["lps"]] if fr["lps"] >= 0 else None
         rows["hf"].append(_hf_row(fr, st, steps[0]))
@@ -593,23 +683,6 @@ def build_rows(spec, sim, route, frames, slots, schema, variant):
                 raise AssertionError("%s row keys differ from the streams JSON: %s"
                                      % (name, sorted(set(r) ^ set(cols))))
     return rows
-
-
-def _horizontal_velocity(st):
-    return st["v"] * math.sin(st["psi"]), st["v"] * math.cos(st["psi"])
-
-
-def _dv_max(steps, p, k):
-    """Largest |v_h(q) - v_h(q - W)| over the steps q in (p - k, p] that have a step W before them; None without."""
-    best = None
-    for q in range(p - k + 1, p + 1):
-        if q - DV_WINDOW_STEPS < 0:
-            continue
-        ax, az = _horizontal_velocity(steps[q])
-        bx, bz = _horizontal_velocity(steps[q - DV_WINDOW_STEPS])
-        dv = math.hypot(ax - bx, az - bz)
-        best = dv if best is None else max(best, dv)
-    return best
 
 
 def _telemetry_row(st, route, ego_slot, entity, dv_max):
@@ -734,10 +807,11 @@ def session_json(spec, start_unix, card_sha):
                 "fingerprint": {"size_m": 4096.0, "latitude_deg": 47.411, "ok": True}},
         "trial": {"trial_id": spec["trial_id"], "source": "cli",
                   "conf": {"trial_id": spec["trial_id"], "route": spec["route"], "seed": spec["seed"],
-                           "warmup_s": spec["warmup_steps"] / 60.0, "synthetic": True},
-                  "seed": spec["seed"], "warmup_s": spec["warmup_steps"] / 60.0, "duration_s": 0.0},
+                           "warmup_s": world_ms(spec["warmup_steps"] - 1) / 1000.0, "synthetic": True},
+                  "seed": spec["seed"], "warmup_s": world_ms(spec["warmup_steps"] - 1) / 1000.0, "duration_s": 0.0},
         "exe": {"kind": "wb", "instance": "i00", "cli": {"dcLaunchId": launch_id, "dcTrial": spec["trial_id"]}},
-        "engine": {"build_version": "1.8.0.13", "build_time": "synthetic", "fixed_time_slice_s": SLICE_S},
+        "engine": {"build_version": "1.8.0.13", "build_time": "synthetic",
+                   "fixed_time_slice_s": 1.0 / spec.get("hz", 60)},
         "pin": {"pin_id": "1.8.0.13", "pin_sha256": _hex("synthetic pin 1.8.0.13"), "build_key": None,
                 "channel": "stable", "launch_id": launch_id, "launch_schema": "dd-launch/1",
                 "game_buildid": 24903726, "tools_buildid": 24870687},
@@ -751,7 +825,7 @@ def session_json(spec, start_unix, card_sha):
                     "yaw_axis_sign": YAW_AXIS_SIGN, "steering_geometry": "unknown_on_1.8"},
         "authority": {"standalone": True, "rpl_ok": True},
         "versions": {"features_version": "features_v1", "nav_version": "nav_v1"},
-        "clocks": {"telemetry_every_k": 3, "physics_steps_per_decision": n_per_decision(spec),
+        "clocks": {"telemetry_every_k": spec.get("k", 3), "physics_steps_per_decision": n_per_decision(spec),
                    "decision_hz": spec.get("decision_hz", 10.0), "image_hz": spec.get("decision_hz", 10.0),
                    "img_inflight_timeout_ms": 2000, "img_lead_ms": 0, "chunk_max_s": 10.0},
         "events": dict(EVENT_PARAMS),
@@ -807,6 +881,9 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
         raise ValueError("variant must be one of %s" % ", ".join(VARIANTS))
     out_dir = check_out(out_dir)
     spec = dict(SPECS[kind])
+    if variant in CRASH_VARIANTS:
+        spec.update({"crash": True, "crash_onset_rows": 240, "crash_stop_rows": 4})
+    _TIMEBASE[0] = Timebase(spec.get("hz", 60), spec.get("covered", (1,)))
     with open(STREAMS_JSON, "rb") as f:
         schema = json.loads(f.read().decode("ascii"))
     route_obj = route_obj or ROUTES[spec["route"]]()
@@ -816,7 +893,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
         raise ValueError("refusing to overwrite %s" % session_dir)
     os.makedirs(session_dir)
     sim = simulate(spec, route)
-    end_reason = inject_crash(sim, variant)
+    end_reason = inject_crash(sim, variant or ("crash" if spec.get("crash") else None))
     frames = frames_of(spec, sim)
     slots = image_slots(spec, sim, frames)
     rows = build_rows(spec, sim, route, frames, slots, schema, variant)
@@ -857,7 +934,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
     with open(os.path.join(session_dir, "heartbeat.csv"), "wb") as f:
         f.write(("\n".join(hb_lines) + "\n").encode("ascii"))
     meta = session_json(spec, start_unix, hashlib.sha256(card_bytes).hexdigest())
-    meta["trial"]["duration_s"] = round((sim.steps[-1]["p"] + 1 - spec["warmup_steps"]) / 60.0, 3)
+    meta["trial"]["duration_s"] = round((world_ms(sim.steps[-1]["p"]) - world_ms(spec["warmup_steps"] - 1)) / 1000.0, 3)
     last = sim.steps[-1]
     end_unix = start_unix + last["world"] // 1000 + 1
     end = {"contract_version": "dc-2.0", "session_id": spec["session_id"], "status": "ok", "end_reason": end_reason,
@@ -929,7 +1006,7 @@ def golden_truth(spec, sim, q, slots, card, pixels):
     the command decided after step P_t), not from the ctl rows: action_cmd_t and hl_seq are that command and its
     index, action_label_t the expert evaluation after step P_t, and the window is held when the simulation applied
     that command in each of P_t + 1 .. P_t + N. State, exec and obs values are the values as written (q)."""
-    n, k = n_per_decision(spec), 3
+    n, k = n_per_decision(spec), spec.get("k", 3)
     period = 1000.0 / spec.get("decision_hz", 10.0)
     steps = sim.steps
     last = steps[-1]["p"]

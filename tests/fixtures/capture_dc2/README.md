@@ -24,13 +24,23 @@ with the regenerated fixture. `--kind golden_5hz` writes the same session at the
 decision_hz = 5, N = 12); the tests generate it, it is not committed.
 
 Crash events (contract 9.5.1): `session.json` carries the `events.*` detector parameters (the TBD-10 defaults) and
-telemetry the optional `dv_max_mps` (the simulation's largest 100 ms horizontal delta-v over the k steps of each
-row). `--variant crash` is the golden session with injected crash rows (generated in the tests, not committed):
-episode 1 ends with termination `collision` after an ego `collision` row (onset 300 ms before the episode end,
-`src=dv_contact`, `other=rock`) and a `veh_damage` `intermediary` row; at the last physics step the ego is destroyed
-and burns (`veh_damage` `destroyed`, `veh_fire_start`) and the session ends with `ego_destroyed`, status ok.
-`--variant crash_unexplained` drops that episode's crash rows and `--variant destroyed_unexplained` the destroyed
-row; both must fail C36 only.
+telemetry the optional `dv_max_mps`, computed by the reference detector `data/dc2/crash_dv.py` (100 ms of world time,
+interpolated, gap rule) on the simulated velocities. The crash fixtures are generated in the tests, not committed,
+in the shape DD-4-min writes them:
+- `--variant crash`: the golden session in which the ego stops dead against a rock 4 s into episode 1 and is
+  destroyed 4 steps later. At that terminal step L: the `collision` row (`onset_step` = the impact step, `dv_mps`
+  and `v_mps` from the reference detector, `src=dv_contact`, `other=rock`), `veh_damage` `destroyed` and
+  `veh_fire_start`; then the seal ends the open episode at L with termination `collision`, and the session ends with
+  `ego_destroyed`, status ok. Nothing is written after L.
+- `--kind crash_30hz`: the same crash on frame-bound rows (freeze decision D-A): 30 Hz physics, each row one callback
+  covering 1 to 3 steps (a fixed pattern of about 1.7 steps per row, as in probe run 4), k = 1, N = 3.
+- `--variant crash_unexplained` drops the crash rows (termination `collision` stays, end `stop`) and
+  `--variant destroyed_unexplained` the destroyed row; both must fail C36 only.
+
+`e01_s105_runs.csv` is the E-01 S105 per-step probe of 2026-11-03 (launch `20261103T061122Z-wb-86bd`, play 01):
+the full-brake, steering and full-throttle phases without their resets, as physics step and horizontal world-frame
+velocity (from `vel_l_*` and `fwd_*`). The detector tests merge its steps 1 to 3 per callback: full braking gives
+2.01 m/s per 100 ms, below the 4.0 m/s threshold, at any merging.
 
 The synthetic session uses the TBD defaults of contract dc-2.0: 60 Hz physics, k = 3, N = 6, image_hz 10,
 img_lead_ms 0, `frames/f_<slot:08d>.png`, steer_sign -1, yaw_axis_sign +1. Its images are 256x240 `wb_viewport`

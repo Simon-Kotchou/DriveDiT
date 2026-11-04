@@ -995,6 +995,43 @@ class C21Test(unittest.TestCase):
             self.assertEqual(c21["status"], "FAIL", extra)
             self.assertIn("do not follow the 5 s world-time schedule", c21["detail"])
 
+    def test_the_final_heartbeat_is_kept_by_a_normal_seal(self):
+        """Codex (CODEX_C21b): t0_loop with tail_ms 4714 ends at 115017 ms in frame 43292 with the 23rd heartbeat in its
+        last frame (duration, status ok). +100000 KiB on that row fails T1 at 771.3 MB/h; removing it with the seal
+        count set to 22 passed. The writer writes the heartbeat before it checks the drain (DC_Session.HandleFrame),
+        so after duration (and stop, dc_stop, ego_disabled) the final row must exist: FAIL. Only a seal inside the
+        frame before its heartbeat (ego_destroyed or an error end reason) may lack it."""
+        with mock.patch.dict(synth.SPECS["t0_loop"], {"tail_ms": 4714}):
+            out = synth.generate(os.path.join(self.tmp, "tail4714"), kind="t0_loop", routes_dir=self.routes)
+        with open(os.path.join(out["session_dir"], "session_end.json"), "rb") as f:
+            end = json.loads(f.read().decode("ascii"))
+        self.assertEqual((end["end"]["world_ms"], end["end"]["render_frame"], end["end_reason"], end["heartbeats"]),
+                         (115017, 43292, "duration", 23))
+        self.assertEqual(self.c21(out["session_dir"], "--trial", "T1")["status"], "PASS")
+        session = self.copy(out, "memlast")
+        self.edit_heartbeat(session, lambda hb: hb[:-1] + [dict(hb[-1], mem_kb=str(int(hb[-1]["mem_kb"]) + 100000))])
+        c21 = self.c21(session, "--trial", "T1")
+        self.assertEqual((c21["status"], c21["severity"]), ("FAIL", "HARD"))
+        self.assertAlmostEqual(c21["value"]["mem_slope_mb_per_h"], 771.30, places=1)
+        self.edit_heartbeat(session, lambda hb: hb[:-1])
+        edit_json(os.path.join(session, "session_end.json"), lambda o: o.update({"heartbeats": 22}))
+        c21 = self.c21(session, "--trial", "T1")
+        self.assertEqual((c21["status"], c21["severity"]), ("FAIL", "HARD"))
+        self.assertIn("the final row is missing after end_reason 'duration'", c21["detail"])
+        for reason in ("stop", "dc_stop", "ego_disabled"):
+            edit_json(os.path.join(session, "session_end.json"),
+                      lambda o, reason=reason: o.update({"end_reason": reason}))
+            self.assertEqual(self.c21(session, "--trial", "T1", "--checks", "C21")["status"], "FAIL", reason)
+        # an early seal in that frame (the writer's seal-at-once paths) may lack the row: C21 alone passes
+        session = self.copy(out, "early")
+        self.edit_heartbeat(session, lambda hb: hb[:-1])
+        for reason, status in (("ego_destroyed", "ok"), ("script_error:other", "failed"), ("camera_lost", "failed")):
+            edit_json(os.path.join(session, "session_end.json"),
+                      lambda o, reason=reason, status=status: o.update({"end_reason": reason, "status": status,
+                                                                        "heartbeats": 22}))
+            c21 = self.c21(session, "--trial", "T1", "--checks", "C21")
+            self.assertEqual(c21["status"], "PASS", reason)
+
     def test_a_contradictory_heartbeat_world_time_fails(self):
         """Codex: on the 22.22 FPS fixture the second heartbeat's world_ms 10015 -> 7000 (frame and hf unchanged)
         turned the FPS failure into a T1 NOT_EVALUATED. A heartbeat must carry its frame's world time: FAIL."""

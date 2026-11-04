@@ -18,6 +18,12 @@ WORLD_REAL_TOL = 0.02
 # 600 s); 5 leaves a factor of 4
 FPS_SAMPLES_PER_S = 5
 FPS_MIN_SAMPLES = 30
+# The end reasons whose seal can fall inside a frame's HandleFrame after its hf row and before its heartbeat row
+# (DC_Session.c: Fail, EndAtOnce and FailWrite set m_sFailureReason, and SealOnFailure seals before the heartbeat):
+# ego_destroyed (EndAtOnce) and every error reason (IsErrorEndReason). duration, dc_stop and ego_disabled seal after
+# the drain, which HandleFrame checks after the heartbeat; stop (Play stop, OnGameEnd / OnDelete) seals between frames,
+# so the last frame's heartbeat is already written
+SEALS_AFTER_THE_HEARTBEAT = ("duration", "stop", "dc_stop", "ego_disabled")
 OUR_CLASS_RE = re.compile(r"\b(SCR_ML\w*|SCR_DC\w*|DC_\w+)")
 OUR_SOURCE = "Scripts/Game/DataCapture/"
 VME = "Virtual Machine Exception"
@@ -120,8 +126,11 @@ def frame_fps(s):
 def heartbeat_schedule(s, period_ms=HEARTBEAT_PERIOD_MS):
     """Problems of heartbeat.csv against the writer's schedule (DC_Session.HandleFrame): one row in the first frame
     whose world time reaches the next boundary (next = world - world mod period + period, from one period), with the
-    world_ms and render_frame of that frame, so every row matches its hf frame and none can be dropped or moved; the
-    expected list may hold one more row at the last hf frame (a seal on failure in that frame precedes the row).
+    world_ms and render_frame of that frame, so every row matches its hf frame and none can be dropped or moved. The
+    expected list may hold one more row at the last hf frame only after a seal that can precede that row in the frame:
+    ego_destroyed or an error end reason (SEALS_AFTER_THE_HEARTBEAT lists the others; a session without
+    session_end.json gets no exemption). Dropping the final row of a duration session hid a T1 memory failure
+    (CODEX_C21b).
     Wall time: unix_s non-decreasing, and world time never outruns it (world <= wall + 1 s per pair, unix_s being
     whole seconds)."""
     hf = s.streams["hf"]
@@ -132,13 +141,16 @@ def heartbeat_schedule(s, period_ms=HEARTBEAT_PERIOD_MS):
             boundary = w - w % period_ms + period_ms
     got = [(r["render_frame"], r["world_ms"]) for r in s.heartbeat]
     last = hf.col("render_frame")[-1] if len(hf) else None
+    end_reason = s.end_get("end_reason") if s.end is not None else None
+    early_seal = isinstance(end_reason, str) and end_reason not in SEALS_AFTER_THE_HEARTBEAT
     problems = []
-    if got != expected and not (expected and got == expected[:-1] and expected[-1][0] == last):
+    if got != expected and not (early_seal and expected and got == expected[:-1] and expected[-1][0] == last):
         wrong = [(i, g, e) for i, (g, e) in enumerate(zip(got, expected)) if g != e]
         problems.append("heartbeat rows do not follow the %d s world-time schedule of the hf frames: %d row(s), %d "
                         "expected%s" % (period_ms // 1000, len(got), len(expected),
                                         "; row %d is (frame, world_ms) %s, the schedule gives %s" % wrong[0]
-                                        if wrong else ""))
+                                        if wrong else "; the final row is missing after end_reason %r, a seal that "
+                                        "follows the frame's heartbeat" % (end_reason,)))
     unix = [r["unix_s"] for r in s.heartbeat]
     if any(b < a for a, b in zip(unix, unix[1:])):
         problems.append("heartbeat unix_s decreases")

@@ -1069,20 +1069,34 @@ class ReReviewFindingsTest(unittest.TestCase):
 
     # -- 3: the location is checked right before the first mutation -----------------------------------
     def test_r3_a_unit_moved_after_its_descriptors_were_opened_is_held(self):
+        """Where a directory with open descriptors can be renamed (tmpfs, ext4), the move is caught right before the
+        first mutation. On drvfs (E:) the rename itself is refused (EACCES) while retention holds the descriptors,
+        so nothing moves and the run completes in place."""
         _, dest = make_captured(self.root)
         moved = dest + "_moved"
         original = ret.Retention.recheck_inputs
+        outcome = []
 
         def recheck_inputs(r, plan, *fds):
             result = original(r, plan, *fds)
-            os.rename(dest, moved)                                  # after the open, before the first mutation
+            try:
+                os.rename(dest, moved)                              # after the open, before the first mutation
+                outcome.append("moved")
+            except PermissionError:
+                outcome.append("refused")
             return result
         with mock.patch.object(ret.Retention, "recheck_inputs", recheck_inputs):
             code, out = run(self.root, "--apply")
-        self.assertEqual(code, 2, out)
-        self.assertIn("was moved or replaced after it was planned", out)
-        self.assertEqual(len(frame_slots(moved)), 250)
-        self.assertFalse(os.path.exists(os.path.join(moved, "_harvest", "RETENTION.json")))
+        if outcome == ["moved"]:
+            self.assertEqual(code, 2, out)
+            self.assertIn("was moved or replaced after it was planned", out)
+            self.assertEqual(len(frame_slots(moved)), 250)
+            self.assertFalse(os.path.exists(os.path.join(moved, "_harvest", "RETENTION.json")))
+        else:
+            self.assertEqual(outcome, ["refused"])
+            self.assertEqual(code, 0, out)
+            self.assertFalse(os.path.exists(moved))
+            self.assertEqual(frame_slots(dest), [0, 100, 200, 249])
 
     # -- 4: staging, restore and crash recovery ---------------------------------------------------------
     def test_r4_a_staged_file_that_fails_its_check_is_put_back(self):

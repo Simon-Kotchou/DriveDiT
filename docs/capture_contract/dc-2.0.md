@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
+Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review round 1 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -1299,7 +1299,9 @@ Rules (r2 3.3, R35):
 dc-2.0 was frozen on 2026-11-04 after the user adopted the freeze decisions D-A to D-E on 2026-11-03
 (`t0/freeze/DECISIONS_dc2_freeze.md`); the reader, validator and capture core that follow it are DD-5-min and
 DD-4-min (`t0/freeze/FREEZE_IMPL.md`). Each row is one decision or folded fact, the date it was decided and its
-evidence; the JSON twin carries the same rows (`changelog`).
+evidence; both JSON twins carry the same rows (`changelog` in `dc-2.0.streams.json` and `features_v1.json`). The
+rows R1-* are the pre-capture corrections of the freeze review round 1 (Codex and Claude, 2026-11-04): no dc-2.0
+session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of a dc-2.x.
 
 <!-- dc2:changelog -->
 | Id | Date | Decision | Evidence |
@@ -1319,3 +1321,16 @@ evidence; the JSON twin carries the same rows (`changelog`).
 | CAPTURE-PHASE | 2026-11-03 | The logged pose follows the frame clock and the image of render frame C shows the state of hf row C + 1; img.done_render_frame added (captured = done_render_frame - 1 in Workbench); hf joins ctl and telemetry exactly (section 6, 9.4) | run 3 E-06A (argmin k = +1 on 628 of 640 moving images, pose corr 1.0000); run 4 E-06 (5999 of 5999) |
 | TBD-10 | 2026-11-04 | Stays PROVISIONAL: the crash-detector values are session.json parameters measured by the TBD-10 probe (a value, never a field) | t0d/crash_events/IMPL.md |
 | FREEZE | 2026-11-04 | Status FROZEN: every field, unit, sign, key, cadence or registry rule change from now on is a new version dc-2.x and re-runs the L-gate; per-build values stay in session.json and in files keyed by build_key | this changelog; t0/freeze/FREEZE_IMPL.md |
+| R1-OBS | 2026-11-04 | obs_t also needs its captured frame at or before the render frame of C_t, so obs_age_ms is never negative (a frame without a callback keeps last_physics_step, so the step bound alone admitted a future image); C13a fails a decision sample with a future obs_t (sections 6, 9.8; features_v1 image rule) | Codex review round 1 X1: golden slot 15 re-posed to frame 261990 (3166 ms) against decision 93 in frame 261989 (3139 ms) became obs_t with obs_age_ms -27 (t0/freeze/review/CODEX.md); reader and validator mutation tests |
+| R1-SEAL | 2026-11-04 | An image captured in the session's last render frame (a seal without drain caught its request in flight) has no pose row: pending, not joined, masks 0, never a C13a join failure; a world-teardown seal writes the held img rows too (section 6) | Claude review round 1 H1 and L2 (t0/freeze/review/CLAUDE_REVIEW.md); the crash fixture now ends with an image in flight |
+| R1-STEPDT | 2026-11-04 | Step dt = the median of the readiness step callbacks' time slice / covered steps when 90% of at least 30 ratios lie within 0.5% of it (engine), else the measured span without the start remainder (measured); both kept in session.json observed (section 6) | Codex X2, Claude L1: 15 frames of 68 ms with 2 steps each measured 1.020/30 under the former rule; run 3 E-10: the EOnFixedFrame slice is covered / 30 on 21296 of 21296 rows |
+| R1-HZ | 2026-11-04 | clocks.image_hz_setting names the rate: 5 Hz is default also when a trial conf sets it, only 10 Hz is trial_conf (sections 6, 10.1) | Codex X6 = Claude M1; C08 and writer tests |
+| R1-CLOCK | 2026-11-04 | Frame-clock joins are HARD checks: ctl and telemetry share render_frame and world_time_ms per key (C06); ctl world_time_ms is the hf world time of its frame and hf.last_physics_step the newest callback of an earlier frame (C07) (section 6) | Codex X3 = Claude M3: the mutations render_frame +10000, world time +1000, a stale last_physics_step and P1-P4 passed before; validator tests |
+| R1-HLSEQ | 2026-11-04 | hl_seq advances by 1 on the row after every decision callback of an episode that goes on (a kept command is numbered again) and on no other row; a command changes only with it (section 6, ctl.hl_seq; C07) | Codex X7: a session with every hl_seq -1 passed C07; validator test |
+| R1-C37 | 2026-11-04 | C37 takes done_render_frame as utilisation evidence only where the decoded fiducial confirms it (captured = done_render_frame - 1); a contradiction refuses the evidence (section 6) | Codex X5: a redirected completion passed C37; validator test |
+| R1-LAG | 2026-11-04 | C13b requires the best lag +1 whenever the yaw signal suffices; lags 0 and -1 fail (a code rule, the thresholds file is unchanged) (section 6) | Claude M2; validator test with the hf poses shifted by one row |
+| R1-ROAD | 2026-11-04 | The D-C road join is one-to-one: candidate pairs within 2 m are ranked by the segment Hausdorff distance and assigned greedily, ambiguous twins reported; the endpoints are unique for exact equality only (section 1 TBD-9, 9.8 road) | Codex X4, Claude L7: A [(0,0),(10,0)] picked the parallel B2 [(0,0.1),(10,0.1)] over B1 [(0,0),(0.5,0),(10,0)]; E-08a: 4 twin pairs 0.49-1.56 m apart; tools tests |
+| R1-NEAR | 2026-11-04 | rig.near_plane_m added to session.json and to rig_id; the Shape fiducial at 0.05 m with near plane 0.03 m awaits the first capture Play's E-06 check, 1.0 m with 0.1 m being the allowed recorded fallback (10.1 rig.near_plane_m, rig.fiducial) | Claude M4: probe run 4 E-06 ran at depth 1.0 m with near plane 0.1 m (t0/run4/e06.txt) |
+| R1-BRIDGE | 2026-11-04 | The closed-loop bridge holds the next physics step until obs_t is done (done_render_frame >= the render frame of C_t + 1) before it sends state_t and obs_t (section 6) | Claude M5: obs_t is the image of C_t's own render frame in 35 of 52 policy-valid golden decisions |
+| R1-TEXT | 2026-11-04 | decision_index.hl_seq may be empty for a decision at the last ctl row; slot 0 is issued in the frame after the anchor's; session_end.json observed.decision_grid_points_skipped declared (int, cross-checked by C08); the contract test compares descriptions, Range, Values and tags; nav_v1 and the route schema no longer say DRAFT; actuation mode A applies the setters in every callback | Claude L4, L5, L6, L8 (t0/freeze/review/CLAUDE_REVIEW.md) |
+| R1-REFREEZE | 2026-11-04 | Review round 1 corrections folded into dc-2.0 itself: no dc-2.0 session was captured and nothing was pushed, so no dc-2.x; the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 1 fixes) |

@@ -58,10 +58,11 @@ def check_c17(ctx):
     """Behavioural profile of the mode-E expert episodes after the C17.warmup_s warm-up (world time since the
     session start), r2 5.1 C17 with the C17 thresholds:
       * moving fraction (speed > 1 m/s) >= moving_frac_min; speed p50 / p95 reported;
-      * stuck events per 30 min <= stuck_per_30min_max and ego collision rows per 30 min <=
-        collision_per_30min_max (default 0: a clean expert never collides), both of the ego slot only (contract
-        9.5.1: traffic vehicles have their own rows); road adherence P(road_dist_m <= road_width_m / 2 + 1 m)
-        >= road_adherence_min;
+      * stuck events per 30 min <= stuck_per_30min_max and terminal ego collisions per 30 min <=
+        collision_per_30min_max (default 0: a clean expert never crashes), both of the ego slot only (contract
+        9.5.1: traffic vehicles have their own rows). A collision row counts when it is terminal (src dv or
+        dv_contact): a contact-only row (src contact, below the detector) is a touch, not a crash; road adherence
+        P(road_dist_m <= road_width_m / 2 + 1 m) >= road_adherence_min;
       * against the route of each episode (drivedit_nav route schema; --route / --routes-dir; a filled
         episodes.route_sha256 must match): progress by drivedit_nav.nav_sequence over the telemetry poses, the
         route's signed curvature kappa_r at each row's progress (+-5 m), and per row the session turning
@@ -142,7 +143,9 @@ def check_c17(ctx):
                                                 ev.col("veh_slot_id"))
                if e in episodes and w >= warm_ms and slot in egos]
     stuck = counted.count("stuck")
-    collisions = counted.count("collision")
+    collisions = sum(1 for c in s.crash_events
+                     if c["kind"] == "collision" and c["ego"] and c["terminal"] and c["episode_id"] in episodes
+                     and c["world_time_ms"] >= warm_ms)
     duration_s = len(rows) * dt
     value["stuck_per_30min"] = stuck * 1800.0 / duration_s if duration_s > 0 else None
     if value["stuck_per_30min"] is not None and value["stuck_per_30min"] > thr.get("stuck_per_30min_max", 2):
@@ -152,8 +155,8 @@ def check_c17(ctx):
     value["collision_per_30min"] = collisions * 1800.0 / duration_s if duration_s > 0 else None
     value["collision_per_30min_max"] = max_collisions
     if value["collision_per_30min"] is not None and value["collision_per_30min"] > max_collisions:
-        issues.append("%d ego collision(s) = %.2f per 30 min > %s" % (collisions, value["collision_per_30min"],
-                                                                      max_collisions))
+        issues.append("%d terminal ego collision(s) = %.2f per 30 min > %s" % (
+            collisions, value["collision_per_30min"], max_collisions))
     skipped = []
     no_signal = None
     road = [(tel.col("road_dist_m")[i], tel.col("road_width_m")[i]) for i in rows]

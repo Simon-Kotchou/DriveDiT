@@ -1,0 +1,3 @@
+# Workbench resources are versioned byte for byte (LF, as Workbench wrote them). No end-of-line conversion on any
+# platform, so a Windows clone with core.autocrlf=true deploys the same bytes that were reviewed.
+* -text

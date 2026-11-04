@@ -100,6 +100,10 @@ class SCR_MLScreenshotCapture: ScriptComponent
         m_iCurrentVehicleIndex = 0;
         m_bCameraAttached = false;
 
+        // World Editor (edit mode) instances never capture (review CR-012); the container above stays valid.
+        if (SCR_Global.IsEditMode(owner) || SCR_Global.IsEditMode())
+            return;
+
         Print("[MLScreenshot] Component initialized, position: " + typename.EnumToString(SCR_MLCameraPosition, m_eCameraPosition), LogLevel.NORMAL);
     }
 
@@ -367,6 +371,39 @@ class SCR_MLScreenshotCapture: ScriptComponent
     void SetTrackedVehicle(IEntity vehicle)
     {
         RegisterVehicle(vehicle);
+    }
+
+    //------------------------------------------------------------------------
+    // Move the camera to another vehicle in the middle of a session (MLDataCollector.DeactivateVehicle: the director
+    // retired the one it followed), at the same offset to its vehicle. SCR_ManualCamera.AttachTo keeps the camera's
+    // world transform (Game/Camera/SCR_ManualCamera.c:309-322), so the camera is first put at its current local
+    // transform on the new vehicle (IEntity.GetLocalTransform, Math3D.MatrixMultiply4 as SCR_AIAnimationWaypoint.c:112).
+    // Returns false without a ManualCamera.
+    bool SwitchTrackedVehicle(IEntity vehicle)
+    {
+        if (!vehicle || !m_ManualCamera)
+            return false;
+
+        bool keepOffset = m_bCameraAttached;
+        vector localTransform[4];
+        if (keepOffset)
+            m_ManualCamera.GetLocalTransform(localTransform);
+
+        DetachCamera();
+        if (keepOffset)
+        {
+            vector vehicleTransform[4];
+            vehicle.GetWorldTransform(vehicleTransform);
+            vector cameraTransform[4];
+            Math3D.MatrixMultiply4(vehicleTransform, localTransform, cameraTransform);
+            m_ManualCamera.SetWorldTransform(cameraTransform);
+        }
+
+        m_aTrackedVehicles.Clear();
+        m_aTrackedVehicles.Insert(vehicle);
+        AttachCameraToVehicle(vehicle);
+        Print("[MLScreenshot] Camera moved to vehicle: " + vehicle.GetName(), LogLevel.NORMAL);
+        return true;
     }
 
     //------------------------------------------------------------------------

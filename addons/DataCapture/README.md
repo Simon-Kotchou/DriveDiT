@@ -176,6 +176,34 @@ nothing is overwritten.
 - Without `-profile` inside `E:\DriveDiT` (for example Workbench started from Steam), the collector refuses to write
   and logs `ERROR: capture output refused`. Relaunch with `wb_R1.bat`.
 
+## Crash events and the addon's first modded class (dc-2.0 9.5.1)
+
+`DC_CrashWatch` (`src/enfusion/datacapture/DC_CrashWatch.c`, a capture module on `GameMode_DataCapture` in
+`DC_Arland`) writes the crash events of contract dc-2.0 section 9.5.1 for every watched vehicle slot (the ego now,
+traffic slots from DD-4/T2): `collision`, `veh_damage`, `veh_fire_start`, `veh_fire_end`, `driver_state`,
+`dismount`, `remount` and `rollover`, and the detector values in `session.json` `events.*`.
+
+- Collisions come from the horizontal world-frame velocity change over 100 ms, measured every physics step. The
+  threshold `m_fCollisionDvMps` 4.0 m/s is **provisional** (TBD-10): it must be measured again by the TBD-10 probe,
+  for every `build_key` and on 1.9. `telemetry.dv_max_mps` keeps the per-row maximum, so a new value can be applied
+  offline.
+- A destroyed ego ends the session with `end_reason` `ego_destroyed`, status `ok`: a crash is data.
+
+`src/enfusion/datacapture/DC_CollisionHook.c` is the **first `modded class` of this addon**:
+`modded class SCR_VehicleDamageManagerComponent` overrides `ProcessCollision`. While the addon is loaded this runs for
+every vehicle in every world, so:
+
+- it calls `super.ProcessCollision` first and changes nothing: vanilla's damage, instigators and ejections stay as
+  they are;
+- it then hands the contact to `DC_CrashWatch.NoteContact`, which returns at once unless a dc-2.0 session is
+  capturing and watches that vehicle (no allocation, no string);
+- it is a manifest entry like every other script. To switch the contacts off, set `m_bUseContactHook 0` on
+  `DC_CrashWatch` in the layer; the session then records `events.contact_source` `none` and names `other` from the
+  registry only. To remove the hook completely, drop the manifest line as well.
+
+The hook's signature is the same in the 1.9 index. The 1.9 method bodies around it (the impulse gates, the
+continued-contact filter) must be checked again once the 1.9 scripts are extracted.
+
 ## Probe world DC_Probes_Arland (DD-4-probe)
 
 `worlds/DataCapture/DC_Probes_Arland.ent` is a second world in the same addon, for the T0-ENG core engine probes

@@ -81,7 +81,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_fRolloverUpY 0.5
    m_iRolloverHoldMs 500
    m_iStatePollMs 100
-   m_bUseContactHook 0
+   m_bUseContactHook 1
   }
   DC_HfRecorder "{DC4A50B400000004}" {
    m_vMountPos 0 1.25 0.3

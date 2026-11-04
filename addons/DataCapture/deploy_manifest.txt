@@ -48,5 +48,8 @@ script src/enfusion/datacapture/DC_StreamRecorder.c
 script src/enfusion/datacapture/DC_VehicleRegistry.c
 script src/enfusion/datacapture/DC_EgoSession.c
 script src/enfusion/datacapture/DC_CrashWatch.c
+# The first modded class of the addon: SCR_VehicleDamageManagerComponent.ProcessCollision forwards contacts to
+# DC_CrashWatch (vanilla runs first and unchanged; a no-op unless a dc-2.0 session watches the vehicle)
+script src/enfusion/datacapture/DC_CollisionHook.c
 script src/enfusion/datacapture/DC_HfRecorder.c
 script src/enfusion/datacapture/DC_ImageScheduler.c

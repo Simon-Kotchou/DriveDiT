@@ -84,7 +84,7 @@
         "policy": {"input": true, "max_offset": 0, "target": false},
         "teacher": {"input": true, "max_offset": null, "target": false}
       },
-      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose pose row (hf row captured_render_frame + 1) has last_physics_step <= P_t; t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period. The builder records the realised age per decision step (derived decision_index).",
+      "rule": "R1 derivative 512x288; photometric augmentation on uint8 before normalisation; no flips (RT-X06). obs_t is the newest image whose pose row (hf row captured_render_frame + 1) has last_physics_step <= P_t and whose captured frame is at or before the render frame of C_t (never a future image); t is dropped (wm_valid = policy_valid = 0) if that image is older than one image period. The builder records the realised age per decision step (derived decision_index).",
       "channels": [
         {"name": "image_r", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Red."},
         {"name": "image_g", "unit": "1", "source": "img_resolved.deriv_path", "absolute": false, "build_scoped": false, "desc": "Green."},

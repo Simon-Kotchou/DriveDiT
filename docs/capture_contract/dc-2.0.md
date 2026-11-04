@@ -1,6 +1,6 @@
 # Capture contract dc-2.0
 
-Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
+Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review round 1 corrections folded in on 2026-11-04 before any capture, changelog in section 16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22
 
 | | |
 |---|---|
@@ -74,8 +74,9 @@ Decisions applied at the freeze (what changed where):
 - Folded facts (no choice needed): the logged pose follows the frame clock and the image of render frame C shows the
   state of hf row C + 1 (section 6); the fiducial carrier is the debug-Shape carrier (`rig.fiducial` `carrier`,
   `depth_m`) at 0.05 m with the rig near plane at 0.03 m (`rig.near_plane_m`), awaiting the first capture Play's
-  E-06 check (fallback 1.0 m and 0.1 m, validated by run 4), the widget carrier is a diagnostic only; `img.done_render_frame` records the frame the file
-  was first seen in (captured frame = done_render_frame - 1 in Workbench).
+  E-06 check (fallback 1.0 m and 0.1 m, validated by run 4), the widget carrier is a diagnostic only;
+  `img.done_render_frame` records the frame the file was first seen in (captured frame = done_render_frame - 1 in
+  Workbench).
 - TBD-10: the values live in `session.json` `events.*`, so a measured threshold never changes a field; the optional
   `dv_max_mps` columns (9.2, 9.7) let a new threshold be re-applied offline without capturing again.
 
@@ -319,18 +320,19 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   `EOnFixedFrame`), so all covered steps run with the same inputs; the rows are written in `EOnPostFixedFrame`, after
   the covered steps. An engine build that delivers `EOnSimulate` to the game mode gives one callback per step
   (`covered_steps` 1) and every rule below holds unchanged.
-- **Step dt.** The engine fixed step dt is measured during readiness, per frame with at least one fixed step: the
-  step callback's time slice divided by the steps it covers (`EOnFixedFrame` reports n x the step for a frame of n
-  steps: covered_steps / 30 on 21296 of 21296 rows of run 3 E-10, so the ratio is the step even in merged frames;
-  1 per `EOnSimulate`). The step dt is the median of these ratios once at least 30 frames gave one and 90% of them
-  lie within 0.5% of the median (`step_dt_source` engine). Only when the ratios disagree is it the measured fixed
-  step (`measured`): the world time between the first and the last readiness frame with a step over the steps run
-  after the first, which leaves out the not yet stepped remainder at the start. `session.json engine.step_dt_s`,
-  `step_dt_source`; `observed.readiness_*` keep the median ratio, the measured value, the ratio spread and
-  `GetFixedTimeSlice()` / `GetFixedSteps()` read in `EOnFrame` as a cross-check. `BaseWorld.GetFixedTimeSlice()`
-  alone reports n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is never the step dt;
-  `engine.fixed_time_slice_s` keeps its raw value at the open for provenance only. A module that needs the physics
-  time of a callback uses `covered_steps` x `step_dt`.
+- **Step dt.** The engine fixed step dt is measured during readiness, per frame with at least one fixed step: the step
+  callback's time slice divided by the steps it covers (`EOnFixedFrame` reports n x the step for a frame of n steps:
+  covered_steps / 30 on 21296 of 21296 rows of run 3 E-10, so the ratio is the step even in merged frames; 1 per
+  `EOnSimulate`). The step dt is the median of these ratios once at least 30 frames gave one and 90% of them lie within
+  0.5% of the median (`step_dt_source` engine). Only when the ratios disagree is it the measured fixed step
+  (`measured`): the world time between the first and the last readiness frame with a step over the steps run after the
+  first, which leaves out the not yet stepped remainder at the start. `session.json engine.step_dt_s`, `step_dt_source`;
+  `session.json observed` keeps `readiness_step_ratio_median_s`, `readiness_step_ratios`,
+  `readiness_step_ratio_agree_frac`, `readiness_measured_step_s` and, as a cross-check, `readiness_slice_ratio_median_s`
+  (`GetFixedTimeSlice()` / `GetFixedSteps()` read in the same callbacks). `BaseWorld.GetFixedTimeSlice()` alone reports
+  n/30 for a frame of n steps (0.1 s in a 3-step frame, runs 3-4) and is never the step dt; `engine.fixed_time_slice_s`
+  keeps its raw value at the open for provenance only. A module that needs the physics time of a callback uses
+  `covered_steps` x `step_dt`.
 - **Decision grid (D-A, D-B).** `physics_steps_per_decision` N = floor(1000 / `decision_hz` / step_dt_ms + 0.5) (an
   explicit half-up rounding, the same in Python and Enforce): 6 at the 5 Hz default and 3 at the 10 Hz override with
   1/30 s steps. N is the nominal length of a decision interval and of `action_exec`; the real interval varies.
@@ -346,10 +348,10 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   command applies from physics step P_t + 1, the first step of the next callback, and is held through the next
   decision callback C_t+1, so:
   - `ctl.hl_*` of a row is the command applied in that row's covered steps. `hl_seq` is -1 until the first command;
-    it advances by 1 exactly on the row after a decision callback in which the driver gave a command (inside an
-    episode a decision callback gives one unless the driver keeps the held command, `Decide` false: then neither
-    `hl_seq` nor the command changes) and stays on every other row; a command changes only together with an
-    `hl_seq` increment, or at an episode boundary (C07);
+    it advances by 1 exactly on the row after every decision callback of an episode that goes on (a driver that
+    keeps its command, `Decide` false, gets the held command numbered again with the same values; false at the
+    episode's first decision fails the session) and stays on every other row; a command changes only together with
+    an `hl_seq` increment, or at an episode boundary (C07);
   - the decision interval of t is the steps (P_t, P_t+1] of n_t = P_t+1 - P_t steps: nominally N, but the fixed-step
     clock lags world time by up to about 250-310 ms while capturing (runs 3-4) and catches up, so n_t varies around N;
   - `ctl.exp_*_now` of a row is the expert re-evaluated after its callback; at C_t it is the label of decision t;
@@ -370,21 +372,20 @@ ego that, between episodes, stays tilted, immobile or burning without being dest
   step_dt is the fixed-step clock, which lags. That velocities and accelerations, read in the same callback, follow
   the same clock is an inference [unverified; the C15 tolerances cover one step].
 - **Images.** The slot grid runs in world time at `image_hz` (TBD-2: 5 Hz; 10 Hz only as the session setting
-  `clocks.image_hz_setting` `trial_conf`), on the anchor of the decision grid: grid point g is due at anchor +
-  g x 1000 / `image_hz` - `clocks.img_lead_ms` (default 0; at `image_hz` = `decision_hz` grid point g is due
-  `img_lead_ms` before decision grid point g). Each grid point reached while the ego is live and the camera current
-  becomes the next `slot_id`. The request is issued in `EOnFrame` of the first frame whose world time is at or past the
-  due time once the anchor exists: grid point 0 is due at the anchor itself, the world time of the first callback,
-  which runs after its frame's `EOnFrame`, so slot 0 is issued in the next frame; every later grid point in the first
-  frame at or past its due time (C08: jitter <= 1 render frame at p99). One request is in flight at a time: a slot that arrives while one is
+  `clocks.image_hz_setting` `trial_conf`), on the anchor of the decision grid: grid point g is due at anchor + g x 1000
+  / `image_hz` - `clocks.img_lead_ms` (default 0; at `image_hz` = `decision_hz` grid point g is due `img_lead_ms` before
+  decision grid point g). Each grid point reached while the ego is live and the camera current becomes the next
+  `slot_id`. The request is issued in `EOnFrame` of the first frame whose world time is at or past the due time once the
+  anchor exists: grid point 0 is due at the anchor itself, the world time of the first callback, which runs after its
+  frame's `EOnFrame`, so slot 0 is issued in the next frame; every later grid point in the first frame at or past its
+  due time (C08: jitter <= 1 render frame at p99). One request is in flight at a time: a slot that arrives while one is
   in flight is written `skipped_busy`, a request that `MakeScreenshot` refuses is written `make_failed`, and both count
-  as missing (C10). A request whose file is not seen within `clocks.img_inflight_timeout_ms` (real time) stops
-  blocking the next slot; it is logged as an `events` row `img_timeout` (payload `img_slot_id=<n>`) and in heartbeat
-  `img_fail`. The request path is extension-less (R06). The img row of a slot is written once the slot resolves (its
-  file seen, timed out, skipped, refused, or the session sealed), in slot order, with `done_render_frame` the render
-  frame in which the writer first saw the file. A seal that does not drain (`ego_destroyed`, a Play stop, an error)
-  writes the row of a request still in flight with `done_render_frame` empty (`images.pending_at_end`); the engine may
-  still write its file.
+  as missing (C10). A request whose file is not seen within `clocks.img_inflight_timeout_ms` (real time) stops blocking
+  the next slot; it is logged as an `events` row `img_timeout` (payload `img_slot_id=<n>`) and in heartbeat `img_fail`.
+  The request path is extension-less (R06). The img row of a slot is written once the slot resolves (its file seen,
+  timed out, skipped, refused, or the session sealed), in slot order, with `done_render_frame` the render frame in which
+  the writer first saw the file. A seal that does not drain (`ego_destroyed`, a Play stop, an error) writes the row of a
+  request still in flight with `done_render_frame` empty (`images.pending_at_end`); the engine may still write its file.
 - **Pairing.** The harvester decodes fiducial v2 (`render_frame mod 2^18`, drawn by the debug-Shape carrier) from each
   image and joins `hf` at that `captured_render_frame` C (C13a, exact). In Workbench 1.8 C = `img.done_render_frame`
   - 1 (run 4 E-06: 5999 of 5999 single-flight decodes); `done_render_frame` is the cross-check, the fiducial the truth
@@ -519,7 +520,7 @@ empty until the named step fills it; null on 1.8), `eval-only` (never a model in
 | `episode_id` | int | - | yes | Current episode; -1 outside an episode (warm-up, settle, between episodes). |
 | `mode` | enum | - | yes | Capture mode of this callback (r2 3.1): E clean expert, N noise injection, R recovery start, X exploration, D DAgger, H human, A AI ego, I idle (no HL command held: warm-up, settle). Values: E, N, R, X, D, H, A, I. |
 | `driver` | enum | - | yes | Who produced the executed HL command of this step (C18, C27). Values: expert, policy, human, ai, none. |
-| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1 until the first command; it advances by 1 exactly on the row after a decision callback in which the driver gave a command (the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1) and stays on every other row; a command changes only with an increment or at an episode boundary (section 6, TBD-1). [TBD-1] |
+| `hl_seq` | int | - | yes | Counter of the HL decision applied in this row's covered steps: -1 until the first command; it advances by 1 exactly on the row after every decision callback of an episode that goes on (the decision of C_t is taken after the rows of C_t and applies from physics step P_t + 1; a kept command is numbered again) and stays on every other row; a command changes only with an increment or at an episode boundary (section 6, TBD-1). [TBD-1] |
 | `hl_kappa` | float | 1/m | no | Held HL curvature target applied in this callback's covered steps (the action_cmd.kappa_target of decision hl_seq, decided at the previous decision callback), right-positive. Empty in mode I. [right+] |
 | `hl_accel` | float | m/s2 | no | Held HL acceleration target applied in this callback (action_cmd.a_target, desired). |
 | `hl_dir` | int | - | no | Held HL direction command applied in this callback: -1 reverse, 0 stop, +1 forward. Values: -1, 0, 1. |
@@ -1298,14 +1299,16 @@ Rules (r2 3.3, R35):
 dc-2.0 was frozen on 2026-11-04 after the user adopted the freeze decisions D-A to D-E on 2026-11-03
 (`t0/freeze/DECISIONS_dc2_freeze.md`); the reader, validator and capture core that follow it are DD-5-min and
 DD-4-min (`t0/freeze/FREEZE_IMPL.md`). Each row is one decision or folded fact, the date it was decided and its
-evidence; the JSON twin carries the same rows (`changelog`).
+evidence; both JSON twins carry the same rows (`changelog` in `dc-2.0.streams.json` and `features_v1.json`). The
+rows R1-* are the pre-capture corrections of the freeze review round 1 (Codex and Claude, 2026-11-04): no dc-2.0
+session existed and nothing was pushed, so they were folded into dc-2.0 itself instead of a dc-2.x.
 
 <!-- dc2:changelog -->
 | Id | Date | Decision | Evidence |
 |---|---|---|---|
 | D-A | 2026-11-03 | TBD-1: frame-bound rows. One ctl and one telemetry row per fixed-frame callback with physics_step (the engine fixed-step clock, + covered_steps per row), covered_steps and render_frame; the step dt is measured, never GetFixedTimeSlice; physics_steps_per_decision from the measured step; decisions on a world-time grid, taken at the first callback at or past the grid point and applied from the next physics step; clocks.telemetry_every_k withdrawn, engine.step_dt_s and step_dt_source added (sections 6, 9.1, 9.2, 10.1) | probe run 4 E-10 (18113 steps in 10215 callbacks, 44% merged); run 3 E-10 (t0/run3/RUN3_SUMMARY.md 8); decision memo t0/freeze/DECISIONS_dc2_freeze.md |
 | D-B | 2026-11-03 | TBD-2: image_hz = decision_hz = 5 as the production default (N = 6); 10 Hz only as the trial-conf session setting clocks.image_hz_setting trial_conf (N = 3), with the validator's SOFT C37 unless the session's capture utilisation u95 <= 0.85 (sections 6, 10.1, 12) | E-05 runs 1, 3 and 4 (p95 latency 101 / 99 ms at 10 Hz on the runway, 7.85% missing in the forest); decision memo |
-| D-C | 2026-11-03 | TBD-9: road_key text unchanged and session-local; cross-session joins by the unordered endpoint pair within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break; no field change (9.2 road_key, 9.8 road) | E-08a runs 1-3: 13 of 181 keys differ between runs 2 and 3, endpoints unique (t0d/decoder/E08B.md 7) |
+| D-C | 2026-11-03 | TBD-9: road_key text unchanged and session-local; cross-session joins by the unordered endpoint pair within 2 m (n_pts excluded), the E-08b per-piece Hausdorff distance as the tie-break; no field change (9.2 road_key, 9.8 road) | E-08a runs 1-3: 13 of 181 keys differ between runs 2 and 3; endpoints unique for exact equality only, 4 twin pairs lie within 2 m (corrected in review round 1) (t0d/decoder/E08B.md 7) |
 | D-D | 2026-11-03 | Trails (Type Path, 11.1 km on Arland) dropped from routes and road-km: no field change here; the validator thresholds lose the C32 trail key (CAPTURE_PROGRAM 5.2) and the E-08a tool expects the 34.5 km engine network | E-08b (t0d/decoder/E08B.md); t0/freeze/DD_DE_APPLIED.md |
 | D-E | 2026-11-03 | R-3 maneuver typing (the straighter of two same-side branches within 35 deg is straight): a nav_v1 route-generator rule, no field change here | t0/freeze/DD_DE_APPLIED.md (DD-7-min c7024d2) |
 | TBD-3 | 2026-11-04 | Writer semantics confirmed as the r2 default (append per line, exact Write counts, null open on read-only targets, WRITE truncates); commit logs consistent after a process kill | E-19 run 3 with the e19kill play: PASS, 212 of 212 commit lines (t0/freeze/e19_kill_2026-11-04.txt) |
@@ -1314,7 +1317,20 @@ evidence; the JSON twin carries the same rows (`changelog`).
 | TBD-6 | 2026-11-03 | The launch id is visible to a Workbench Play (launch_mode cli) | E-11 run 3 (-dcLaunchId visible=1) |
 | TBD-7 | 2026-11-03 | Manual gearbox; S105 6 gears, 4 forward: 0 reverse, 1 neutral, 2..5 forward; general rule from the vanilla gear computation | E-04 runs 2-3, E-01 run 3; SCR_ToggleHandbrakeAction.c:100-108, SCR_VehicleGearCondition.c:32-44 (1.8.0.13) |
 | TBD-8 | 2026-11-03 | Render-settings dump keys of E-20 (VideoUserSettings, DisplayUserSettings); the client compare follows at the first client session | E-20 runs 2-3 |
-| FIDUCIAL | 2026-11-03 | rig.fiducial carrier = the debug-Shape carrier at depth_m 0.05 (the widget carrier is a diagnostic only, it never reaches screenshots); rig.fiducial gains carrier and depth_m | probe run 4 E-06: shape 5999 of 5999 decoded, widget 0 of 5999 (t0/run4/RUN4_SUMMARY.md) |
+| FIDUCIAL | 2026-11-03 | rig.fiducial carrier = the debug-Shape carrier at depth_m 0.05 (the widget carrier is a diagnostic only, it never reaches screenshots); rig.fiducial gains carrier and depth_m | probe run 4 E-06 at depth 1.0 m with near plane 0.1 m (t0/run4/e06.txt): shape 5999 of 5999 decoded, widget 0 of 5999 (t0/run4/RUN4_SUMMARY.md); depth 0.05 m with near plane 0.03 m is not yet measured and awaits the first capture Play's E-06 check, 1.0 m / 0.1 m being the recorded fallback (corrected in review round 1) |
 | CAPTURE-PHASE | 2026-11-03 | The logged pose follows the frame clock and the image of render frame C shows the state of hf row C + 1; img.done_render_frame added (captured = done_render_frame - 1 in Workbench); hf joins ctl and telemetry exactly (section 6, 9.4) | run 3 E-06A (argmin k = +1 on 628 of 640 moving images, pose corr 1.0000); run 4 E-06 (5999 of 5999) |
 | TBD-10 | 2026-11-04 | Stays PROVISIONAL: the crash-detector values are session.json parameters measured by the TBD-10 probe (a value, never a field) | t0d/crash_events/IMPL.md |
 | FREEZE | 2026-11-04 | Status FROZEN: every field, unit, sign, key, cadence or registry rule change from now on is a new version dc-2.x and re-runs the L-gate; per-build values stay in session.json and in files keyed by build_key | this changelog; t0/freeze/FREEZE_IMPL.md |
+| R1-OBS | 2026-11-04 | obs_t also needs its captured frame at or before the render frame of C_t, so obs_age_ms is never negative (a frame without a callback keeps last_physics_step, so the step bound alone admitted a future image); C13a fails a decision sample with a future obs_t (sections 6, 9.8; features_v1 image rule) | Codex review round 1 X1: golden slot 15 re-posed to frame 261990 (3166 ms) against decision 93 in frame 261989 (3139 ms) became obs_t with obs_age_ms -27 (t0/freeze/review/CODEX.md); reader and validator mutation tests |
+| R1-SEAL | 2026-11-04 | An image captured in the session's last render frame (a seal without drain caught its request in flight) has no pose row: pending, not joined, masks 0, never a C13a join failure; a world-teardown seal writes the held img rows too (section 6) | Claude review round 1 H1 and L2 (t0/freeze/review/CLAUDE_REVIEW.md); the crash fixture now ends with an image in flight |
+| R1-STEPDT | 2026-11-04 | Step dt = the median of the readiness step callbacks' time slice / covered steps when 90% of at least 30 ratios lie within 0.5% of it (engine), else the measured span without the start remainder (measured); both kept in session.json observed (section 6) | Codex X2, Claude L1: 15 frames of 68 ms with 2 steps each measured 1.020/30 under the former rule; run 3 E-10: the EOnFixedFrame slice is covered / 30 on 21296 of 21296 rows |
+| R1-HZ | 2026-11-04 | clocks.image_hz_setting names the rate: 5 Hz is default also when a trial conf sets it, only 10 Hz is trial_conf (sections 6, 10.1) | Codex X6 = Claude M1; C08 and writer tests |
+| R1-CLOCK | 2026-11-04 | Frame-clock joins are HARD checks: ctl and telemetry share render_frame and world_time_ms per key (C06); ctl world_time_ms is the hf world time of its frame and hf.last_physics_step the newest callback of an earlier frame (C07) (section 6) | Codex X3 = Claude M3: the mutations render_frame +10000, world time +1000, a stale last_physics_step and P1-P4 passed before; validator tests |
+| R1-HLSEQ | 2026-11-04 | hl_seq advances by 1 on the row after every decision callback of an episode that goes on (a kept command is numbered again) and on no other row; a command changes only with it (section 6, ctl.hl_seq; C07) | Codex X7: a session with every hl_seq -1 passed C07; validator test |
+| R1-C37 | 2026-11-04 | C37 takes done_render_frame as utilisation evidence only where the decoded fiducial confirms it (captured = done_render_frame - 1); a contradiction refuses the evidence (section 6) | Codex X5: a redirected completion passed C37; validator test |
+| R1-LAG | 2026-11-04 | C13b requires the best lag +1 whenever the yaw signal suffices; lags 0 and -1 fail (a code rule, the thresholds file is unchanged) (section 6) | Claude M2; validator test with the hf poses shifted by one row |
+| R1-ROAD | 2026-11-04 | The D-C road join is one-to-one: candidate pairs within 2 m are ranked by the segment Hausdorff distance and assigned greedily, ambiguous twins reported; the endpoints are unique for exact equality only (section 1 TBD-9, 9.8 road) | Codex X4, Claude L7: A [(0,0),(10,0)] picked the parallel B2 [(0,0.1),(10,0.1)] over B1 [(0,0),(0.5,0),(10,0)]; E-08a: 4 twin pairs 0.49-1.56 m apart; tools tests |
+| R1-NEAR | 2026-11-04 | rig.near_plane_m added to session.json and to rig_id; the Shape fiducial at 0.05 m with near plane 0.03 m awaits the first capture Play's E-06 check, 1.0 m with 0.1 m being the allowed recorded fallback (10.1 rig.near_plane_m, rig.fiducial) | Claude M4: probe run 4 E-06 ran at depth 1.0 m with near plane 0.1 m (t0/run4/e06.txt) |
+| R1-BRIDGE | 2026-11-04 | The closed-loop bridge holds the next physics step until obs_t is done (done_render_frame >= the render frame of C_t + 1) before it sends state_t and obs_t (section 6) | Claude M5: obs_t is the image of C_t's own render frame in 35 of 52 policy-valid golden decisions |
+| R1-TEXT | 2026-11-04 | decision_index.hl_seq may be empty for a decision at the last ctl row; slot 0 is issued in the frame after the anchor's; session_end.json observed.decision_grid_points_skipped declared (int, cross-checked by C08); the contract test compares descriptions, Range, Values and tags; nav_v1 and the route schema no longer say DRAFT; actuation mode A applies the setters in every callback | Claude L4, L5, L6, L8 (t0/freeze/review/CLAUDE_REVIEW.md) |
+| R1-REFREEZE | 2026-11-04 | Review round 1 corrections folded into dc-2.0 itself: no dc-2.0 session was captured and nothing was pushed, so no dc-2.x; the FROZEN date stays 2026-11-04 | coordinator decision 2026-11-04; t0/freeze/FREEZE_IMPL.md (Review round 1 fixes) |

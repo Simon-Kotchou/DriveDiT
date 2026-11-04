@@ -42,7 +42,8 @@ SPEC_MD = os.path.join(CONTRACT_DIR, "dc-2.0.md")
 STREAMS_JSON = os.path.join(CONTRACT_DIR, "dc-2.0.streams.json")
 FEATURES_JSON = os.path.join(CONTRACT_DIR, "features_v1.json")
 
-STATUS_LINE = ("Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, changelog in section "
+STATUS_LINE = ("Status: FROZEN 2026-11-04 (freeze decisions D-A to D-E adopted 2026-11-03, review round 1 "
+               "corrections folded in on 2026-11-04 before any capture, changelog in section "
                "16); a change needs a new version dc-2.x; user decision D15 adopted 2026-10-22")
 T0ENG = "docs/trials/T0-ENG.md"
 
@@ -633,15 +634,16 @@ class StreamSchemaTest(unittest.TestCase):
         self.assertIn("at or before the render frame of C_t", timing["sample"]["obs"]["rule"])
         self.assertIn("obs_age_ms >= 0", timing["sample"]["obs"]["rule"])
         self.assertIn("done_render_frame >= the render frame of C_t + 1", timing["decision"]["bridge_pause"])
-        self.assertIn("+1 exactly on the row after a decision callback", timing["decision"]["hl_seq"])
+        self.assertIn("+1 exactly on the row after every decision callback", timing["decision"]["hl_seq"])
         self.assertIn("newest ctl key with a smaller render_frame", timing["joins"]["frame_clock"])
         self.assertIn("no pose row and is not joined", timing["joins"]["capture_pose"])
         self.assertIn("median", timing["clock"]["step_dt"])
-        section6 = self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")]
-        for phrase in ("whose captured frame C is at or\n  before the render frame of C_t", "never negative",
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
+        for phrase in ("whose captured frame C is at or before the render frame of C_t", "never negative",
                        "best lag to be +1", "slot 0 is issued in the next frame", "never a join failure",
-                       "covered_steps / 30 on 21296 of 21296 rows"):
-            self.assertIn(phrase.replace("\\n", "\n"), section6, phrase)
+                       "covered_steps / 30 on 21296 of 21296 rows", "the ratio is the step even in merged frames",
+                       "every decision callback of an episode that goes on"):
+            self.assertIn(phrase, section6, phrase)
         session = {f["name"]: f for f in self.schema["files"]["session.json"]["fields"]}
         self.assertEqual((session["rig.near_plane_m"]["unit"], session["rig.near_plane_m"]["required"]), ("m", True))
         self.assertIn("near plane", session["rig.rig_id"]["desc"])
@@ -783,6 +785,16 @@ class StreamSchemaTest(unittest.TestCase):
         for want in ("D-A", "D-B", "D-C", "D-D", "D-E", "TBD-3", "TBD-4", "TBD-5", "TBD-6", "TBD-7", "FIDUCIAL",
                      "CAPTURE-PHASE", "FREEZE"):
             self.assertIn(want, ids)
+        # review round 1: the pre-capture corrections, in the md and in both JSON twins, after the freeze row
+        review = [i for i in ids if i.startswith("R1-")]
+        self.assertEqual(review, ["R1-OBS", "R1-SEAL", "R1-STEPDT", "R1-HZ", "R1-CLOCK", "R1-HLSEQ", "R1-C37", "R1-LAG",
+                                  "R1-ROAD", "R1-NEAR", "R1-BRIDGE", "R1-TEXT", "R1-REFREEZE"])
+        self.assertEqual(ids[ids.index("FREEZE") + 1:], review)
+        self.assertTrue(all(c["date"] == "2026-11-04" for c in self.schema["changelog"] if c["id"] in review))
+        with open(FEATURES_JSON, encoding="ascii") as f:
+            features = json.load(f)
+        self.assertEqual(features["changelog"], self.schema["changelog"])
+        self.assertEqual(features["status"], self.schema["status"])
         self.assertIn("2026-11-04", log)
         self.assertIn("dc-2.x", self.spec[self.spec.index("## 0. How to read this"):self.spec.index("## 1. ")])
 
@@ -978,13 +990,15 @@ class StreamSchemaTest(unittest.TestCase):
                      "clocks.physics_steps_per_decision", "clocks.decision_hz"):
             self.assertTrue(session[name]["required"], name)
         self.assertEqual(session["engine.step_dt_source"]["enum"], ["engine", "measured"])
-        self.assertNotIn("telemetry_every_k", read_text(FEATURES_JSON))
+        features = json.loads(read_text(FEATURES_JSON))
+        features.pop("changelog")                         # the changelog records the withdrawal
+        self.assertNotIn("telemetry_every_k", json.dumps(features))
         self.assertAlmostEqual(tbd["TBD-1"]["decided"]["step_dt_s"], 1 / 30.0)
         self.assertEqual(tbd["TBD-1"]["decided"]["rows"], "frame_bound")
-        section6 = self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")]
+        section6 = " ".join(self.spec[self.spec.index("## 6. Clocks"):self.spec.index("## 7. Units")].split())
         for phrase in ("covered_steps", "EOnFixedFrame", "GetFixedSteps()", "is never the step dt", "world-time grid",
                        "frame clock", "hf row C + 1", "done_render_frame"):
-            self.assertIn(phrase.replace("\\n", "\n"), section6, phrase)
+            self.assertIn(phrase, section6, phrase)
         self.assertNotIn("mod physics_steps_per_decision", self.spec)
         # D-B
         d2 = tbd["TBD-2"]["decided"]

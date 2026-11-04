@@ -24,3 +24,4 @@ script src/enfusion/datacapture/SCR_MLDataCollector.c
 script src/enfusion/datacapture/SCR_MLScreenshotCapture.c
 script src/enfusion/datacapture/SCR_AnchorFrameSelector.c
 script src/enfusion/datacapture/SCR_MLDataCaptureDirector.c
+script src/enfusion/datacapture/DC_Gates.c

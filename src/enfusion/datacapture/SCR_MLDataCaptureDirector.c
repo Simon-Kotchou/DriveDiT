@@ -8,11 +8,11 @@
 //
 // WHAT IT DOES (authority only, play mode only)
 //   - sets the initial time of day and weather;
-//   - opens every vehicle gate of the map once, before the first group spawns (m_bOpenGatesAtStart, OpenGates): every
-//     door leaf with a navmesh link of the vehicle navmesh (bar gates, wide metal gates) and its sibling leaves, set
-//     open without a performer as SCR_DoorOpenerEntity does. A closed gate on a car's route makes the vanilla driver
-//     stop, get out, open it and get back in (HandleFailedNavlinkDoor.bt), because a driver below max LOD never opens
-//     it remotely. It logs every gate with its position, and 10 s later every leaf that is not open;
+//   - opens every vehicle gate of the map once, before the first group spawns (m_bOpenGatesAtStart, OpenGates with
+//     DC_Gates.c): every door leaf with a navmesh link of the vehicle navmesh (bar gates, wide metal gates) and its
+//     sibling leaves, set open without a performer as SCR_DoorOpenerEntity does. A closed gate on a car's route makes
+//     the vanilla driver stop, get out, open it and get back in (HandleFailedNavlinkDoor.bt), because a driver below
+//     max LOD never opens it remotely. It logs every gate with its position, and 10 s later every leaf that is not open;
 //   - for every configured group id k = 1..m_iMaxAIGroups: spawns the empty group m_sGroupPrefab at
 //     <m_sSpawnPointPrefix>k, hands it the placed vehicle <m_sVehiclePrefix>k and gives it its own forced-move
 //     waypoints on every <m_sDriveTargetPrefix>N marker; each waypoint keeps its original marker id N;
@@ -430,13 +430,6 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	[Attribute("1", UIWidgets.CheckBox, "Open every vehicle gate of the map once at the director start, before the groups spawn: every door leaf with a navmesh link of the vehicle navmesh, and its sibling leaves. At a closed gate on its route the vanilla driver stops, gets out, opens it and gets back in, because an agent below max LOD (m_bPinDriverLOD) never opens a gate remotely (SCR_AISelectDoorOperatorAgent.c:91-94)", category: "Driving")]
 	protected bool m_bOpenGatesAtStart;
 
-	//! Vehicle navmesh project of SCR_AIWorld.et: a door leaf with a link of it is a gate cars wait at
-	//! (SCR_AIWorld.HasVehicleNavlink, Game/AI/SCR_AIWorld.c:315-321)
-	static const string GATE_VEHICLE_NAVMESH = "BTRlike";
-	//! Door control value OpenGates sets: fully open, the SCR_DoorOpenerEntity default (Game/Campaign/SCR_doorOpener.c:24)
-	static const float GATE_OPEN_CONTROL_VALUE = 1.0;
-	//! A door is open beyond 1 minus this of its normalized state (SCR_AIOpenDoor.STATE_EPSILON, SCR_AIOpenDoor.c:4,39)
-	static const float GATE_OPEN_EPSILON = 0.01;
 	//! CheckGatesOpen runs this long after OpenGates [ms] (DoorSet_MetalGate_01_Long opens in 1.5 s)
 	static const int GATE_CHECK_DELAY_MS = 10000;
 
@@ -489,9 +482,7 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	protected SCR_MLDataCollector m_Collector;
 	protected ref array<ref SCR_MLDataCaptureWaypoint> m_aDriveTargets = {};	//!< marker records, m_Waypoint = null
 	protected ref array<ref SCR_MLDataCaptureGroupState> m_aGroups = {};		//!< successfully started groups, ascending group id
-	protected ref array<IEntity> m_aGateLeaves = {};	//!< door leaves with a vehicle navmesh link (OpenGates query)
-	protected ref array<IEntity> m_aGateDoors = {};		//!< the door leaves OpenGates opened: the gate leaves and their siblings
-	protected int m_iGateQueryDoors;					//!< entities with a DoorComponent the gate query saw
+	protected ref DC_Gates m_Gates;						//!< the gates OpenGates opened (DC_Gates.c), null = none
 	protected float m_fGateCheckAtMs = -1;				//!< world time of CheckGatesOpen, -1 = none pending
 
 	//------------------------------------------------------------------------------------------------
@@ -762,23 +753,9 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Opens every vehicle gate of the map once (m_bOpenGatesAtStart; run2/DISMOUNT_SOURCE.md 7.1 M3, map-wide):
-	//! 1. one query over the world's bound box (BaseWorld.GetBoundBox / QueryEntitiesByAABB, Core/generated/World/
-	//!    BaseWorld.c:116, :56) keeps every entity with a DoorComponent and a navmesh link of the vehicle navmesh
-	//!    (AddGateLeaf). The OpenGate smart action alone would not do: every door leaf inherits it from Door_Base.et,
-	//!    house doors included, while only gate leaves add a BTRlike link (Door_MetalGate_01_Long_LEFT_EXT_ST_B.et,
-	//!    BarGate_01_bar_base.et);
-	//! 2. adds each leaf's sibling leaves, the doors the vanilla driver opens (SA_OpenGate.bt runs SCR_AIOpenDoor with
-	//!    m_bOpenSiblingDoors 1; SCR_AIOpenDoor.FindDoorActions, Game/AI/ScriptedNodes/Soldier/SCR_AIOpenDoor.c:55);
-	//! 3. sets each closed leaf open with BaseDoorComponent.SetControlValue(1, RplId.Invalid())
-	//!    (Game/generated/Components/BaseDoorComponent.c:27), as vanilla SCR_DoorOpenerEntity opens the doors around it
-	//!    without any character (Game/Campaign/SCR_doorOpener.c:54-71). The user action that the AI uses,
-	//!    SCR_DoorUserAction.PerformAction, needs a performer: it calls the native UseDoorAction(user), which toggles the
-	//!    door and opens it relative to that user (SCR_DoorUserAction.c:1-14, BaseDoorComponent.c:35), and vanilla only
-	//!    ever passes the operating character (SCR_AIOpenDoor.c:24-26, :43).
-	//! The gates stay open: today's Play showed an opened gate letting every later car through (DISMOUNT_SOURCE.md 2.3).
-	//! CheckGatesOpen checks the leaves GATE_CHECK_DELAY_MS later. One-time cost: one native query visiting every entity
-	//! of the map with one script callback each, logged in ms.
+	//! Opens every vehicle gate of the map once (m_bOpenGatesAtStart) with DC_Gates.OpenVehicleGates (DC_Gates.c: one
+	//! map-wide query for door leaves with a vehicle navmesh link and their sibling leaves, each set open without a
+	//! performer as vanilla SCR_DoorOpenerEntity does); CheckGatesOpen checks them GATE_CHECK_DELAY_MS later.
 	protected void OpenGates()
 	{
 		if (!m_bOpenGatesAtStart)
@@ -788,202 +765,18 @@ class SCR_MLDataCaptureDirector : SCR_BaseGameModeComponent
 		}
 
 		BaseWorld world = GetGame().GetWorld();
-		vector mins;
-		vector maxs;
-		world.GetBoundBox(mins, maxs);
-
-		m_aGateLeaves.Clear();
-		m_aGateDoors.Clear();
-		m_iGateQueryDoors = 0;
-		int startMs = System.GetTickCount(); // Core/generated/System/System.c:134
-		world.QueryEntitiesByAABB(mins, maxs, AddGateLeaf);
-		int queryMs = System.GetTickCount() - startMs;
-
-		// The gates (the leaves' parent: DoorSet_*, BarGate_01, ...) and every leaf to open.
-		array<IEntity> gates = {};
-		array<ScriptedUserAction> actions = {};
-		int withSmartAction;
-		foreach (IEntity leaf : m_aGateLeaves)
-		{
-			// The tag the vanilla gate reaction looks for (SCR_AIGoalReaction.c:474; SCR_AIUtils.c:502)
-			if (SCR_AISmartActionHandling.FindSmartAction(leaf, "OpenGate", false))
-				withSmartAction++;
-
-			IEntity leafGate = GetGateOf(leaf);
-			if (!gates.Contains(leafGate))
-				gates.Insert(leafGate);
-
-			SCR_AIOpenDoor.FindDoorActions(leaf, actions, true);
-			foreach (ScriptedUserAction action : actions)
-			{
-				IEntity actionDoor = action.GetOwner(); // Game/generated/UserAction/BaseUserAction.c:76
-				if (actionDoor && !m_aGateDoors.Contains(actionDoor))
-					m_aGateDoors.Insert(actionDoor);
-			}
-
-			if (!m_aGateDoors.Contains(leaf))
-				m_aGateDoors.Insert(leaf);
-		}
-
-		int opening;
-		int alreadyOpen;
-		int noDoorComponent;
-		foreach (int gateIndex, IEntity gate : gates)
-		{
-			// Initialised explicitly: declared in the loop body, they count one gate each.
-			int gateLeaves = 0;
-			int gateOpening = 0;
-			int gateAlreadyOpen = 0;
-			foreach (IEntity door : m_aGateDoors)
-			{
-				if (GetGateOf(door) != gate)
-					continue;
-
-				gateLeaves++;
-				DoorComponent doorComponent = DoorComponent.Cast(door.FindComponent(DoorComponent));
-				if (!doorComponent)
-				{
-					noDoorComponent++;
-					continue;
-				}
-
-				if (IsDoorOpen(doorComponent) || doorComponent.IsOpening())
-				{
-					gateAlreadyOpen++;
-					continue;
-				}
-
-				doorComponent.SetControlValue(GATE_OPEN_CONTROL_VALUE, RplId.Invalid()); // RplId.Invalid: Core/generated/Replication/RplId.c:18
-				gateOpening++;
-			}
-
-			opening += gateOpening;
-			alreadyOpen += gateAlreadyOpen;
-			Print(string.Format("[DataCapture] Gate %1/%2: %3 at %4 - %5 door leaves, opening %6, already open %7", gateIndex + 1, gates.Count(), DescribePrefab(gate), gate.GetOrigin(), gateLeaves, gateOpening, gateAlreadyOpen), LogLevel.NORMAL);
-		}
-
-		string counts = string.Format("%1 vehicle gates with %2 door leaves (%3 leaves with a vehicle navmesh link, %4 of them with the OpenGate smart action, among %5 doors of the map)", gates.Count(), m_aGateDoors.Count(), m_aGateLeaves.Count(), withSmartAction, m_iGateQueryDoors);
-		LogLevel level = LogLevel.NORMAL;
-		if (gates.IsEmpty() || noDoorComponent > 0)
-			level = LogLevel.WARNING;
-
-		PrintText(string.Format("[DataCapture] Gates: found %1 in %2 ms over the map %3 - %4; opening %5 leaves, %6 already open, %7 without a door component; checked in %8 s", counts, queryMs, mins, maxs, opening, alreadyOpen, noDoorComponent, GATE_CHECK_DELAY_MS / 1000), level);
+		m_Gates = DC_Gates.OpenVehicleGates(world, "[DataCapture]");
 		m_fGateCheckAtMs = world.GetWorldTime() + GATE_CHECK_DELAY_MS;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! QueryEntitiesCallback (Core/proto/EnWorld.c:6-7) of the gate query: keeps every door leaf with a navmesh link of
-	//! the vehicle navmesh. \return true: go on with the query
-	protected bool AddGateLeaf(IEntity entity)
-	{
-		if (!entity || !entity.FindComponent(DoorComponent))
-			return true;
-
-		m_iGateQueryDoors++;
-		if (HasVehicleDoorLink(entity) && !m_aGateLeaves.Contains(entity))
-			m_aGateLeaves.Insert(entity);
-
-		return true;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	//! \return true when a navmesh custom link of the entity is for the vehicle navmesh: SCR_AIWorld.HasVehicleNavlink
-	//! (Game/AI/SCR_AIWorld.c:315-321), but over every NavmeshCustomLinkComponent, since a gate leaf carries a door link
-	//! and a jump link (Door_MetalGate_01_Long_LEFT_EXT_ST_B.et)
-	protected bool HasVehicleDoorLink(IEntity entity)
-	{
-		array<Managed> navlinks = {};
-		entity.FindComponents(NavmeshCustomLinkComponent, navlinks); // Core/generated/Entities/IEntity.c:539
-		foreach (Managed navlinkComponent : navlinks)
-		{
-			NavmeshCustomLinkComponent navlink = NavmeshCustomLinkComponent.Cast(navlinkComponent);
-			if (navlink && navlink.HasLinkOfNavmeshType(GATE_VEHICLE_NAVMESH)) // Game/generated/AI/NavmeshCustomLinkComponent.c:14
-				return true;
-		}
-
-		return false;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	//! \return the gate a door leaf belongs to: its parent (the door set or barrier), or the leaf itself
-	protected IEntity GetGateOf(IEntity door)
-	{
-		IEntity parent = door.GetParent();
-		if (parent)
-			return parent;
-
-		return door;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	//! \return true when the door is fully open, the test of SCR_AIOpenDoor (SCR_AIOpenDoor.c:39)
-	protected bool IsDoorOpen(DoorComponent doorComponent)
-	{
-		return Math.AbsFloat(doorComponent.GetNormalizedDoorState()) > 1.0 - GATE_OPEN_EPSILON;
-	}
-
-	//------------------------------------------------------------------------------------------------
-	//! Run once by MonitorVehicles GATE_CHECK_DELAY_MS after OpenGates: counts the door leaves that are open and logs
-	//! every one that is not (blocked while it opened, or destroyed), with its position; a closed one is set open once
-	//! more.
+	//! Run once by MonitorVehicles GATE_CHECK_DELAY_MS after OpenGates: DC_Gates.CheckOpen logs every gate leaf that is
+	//! not open, with its position, and sets it open once more.
 	protected void CheckGatesOpen()
 	{
 		m_fGateCheckAtMs = -1;
-		int open;
-		int notOpen;
-		int gone;
-		foreach (IEntity door : m_aGateDoors)
-		{
-			if (!door)
-			{
-				gone++;
-				continue;
-			}
-
-			DoorComponent doorComponent = DoorComponent.Cast(door.FindComponent(DoorComponent));
-			if (!doorComponent)
-			{
-				gone++;
-				continue;
-			}
-
-			if (IsDoorOpen(doorComponent))
-			{
-				open++;
-				continue;
-			}
-
-			notOpen++;
-			float doorState = doorComponent.GetNormalizedDoorState(); // Game/generated/Components/BaseDoorComponent.c:17
-			float controlValue = doorComponent.GetControlValue(); // BaseDoorComponent.c:29
-			Print(string.Format("[DataCapture] WARNING: gate door %1 at %2 (gate %3 at %4) is not open %5 s after the director opened it: state %6, control value %7, opening %8 - set open again; a car may still stop there", DescribePrefab(door), door.GetOrigin(), DescribePrefab(GetGateOf(door)), GetGateOf(door).GetOrigin(), GATE_CHECK_DELAY_MS / 1000, doorState.ToString(-1, 2), controlValue.ToString(-1, 2), doorComponent.IsOpening()), LogLevel.WARNING);
-			doorComponent.SetControlValue(GATE_OPEN_CONTROL_VALUE, RplId.Invalid());
-		}
-
-		LogLevel level = LogLevel.NORMAL;
-		if (notOpen > 0 || gone > 0)
-			level = LogLevel.WARNING;
-
-		PrintText(string.Format("[DataCapture] Gates %1 s after opening: %2 of %3 door leaves open, %4 not open, %5 gone (destroyed or deleted)", GATE_CHECK_DELAY_MS / 1000, open, m_aGateDoors.Count(), notOpen, gone), level);
-	}
-
-	//------------------------------------------------------------------------------------------------
-	//! \return the entity's prefab path (EntityPrefabData.GetPrefabName, Core/generated/Entities/EntityPrefabData.c:20),
-	//! "no prefab" or "none"
-	protected string DescribePrefab(IEntity entity)
-	{
-		if (!entity)
-			return "none";
-
-		EntityPrefabData prefabData = entity.GetPrefabData(); // Core/generated/Entities/IEntity.c:181
-		if (!prefabData)
-			return "no prefab";
-
-		ResourceName prefab = prefabData.GetPrefabName();
-		if (prefab.IsEmpty())
-			return "no prefab";
-
-		return prefab.GetPath(); // Core/generated/Types/ResourceName.c:14
+		if (m_Gates)
+			m_Gates.CheckOpen(GATE_CHECK_DELAY_MS / 1000);
 	}
 
 	//------------------------------------------------------------------------------------------------

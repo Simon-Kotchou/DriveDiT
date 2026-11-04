@@ -12,7 +12,7 @@
 // PER CALLBACK C ending at physics step P (docs/capture_contract/dc-2.0.md section 6, the R-01 decision boundary on
 // the world-time grid; no CallLater clock)
 //   OnStepPre (EOnFixedFrame): a decision taken in the previous callback becomes the held command (hl_seq + 1, so
-//     hl_seq changes only on the callback after a decision callback); inside an episode with a held command the
+//     hl_seq changes exactly on the callback after each decision callback of the episode, a kept command included); inside an episode with a held command the
 //     driver's ApplyStep runs once for all covered steps (timeSlice = covered_steps x the measured step dt; llc_v1
 //     calls the setters through the DC_Actuator); every other callback (warm-up, the null driver, the first one of
 //     an episode, between episodes) re-applies the actuator's Park(), so Mode A calls the setters in every callback
@@ -852,8 +852,9 @@ class DC_DriverInterface : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! At every decision step of the episode, after its rows: the command applied over (P, P + N]. false = no new
-	//! decision (the held command stays, hl_seq does not change)
+	//! At every decision step of the episode, after its rows: the command applied over (P, P + N]. false = keep the
+	//! held command: the core numbers it again (hl_seq + 1, the same values), as every decision is numbered (dc-2.0
+	//! section 6); false at the episode's first decision fails the session (nothing is held yet)
 	bool Decide(int physicsStep, notnull DC_HLCommand command)
 	{
 		return false;
@@ -1183,7 +1184,16 @@ class DC_StreamRecorder : DC_SessionModule
 
 		m_Pending.Reset();
 		if (!driver.Decide(physicsStep, m_Pending))
-			return;
+		{
+			// Every decision is numbered (dc-2.0 section 6, C07): a kept command is the held one again, hl_seq + 1
+			if (!m_bHasHeld)
+			{
+				m_Session.Fail(DC_Session.END_SCRIPT_ERROR, string.Format("the driver gave no command at the first decision of episode %1 (physics step %2): there is no held command to keep", m_Session.GetEpisodeId(), physicsStep));
+				return;
+			}
+
+			m_Pending.CopyFrom(m_Held);
+		}
 
 		if (m_Pending.m_iDir < -1 || m_Pending.m_iDir > 1 || (m_bForwardOnly && m_Pending.m_iDir < 0))
 		{

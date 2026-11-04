@@ -33,7 +33,10 @@
 //     flight waits for it;
 //   - END: OnSessionStopping stops the grid (no new slot, no skipped row); the session drains until nothing is in
 //     flight or the timeout passed; a request still unresolved at the seal counts as images.pending_at_end and its
-//     row is written with done_render_frame empty.
+//     row is written with done_render_frame empty. The held rows live in a DC_ImageRowQueue that the session owns
+//     (DC_Session.RegisterImageQueue), so a world-teardown seal, which calls no module, still writes them;
+//   - OBSERVED (session_end.json observed): the Shape carrier's relayouts and layout failures as they happen, and
+//     whether it still draws at the seal.
 // A telemetry-only trial ("images": false, T0a) creates frames/ and the img stream but no fiducial and no request.
 // ============================================================================
 
@@ -55,6 +58,124 @@ class DC_ImageSlotRow
 	bool m_bCamAttached;
 	bool m_bResolved;
 	int m_iDoneFrame = -1;		//!< -1 = done_render_frame empty
+}
+
+//------------------------------------------------------------------------------------------------
+//! The img rows held until their slots resolve, written in slot order (dc-2.0 9.4). The session keeps the only strong
+//! reference (DC_Session.RegisterImageQueue) and closes it on a world-teardown seal, when no module is called: the
+//! rows are written then too (a request in flight keeps done_render_frame empty, images.pending_at_end)
+class DC_ImageRowQueue
+{
+	protected DC_Session m_Session;
+	protected DC_SessionStream m_Img;
+	protected ref DC_ProbeRow m_Row = new DC_ProbeRow();
+	protected ref array<ref DC_ImageSlotRow> m_aRows = {};
+	protected bool m_bClosed;
+
+	//------------------------------------------------------------------------------------------------
+	void DC_ImageRowQueue(DC_Session session, DC_SessionStream img)
+	{
+		m_Session = session;
+		m_Img = img;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void Insert(notnull DC_ImageSlotRow row)
+	{
+		m_aRows.Insert(row);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The held row of a slot, or null
+	DC_ImageSlotRow FindRow(int slot)
+	{
+		foreach (DC_ImageSlotRow row : m_aRows)
+		{
+			if (row.m_iSlot == slot)
+				return row;
+		}
+
+		return null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Writes the rows from the front of the queue while they are resolved (slot order)
+	void Flush(int worldMs)
+	{
+		while (!m_aRows.IsEmpty() && m_aRows[0].m_bResolved)
+		{
+			if (!m_Img || !m_Session || m_Session.HasWriteFailure())
+				return;
+
+			WriteRow(m_aRows[0], worldMs);
+			m_aRows.RemoveOrdered(0);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The seal: every held row resolves and is written. Idempotent
+	//! \return the issued rows still unresolved (requests in flight: images.pending_at_end)
+	int CloseAll(int worldMs)
+	{
+		if (m_bClosed)
+			return 0;
+
+		m_bClosed = true;
+		int pending = 0;
+		foreach (DC_ImageSlotRow held : m_aRows)
+		{
+			if (!held.m_bResolved && held.m_sStatus == DC_ImageScheduler.ISSUED)
+				pending++;
+
+			held.m_bResolved = true;
+		}
+
+		Flush(worldMs);
+		return pending;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	void Clear()
+	{
+		m_aRows.Clear();
+		m_Img = null;
+		m_Session = null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void WriteRow(notnull DC_ImageSlotRow row, int worldMs)
+	{
+		m_Row.Clear();
+		m_Row.AddInt(row.m_iSlot);
+		m_Row.AddInt(row.m_iEpisodeId);
+		m_Row.AddInt(row.m_iEgoSlotId);
+		m_Row.AddInt(row.m_iRequestedMs);
+		m_Row.AddString(row.m_sStatus);
+		if (row.m_bIssueFields)
+		{
+			m_Row.AddInt(row.m_iIssueWorldMs);
+			m_Row.AddInt(row.m_iIssueFrame);
+			m_Row.AddInt(row.m_iIssueStep);
+			m_Row.AddString(row.m_sRelPath);
+		}
+		else
+		{
+			m_Row.AddEmpty();
+			m_Row.AddEmpty();
+			m_Row.AddEmpty();
+			m_Row.AddEmpty();
+		}
+
+		m_Row.AddBool(row.m_bCamCurrent);
+		m_Row.AddBool(row.m_bCamAttached);
+		if (row.m_iDoneFrame >= 0)
+			m_Row.AddInt(row.m_iDoneFrame);
+		else
+			m_Row.AddEmpty();
+
+		if (!m_Img.AddRow(m_Row, row.m_iSlot, worldMs))
+			m_Session.FailWrite("img: " + m_Img.GetFailure());
+	}
 }
 
 //------------------------------------------------------------------------------------------------
@@ -108,13 +229,13 @@ class DC_ImageScheduler : DC_SessionModule
 	protected ref DC_FiducialShape m_Shapes;		//!< the SHAPE carrier (production)
 	protected bool m_bShapeFailed;					//!< the shape carrier refused once (readiness refused)
 	protected DC_ChunkWriter m_Img;
-	protected ref DC_ProbeRow m_Row = new DC_ProbeRow();
+	protected DC_ImageRowQueue m_Queue;			//!< the held rows (the session owns it, RegisterImageQueue)
 	protected bool m_bImages;
 	protected bool m_bDraining;
 	protected string m_sFrameDir;
 	protected int m_iPeriodMs = 200;
 	protected int m_iNextSlot;					//!< next grid point = next slot_id
-	protected ref array<ref DC_ImageSlotRow> m_aRows = {};	//!< rows not written yet, in slot order
+	protected int m_iShapeRelayoutsNoted = -1;		//!< the Shape carrier's relayouts last written to observed
 	protected ref array<string> m_aSuffixes = {};
 	protected ref array<int> m_aSuffixCounts = {};
 	protected string m_sFirstSuffix;
@@ -226,6 +347,7 @@ class DC_ImageScheduler : DC_SessionModule
 
 		m_Shapes = shapes;
 		PlaceShapes();
+		NoteShapeLayout();
 		array<string> lines = {};
 		m_Shapes.AppendHeaderLines(lines);
 		Print(LOG + "fiducial v2 shape carrier created:" + JoinLines(lines), LogLevel.NORMAL);
@@ -351,6 +473,9 @@ class DC_ImageScheduler : DC_SessionModule
 		bool opened = writer.Open(session.GetSessionDir(), "img", columns, IMG_CHUNK_ROWS, session.GetChunkMaxMs(), session.GetKeepLogsOpen(), session.GetVerifyChunkLength());
 		session.RegisterStream(writer);
 		m_Img = writer;
+		DC_ImageRowQueue rowQueue = new DC_ImageRowQueue(session, writer);
+		session.RegisterImageQueue(rowQueue);
+		m_Queue = rowQueue;
 		if (opened)
 			return true;
 
@@ -369,7 +494,25 @@ class DC_ImageScheduler : DC_SessionModule
 		{
 			m_Shapes.Show(renderFrame);
 			PlaceShapes();
+			NoteShapeLayout();
 		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! session_end observed: the Shape carrier's relayouts (a workspace size change) and those onto a canvas too small
+	//! for the bands (nothing drawn until the next size change), written when they change, so a teardown seal has them
+	protected void NoteShapeLayout()
+	{
+		int relayouts = m_Shapes.GetRelayouts();
+		if (relayouts == m_iShapeRelayoutsNoted)
+			return;
+
+		m_iShapeRelayoutsNoted = relayouts;
+		int failures = m_Shapes.GetLayoutFailures();
+		m_Session.NoteObserved("fiducial_shape_relayouts", relayouts.ToString());
+		m_Session.NoteObserved("fiducial_shape_layout_failures", failures.ToString());
+		if (failures > 0)
+			Print(string.Format(LOG + "WARNING: fiducial shape carrier: %1 relayout(s), %2 onto a canvas too small for the bands (nothing drawn until the next size change)", relayouts, failures), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -463,69 +606,26 @@ class DC_ImageScheduler : DC_SessionModule
 		}
 
 		m_Session.CountImageSlot(row.m_sStatus);
-		m_aRows.Insert(row);
+		if (m_Queue)
+			m_Queue.Insert(row);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! Writes the rows from the front of the queue while they are resolved (slot order)
 	protected void FlushRows(int worldMs)
 	{
-		while (!m_aRows.IsEmpty() && m_aRows[0].m_bResolved)
-		{
-			if (!m_Img || m_Session.HasWriteFailure())
-				return;
-
-			WriteRow(m_aRows[0], worldMs);
-			m_aRows.RemoveOrdered(0);
-		}
-	}
-
-	//------------------------------------------------------------------------------------------------
-	protected void WriteRow(notnull DC_ImageSlotRow row, int worldMs)
-	{
-		m_Row.Clear();
-		m_Row.AddInt(row.m_iSlot);
-		m_Row.AddInt(row.m_iEpisodeId);
-		m_Row.AddInt(row.m_iEgoSlotId);
-		m_Row.AddInt(row.m_iRequestedMs);
-		m_Row.AddString(row.m_sStatus);
-		if (row.m_bIssueFields)
-		{
-			m_Row.AddInt(row.m_iIssueWorldMs);
-			m_Row.AddInt(row.m_iIssueFrame);
-			m_Row.AddInt(row.m_iIssueStep);
-			m_Row.AddString(row.m_sRelPath);
-		}
-		else
-		{
-			m_Row.AddEmpty();
-			m_Row.AddEmpty();
-			m_Row.AddEmpty();
-			m_Row.AddEmpty();
-		}
-
-		m_Row.AddBool(row.m_bCamCurrent);
-		m_Row.AddBool(row.m_bCamAttached);
-		if (row.m_iDoneFrame >= 0)
-			m_Row.AddInt(row.m_iDoneFrame);
-		else
-			m_Row.AddEmpty();
-
-		if (!m_Img.AddRow(m_Row, row.m_iSlot, worldMs))
-			m_Session.FailWrite("img: " + m_Img.GetFailure());
+		if (m_Queue)
+			m_Queue.Flush(worldMs);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! The held row of a slot, or null
 	protected DC_ImageSlotRow FindRow(int slot)
 	{
-		foreach (DC_ImageSlotRow row : m_aRows)
-		{
-			if (row.m_iSlot == slot)
-				return row;
-		}
+		if (!m_Queue)
+			return null;
 
-		return null;
+		return m_Queue.FindRow(slot);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -606,14 +706,11 @@ class DC_ImageScheduler : DC_SessionModule
 		if (m_bInFlight)
 			pending = 1;
 
-		m_Session.SetImagesPending(pending);
 		// Every held row is written now: a request still in flight keeps done_render_frame empty (pending_at_end)
-		foreach (DC_ImageSlotRow held : m_aRows)
-		{
-			held.m_bResolved = true;
-		}
+		if (m_Queue)
+			pending = m_Queue.CloseAll(m_Session.GetWorldMs());
 
-		FlushRows(m_Session.GetWorldMs());
+		m_Session.SetImagesPending(pending);
 		string counts;
 		for (int i = 0, count = m_aSuffixes.Count(); i < count; i++)
 		{
@@ -631,6 +728,16 @@ class DC_ImageScheduler : DC_SessionModule
 			int relayouts = m_Fiducial.GetRelayouts();
 			m_Session.NoteObserved("fiducial_relayouts", relayouts.ToString());
 		}
+
+		if (m_Shapes)
+		{
+			NoteShapeLayout();
+			string drawing = "0";
+			if (m_Shapes.IsDrawing())
+				drawing = "1";
+
+			m_Session.NoteObserved("fiducial_shape_drawing_at_end", drawing);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -645,7 +752,7 @@ class DC_ImageScheduler : DC_SessionModule
 
 		m_Fiducial = null;
 		m_Shapes = null;
-		m_aRows.Clear();
+		m_Queue = null;			// the session drops it at its release
 		m_Img = null;
 		m_HfRecorder = null;
 	}

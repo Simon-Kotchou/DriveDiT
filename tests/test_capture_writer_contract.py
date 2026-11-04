@@ -217,9 +217,8 @@ class WriterContractTest(unittest.TestCase):
         self.assertIn("module.OnStepPre(m_iPhysicsStep, sliceS);", pre)
         self.assertIn("int worldMs = m_iCallbackWorldMs;", body(self.session, "protected void HandleStepPost("))
         clocks = body(self.session, "protected bool ComputeClocks(")
-        self.assertNotIn("GetFixedTimeSlice", clocks)
+        self.assertNotIn("GetFixedTimeSlice", re.sub(r'"[^"]*"', '""', clocks))     # the log line may name it
         self.assertIn("m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);", clocks)
-        self.assertIn("STEP_DT_TOLERANCE * m_fMeasuredStepS", clocks)
         self.assertIn("world.GetFixedSteps()", body(self.session, "protected void NoteFrameSteps("))
         self.assertIn("EntityEvent.POSTFRAME", body(self.session, "protected int GetDispatchEventMask("))
         for text in (self.session, self.recorder, self.ego):
@@ -272,6 +271,122 @@ class WriterContractTest(unittest.TestCase):
         self.assertLess(float(layer_value("DC_HfRecorder", "m_fNearPlaneM")), depth)
         enum = re.search(r"enum DC_EFiducialCarrier\s*\{(.*?)\}", source("DC_FiducialShape.c"), re.S).group(1)
         self.assertEqual(re.findall(r"^\s*(\w+),?", enum, re.M)[:3], ["WIDGET", "SHAPE", "BOTH"])
+
+    def test_step_dt_from_the_callback_ratio(self):
+        """Review round 1 (X2, C-L1): the step dt is the median of the readiness step callbacks' time slice / covered
+        steps when they agree, else the measured span; the reference model below is the Enforce code's rule."""
+        clocks = body(self.session, "protected bool ComputeClocks(")
+        self.assertIn("m_fStepRatioMedianS = MedianOf(m_aStepRatios);", clocks)
+        self.assertIn("m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;", clocks)
+        self.assertIn("ratios >= STEP_DT_MIN_RATIOS && m_fStepRatioMedianS > 0 && "
+                      "m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC", clocks)
+        self.assertIn("m_aStepRatios.Insert(timeSlice / coveredSteps);",
+                      body(self.session, "protected void NoteStepRatio("))
+        self.assertIn("NoteStepRatio(timeSlice, GetFrameFixedSteps());",
+                      body(self.session, "override void EOnFixedFrame("))
+        self.assertIn("NoteStepRatio(timeSlice, 1);", body(self.session, "override void EOnSimulate("))
+        consts = dict(re.findall(r"static const (?:int|float) (STEP_DT_\w+) = ([\d.]+);", self.session))
+        self.assertEqual((consts["STEP_DT_AGREEMENT"], consts["STEP_DT_AGREE_FRAC"], consts["STEP_DT_MIN_RATIOS"]),
+                         ("0.005", "0.9", "30"))
+        session_json = body(self.session, "protected bool WriteSessionJson(")
+        for key in ("readiness_step_ratio_median_s", "readiness_slice_ratio_median_s", "readiness_measured_step_s"):
+            self.assertIn('"%s"' % key, session_json)
+
+        def engine(frames_ms, step_ms=1000.0 / 30, cap=3):
+            """(frame time slices [s], fixed steps per frame, callback slices [s]) of an accumulator engine."""
+            acc, slices, steps, cb = 0.0, [], [], []
+            for ms in frames_ms:
+                acc += ms
+                n = min(cap, int(acc // step_ms))
+                acc -= n * step_ms
+                slices.append(ms / 1000.0)
+                steps.append(n)
+                if n:
+                    cb.append(n * step_ms / 1000.0)
+            return slices, steps, cb
+
+        def old_rule(slices, steps, cb_slices):
+            measured = sum(slices) / sum(steps)
+            one = [s for s, n in zip(cb_slices, [n for n in steps if n]) if n == 1]
+            if one and abs(one[-1] - measured) <= 0.05 * measured:
+                return one[-1], "engine"
+            return measured, "measured"
+
+        def new_rule(slices, steps, cb_slices, min_ratios=30, agreement=0.005, agree_frac=0.9):
+            ratios = sorted(s / n for s, n in zip(cb_slices, [n for n in steps if n]))
+            span_s = span_steps = 0
+            seen, total_s, after = False, 0.0, 0
+            for s, n in zip(slices, steps):
+                if not seen:
+                    seen = n > 0
+                    continue
+                total_s += s
+                after += n
+                if n:
+                    span_s, span_steps = total_s, after
+            measured = span_s / span_steps if span_steps else 0.0
+            if ratios:
+                mid = len(ratios) // 2
+                median = ratios[mid] if len(ratios) % 2 else 0.5 * (ratios[mid - 1] + ratios[mid])
+                agree = sum(1 for r in ratios if abs(r - median) <= agreement * median) / float(len(ratios))
+                if len(ratios) >= min_ratios and agree >= agree_frac:
+                    return median, "engine"
+            return measured, "measured"
+
+        # Codex's case: 15 frames of 68 ms, 2 steps each (no one-step frame): the old rule measured 1.020 / 30 s
+        slices, steps, cb = engine([68.0] * 15)
+        self.assertEqual(steps, [2] * 15)
+        dt, src = old_rule(slices, steps, cb)
+        self.assertEqual(src, "measured")
+        self.assertAlmostEqual(dt * 30, 1.020, places=9)
+        dt, src = new_rule(slices, steps, cb, min_ratios=15)
+        self.assertEqual(src, "engine")
+        self.assertAlmostEqual(dt, 1.0 / 30, places=12)
+        # capture frames merging 1-3 steps, 60 FPS idle frames: the ratio is the step on every frame
+        frames = ([16.7] * 40 + [27.0, 80.0, 25.0, 70.0] * 15) * 2
+        slices, steps, cb = engine(frames)
+        self.assertGreater(sum(1 for n in steps if n > 1), 20)
+        dt, src = new_rule(slices, steps, cb)
+        self.assertEqual(src, "engine")
+        self.assertAlmostEqual(dt, 1.0 / 30, places=12)
+        # disagreeing ratios fall back to the measured span, which leaves out the remainder before the first step
+        noisy = [s * f for s, f in zip(cb, [1.0, 1.1, 0.9, 1.05] * len(cb))]
+        dt, src = new_rule(slices, steps, noisy)
+        self.assertEqual(src, "measured")
+        self.assertLess(abs(dt * 30 - 1.0), 1.0 / sum(steps[1:]) + 1e-9)
+
+    def test_review_round1_capture_rules(self):
+        """X6 (a trial conf at 5 Hz is the default setting), C-M4 (near plane in session.json and rig_id), C-L2
+        (the held img rows survive a teardown seal), C-L3 (the Shape carrier's layout in observed), X7 (a kept
+        command is numbered again)."""
+        rates = body(self.session, "protected bool CheckRates(")
+        self.assertRegex(rates, r"if \(isDefault\)\s*\{\s*m_fImageHz = DEFAULT_IMAGE_HZ;\s*"
+                                r"m_sImageHzSetting = IMAGE_HZ_DEFAULT;")
+        self.assertIn("m_sImageHzSetting = IMAGE_HZ_TRIAL_CONF;", rates)
+        hf = source("DC_HfRecorder.c")
+        self.assertIn('json.AddFloat("near_plane_m", GetNearPlaneRead(), 4);',
+                      body(hf, "override void WriteSessionJson("))
+        self.assertIn('"|n" + GetNearPlaneRead().ToString(-1, 3)', body(hf, "override string GetRigIdPart("))
+        self.assertIn("return camera.GetNearPlane();", body(hf, "protected float GetNearPlaneRead("))
+        seal = body(self.session, "protected void Seal(")
+        self.assertIn("m_iImagesPending = m_ImageQueue.CloseAll(GetWorldMs());", seal)
+        self.assertLess(seal.index("m_ImageQueue.CloseAll"), seal.index("CloseStreams(endReason);"))
+        images = source("DC_ImageScheduler.c")
+        self.assertIn("session.RegisterImageQueue(rowQueue);", body(images, "override bool OnSessionOpen("))
+        self.assertIn("pending = m_Queue.CloseAll(m_Session.GetWorldMs());",
+                      body(images, "override void OnSessionClosing("))
+        self.assertNotIn("m_aRows", images[images.index("class DC_ImageScheduler : DC_SessionModule"):])
+        layout = body(images, "protected void NoteShapeLayout(")
+        for key in ("fiducial_shape_relayouts", "fiducial_shape_layout_failures"):
+            self.assertIn('"%s"' % key, layout)
+        self.assertIn('"fiducial_shape_drawing_at_end"', body(images, "override void OnSessionClosing("))
+        # C-L4: the declared field is an int, not one of the observed strings
+        end = body(self.session, "protected bool WriteSessionEnd(")
+        self.assertIn('json.AddInt("decision_grid_points_skipped", m_iDecisionGridSkipped);', end)
+        self.assertNotIn('NoteObserved("decision_grid_points_skipped"', self.session)
+        decide = body(self.recorder, "override void OnStepDecide(")
+        self.assertIn("m_Pending.CopyFrom(m_Held);", decide)
+        self.assertIn("if (!m_bHasHeld)", decide)
 
     def test_out_parameters_are_assigned_on_entry(self):
         sig = re.compile(r"^\t(?:[a-z]+ )*[\w<>]+ (\w+)\(([^)]*\bout\b[^)]*)\)\n\t\{", re.M)

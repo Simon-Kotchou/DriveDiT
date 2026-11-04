@@ -184,17 +184,26 @@ of `t0/freeze/DECISIONS_dc2_freeze.md`):
 - **Frame-bound rows (D-A).** The game mode gets one `EOnFixedFrame` / `EOnPostFixedFrame` pair per render frame
   with a fixed step, covering 1 to 3 merged steps of 1/30 s on 1.8. Every callback writes one `ctl` and one
   `telemetry` row: `physics_step` (the last step it covers), `covered_steps`, `render_frame`, `world_time_ms`. The
-  step dt is measured during readiness (`[DC_Session] clocks: step dt ...` line; `session.json engine.step_dt_s`),
-  never `GetFixedTimeSlice()` (it reports n/30 per frame). Drivers get `timeSlice` = covered steps x step dt.
+  step dt is measured during readiness (`[DC_Session] clocks: step dt ...` line; `session.json engine.step_dt_s`):
+  the median of the step callbacks' time slice / covered steps (`engine`, exact also in merged frames), the measured
+  span only when those disagree (`measured`); both go to `session.json observed.readiness_*`. Never
+  `GetFixedTimeSlice()` alone (it reports n/30 per frame). Drivers get `timeSlice` = covered steps x step dt.
+- **Numbered decisions.** `hl_seq` advances on the callback after every decision callback of an episode; a driver
+  whose `Decide` returns false keeps the held command, which the core numbers again (C07). False at an episode's
+  first decision fails the session.
 - **Decisions and images on one world-time grid.** Every 200 ms at the default 5 Hz from the first callback's world
   time; a decision is taken in the first callback at or past a grid point and applies from the next callback. 10 Hz
-  only through the trial conf key `"image_hz": 10` (`clocks.image_hz_setting` `trial_conf`); the layer must keep
-  `m_fImageHz 5`, any other value refuses the session.
+  only through the trial conf key `"image_hz": 10` (`clocks.image_hz_setting` `trial_conf`; a trial conf with
+  `"image_hz": 5` runs the default and is stamped `default`); the layer must keep `m_fImageHz 5`, any other value
+  refuses the session.
 - **Images.** The fiducial is the debug-Shape carrier (`m_eFiducialCarrier 1` = SHAPE) 0.05 m in front of the rig
   camera (`m_fShapeDepthM`), so the rig's near plane is 0.03 m (`DC_HfRecorder m_fNearPlaneM`; the probes drew the
-  bands at 1 m with a 0.1 m near plane). The widget carrier (0) is a diagnostic only: widgets never reach
+  bands at 1 m with a 0.1 m near plane, the documented fallback). The near plane is written to `session.json
+  rig.near_plane_m` and is part of `rig_id`. The widget carrier (0) is a diagnostic only: widgets never reach
   `MakeScreenshot` files. Each `img` row is written when its slot resolves, with `done_render_frame` (the captured
-  frame is `done_render_frame - 1` in Workbench).
+  frame is `done_render_frame - 1` in Workbench); the held rows belong to the session, so a world-teardown seal
+  writes them too (a request in flight with `done_render_frame` empty). The Shape carrier's relayouts and layout
+  failures go to `session_end.json observed.fiducial_shape_*`.
 - **Signs.** `DC_StreamRecorder m_iSteerSign 1` (a positive `SetSteering` turns right, E-01 run 3).
 
 What only a Play confirms: the step-dt line (`engine` source, 0.033333 s), rows with `covered_steps` 2-3 on screenshot
@@ -379,7 +388,7 @@ with `python3 -I -B`; scripts without a folder are in `tools/probes/t0eng/`.
 | e20 | render-settings dump | < 1 s | `e20_settings.py <play_dir> [--compare <client play_dir>] [--profile-dir <dir>]` |
 | e19 | writer return values | < 5 s | `e19_write.py <play_dir>` |
 | e19kill | taskkill consistency (opt-in) | until killed, max 300 s | `e19_write.py [<e19 play_dir>] --kill <play_dir>` |
-| e08a | engine road dump | ~10-60 s | `tools/roads/compare_dump_decoder.py <play_dir> --decoder <Arland_road_polylines.tsv>` |
+| e08a | engine road dump | ~10-60 s | `tools/roads/compare_dump_decoder.py <play_dir> --decoder <Arland_road_polylines_v2.tsv>` |
 | e01 | Mode A actuation identification | ~6 min | `e01_actuation.py e01 <play_dir>` |
 | e02a | first-pass steer -> kappa | ~10-15 min | `e01_actuation.py e02a <play_dir>` |
 | e05 | R1 camera, 10 Hz screenshots (E-05, E-06) | 10 min | `e05_images.py <play_dir> --log <console.log>`, `e06_fiducial.py <play_dir>` |

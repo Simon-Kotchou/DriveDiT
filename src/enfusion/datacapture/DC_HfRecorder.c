@@ -21,8 +21,9 @@
 //   (System.GetFPS()). A frame number that does not advance is not written again (counted in session_end
 //   observed.hf_frame_repeats).
 //
-// session.json rig.*: rig_name, mount, vfov_deg (read back from the camera); rig_id part: rig, vehicle, mount,
-// pitch, vFOV. Release: the previous camera is current again and the rig camera is deleted; on world teardown the
+// session.json rig.*: rig_name, mount, vfov_deg and near_plane_m (read back from the camera); rig_id part: rig,
+// vehicle, mount, pitch, vFOV, near plane (it sets the depth precision of every pixel and whether the Shape fiducial
+// at DC_ImageScheduler m_fShapeDepthM is drawn: 0.03 m with 0.05 m is the default, 0.1 m with 1.0 m the fallback). Release: the previous camera is current again and the rig camera is deleted; on world teardown the
 // camera dies with the world and only the reference is dropped.
 // ============================================================================
 
@@ -119,7 +120,21 @@ class DC_HfRecorder : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! rig.rig_name, rig.mount, rig.vfov_deg
+	//! The near plane of the rig camera as read back (CameraBase.GetNearPlane, CameraBase.c:44), else the attribute
+	protected float GetNearPlaneRead()
+	{
+		if (m_Rig)
+		{
+			CameraBase camera = m_Rig.GetCamera();
+			if (camera)
+				return camera.GetNearPlane();
+		}
+
+		return m_fNearPlaneM;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! rig.rig_name, rig.mount, rig.vfov_deg, rig.near_plane_m
 	override void WriteSessionJson(string section, notnull DC_JsonWriter json)
 	{
 		if (section != "rig")
@@ -137,10 +152,11 @@ class DC_HfRecorder : DC_SessionModule
 			vFovRead = m_Rig.GetVerticalFovRead();
 
 		json.AddFloat("vfov_deg", vFovRead, 4);
+		json.AddFloat("near_plane_m", GetNearPlaneRead(), 4);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! rig_id part: rig, vehicle, mount x,y,z, pitch, vFOV read back
+	//! rig_id part: rig, vehicle, mount x,y,z, pitch, vFOV and near plane read back
 	override string GetRigIdPart()
 	{
 		float vFovRead = m_fVerticalFovDeg;
@@ -149,7 +165,7 @@ class DC_HfRecorder : DC_SessionModule
 
 		string mount = DC_RigR1.FormatVector(m_vMountPos, 3);
 		mount.Replace(" ", ",");
-		return DC_RigR1.RIG_NAME + "|" + m_sVehicleName + "|m" + mount + "|p" + m_fMountPitchDeg.ToString(-1, 2) + "|v" + vFovRead.ToString(-1, 2);
+		return DC_RigR1.RIG_NAME + "|" + m_sVehicleName + "|m" + mount + "|p" + m_fMountPitchDeg.ToString(-1, 2) + "|v" + vFovRead.ToString(-1, 2) + "|n" + GetNearPlaneRead().ToString(-1, 3);
 	}
 
 	//------------------------------------------------------------------------------------------------

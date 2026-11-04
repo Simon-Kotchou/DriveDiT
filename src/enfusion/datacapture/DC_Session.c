@@ -54,11 +54,16 @@
 // STEP TIMING (dc-2.0 section 6, D-A; probe runs 3-4 on 1.8: fixed steps of 1/30 s, 1 to 3 merged into one
 //   EOnFixedFrame while capturing): BaseWorld.GetFixedTimeSlice() reports n/30 for a frame of n steps and is never
 //   the step dt (session.json engine.fixed_time_slice_s keeps its value at the open for provenance only). During
-//   readiness the unpaused EOnFrame time slices and GetFixedSteps() are summed; once STEP_DT_MIN_STEPS steps were
-//   seen the step dt is the step callback's time slice of a one-step frame when it lies within STEP_DT_TOLERANCE of
-//   the measured fixed step (sum of time slices / sum of steps), else the measured value (engine.step_dt_s,
-//   engine.step_dt_source engine or measured). physics_steps_per_decision N = floor(1000 / decision_hz /
-//   step_dt_ms + 0.5) (6 at the 5 Hz default).
+//   readiness every unpaused step callback gives one ratio, its time slice / the fixed steps of its frame (the
+//   EOnFixedFrame slice is covered_steps x the step: covered / 30 on 21296 of 21296 rows of run 3, so the ratio is
+//   the step even in merged frames; 1 step per EOnSimulate); BaseWorld.GetFixedTimeSlice() / GetFixedSteps() read in
+//   the same callback is kept as a cross-check. Once STEP_DT_MIN_RATIOS ratios and STEP_DT_MIN_STEPS steps were
+//   seen, the step dt is their median when at least STEP_DT_AGREE_FRAC of them lie within STEP_DT_AGREEMENT of it
+//   (engine.step_dt_source engine); otherwise, or when no step callback came within STEP_DT_MAX_WAIT_STEPS, it is the
+//   measured fixed step (measured): the EOnFrame time slices after the first frame with a step through the last one
+//   over the steps run in them, which leaves out the remainder the accumulator held before the first step (an error
+//   below one step over the steps counted, of either sign). Both values are written to session.json observed.
+//   physics_steps_per_decision N = floor(1000 / decision_hz / step_dt_ms + 0.5) (6 at the 5 Hz default).
 //
 // TBD PARAMETERS (dc-2.0 section 1; [Attribute]s with the value decided at the freeze, recorded in session.json):
 //   TBD-1 frame-bound rows and the measured step dt (above), TBD-2 image rate (5 Hz default; 10 Hz only through the
@@ -545,10 +550,14 @@ class DC_Session : SCR_BaseGameModeComponent
 	static const float OVERRIDE_IMAGE_HZ = 10;
 	static const string IMAGE_HZ_DEFAULT = "default";
 	static const string IMAGE_HZ_TRIAL_CONF = "trial_conf";
-	//! STEP TIMING: fixed steps summed in readiness before the step dt is chosen (about 1 s at 30 steps per second)
+	//! STEP TIMING: fixed steps and step-callback ratios seen in readiness before the step dt is chosen
 	static const int STEP_DT_MIN_STEPS = 30;
-	//! STEP TIMING: the step callback's time slice must lie this close to the measured fixed step (relative)
-	static const float STEP_DT_TOLERANCE = 0.05;
+	static const int STEP_DT_MIN_RATIOS = 30;
+	//! STEP TIMING: without enough step callbacks after this many fixed steps the measured fixed step is taken
+	static const int STEP_DT_MAX_WAIT_STEPS = 300;
+	//! STEP TIMING: a ratio agrees within this relative distance of the median; this fraction of them must agree
+	static const float STEP_DT_AGREEMENT = 0.005;
+	static const float STEP_DT_AGREE_FRAC = 0.9;
 	static const string STEP_DT_ENGINE = "engine";
 	static const string STEP_DT_MEASURED = "measured";
 	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
@@ -585,6 +594,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected ref DC_LaunchInfo m_LaunchInfo;
 	protected ref array<DC_SessionModule> m_aModules = {};		//!< sorted by GetDispatchOrder
 	protected ref array<ref DC_SessionStream> m_aStreams = {};	//!< the only strong references to the writers
+	protected ref DC_ImageRowQueue m_ImageQueue;	//!< the held img rows (DC_ImageScheduler), written at any seal
 
 	// trial
 	protected string m_sTrialId;
@@ -615,11 +625,19 @@ class DC_Session : SCR_BaseGameModeComponent
 	// step timing (STEP TIMING): measured in readiness
 	protected float m_fStepDtS;					//!< 0 until measured
 	protected string m_sStepDtSource;
-	protected float m_fMeasuredStepS;
-	protected float m_fReadinessFrameS;			//!< Kahan sum of the unpaused EOnFrame time slices in readiness
+	protected float m_fMeasuredStepS;			//!< m_fSpanS / m_iSpanSteps (the measured fixed step)
+	protected int m_iReadinessFixedSteps;		//!< sum of GetFixedSteps() over the unpaused readiness frames
+	protected bool m_bReadinessStepSeen;		//!< the first readiness frame with a fixed step has passed
+	protected float m_fReadinessFrameS;			//!< Kahan sum of the EOnFrame time slices after that frame
 	protected float m_fReadinessFrameCompS;
-	protected int m_iReadinessFixedSteps;		//!< sum of GetFixedSteps() over those frames
-	protected float m_fOneStepSliceS;			//!< step callback time slice of the last frame with one fixed step
+	protected int m_iReadinessStepsAfter;		//!< fixed steps of the frames after it
+	protected float m_fSpanS;					//!< m_fReadinessFrameS at the last frame with a fixed step
+	protected int m_iSpanSteps;					//!< m_iReadinessStepsAfter at that frame
+	protected ref array<float> m_aStepRatios = {};	//!< per step callback: time slice / fixed steps of its frame
+	protected ref array<float> m_aSliceRatios = {};	//!< per step callback: GetFixedTimeSlice() / GetFixedSteps()
+	protected float m_fStepRatioMedianS;
+	protected float m_fStepRatioAgreeFrac;
+	protected float m_fSliceRatioMedianS;
 	protected int m_iFrameFixedSteps;			//!< GetFixedSteps() as this frame's EOnFrame read it
 	protected int m_iFrameFixedStepsFrame = -1;
 
@@ -1110,10 +1128,17 @@ class DC_Session : SCR_BaseGameModeComponent
 			return false;
 		}
 
+		// D-B: the setting names the rate, not where it came from: a trial conf that sets 5 Hz still runs the default
 		if (isDefault)
+		{
 			m_fImageHz = DEFAULT_IMAGE_HZ;
+			m_sImageHzSetting = IMAGE_HZ_DEFAULT;
+		}
 		else
+		{
 			m_fImageHz = OVERRIDE_IMAGE_HZ;
+			m_sImageHzSetting = IMAGE_HZ_TRIAL_CONF;
+		}
 
 		m_iDecisionPeriodMs = Math.Round(1000 / m_fImageHz);
 		m_iImagePeriodMs = m_iDecisionPeriodMs;
@@ -1129,32 +1154,77 @@ class DC_Session : SCR_BaseGameModeComponent
 		m_fStepDtS = 0;
 		m_sStepDtSource = string.Empty;
 		m_fMeasuredStepS = 0;
-		if (m_iReadinessFixedSteps > 0)
-			m_fMeasuredStepS = m_fReadinessFrameS / m_iReadinessFixedSteps;
+		if (m_iSpanSteps > 0)
+			m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;
 
-		if (m_fMeasuredStepS <= 0)
+		int ratios = m_aStepRatios.Count();
+		m_fStepRatioMedianS = MedianOf(m_aStepRatios);
+		m_fSliceRatioMedianS = MedianOf(m_aSliceRatios);
+		m_fStepRatioAgreeFrac = 0;
+		if (ratios > 0 && m_fStepRatioMedianS > 0)
 		{
-			failure = "no engine fixed step in the readiness frames: the step dt cannot be measured";
-			return false;
+			float agree = 0;		// float: an int quotient would truncate
+			foreach (float ratio : m_aStepRatios)
+			{
+				if (Math.AbsFloat(ratio - m_fStepRatioMedianS) <= STEP_DT_AGREEMENT * m_fStepRatioMedianS)
+					agree += 1;
+			}
+
+			m_fStepRatioAgreeFrac = agree / ratios;
 		}
 
-		if (m_fOneStepSliceS > 0 && Math.AbsFloat(m_fOneStepSliceS - m_fMeasuredStepS) <= STEP_DT_TOLERANCE * m_fMeasuredStepS)
+		if (ratios >= STEP_DT_MIN_RATIOS && m_fStepRatioMedianS > 0 && m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC)
 		{
-			m_fStepDtS = m_fOneStepSliceS;
+			m_fStepDtS = m_fStepRatioMedianS;
 			m_sStepDtSource = STEP_DT_ENGINE;
 		}
-		else
+		else if (m_fMeasuredStepS > 0)
 		{
 			m_fStepDtS = m_fMeasuredStepS;
 			m_sStepDtSource = STEP_DT_MEASURED;
+		}
+		else
+		{
+			failure = "no engine fixed step in the readiness frames: the step dt cannot be measured";
+			return false;
 		}
 
 		m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);
 		if (m_iStepsPerDecision < 1)
 			m_iStepsPerDecision = 1;
 
-		Print(string.Format(LOG + "clocks: step dt %1 s (%2; one-step callback slice %3 s, measured %4 s over %5 fixed steps), N=%6 steps per %7 ms decision", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fOneStepSliceS.ToString(-1, 6), m_fMeasuredStepS.ToString(-1, 6), m_iReadinessFixedSteps, m_iStepsPerDecision, m_iDecisionPeriodMs), LogLevel.NORMAL);
+		Print(string.Format(LOG + "clocks: step dt %1 s (%2; callback ratio median %3 s over %4 callbacks, %5 of them within 0.5 percent; GetFixedTimeSlice / GetFixedSteps median %6 s; measured %7 s over %8 fixed steps), N=%9 steps per decision", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fStepRatioMedianS.ToString(-1, 6), ratios, m_fStepRatioAgreeFrac.ToString(-1, 3), m_fSliceRatioMedianS.ToString(-1, 6), m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, m_iStepsPerDecision), LogLevel.NORMAL);
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the median of the values (sorted in place; the mean of the two middle values of an even count), 0
+	//! when empty
+	protected float MedianOf(notnull array<float> values)
+	{
+		int n = values.Count();
+		if (n == 0)
+			return 0;
+
+		values.Sort();
+		int mid = n / 2;
+		if (n % 2 == 1)
+			return values[mid];
+
+		return 0.5 * (values[mid - 1] + values[mid]);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: one ratio per unpaused readiness step callback (coveredSteps = the fixed steps of its frame)
+	protected void NoteStepRatio(float timeSlice, int coveredSteps)
+	{
+		if (m_ePhase != DC_ESessionPhase.PREPARING || m_fStepDtS > 0 || IsPaused() || coveredSteps <= 0)
+			return;
+
+		m_aStepRatios.Insert(timeSlice / coveredSteps);
+		BaseWorld world = GetGame().GetWorld();
+		if (world && world.GetFixedSteps() > 0)
+			m_aSliceRatios.Insert(world.GetFixedTimeSlice() / world.GetFixedSteps());
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1566,8 +1636,12 @@ class DC_Session : SCR_BaseGameModeComponent
 		// Not in the dc-2.0 field table: run-time facts behind the TBD tolerances (proposed for the freeze)
 		json.BeginObject("observed");
 		json.AddString("step_source", m_sStepSource);
+		json.AddFloat("readiness_step_ratio_median_s", m_fStepRatioMedianS, 9);
+		json.AddInt("readiness_step_ratios", m_aStepRatios.Count());
+		json.AddFloat("readiness_step_ratio_agree_frac", m_fStepRatioAgreeFrac, 4);
+		json.AddFloat("readiness_slice_ratio_median_s", m_fSliceRatioMedianS, 9);
 		json.AddFloat("readiness_measured_step_s", m_fMeasuredStepS, 9);
-		json.AddFloat("readiness_one_step_slice_s", m_fOneStepSliceS, 9);
+		json.AddInt("readiness_measured_span_steps", m_iSpanSteps);
 		json.AddInt("readiness_fixed_steps", m_iReadinessFixedSteps);
 		json.AddInt("readiness_simulate_events", m_iSimulateCount);
 		json.AddInt("readiness_fixedframe_events", m_iFixedFrameCount);
@@ -1933,7 +2007,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	override void EOnSimulate(IEntity owner, float timeSlice)
 	{
 		m_iSimulateCount++;
-		m_fOneStepSliceS = timeSlice;		// one call per fixed step
+		NoteStepRatio(timeSlice, 1);		// one call per fixed step
 		if (m_sStepSource == STEP_SIMULATE)
 			HandleStepPre(timeSlice);
 	}
@@ -1950,8 +2024,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	override void EOnFixedFrame(IEntity owner, float timeSlice)
 	{
 		m_iFixedFrameCount++;
-		if (GetFrameFixedSteps() == 1)
-			m_fOneStepSliceS = timeSlice;		// STEP TIMING: a one-step frame's slice is the step dt
+		NoteStepRatio(timeSlice, GetFrameFixedSteps());		// STEP TIMING: the slice covers the frame's steps
 
 		if (m_sStepSource == STEP_FIXEDFRAME)
 			HandleStepPre(timeSlice);
@@ -1994,8 +2067,10 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! STEP TIMING: GetFixedSteps() of this frame for its callback; in readiness the unpaused frames' time slices and
-	//! fixed steps are summed, and the clocks follow once STEP_DT_MIN_STEPS steps were seen
+	//! STEP TIMING: GetFixedSteps() of this frame for its callback; in readiness the unpaused frames' fixed steps are
+	//! counted and, after the first frame with a step, their time slices summed (the measured span); the clocks follow
+	//! once STEP_DT_MIN_STEPS steps and STEP_DT_MIN_RATIOS step-callback ratios were seen, or after
+	//! STEP_DT_MAX_WAIT_STEPS steps without them
 	protected void NoteFrameSteps(float timeSlice)
 	{
 		BaseWorld world = GetGame().GetWorld();
@@ -2008,12 +2083,31 @@ class DC_Session : SCR_BaseGameModeComponent
 			return;
 
 		m_iReadinessFixedSteps += m_iFrameFixedSteps;
-		// Kahan summation (as DC_ProbeRunner.MeasureFrame)
-		float addS = timeSlice - m_fReadinessFrameCompS;
-		float sumS = m_fReadinessFrameS + addS;
-		m_fReadinessFrameCompS = (sumS - m_fReadinessFrameS) - addS;
-		m_fReadinessFrameS = sumS;
+		if (!m_bReadinessStepSeen)
+		{
+			// the accumulator's remainder before the first step is not a step: the span starts after this frame
+			m_bReadinessStepSeen = m_iFrameFixedSteps > 0;
+		}
+		else
+		{
+			// Kahan summation (as DC_ProbeRunner.MeasureFrame)
+			float addS = timeSlice - m_fReadinessFrameCompS;
+			float sumS = m_fReadinessFrameS + addS;
+			m_fReadinessFrameCompS = (sumS - m_fReadinessFrameS) - addS;
+			m_fReadinessFrameS = sumS;
+			m_iReadinessStepsAfter += m_iFrameFixedSteps;
+			if (m_iFrameFixedSteps > 0)
+			{
+				m_fSpanS = m_fReadinessFrameS;
+				m_iSpanSteps = m_iReadinessStepsAfter;
+			}
+		}
+
+		// the ratios of this frame's callbacks follow its EOnFrame: count those of the earlier frames
 		if (m_iReadinessFixedSteps < STEP_DT_MIN_STEPS)
+			return;
+
+		if (m_aStepRatios.Count() < STEP_DT_MIN_RATIOS && m_iReadinessFixedSteps < STEP_DT_MAX_WAIT_STEPS)
 			return;
 
 		string failure;
@@ -2292,6 +2386,12 @@ class DC_Session : SCR_BaseGameModeComponent
 				module.OnSessionClosing(endReason);
 			}
 		}
+		else if (m_ImageQueue && endReason != END_ZERO_EGO)
+		{
+			// World teardown calls no module: the held img rows are written here (the image scheduler's
+			// OnSessionClosing does it otherwise), a request in flight with done_render_frame empty
+			m_iImagesPending = m_ImageQueue.CloseAll(GetWorldMs());
+		}
 
 		if (endReason == END_ZERO_EGO)
 		{
@@ -2460,9 +2560,10 @@ class DC_Session : SCR_BaseGameModeComponent
 		NoteObserved("merged_fixed_steps", m_iMergedSteps.ToString());
 		NoteObserved("max_covered_steps", m_iMaxCoveredSteps.ToString());
 		NoteObserved("zero_step_callbacks", m_iZeroStepCallbacks.ToString());
-		NoteObserved("decision_grid_points_skipped", m_iDecisionGridSkipped.ToString());
 		NoteObserved("failure", m_sFailureDetail);
 		json.BeginObject("observed");
+		// the one contract field of the object (dc-2.0 10.2, int; C08 compares it with its rebuild of the grid)
+		json.AddInt("decision_grid_points_skipped", m_iDecisionGridSkipped);
 		for (int i = 0, count = m_aObservedKeys.Count(); i < count; i++)
 		{
 			json.AddString(m_aObservedKeys[i], m_aObservedValues[i]);
@@ -2526,6 +2627,10 @@ class DC_Session : SCR_BaseGameModeComponent
 		}
 
 		m_aModules.Clear();
+		if (m_ImageQueue)
+			m_ImageQueue.Clear();
+
+		m_ImageQueue = null;
 		ArmaReforgerScripted game = GetGame();
 		if (game)
 		{
@@ -2678,6 +2783,14 @@ class DC_Session : SCR_BaseGameModeComponent
 	void RegisterStream(notnull DC_SessionStream stream)
 	{
 		m_aStreams.Insert(stream);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The held img rows: the session keeps the only strong reference so that a world-teardown seal, which calls no
+	//! module, still writes them (dc-2.0 section 6: a seal without drain writes the row of a request in flight)
+	void RegisterImageQueue(notnull DC_ImageRowQueue rowQueue)
+	{
+		m_ImageQueue = rowQueue;
 	}
 
 	//------------------------------------------------------------------------------------------------

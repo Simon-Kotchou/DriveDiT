@@ -24,6 +24,7 @@ script src/enfusion/datacapture/SCR_MLDataCollector.c
 script src/enfusion/datacapture/SCR_MLScreenshotCapture.c
 script src/enfusion/datacapture/SCR_AnchorFrameSelector.c
 script src/enfusion/datacapture/SCR_MLDataCaptureDirector.c
+script src/enfusion/datacapture/DC_Gates.c
 
 # DC_Probes_Arland: the T0-ENG probe world (DD-4-probe). One deploy carries both worlds; DC_Arland is unchanged.
 addon  addons/DataCapture/worlds/DataCapture/DC_Probes_Arland.ent

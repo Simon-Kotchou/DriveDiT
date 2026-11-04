@@ -57,12 +57,17 @@
 //   readiness every unpaused step callback gives one ratio, its time slice / the fixed steps of its frame (the
 //   EOnFixedFrame slice is covered_steps x the step: covered / 30 on 21296 of 21296 rows of run 3, so the ratio is
 //   the step even in merged frames; 1 step per EOnSimulate); BaseWorld.GetFixedTimeSlice() / GetFixedSteps() read in
-//   the same callback is kept as a cross-check. Once STEP_DT_MIN_RATIOS ratios and STEP_DT_MIN_STEPS steps were
-//   seen, the step dt is their median when at least STEP_DT_AGREE_FRAC of them lie within STEP_DT_AGREEMENT of it
-//   (engine.step_dt_source engine); otherwise, or when no step callback came within STEP_DT_MAX_WAIT_STEPS, it is the
-//   measured fixed step (measured): the EOnFrame time slices after the first frame with a step through the last one
-//   over the steps run in them, which leaves out the remainder the accumulator held before the first step (an error
-//   below one step over the steps counted, of either sign). Both values are written to session.json observed.
+//   the same callback is kept as a cross-check. After every readiness frame (once STEP_DT_MIN_STEPS steps and
+//   STEP_DT_MIN_RATIOS ratios were seen) TryChooseStepDt decides, never locking in a guess:
+//     - engine: at least STEP_DT_AGREE_FRAC of the ratios lie within STEP_DT_AGREEMENT of their median -> the median;
+//     - measured: else the measured span (the EOnFrame time slices after the first frame with a step through the
+//       last one, over the steps run in them) once it is long (STEP_DT_SPAN_MIN_STEPS), stable (its two halves, split
+//       at half its steps, agree within STEP_DT_AGREEMENT) and confirms the ratio median within STEP_DT_AGREEMENT.
+//       The span's endpoint error (the accumulator remainder and backlog at both ends) is not bounded by itself;
+//       these conditions keep it within half of C28's 1% tolerance of the median;
+//     - neither: the measurement goes on; at the readiness timeout readiness is refused with the reason
+//       (m_sStepDtWaiting), so no session opens with an untrustworthy step dt.
+//   All values go to session.json observed.
 //   physics_steps_per_decision N = floor(1000 / decision_hz / step_dt_ms + 0.5) (6 at the 5 Hz default).
 //
 // TBD PARAMETERS (dc-2.0 section 1; [Attribute]s with the value decided at the freeze, recorded in session.json):
@@ -553,11 +558,12 @@ class DC_Session : SCR_BaseGameModeComponent
 	//! STEP TIMING: fixed steps and step-callback ratios seen in readiness before the step dt is chosen
 	static const int STEP_DT_MIN_STEPS = 30;
 	static const int STEP_DT_MIN_RATIOS = 30;
-	//! STEP TIMING: without enough step callbacks after this many fixed steps the measured fixed step is taken
-	static const int STEP_DT_MAX_WAIT_STEPS = 300;
-	//! STEP TIMING: a ratio agrees within this relative distance of the median; this fraction of them must agree
+	//! STEP TIMING: a ratio agrees within this relative distance of the median; this fraction of them must agree.
+	//! The same distance bounds the measured span's halves and its distance to the median (half of C28's 1%)
 	static const float STEP_DT_AGREEMENT = 0.005;
 	static const float STEP_DT_AGREE_FRAC = 0.9;
+	//! STEP TIMING: the measured span counts only from this many steps (3 s at 1/30 s)
+	static const int STEP_DT_SPAN_MIN_STEPS = 90;
 	static const string STEP_DT_ENGINE = "engine";
 	static const string STEP_DT_MEASURED = "measured";
 	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
@@ -633,6 +639,11 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected int m_iReadinessStepsAfter;		//!< fixed steps of the frames after it
 	protected float m_fSpanS;					//!< m_fReadinessFrameS at the last frame with a fixed step
 	protected int m_iSpanSteps;					//!< m_iReadinessStepsAfter at that frame
+	protected ref array<float> m_aSpanTimesS = {};	//!< m_fSpanS after each frame with a fixed step
+	protected ref array<int> m_aSpanStepCounts = {};	//!< m_iSpanSteps after each frame with a fixed step
+	protected float m_fSpanHalfAS;				//!< the measured span's first half [s per step], 0 until measured
+	protected float m_fSpanHalfBS;				//!< its second half
+	protected string m_sStepDtWaiting;			//!< why no step dt was chosen yet (the readiness timeout's reason)
 	protected ref array<float> m_aStepRatios = {};	//!< per step callback: time slice / fixed steps of its frame
 	protected ref array<float> m_aSliceRatios = {};	//!< per step callback: GetFixedTimeSlice() / GetFixedSteps()
 	protected float m_fStepRatioMedianS;
@@ -1147,54 +1158,96 @@ class DC_Session : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! STEP TIMING: the step dt from the readiness frames, then N = floor(1000 / decision_hz / step_dt_ms + 0.5)
-	protected bool ComputeClocks(out string failure)
+	//! STEP TIMING: chooses the step dt from what readiness has seen so far, then N = floor(1000 / decision_hz /
+	//! step_dt_ms + 0.5). Never fails and never locks in a guess: without a trustworthy estimate it returns false,
+	//! m_sStepDtWaiting says why, and the measurement goes on (the readiness timeout refuses with that reason)
+	protected bool TryChooseStepDt()
 	{
-		failure = string.Empty;
-		m_fStepDtS = 0;
-		m_sStepDtSource = string.Empty;
-		m_fMeasuredStepS = 0;
-		if (m_iSpanSteps > 0)
-			m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;
-
 		int ratios = m_aStepRatios.Count();
 		m_fStepRatioMedianS = MedianOf(m_aStepRatios);
 		m_fSliceRatioMedianS = MedianOf(m_aSliceRatios);
-		m_fStepRatioAgreeFrac = 0;
-		if (ratios > 0 && m_fStepRatioMedianS > 0)
-		{
-			float agree = 0;		// float: an int quotient would truncate
-			foreach (float ratio : m_aStepRatios)
-			{
-				if (Math.AbsFloat(ratio - m_fStepRatioMedianS) <= STEP_DT_AGREEMENT * m_fStepRatioMedianS)
-					agree += 1;
-			}
-
-			m_fStepRatioAgreeFrac = agree / ratios;
-		}
-
+		m_fStepRatioAgreeFrac = AgreeFraction(m_aStepRatios, m_fStepRatioMedianS);
+		MeasureSpan();
 		if (ratios >= STEP_DT_MIN_RATIOS && m_fStepRatioMedianS > 0 && m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC)
 		{
-			m_fStepDtS = m_fStepRatioMedianS;
-			m_sStepDtSource = STEP_DT_ENGINE;
-		}
-		else if (m_fMeasuredStepS > 0)
-		{
-			m_fStepDtS = m_fMeasuredStepS;
-			m_sStepDtSource = STEP_DT_MEASURED;
-		}
-		else
-		{
-			failure = "no engine fixed step in the readiness frames: the step dt cannot be measured";
-			return false;
+			SetStepDt(m_fStepRatioMedianS, STEP_DT_ENGINE);
+			return true;
 		}
 
+		// the ratios disagree: the measured span only when it is long, stable and confirms their median
+		float tolS = STEP_DT_AGREEMENT * m_fStepRatioMedianS;
+		bool longSpan = m_iSpanSteps >= STEP_DT_SPAN_MIN_STEPS && m_fSpanHalfAS > 0 && m_fSpanHalfBS > 0;
+		bool stable = longSpan && Math.AbsFloat(m_fSpanHalfAS - m_fSpanHalfBS) <= tolS;
+		bool confirmed = m_fStepRatioMedianS > 0 && Math.AbsFloat(m_fMeasuredStepS - m_fStepRatioMedianS) <= tolS;
+		if (ratios >= STEP_DT_MIN_RATIOS && stable && confirmed)
+		{
+			SetStepDt(m_fMeasuredStepS, STEP_DT_MEASURED);
+			return true;
+		}
+
+		string halves = m_fSpanHalfAS.ToString(-1, 6) + " / " + m_fSpanHalfBS.ToString(-1, 6);
+		m_sStepDtWaiting = string.Format("a trustworthy step dt: %1 step-callback ratios, a fraction %2 of them within 0.5 percent of their median %3 s (needs %4 ratios and %5); measured span %6 s over %7 steps, halves %8 s (needs %9 steps, halves and median within 0.5 percent)", ratios, m_fStepRatioAgreeFrac.ToString(-1, 3), m_fStepRatioMedianS.ToString(-1, 6), STEP_DT_MIN_RATIOS, STEP_DT_AGREE_FRAC, m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, halves, STEP_DT_SPAN_MIN_STEPS);
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the chosen step dt and N
+	protected void SetStepDt(float stepDtS, string source)
+	{
+		m_fStepDtS = stepDtS;
+		m_sStepDtSource = source;
+		m_sStepDtWaiting = string.Empty;
 		m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);
 		if (m_iStepsPerDecision < 1)
 			m_iStepsPerDecision = 1;
 
-		Print(string.Format(LOG + "clocks: step dt %1 s (%2; callback ratio median %3 s over %4 callbacks, %5 of them within 0.5 percent; GetFixedTimeSlice / GetFixedSteps median %6 s; measured %7 s over %8 fixed steps), N=%9 steps per decision", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fStepRatioMedianS.ToString(-1, 6), ratios, m_fStepRatioAgreeFrac.ToString(-1, 3), m_fSliceRatioMedianS.ToString(-1, 6), m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, m_iStepsPerDecision), LogLevel.NORMAL);
-		return true;
+		Print(string.Format(LOG + "clocks: step dt %1 s (%2; callback ratio median %3 s over %4 callbacks, %5 of them within 0.5 percent; GetFixedTimeSlice / GetFixedSteps median %6 s; measured %7 s over %8 fixed steps), N=%9 steps per decision", m_fStepDtS.ToString(-1, 6), m_sStepDtSource, m_fStepRatioMedianS.ToString(-1, 6), m_aStepRatios.Count(), m_fStepRatioAgreeFrac.ToString(-1, 3), m_fSliceRatioMedianS.ToString(-1, 6), m_fMeasuredStepS.ToString(-1, 6), m_iSpanSteps, m_iStepsPerDecision), LogLevel.NORMAL);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the measured span (m_fSpanS / m_iSpanSteps) and its two halves, split at the first frame with at
+	//! least half of its steps (0 while there is no such split)
+	protected void MeasureSpan()
+	{
+		m_fMeasuredStepS = 0;
+		m_fSpanHalfAS = 0;
+		m_fSpanHalfBS = 0;
+		if (m_iSpanSteps <= 0)
+			return;
+
+		m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;
+		int half = m_iSpanSteps / 2;
+		for (int i = 0, count = m_aSpanStepCounts.Count(); i < count; i++)
+		{
+			int stepsBefore = m_aSpanStepCounts[i];
+			if (stepsBefore < half)
+				continue;
+
+			if (stepsBefore <= 0 || stepsBefore >= m_iSpanSteps)
+				return;
+
+			m_fSpanHalfAS = m_aSpanTimesS[i] / stepsBefore;
+			m_fSpanHalfBS = (m_fSpanS - m_aSpanTimesS[i]) / (m_iSpanSteps - stepsBefore);
+			return;
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! STEP TIMING: the fraction of the values within STEP_DT_AGREEMENT of the median, 0 when empty
+	protected float AgreeFraction(notnull array<float> values, float median)
+	{
+		int n = values.Count();
+		if (n == 0 || median <= 0)
+			return 0;
+
+		float agree = 0;		// float: an int quotient would truncate
+		foreach (float value : values)
+		{
+			if (Math.AbsFloat(value - median) <= STEP_DT_AGREEMENT * median)
+				agree += 1;
+		}
+
+		return agree / n;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1316,7 +1369,12 @@ class DC_Session : SCR_BaseGameModeComponent
 
 		float elapsedS = (GetGame().GetWorld().GetWorldTime() - m_fPrepareStartMs) / 1000;
 		if (waiting.IsEmpty() && m_fStepDtS <= 0)
-			waiting = "the step dt measurement (" + m_iReadinessFixedSteps.ToString() + " of " + STEP_DT_MIN_STEPS.ToString() + " fixed steps)";
+		{
+			waiting = m_sStepDtWaiting;
+			int ratioCount = m_aStepRatios.Count();
+			if (waiting.IsEmpty())
+				waiting = "the step dt measurement (" + m_iReadinessFixedSteps.ToString() + " of " + STEP_DT_MIN_STEPS.ToString() + " fixed steps, " + ratioCount.ToString() + " of " + STEP_DT_MIN_RATIOS.ToString() + " step-callback ratios)";
+		}
 
 		if (waiting.IsEmpty())
 		{
@@ -1641,6 +1699,8 @@ class DC_Session : SCR_BaseGameModeComponent
 		json.AddFloat("readiness_step_ratio_agree_frac", m_fStepRatioAgreeFrac, 4);
 		json.AddFloat("readiness_slice_ratio_median_s", m_fSliceRatioMedianS, 9);
 		json.AddFloat("readiness_measured_step_s", m_fMeasuredStepS, 9);
+		json.AddFloat("readiness_measured_half_a_s", m_fSpanHalfAS, 9);
+		json.AddFloat("readiness_measured_half_b_s", m_fSpanHalfBS, 9);
 		json.AddInt("readiness_measured_span_steps", m_iSpanSteps);
 		json.AddInt("readiness_fixed_steps", m_iReadinessFixedSteps);
 		json.AddInt("readiness_simulate_events", m_iSimulateCount);
@@ -2068,9 +2128,8 @@ class DC_Session : SCR_BaseGameModeComponent
 
 	//------------------------------------------------------------------------------------------------
 	//! STEP TIMING: GetFixedSteps() of this frame for its callback; in readiness the unpaused frames' fixed steps are
-	//! counted and, after the first frame with a step, their time slices summed (the measured span); the clocks follow
-	//! once STEP_DT_MIN_STEPS steps and STEP_DT_MIN_RATIOS step-callback ratios were seen, or after
-	//! STEP_DT_MAX_WAIT_STEPS steps without them
+	//! counted and, after the first frame with a step, their time slices summed (the measured span); from
+	//! STEP_DT_MIN_STEPS steps and STEP_DT_MIN_RATIOS step-callback ratios on, every frame tries to choose the step dt
 	protected void NoteFrameSteps(float timeSlice)
 	{
 		BaseWorld world = GetGame().GetWorld();
@@ -2100,19 +2159,17 @@ class DC_Session : SCR_BaseGameModeComponent
 			{
 				m_fSpanS = m_fReadinessFrameS;
 				m_iSpanSteps = m_iReadinessStepsAfter;
+				m_aSpanTimesS.Insert(m_fSpanS);
+				m_aSpanStepCounts.Insert(m_iSpanSteps);
 			}
 		}
 
-		// the ratios of this frame's callbacks follow its EOnFrame: count those of the earlier frames
-		if (m_iReadinessFixedSteps < STEP_DT_MIN_STEPS)
+		// the ratios of this frame's callbacks follow its EOnFrame: those of the earlier frames count. A step dt that is
+		// not trustworthy yet is chosen in a later frame or never (the readiness timeout refuses with the reason)
+		if (m_iReadinessFixedSteps < STEP_DT_MIN_STEPS || m_aStepRatios.Count() < STEP_DT_MIN_RATIOS)
 			return;
 
-		if (m_aStepRatios.Count() < STEP_DT_MIN_RATIOS && m_iReadinessFixedSteps < STEP_DT_MAX_WAIT_STEPS)
-			return;
-
-		string failure;
-		if (!ComputeClocks(failure))
-			RefuseReadiness("clocks: " + failure);
+		TryChooseStepDt();
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -185,12 +185,18 @@ of `t0/freeze/DECISIONS_dc2_freeze.md`):
   with a fixed step, covering 1 to 3 merged steps of 1/30 s on 1.8. Every callback writes one `ctl` and one
   `telemetry` row: `physics_step` (the last step it covers), `covered_steps`, `render_frame`, `world_time_ms`. The
   step dt is measured during readiness (`[DC_Session] clocks: step dt ...` line; `session.json engine.step_dt_s`):
-  the median of the step callbacks' time slice / covered steps (`engine`, exact also in merged frames), the measured
-  span only when those disagree (`measured`); both go to `session.json observed.readiness_*`. Never
-  `GetFixedTimeSlice()` alone (it reports n/30 per frame). Drivers get `timeSlice` = covered steps x step dt.
-- **Numbered decisions.** `hl_seq` advances on the callback after every decision callback of an episode; a driver
-  whose `Decide` returns false keeps the held command, which the core numbers again (C07). False at an episode's
-  first decision fails the session.
+  the median of the step callbacks' time slice / covered steps (`engine`, exact also in merged frames, once 90% of
+  at least 30 ratios agree within 0.5%); when they disagree the measurement goes on, and the measured span is taken
+  only once it is long (90 steps), its halves agree within 0.5% and it confirms the median within 0.5% (`measured`).
+  Without a trustworthy value by the readiness timeout readiness is refused with the reason. All values go to
+  `session.json observed.readiness_*`. Never `GetFixedTimeSlice()` alone (it reports n/30 per frame). Drivers get
+  `timeSlice` = covered steps x step dt.
+- **Numbered decisions and admission.** `hl_seq` advances on the callback after every decision callback of an
+  episode; a driver whose `Decide` returns false keeps the held command, which the core numbers again (C07). An
+  episode is admitted only after the handshake `CanDecide(physicsStep)` (base default true): a driver that cannot
+  give the first command in this callback returns false and is asked again at the next grid point, or it fills
+  `DC_EpisodeInfo.m_InitialCommand` in `BeginEpisode`. Only a first `Decide` false after an admission without an
+  initial command fails the session.
 - **Decisions and images on one world-time grid.** Every 200 ms at the default 5 Hz from the first callback's world
   time; a decision is taken in the first callback at or past a grid point and applies from the next callback. 10 Hz
   only through the trial conf key `"image_hz": 10` (`clocks.image_hz_setting` `trial_conf`; a trial conf with

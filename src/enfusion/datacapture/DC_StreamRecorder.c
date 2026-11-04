@@ -35,6 +35,7 @@
 //     class DC_DriverInterface : ScriptComponent
 //       bool GetSpawnPose(out vector position, out float headingDeg);       // false = DC_EgoSession's attribute pose
 //       bool BeginDriver(notnull DC_DriverContext ctx);                     // readiness; false = no session
+//       bool CanDecide(int physicsStep);                                    // admission handshake; false = defer
 //       bool BeginEpisode(int episodeId, int firstPhysicsStep, notnull DC_EpisodeInfo info); // false = no episode
 //       void ApplyStep(int physicsStep, float timeSlice, notnull DC_HLCommand held, notnull DC_LLCOutput llc);
 //       void PostStep(int physicsStep, float timeSlice, notnull DC_DriverPost post);
@@ -43,8 +44,14 @@
 //       void EndDriver(string endReason);
 //
 //   Call order: GetSpawnPose (before the ego is spawned), BeginDriver once (the ego is spawned, its actuator exists
-//   and the step dt is measured; the session directory does not exist yet), then per episode BeginEpisode in a
-//   decision callback P_a (in OnStepPre of P_a, so the rows of P_a carry the episode), ApplyStep in every OnStepPre
+//   and the step dt is measured; the session directory does not exist yet), then per episode the admission
+//   handshake and BeginEpisode in a decision callback P_a (in OnStepPre of P_a, so the rows of P_a carry the
+//   episode): CanDecide(P_a) true means this callback's Decide will give the first command; a driver that cannot
+//   decide yet returns false and is asked again at the next grid point (nothing is committed), or it returns true
+//   and fills DC_EpisodeInfo.m_InitialCommand in BeginEpisode, which the core holds when the first Decide gives
+//   none. Once BeginEpisode committed the episode a first Decide false without an initial command fails the session
+//   (a well-behaved driver never reaches it); a later Decide false keeps the held command, numbered again (hl_seq +
+//   1, dc-2.0 section 6). ApplyStep in every OnStepPre
 //   with a held command, PostStep in every OnStepPost of the episode, Decide in OnStepDecide of every decision
 //   callback of the episode, EndEpisode in the decision callback P_b that ends it (after the rows of P_b), EndDriver
 //   once at the seal. physicsStep is the callback's physics_step (the last step it covers) and timeSlice the physics
@@ -173,6 +180,7 @@ class DC_EpisodeInfo
 	float m_fStyleLaneOffsetM = 0;
 	float m_fStyleAlatMaxMps2 = 2.75;
 	int m_iSeed;						//!< preset by the core to trial seed + episode id
+	ref DC_HLCommand m_InitialCommand;	//!< optional (null = none): held when the episode's first Decide gives none
 }
 
 //------------------------------------------------------------------------------------------------
@@ -830,8 +838,17 @@ class DC_DriverInterface : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Episode admission handshake, asked before BeginEpisode in OnStepPre of a decision callback (dc-2.0 section 6):
+	//! true when this callback's Decide will give the episode's first command (or BeginEpisode will fill
+	//! DC_EpisodeInfo.m_InitialCommand). false = not ready: no episode now, asked again at the next grid point
+	bool CanDecide(int physicsStep)
+	{
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! At a decision step after the warm-up while no episode runs. Fill info (mode, driver, card, route, shas, style,
-	//! seed). false = no episode now (asked again at the next decision step)
+	//! seed; optionally the initial command). false = no episode now (asked again at the next decision step)
 	bool BeginEpisode(int episodeId, int firstPhysicsStep, notnull DC_EpisodeInfo info)
 	{
 		return false;
@@ -933,6 +950,8 @@ class DC_StreamRecorder : DC_SessionModule
 	// HL command state
 	protected ref DC_HLCommand m_Held = new DC_HLCommand();
 	protected ref DC_HLCommand m_Pending = new DC_HLCommand();
+	protected ref DC_HLCommand m_Initial = new DC_HLCommand();	//!< the episode's initial command (admission)
+	protected bool m_bHasInitial;
 	protected bool m_bHasHeld;
 	protected bool m_bHasPending;
 	protected int m_iHlSeq = -1;
@@ -1185,15 +1204,21 @@ class DC_StreamRecorder : DC_SessionModule
 		m_Pending.Reset();
 		if (!driver.Decide(physicsStep, m_Pending))
 		{
-			// Every decision is numbered (dc-2.0 section 6, C07): a kept command is the held one again, hl_seq + 1
-			if (!m_bHasHeld)
+			// Every decision is numbered (dc-2.0 section 6, C07): a kept command is the held one again, hl_seq + 1; at
+			// the first decision the initial command of the admission handshake, else the episode was admitted by a
+			// driver that could not decide (CanDecide should have deferred it)
+			if (m_bHasHeld)
+				m_Pending.CopyFrom(m_Held);
+			else if (m_bHasInitial)
+				m_Pending.CopyFrom(m_Initial);
+			else
 			{
-				m_Session.Fail(DC_Session.END_SCRIPT_ERROR, string.Format("the driver gave no command at the first decision of episode %1 (physics step %2): there is no held command to keep", m_Session.GetEpisodeId(), physicsStep));
+				m_Session.Fail(DC_Session.END_SCRIPT_ERROR, string.Format("the driver gave no command at the first decision of episode %1 (physics step %2) although CanDecide admitted it and no initial command was given", m_Session.GetEpisodeId(), physicsStep));
 				return;
 			}
-
-			m_Pending.CopyFrom(m_Held);
 		}
+
+		m_bHasInitial = false;
 
 		if (m_Pending.m_iDir < -1 || m_Pending.m_iDir > 1 || (m_bForwardOnly && m_Pending.m_iDir < 0))
 		{
@@ -1619,6 +1644,9 @@ class DC_StreamRecorder : DC_SessionModule
 		m_bHasHeld = false;
 		m_bHasPending = false;
 		m_sTermination = string.Empty;
+		m_bHasInitial = info.m_InitialCommand != null;
+		if (m_bHasInitial)
+			m_Initial.CopyFrom(info.m_InitialCommand);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1627,6 +1655,7 @@ class DC_StreamRecorder : DC_SessionModule
 	{
 		m_EpisodeInfo = null;
 		m_bHasPending = false;
+		m_bHasInitial = false;
 		m_sTermination = string.Empty;
 	}
 

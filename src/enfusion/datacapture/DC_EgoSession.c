@@ -35,8 +35,11 @@
 //     first ctl row it is still zero_ego;
 //   - episodes: in a decision callback (the first callback at or past a grid point of the world-time decision grid,
 //     DC_Session.IsDecisionStep; dc-2.0 section 6, D-A) after warmup_end, while no episode runs and the session is
-//     not stopping, the driver's BeginEpisode is asked in OnStepPre (so the rows of that callback carry the episode;
-//     the null driver never begins one). A termination the driver reports, or the planned end, ends the episode in
+//     not stopping, the driver's admission handshake (CanDecide: will this callback's Decide give the first command?)
+//     and then BeginEpisode are asked in OnStepPre (so the rows of that callback carry the episode; the null driver
+//     never begins one). A driver that cannot decide yet defers the admission to the next grid point: nothing is
+//     committed, so a driver that is not ready never fails the session (session_end.json observed key
+//     episode_admissions_deferred counts the deferrals). A termination the driver reports, or the planned end, ends the episode in
 //     the next decision callback in OnStepDecide, after that callback's rows: DC_DriverInterface.EndEpisode, one episodes
 //     row (chunk_max_rows 1, so it is committed at once), events episode_start / episode_end, the ego parked. The
 //     seal ends an episode still open at the last step (session_stop, or script_error after an error);
@@ -112,6 +115,7 @@ class DC_EgoSession : DC_SessionModule
 	protected int m_iLastWorldMs;
 	protected string m_sStopTermination;		//!< latched when the planned end begins during an episode
 	protected string m_sBlockedNoted;			//!< the reason of the last "no new episode" line printed (once per reason)
+	protected int m_iAdmissionsDeferred;		//!< decision callbacks whose driver could not decide yet (CanDecide false)
 	protected bool m_bDestroyedAfterStep;		//!< destruction seen in OnStepPost: the session ends after this step's rows
 	protected bool m_bDisabledTiming;			//!< the ego blocks episodes as tilted, immobile or burning since m_iDisabledSinceMs
 	protected int m_iDisabledSinceMs;
@@ -581,6 +585,16 @@ class DC_EgoSession : DC_SessionModule
 
 		m_sBlockedNoted = string.Empty;
 		m_bDisabledTiming = false;
+		// Admission handshake (dc-2.0 section 6): only a driver that will give the first command in this callback's
+		// Decide (or an initial command in BeginEpisode) is admitted; else nothing is committed and the next grid
+		// point asks again
+		if (!driver.CanDecide(physicsStep))
+		{
+			m_iAdmissionsDeferred++;
+			m_Session.NoteObserved("episode_admissions_deferred", m_iAdmissionsDeferred.ToString());
+			return;
+		}
+
 		DC_EpisodeInfo info = new DC_EpisodeInfo();
 		info.m_iSeed = m_Session.GetTrialSeed() + m_iNextEpisodeId;
 		if (!driver.BeginEpisode(m_iNextEpisodeId, physicsStep, info))

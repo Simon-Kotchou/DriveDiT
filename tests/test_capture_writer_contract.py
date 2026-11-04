@@ -216,7 +216,7 @@ class WriterContractTest(unittest.TestCase):
         self.assertIn("m_bDecisionStep = m_iCallbackWorldMs >= m_iGridAnchorMs + m_iNextDecisionGrid * m_iDecisionPeriodMs;", pre)
         self.assertIn("module.OnStepPre(m_iPhysicsStep, sliceS);", pre)
         self.assertIn("int worldMs = m_iCallbackWorldMs;", body(self.session, "protected void HandleStepPost("))
-        clocks = body(self.session, "protected bool ComputeClocks(")
+        clocks = body(self.session, "protected bool TryChooseStepDt(") + body(self.session, "protected void SetStepDt(")
         self.assertNotIn("GetFixedTimeSlice", re.sub(r'"[^"]*"', '""', clocks))     # the log line may name it
         self.assertIn("m_iStepsPerDecision = Math.Floor(m_iDecisionPeriodMs / (m_fStepDtS * 1000) + 0.5);", clocks)
         self.assertIn("world.GetFixedSteps()", body(self.session, "protected void NoteFrameSteps("))
@@ -273,87 +273,137 @@ class WriterContractTest(unittest.TestCase):
         self.assertEqual(re.findall(r"^\s*(\w+),?", enum, re.M)[:3], ["WIDGET", "SHAPE", "BOTH"])
 
     def test_step_dt_from_the_callback_ratio(self):
-        """Review round 1 (X2, C-L1): the step dt is the median of the readiness step callbacks' time slice / covered
-        steps when they agree, else the measured span; the reference model below is the Enforce code's rule."""
-        clocks = body(self.session, "protected bool ComputeClocks(")
-        self.assertIn("m_fStepRatioMedianS = MedianOf(m_aStepRatios);", clocks)
-        self.assertIn("m_fMeasuredStepS = m_fSpanS / m_iSpanSteps;", clocks)
-        self.assertIn("ratios >= STEP_DT_MIN_RATIOS && m_fStepRatioMedianS > 0 && "
-                      "m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC", clocks)
+        """Review rounds 1-2 (X2, C-L1, N4): the step dt is the median of the readiness step callbacks' time slice /
+        covered steps when they agree; else the measured span once it is long, stable and confirms the median; else
+        the measurement goes on and the readiness timeout refuses with the reason. Never a lock-in at the first window.
+        The reference model below transcribes DC_Session.NoteFrameSteps / NoteStepRatio / TryChooseStepDt."""
+        choose = body(self.session, "protected bool TryChooseStepDt(")
+        self.assertIn("m_fStepRatioMedianS = MedianOf(m_aStepRatios);", choose)
+        self.assertIn("m_fStepRatioAgreeFrac >= STEP_DT_AGREE_FRAC", choose)
+        self.assertIn("SetStepDt(m_fStepRatioMedianS, STEP_DT_ENGINE);", choose)
+        self.assertIn("m_iSpanSteps >= STEP_DT_SPAN_MIN_STEPS", choose)
+        self.assertIn("Math.AbsFloat(m_fSpanHalfAS - m_fSpanHalfBS) <= tolS", choose)
+        self.assertIn("Math.AbsFloat(m_fMeasuredStepS - m_fStepRatioMedianS) <= tolS", choose)
+        self.assertIn("SetStepDt(m_fMeasuredStepS, STEP_DT_MEASURED);", choose)
+        self.assertIn("m_sStepDtWaiting = string.Format(", choose)
+        self.assertNotIn("Refuse", choose)
+        span = body(self.session, "protected void MeasureSpan(")
+        self.assertIn("m_fSpanHalfAS = m_aSpanTimesS[i] / stepsBefore;", span)
+        self.assertIn("m_fSpanHalfBS = (m_fSpanS - m_aSpanTimesS[i]) / (m_iSpanSteps - stepsBefore);", span)
+        note = body(self.session, "protected void NoteFrameSteps(")
+        self.assertIn("if (m_iReadinessFixedSteps < STEP_DT_MIN_STEPS || m_aStepRatios.Count() < STEP_DT_MIN_RATIOS)",
+                      note)
+        self.assertIn("TryChooseStepDt();", note)
+        self.assertNotIn("ComputeClocks", self.session)
+        self.assertNotIn("STEP_DT_MAX_WAIT_STEPS", self.session)
+        self.assertIn("waiting = m_sStepDtWaiting;", body(self.session, "protected void UpdateReadiness("))
         self.assertIn("m_aStepRatios.Insert(timeSlice / coveredSteps);",
                       body(self.session, "protected void NoteStepRatio("))
         self.assertIn("NoteStepRatio(timeSlice, GetFrameFixedSteps());",
                       body(self.session, "override void EOnFixedFrame("))
         self.assertIn("NoteStepRatio(timeSlice, 1);", body(self.session, "override void EOnSimulate("))
         consts = dict(re.findall(r"static const (?:int|float) (STEP_DT_\w+) = ([\d.]+);", self.session))
-        self.assertEqual((consts["STEP_DT_AGREEMENT"], consts["STEP_DT_AGREE_FRAC"], consts["STEP_DT_MIN_RATIOS"]),
-                         ("0.005", "0.9", "30"))
+        self.assertEqual(consts, {"STEP_DT_MIN_STEPS": "30", "STEP_DT_MIN_RATIOS": "30", "STEP_DT_AGREEMENT": "0.005",
+                                  "STEP_DT_AGREE_FRAC": "0.9", "STEP_DT_SPAN_MIN_STEPS": "90"})
         session_json = body(self.session, "protected bool WriteSessionJson(")
-        for key in ("readiness_step_ratio_median_s", "readiness_slice_ratio_median_s", "readiness_measured_step_s"):
+        for key in ("readiness_step_ratio_median_s", "readiness_slice_ratio_median_s", "readiness_measured_step_s",
+                    "readiness_measured_half_a_s", "readiness_measured_half_b_s"):
             self.assertIn('"%s"' % key, session_json)
 
-        def engine(frames_ms, step_ms=1000.0 / 30, cap=3):
-            """(frame time slices [s], fixed steps per frame, callback slices [s]) of an accumulator engine."""
-            acc, slices, steps, cb = 0.0, [], [], []
+        step = 1.0 / 30
+
+        def accumulator(frames_ms, cap=3):
+            """[(EOnFrame slice [s], fixed steps, callback slice [s] or None)] of an engine whose fixed-step
+            accumulator gains the frame's world time (at most 100 ms) and runs at most cap steps."""
+            acc, out = 0.0, []
             for ms in frames_ms:
+                ms = min(ms, 100.0)
                 acc += ms
-                n = min(cap, int(acc // step_ms))
-                acc -= n * step_ms
-                slices.append(ms / 1000.0)
-                steps.append(n)
-                if n:
-                    cb.append(n * step_ms / 1000.0)
-            return slices, steps, cb
+                n = min(cap, int(acc // (step * 1000)))
+                acc -= n * step * 1000
+                out.append((ms / 1000.0, n, n * step if n else None))
+            return out
 
-        def old_rule(slices, steps, cb_slices):
-            measured = sum(slices) / sum(steps)
-            one = [s for s, n in zip(cb_slices, [n for n in steps if n]) if n == 1]
-            if one and abs(one[-1] - measured) <= 0.05 * measured:
-                return one[-1], "engine"
-            return measured, "measured"
+        def lagging(frame_ms, count):
+            """Codex's transcription: frames of frame_ms with exactly one fixed step each (the clock lags)."""
+            return [(frame_ms / 1000.0, 1, step)] * count
 
-        def new_rule(slices, steps, cb_slices, min_ratios=30, agreement=0.005, agree_frac=0.9):
-            ratios = sorted(s / n for s, n in zip(cb_slices, [n for n in steps if n]))
-            span_s = span_steps = 0
-            seen, total_s, after = False, 0.0, 0
-            for s, n in zip(slices, steps):
+        def median(values):
+            v, mid = sorted(values), len(values) // 2
+            return v[mid] if len(v) % 2 else 0.5 * (v[mid - 1] + v[mid])
+
+        def readiness(frames, perturb=lambda k: 1.0, rule="round2"):
+            """(frame index of the choice or None, step dt, source or the waiting reason)."""
+            fixed = after = span_steps = 0
+            seen, total, span_s = False, 0.0, 0.0
+            span_t, span_n, ratios = [], [], []
+            for k, (slice_s, n, cb) in enumerate(frames):
+                fixed += n                                   # EOnFrame: NoteFrameSteps
                 if not seen:
                     seen = n > 0
-                    continue
-                total_s += s
-                after += n
-                if n:
-                    span_s, span_steps = total_s, after
-            measured = span_s / span_steps if span_steps else 0.0
-            if ratios:
-                mid = len(ratios) // 2
-                median = ratios[mid] if len(ratios) % 2 else 0.5 * (ratios[mid - 1] + ratios[mid])
-                agree = sum(1 for r in ratios if abs(r - median) <= agreement * median) / float(len(ratios))
-                if len(ratios) >= min_ratios and agree >= agree_frac:
-                    return median, "engine"
-            return measured, "measured"
+                else:
+                    total += slice_s
+                    after += n
+                    if n:
+                        span_s, span_steps = total, after
+                        span_t.append(span_s)
+                        span_n.append(span_steps)
+                if fixed >= 30 and len(ratios) >= 30:
+                    med = median(ratios)
+                    agree = sum(1 for r in ratios if abs(r - med) <= 0.005 * med) / float(len(ratios))
+                    measured = span_s / span_steps if span_steps else 0.0
+                    if agree >= 0.9:
+                        return k, med, "engine"
+                    if rule == "round1":
+                        return k, measured, "measured"
+                    half_a = half_b = 0.0
+                    for t_i, n_i in zip(span_t, span_n):
+                        if n_i >= span_steps // 2:
+                            if 0 < n_i < span_steps:
+                                half_a, half_b = t_i / n_i, (span_s - t_i) / (span_steps - n_i)
+                            break
+                    tol = 0.005 * med
+                    stable = span_steps >= 90 and half_a > 0 and half_b > 0 and abs(half_a - half_b) <= tol
+                    if stable and abs(measured - med) <= tol:
+                        return k, measured, "measured"
+                if cb is not None:                           # the frame's step callback: NoteStepRatio
+                    ratios.append(cb / n * perturb(len(ratios)))
+            return None, None, "%d ratios, span %d steps" % (len(ratios), span_steps)
 
-        # Codex's case: 15 frames of 68 ms, 2 steps each (no one-step frame): the old rule measured 1.020 / 30 s
-        slices, steps, cb = engine([68.0] * 15)
-        self.assertEqual(steps, [2] * 15)
-        dt, src = old_rule(slices, steps, cb)
+        # Codex's N4 case: 34 ms frames with one step each, 4 of the first 30 ratios 2% high. Round 1 locked the span
+        # (0.034 s, 2% high: C28 fails) in at the 30th ratio; now the measurement goes on and the frame after the 40th
+        # ratio (36 of 40 agree) chooses the median
+        bad = lambda k: 1.02 if k in (3, 9, 17, 25) else 1.0
+        k, dt, src = readiness(lagging(34.0, 400), bad, rule="round1")
         self.assertEqual(src, "measured")
-        self.assertAlmostEqual(dt * 30, 1.020, places=9)
-        dt, src = new_rule(slices, steps, cb, min_ratios=15)
+        self.assertAlmostEqual(dt, 0.034, places=9)
+        k, dt, src = readiness(lagging(34.0, 400), bad)
+        self.assertEqual((src, k), ("engine", 40))
+        self.assertAlmostEqual(dt, step, places=12)
+        # Codex's X2 case (15 frames of 68 ms with 2 steps) and longer: the median is exact once 30 ratios exist
+        self.assertEqual(readiness(accumulator([68.0] * 15))[0], None)
+        k, dt, src = readiness(accumulator([68.0] * 40))
         self.assertEqual(src, "engine")
-        self.assertAlmostEqual(dt, 1.0 / 30, places=12)
-        # capture frames merging 1-3 steps, 60 FPS idle frames: the ratio is the step on every frame
-        frames = ([16.7] * 40 + [27.0, 80.0, 25.0, 70.0] * 15) * 2
-        slices, steps, cb = engine(frames)
-        self.assertGreater(sum(1 for n in steps if n > 1), 20)
-        dt, src = new_rule(slices, steps, cb)
-        self.assertEqual(src, "engine")
-        self.assertAlmostEqual(dt, 1.0 / 30, places=12)
-        # disagreeing ratios fall back to the measured span, which leaves out the remainder before the first step
-        noisy = [s * f for s, f in zip(cb, [1.0, 1.1, 0.9, 1.05] * len(cb))]
-        dt, src = new_rule(slices, steps, noisy)
+        self.assertAlmostEqual(dt, step, places=12)
+        # zero-step frames (60 FPS), 3-step frames and hitches (a 250 ms frame: 100 ms of world time, 3 steps)
+        for frames in ([16.7] * 200, [100.0] * 60, ([16.7] * 10 + [250.0] + [27.0, 80.0]) * 10):
+            k, dt, src = readiness(accumulator(frames))
+            self.assertEqual(src, "engine", frames[:3])
+            self.assertAlmostEqual(dt, step, places=12)
+        # a readiness shorter than 30 step callbacks chooses nothing (the timeout refuses with the reason)
+        k, dt, why = readiness(accumulator([33.4] * 29))
+        self.assertIsNone(k)
+        self.assertIn("29 ratios", why)
+        # persistently disagreeing ratios (4 in every 30 off by 2%): the span is taken once long and stable, and
+        # within 0.5% of the median
+        persistent = lambda k: 1.02 if k % 30 in (3, 9, 17, 25) else 1.0
+        k, dt, src = readiness(accumulator([34.0] * 600), persistent)
         self.assertEqual(src, "measured")
-        self.assertLess(abs(dt * 30 - 1.0), 1.0 / sum(steps[1:]) + 1e-9)
+        self.assertLess(abs(dt / step - 1.0), 0.005)
+        # ... but never a span 2% off the median: the measurement goes on to the readiness timeout
+        k, dt, why = readiness(lagging(34.0, 900), persistent)
+        self.assertIsNone(k)
+        self.assertIn("span", why)
 
     def test_review_round1_capture_rules(self):
         """X6 (a trial conf at 5 Hz is the default setting), C-M4 (near plane in session.json and rig_id), C-L2
@@ -386,7 +436,63 @@ class WriterContractTest(unittest.TestCase):
         self.assertNotIn('NoteObserved("decision_grid_points_skipped"', self.session)
         decide = body(self.recorder, "override void OnStepDecide(")
         self.assertIn("m_Pending.CopyFrom(m_Held);", decide)
-        self.assertIn("if (!m_bHasHeld)", decide)
+        self.assertIn("if (m_bHasHeld)", decide)
+
+    def test_episode_admission_handshake(self):
+        """Review round 2 (X7 decision): an episode is admitted only when the driver can decide at that callback
+        (CanDecide) or gives an initial command; a driver that is not ready defers to the next grid point and never
+        fails the session; only a Decide false after an admission without an initial command fails it. A held command
+        that the driver keeps is numbered again. The model below transcribes TryBeginEpisode and OnStepDecide."""
+        begin = body(self.ego, "protected void TryBeginEpisode(")
+        self.assertLess(begin.index("if (!driver.CanDecide(physicsStep))"), begin.index("driver.BeginEpisode("))
+        self.assertIn('m_Session.NoteObserved("episode_admissions_deferred"', begin)
+        decide = body(self.recorder, "override void OnStepDecide(")
+        self.assertRegex(decide, r"if \(m_bHasHeld\)\s*m_Pending\.CopyFrom\(m_Held\);\s*else if \(m_bHasInitial\)\s*"
+                                 r"m_Pending\.CopyFrom\(m_Initial\);\s*else\s*\{\s*m_Session\.Fail\(")
+        self.assertIn("m_bHasInitial = info.m_InitialCommand != null;", body(self.recorder, "void SetEpisode("))
+        self.assertIn("bool CanDecide(int physicsStep)", self.recorder)
+
+        def run(grid_points, can_decide, decides, initial=None):
+            """Decision callbacks 0..grid_points-1; can_decide(g) / decides(g) (None = Decide false) the driver.
+            Returns (episode start or None, deferrals, [(grid, hl_seq, command)], failure or None)."""
+            start, deferred, held, seq, rows = None, 0, None, -1, []
+            for g in range(grid_points):
+                if start is None:                            # OnStepPre: admission
+                    if not can_decide(g):
+                        deferred += 1
+                        continue
+                    start, first_initial = g, initial
+                cmd = decides(g)                             # OnStepDecide
+                if cmd is None:
+                    if held is not None:
+                        cmd = held
+                    elif first_initial is not None:
+                        cmd = first_initial
+                    else:
+                        return start, deferred, rows, "no command at the first decision"
+                first_initial = None
+                held, seq = cmd, seq + 1                     # next OnStepPre: held, hl_seq + 1
+                rows.append((g, seq, cmd))
+            return start, deferred, rows, None
+
+        # DD-7's expert: Decide is false when its PostStep did not evaluate the step (here grid points 0 and 1);
+        # with CanDecide answering the same, admission waits for grid point 2 and nothing fails
+        evaluates = lambda g: g >= 2
+        start, deferred, rows, failure = run(6, evaluates, lambda g: ("cmd", g) if evaluates(g) else None)
+        self.assertEqual((start, deferred, failure), (2, 2, None))
+        self.assertEqual([r[1] for r in rows], [0, 1, 2, 3])
+        # the same driver without the handshake (CanDecide true) fails at its first decision ...
+        start, deferred, rows, failure = run(6, lambda g: True, lambda g: ("cmd", g) if evaluates(g) else None)
+        self.assertEqual((start, failure), (0, "no command at the first decision"))
+        # ... unless it gave an initial command: held and numbered, then its own decisions
+        start, deferred, rows, failure = run(6, lambda g: True, lambda g: ("cmd", g) if evaluates(g) else None,
+                                             initial=("initial",))
+        self.assertEqual(failure, None)
+        self.assertEqual(rows[:3], [(0, 0, ("initial",)), (1, 1, ("initial",)), (2, 2, ("cmd", 2))])
+        # a kept command (Decide false later) is numbered again: one hl_seq per decision
+        start, deferred, rows, failure = run(5, lambda g: True, lambda g: ("cmd", g) if g in (0, 3) else None)
+        self.assertEqual([(r[1], r[2]) for r in rows], [(0, ("cmd", 0)), (1, ("cmd", 0)), (2, ("cmd", 0)),
+                                                        (3, ("cmd", 3)), (4, ("cmd", 3))])
 
     def test_out_parameters_are_assigned_on_entry(self):
         sig = re.compile(r"^\t(?:[a-z]+ )*[\w<>]+ (\w+)\(([^)]*\bout\b[^)]*)\)\n\t\{", re.M)

@@ -187,6 +187,11 @@ class GoldenTest(unittest.TestCase):
             cls.golden = json.loads(f.read().decode("ascii"))
         cls.session = reader.open_session(GOLDEN_DIR, vehicle_card=CARD)
 
+    def test_bridge_wait_ends_for_every_decision(self):
+        """N3: the bridge wait (current frame >= C_t + 1 and obs_t done by then) ends for all 52 policy-valid golden
+        decisions; for 17 of them obs_t completed before C_t + 1, where the round-1 rule never held."""
+        self.assertEqual(bridge_waits(self, self.session), (52, 17))
+
     def test_reproduces_golden_json(self):
         slots = [p["slot_id"] for p in self.golden["pixels"]["slots"]]
         view = json.loads(json.dumps(self.session.golden_view(slots, self.golden["pixels"]["stride"])))
@@ -394,6 +399,28 @@ class GoldenTest(unittest.TestCase):
         self.assertEqual([reader.dir_state_of(s105, g) for g in (2, 5, 1, 0, 6)], [1, 1, 0, -1, None])
 
 
+def bridge_waits(test, s):
+    """Review round 2, N3: the closed-loop bridge holds the next physics step after the rows of C_t until the current
+    render frame is at least C_t's frame + 1 and obs_t's file has completed (done_render_frame set and at or before
+    the current frame): the wait ends in frame max(C_t + 1, done) for every policy-valid decision, and the pose row of
+    obs_t (C + 1 <= done) exists by then. Returns (policy-valid decisions, those whose obs_t completed before C_t + 1,
+    for which the round-1 predicate done >= C_t + 1 could never hold)."""
+    rows = {r["slot_id"]: r for r in s.images}
+    hf_frames = set(s.streams["hf"].col("render_frame"))
+    valid = [d for d in s.decisions if d["masks"]["policy_valid"]]
+    older = 0
+    for d in valid:
+        obs = rows[d["obs_slot_id"]]
+        done = obs["done_render_frame"]
+        test.assertIsNotNone(done, d["decision_step"])
+        released = max(d["render_frame"] + 1, done)
+        test.assertTrue(done <= released and d["render_frame"] + 1 <= released)
+        test.assertLessEqual(obs["captured_render_frame"] + 1, released)
+        test.assertIn(obs["captured_render_frame"] + 1, hf_frames)
+        older += done < d["render_frame"] + 1
+    return len(valid), older
+
+
 class TenHzTest(unittest.TestCase):
     """The non-default 10 Hz setting (TBD-2): image_hz = decision_hz = 10, N = 3, clocks.image_hz_setting trial_conf."""
 
@@ -414,19 +441,23 @@ class TenHzTest(unittest.TestCase):
             self.assertEqual(diffs, [], diffs[:10])
             self.assertEqual(len(s.decisions[50]["action_exec"]), 3)
             self.assertTrue(any(d["masks"]["wm_valid"] for d in s.decisions))
+            self.assertEqual(bridge_waits(self, s), (100, 22))
         finally:
             shutil.rmtree(tmp)
 
 
-def repose_slot(session_dir, slot, captured):
+def repose_slot(session_dir, slot, captured, keep_done=False):
     """Codex's X1 mutation: slot's file shows render frame `captured` (its fiducial and the state of hf row captured
-    + 1, as the engine renders it) and was first seen in frame captured + 1."""
+    + 1, as the engine renders it, or the last state past the simulation) and was first seen in frame captured + 1
+    (keep_done: its done_render_frame is left as it was)."""
     spec = dict(synth.SPECS["golden"])
     sim = synth.simulate(spec, synth.drivedit_nav.route_from_dict(synth.ROUTES[spec["route"]]()))
-    state = sim.frames[captured + 1 - spec["render_frame0"]]["state"]
+    state = sim.frames[min(captured + 1 - spec["render_frame0"], len(sim.frames) - 1)]["state"]
     img = synth.render_image(spec, state, synth.fiducial.code_for(captured))
     with open(os.path.join(session_dir, "frames", "f_%08d.png" % slot), "wb") as f:
         f.write(synth.png_bytes(img))
+    if keep_done:
+        return
     for name in sorted(os.listdir(os.path.join(session_dir, "img"))):
         if name.startswith("chunk_"):
             set_column(session_dir, "img", int(name[6:11]), "done_render_frame",
@@ -439,6 +470,20 @@ class DefectTest(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
+
+    def test_a_capture_past_the_seal_is_not_exempt(self):
+        """Review round 2, N1: Codex's slot 67 re-encoded to frame 262296, past the seal (end.render_frame 262291);
+        the slot completed at 262287 and nothing was pending: no exemption, its captured frame does not join."""
+        session = copy_golden(self.tmp)
+        g = reader.open_session(golden_source(), vehicle_card=CARD)
+        self.assertEqual((g.end_get("end.render_frame"), g.end_get("images.pending_at_end")), (262291, 0))
+        self.assertEqual([r["done_render_frame"] for r in g.images if r["slot_id"] == 67], [262287])
+        repose_slot(session, 67, 262296, keep_done=True)
+        s = reader.open_session(session, vehicle_card=CARD)
+        row = [r for r in s.images if r["slot_id"] == 67][0]
+        self.assertEqual((row["fid_ok"], row["captured_render_frame"], row["pending_at_seal"], row["pose_after_seal"],
+                          row["hf_index"]), (1, 262296, 0, 0, None))
+        self.assertEqual(sum(r["pending_at_seal"] for r in s.images), 0)
 
     def test_obs_t_is_never_a_future_image(self):
         """Review round 1, X1: decision 93 is taken in frame 261989 (world 3139 ms); frame 261990 (3166 ms) has no

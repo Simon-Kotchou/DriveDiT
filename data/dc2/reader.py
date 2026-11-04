@@ -1051,10 +1051,28 @@ def _image_files(s):
         s.image_files.append((rel, None))
 
 
+def timed_out_slots(s):
+    """slot_ids named by events rows img_timeout (payload img_slot_id=<n>): requests that stopped blocking (section 6)."""
+    events = s.streams.get("events")
+    out = set()
+    if events is None or not events.present:
+        return out
+    for kind, payload in zip(events.col("kind"), events.col("payload")):
+        if kind != "img_timeout":
+            continue
+        try:
+            value = dict(parse_payload(payload)).get("img_slot_id")
+            out.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _resolve_images(s, decode, visitor):
     img = s.streams["img"]
     hf_index = s.streams["hf"].index()
     end_frame = s.end_get("end.render_frame") if s.end is not None else None
+    timed_out = timed_out_slots(s)
     s.images = []
     for i in range(len(img)):
         slot = img.data["slot_id"][i]
@@ -1064,6 +1082,10 @@ def _resolve_images(s, decode, visitor):
                "png_w": None, "png_h": None, "fid_ok": 0, "fid_status": None, "code": None,
                "captured_render_frame": None, "fid_margin": None, "hf_index": None, "pose_hf_index": None,
                "pose_after_seal": 0, "error": None}
+        # a request still in flight at the seal: issued, never seen done, never timed out (images.pending_at_end)
+        row["pending_at_seal"] = int(row["issue_status"] == "issued" and row["done_render_frame"] is None
+                                     and slot not in timed_out)
+        row["timed_out"] = int(slot in timed_out)
         s.images.append(row)
         rel, error = s.image_files[i]
         if rel is None:
@@ -1093,8 +1115,12 @@ def _resolve_images(s, decode, visitor):
             row["fid_margin"] = fid_margin(rgb, result)
             row["hf_index"] = hf_index.get(row["captured_render_frame"])
             row["pose_hf_index"] = hf_index.get(row["captured_render_frame"] + 1)     # the image's pose row
-            # captured in the last render frame: a seal without drain caught the request in flight, no pose row exists
-            row["pose_after_seal"] = int(isinstance(end_frame, int) and row["captured_render_frame"] >= end_frame)
+            # the one documented exemption (section 6): a request the seal caught in flight (pending_at_seal) whose
+            # image is of the terminal render frame (end.render_frame) and whose captured hf row exists: only its pose
+            # row C + 1 is missing. A capture past the seal, or of a completed or timed-out slot, is a join failure.
+            row["pose_after_seal"] = int(row["pending_at_seal"] == 1 and isinstance(end_frame, int)
+                                         and row["captured_render_frame"] == end_frame
+                                         and row["hf_index"] is not None and row["pose_hf_index"] is None)
         if visitor is not None:
             visitor(s, row, rgb)
 

@@ -14,7 +14,8 @@ sources (the statements the Python models mirror) and check, per adaptation of t
     check_payload accepts it against the contract's event_payloads), no ego SetWorldTransform without PrepareReposition
     and no spawned vehicle without DC_CrashWatch.WatchSlot;
   - vehicle gates: the driver opens every vehicle gate of the world at its start with the DD-1 director's DC_Gates
-    (deployed by the manifest) and checks them once, 10 s of world time later or at its end.
+    (deployed by the manifest) and checks them once, 10 s of world time later (from its own per-frame event, so also
+    in the warm-up and between episodes) or at its end.
 """
 
 import importlib.util
@@ -482,6 +483,28 @@ class GateCheckMirror:
         self.checked.append(int(math.floor(elapsed / 1000.0 + 0.5)))
 
 
+def gate_check_session(warmup_s, end_s, poll_per_frame, opened_s=1.5, fps=39.0):
+    """A session on the frame clock: the driver opens the gates in BeginDriver (readiness, at opened_s), episodes
+    begin at the first decision callback after the warm-up and run to end_s, EndDriver at end_s. poll_per_frame True
+    is the driver's EOnFrame (every frame while the mask is set); False the earlier placement (BeginEpisode after the
+    warm-up, PostStep inside an episode). (world time of the check [s], afterS logged, frames the event ran)."""
+    mirror, frames, t = GateCheckMirror(opened_ms=opened_s * 1000.0), 0, opened_s
+    mask = True
+    while t < end_s:
+        world_ms = t * 1000.0
+        if poll_per_frame and mask:
+            frames += 1
+            mirror.check(world_ms, False)
+            mask = not mirror.checked                           # EOnFrame clears its mask once the check ran
+        elif not poll_per_frame and t >= warmup_s:
+            mirror.check(world_ms, False)                       # BeginEpisode / PostStep
+        if mirror.checked and not hasattr(mirror, "at_s"):
+            mirror.at_s = t
+        t += 1.0 / fps
+    mirror.check(end_s * 1000.0, True)                          # EndDriver
+    return getattr(mirror, "at_s", end_s), mirror.checked, frames
+
+
 class VehicleGatesTest(unittest.TestCase):
     """(f) the capture world's vehicle gates are opened at the driver's start, as the director opens them."""
 
@@ -502,10 +525,17 @@ class VehicleGatesTest(unittest.TestCase):
         self.assertIn("if (!atEnd && elapsedMs < GATE_CHECK_AFTER_S * 1000) return; m_bGatesChecked = true; int afterS "
                       "= Math.Round(elapsedMs / 1000); m_Gates.CheckOpen(afterS);", check)
         self.assertIn("static const int GATE_CHECK_AFTER_S = 10;", code_only(self.expert))
+        # polled by the component's own frame event from the opening until the check ran (Codex LOW 1: the driver
+        # interface's BeginEpisode and PostStep come only after the warm-up or inside an episode)
+        self.assertIn("m_bGatesChecked = false; SetEventMask(GetOwner(), EntityEvent.FRAME);", opener)
+        frame = enforce_body(self.expert, "DC_ExpertDriver", "EOnFrame")
+        self.assertEqual(frame, "override void EOnFrame(IEntity owner, float timeSlice) { CheckGates(false); if "
+                                "(!m_Gates || m_bGatesChecked) ClearEventMask(owner, EntityEvent.FRAME);")
+        self.assertEqual(code_only(self.expert).count("CheckGates(false)"), 1)
         for method in ("BeginEpisode", "PostStep"):
-            body = enforce_body(self.expert, "DC_ExpertDriver", method)
-            self.assertIn(") { CheckGates(false);", body[:200], method)
-        self.assertIn("CheckGates(true); m_Gates = null;", enforce_body(self.expert, "DC_ExpertDriver", "EndDriver"))
+            self.assertNotIn("CheckGates", enforce_body(self.expert, "DC_ExpertDriver", method), method)
+        self.assertIn("CheckGates(true); m_Gates = null; ClearEventMask(GetOwner(), EntityEvent.FRAME);",
+                      enforce_body(self.expert, "DC_ExpertDriver", "EndDriver"))
 
     def test_the_opener_is_deployed_and_switched_on(self):
         gates = code_only(read(GATES_SOURCE))
@@ -533,6 +563,20 @@ class VehicleGatesTest(unittest.TestCase):
         early = GateCheckMirror(opened_ms=4000.0)        # a session that ends before 10 s still gets its check
         early.check(7000.0, True)
         self.assertEqual(early.checked, [3])
+
+    def test_the_check_comes_10_s_after_opening_in_a_30_s_warm_up(self):
+        # Codex LOW 1: with the 30 s warm-up the earlier placement first checked at about 30 s
+        at_s, checked, _ = gate_check_session(warmup_s=30.0, end_s=600.0, poll_per_frame=False)
+        self.assertGreaterEqual(at_s, 30.0)
+        self.assertEqual(checked, [29])
+        # the frame event checks at the first frame 10 s after the opening, once, and stops polling there
+        at_s, checked, frames = gate_check_session(warmup_s=30.0, end_s=600.0, poll_per_frame=True)
+        self.assertAlmostEqual(at_s, 11.5, delta=1.0 / 39.0)
+        self.assertEqual(checked, [10])
+        self.assertLessEqual(frames, 10 * 39 + 2)
+        # a session that ends in the warm-up (before 10 s) is checked once, by EndDriver
+        at_s, checked, _ = gate_check_session(warmup_s=30.0, end_s=8.0, poll_per_frame=True)
+        self.assertEqual(checked, [7])                              # 6.5 s, Math.Round
 
 
 if __name__ == "__main__":

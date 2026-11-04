@@ -987,7 +987,6 @@ class DC_ExpertDriver : DC_DriverInterface
 	//! A new episode when the ego stands at the route start (see the header)
 	override bool BeginEpisode(int episodeId, int firstPhysicsStep, notnull DC_EpisodeInfo info)
 	{
-		CheckGates(false);
 		if (!m_bReady || m_bInEpisode)
 			return false;
 
@@ -1052,7 +1051,6 @@ class DC_ExpertDriver : DC_DriverInterface
 	//! in a decision callback of the world-time grid (ctx.IsDecisionStep) that evaluation is the decision Decide returns
 	override void PostStep(int physicsStep, float timeSlice, notnull DC_DriverPost post)
 	{
-		CheckGates(false);
 		if (!m_bInEpisode || !CanEvaluate())
 			return;
 
@@ -1136,6 +1134,7 @@ class DC_ExpertDriver : DC_DriverInterface
 
 		CheckGates(true);
 		m_Gates = null;
+		ClearEventMask(GetOwner(), EntityEvent.FRAME);
 		m_bReady = false;
 		m_bInEpisode = false;
 		m_Context = null;
@@ -1165,13 +1164,26 @@ class DC_ExpertDriver : DC_DriverInterface
 		m_Gates = DC_Gates.OpenVehicleGates(world, "[DC_Driver]");
 		m_fGatesOpenedWorldMs = world.GetWorldTime();
 		m_bGatesChecked = false;
+		SetEventMask(GetOwner(), EntityEvent.FRAME);		// EOnFrame polls the check, episode or not
 		ctx.Log(string.Format("vehicle gates: %1 gates with %2 door leaves, %3 set open; checked %4 s later", m_Gates.GetGateCount(), m_Gates.GetDoorCount(), m_Gates.GetOpeningCount(), GATE_CHECK_AFTER_S));
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The gate check (DC_Gates.CheckOpen, diagnostic only: it commands no door), once: from BeginEpisode and PostStep
-	//! (the driver's calls between episodes and during one) when GATE_CHECK_AFTER_S of world time have passed since the
-	//! opening, or at the driver's end (atEnd) when it has not run yet
+	//! This component's per-frame event, set only from OpenGates until the gate check ran: the check comes
+	//! GATE_CHECK_AFTER_S of world time after the opening in the warm-up and between episodes too (the driver interface
+	//! calls nothing per callback outside an episode; PostStep runs only inside one, BeginEpisode only after the
+	//! warm-up). No CallLater clock
+	override void EOnFrame(IEntity owner, float timeSlice)
+	{
+		CheckGates(false);
+		if (!m_Gates || m_bGatesChecked)
+			ClearEventMask(owner, EntityEvent.FRAME);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The gate check (DC_Gates.CheckOpen, diagnostic only: it commands no door), once: from EOnFrame when
+	//! GATE_CHECK_AFTER_S of world time have passed since the opening, or at the driver's end (atEnd) when it has not
+	//! run yet
 	protected void CheckGates(bool atEnd)
 	{
 		if (!m_Gates || m_bGatesChecked)

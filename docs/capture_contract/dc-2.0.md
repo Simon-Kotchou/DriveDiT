@@ -678,10 +678,11 @@ fallback). Rows are frame-bound (dc-2.0 freeze decision D-A): one callback cover
   `Physics.GetVelocity()`. The world frame, never the local one: a spin turns the local velocity vector with no force
   acting.
 - `dv_h(t) = |v_h(t) - v_ref|`, where `v_ref` is the velocity at `t - events.collision_window_ms`, linearly
-  interpolated between the newest sample at or before that instant and the sample after it. When the newest sample
-  at or before it is more than `events.collision_window_tol_ms` older than that instant (a frame hitch, a gap after a
-  reset), the slot is not evaluated and its history restarts at the current sample; a history shorter than the
-  window is not evaluated either. `telemetry.dv_max_mps` uses exactly this quantity.
+  interpolated between the newest sample at or before that instant and the sample after it. When these two samples
+  are more than `events.collision_window_ms + events.collision_window_tol_ms` apart (a frame hitch; one callback of 3
+  merged steps spans only 100 ms), the slot is not evaluated and its history restarts at the current sample; a
+  history that does not reach back to that instant is not evaluated either. `telemetry.dv_max_mps` uses exactly this
+  quantity.
 - Onset: the first evaluated callback with `dv_h >= events.collision_dv_mps` while the slot is neither in refractory
   nor suppressed; `onset_step` is its `physics_step`. `dv_mps` is the peak of `|v_h(t) - v_ref|` (the onset's
   `v_ref`) over `events.collision_peak_ms` of world time after the onset; further crossings within
@@ -990,7 +991,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `clocks.chunk_max_s` | float | s | yes | World-time bound on a chunk (10). |
 | `events.collision_dv_mps` | float | m/s | yes | Collision onset threshold on dv_h, the horizontal world-frame delta-v over events.collision_window_ms of world time (section 9.5.1; default 4.0, PROVISIONAL until the TBD-10 probe, measured per build_key and again on 1.9). [TBD-10] |
 | `events.collision_window_ms` | int | ms | yes | Delta-v window in world time: dv_h at a sample is measured against the velocity at t - collision_window_ms, linearly interpolated between the two samples around that instant (section 9.5.1; default 100). Rows are frame-bound (one callback covers 1 to 3 physics steps of 1/30 s on 1.8), so the window is never a count of steps or callbacks. [TBD-10] |
-| `events.collision_window_tol_ms` | int | ms | yes | Gap tolerance of the delta-v window: the newest sample at or before t - collision_window_ms must be at most this much older than that instant, else the slot is not evaluated and its baseline restarts (a frame hitch never counts as a 100 ms change; default 50, above the 1/30 s step of 1.8). [TBD-10] |
+| `events.collision_window_tol_ms` | int | ms | yes | Gap tolerance of the delta-v window: the two samples around t - collision_window_ms must be at most collision_window_ms + this apart, else the slot is not evaluated and its history restarts (default 50: a callback that merges 3 steps of 1/30 s spans 100 ms and is evaluated, a frame hitch of more than 150 ms never counts as a 100 ms change). [TBD-10] |
 | `events.collision_peak_ms` | int | ms | yes | World time after the onset over which the collision dv_mps is the peak of the velocity change against the onset's reference velocity (default 200). [TBD-10] |
 | `events.collision_refractory_ms` | int | ms | yes | Per-slot refractory after an onset: a further crossing or a contact with the same other entity belongs to the same impact (default 1000). [TBD-10] |
 | `events.episode_end_wait_ms` | int | ms | yes | Longest wait, from the onset, of an episode end for the ego's pending collision row (default 250). [TBD-10] |

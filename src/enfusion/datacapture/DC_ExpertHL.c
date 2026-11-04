@@ -1057,7 +1057,8 @@ class DC_ExpertDriver : DC_DriverInterface
 			return;
 
 		IEntity ego = m_Context.GetEgo();
-		VehicleWheeledSimulation simulation = m_Context.GetActuator().GetSimulation();
+		DC_Actuator actuator = m_Context.GetActuator();
+		VehicleWheeledSimulation simulation = actuator.GetSimulation();
 		vector transform[4];
 		ego.GetWorldTransform(transform);
 		vector position = transform[3];

@@ -142,13 +142,23 @@ class DecodeTests(unittest.TestCase):
             fiducial.render(image, code)
             self.assertDecodes(image, code)
 
-    def test_noise_40_still_decodes(self):
+    def test_small_noise_still_decodes(self):
+        # The capture is lossless and debug shapes kept their colour within 2 levels (run 1); +-6 is a wide margin
         rng = numpy.random.default_rng(2)
         for code in (0, 0x2AAAA, M - 1, 123456):
             image = encoded(code, seed=3).astype(numpy.int16)
-            image += rng.integers(-40, 41, size=image.shape, dtype=numpy.int16)
+            image += rng.integers(-6, 7, size=image.shape, dtype=numpy.int16)
             noisy = numpy.clip(image, 0, 255).astype(numpy.uint8)
             self.assertDecodes(noisy, code)
+
+    def test_heavy_noise_is_not_a_carrier(self):
+        # +-40 noise was "ok" under the old rule (margin 80, no presence gate); now no patch is flat enough
+        rng = numpy.random.default_rng(2)
+        image = encoded(0x2AAAA, seed=3).astype(numpy.int16)
+        image += rng.integers(-40, 41, size=image.shape, dtype=numpy.int16)
+        result = fiducial.decode(numpy.clip(image, 0, 255).astype(numpy.uint8))
+        self.assertNotEqual(result.status, "ok")
+        self.assertIsNone(result.code)
 
     def test_channel_at_128_is_ambiguous(self):
         image = encoded(0x15555)
@@ -166,17 +176,32 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(fiducial.decode(image).status, "ambiguous_right")
 
     def test_edge_of_the_margin(self):
+        margin = fiducial.CHANNEL_MARGIN
+        self.assertEqual(margin, 32)
         image = encoded(0)
         x0, y0 = fiducial.layout(1408, 720)["left"][0]
-        image[y0:y0 + 32, x0:x0 + 32, 1] = 80     # exactly channel_margin: still 0
-        self.assertEqual(fiducial.decode(image).status, "ok")
-        image[y0:y0 + 32, x0:x0 + 32, 1] = 81     # just above: ambiguous
-        self.assertEqual(fiducial.decode(image).status, "ambiguous_left")
-        image[y0:y0 + 32, x0:x0 + 32, 1] = 175    # exactly 255 - channel_margin: 1
+        image[y0:y0 + 32, x0:x0 + 32, 1] = margin          # exactly channel_margin: still 0
+        result = fiducial.decode(image)
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.margin, 0.0)
+        image[y0:y0 + 32, x0:x0 + 32, 1] = margin + 1      # just above: no value, so not present
+        result = fiducial.decode(image)
+        self.assertEqual(result.status, "ambiguous_left")
+        self.assertEqual((result.present_left, result.present_right), (5, 6))
+        image[y0:y0 + 32, x0:x0 + 32, 1] = 255 - margin    # exactly 255 - channel_margin: 1
         result = fiducial.decode(image)
         self.assertEqual(result.status, "mirror_mismatch")
         self.assertEqual(result.left, 2)
         self.assertEqual(result.right, 0)
+
+    def test_exact_patches_have_the_full_margin(self):
+        result = fiducial.decode(encoded(4242))
+        self.assertEqual(result.margin, float(fiducial.CHANNEL_MARGIN))
+        self.assertEqual((result.present_left, result.present_right), (6, 6))
+        image = encoded(7)                                  # patch 0 white
+        x0, y0 = fiducial.layout(1408, 720)["right"][0]
+        image[y0:y0 + 32, x0:x0 + 32, 0] = 250
+        self.assertEqual(fiducial.decode(image).margin, float(fiducial.CHANNEL_MARGIN) - 5.0)
 
     def test_left_right_disagreement_is_mirror_mismatch(self):
         image = encoded(1000)
@@ -210,11 +235,108 @@ class DecodeTests(unittest.TestCase):
         result = fiducial.decode_origins(image, geometry["left"], geometry["right"])
         self.assertEqual((result.status, result.code), ("ok", 4242))
 
+    def test_result_keeps_the_four_positional_fields(self):
+        # e06_fiducial and older callers build FiducialResult(code, left, right, status)
+        result = fiducial.FiducialResult(None, None, None, "unreadable")
+        self.assertEqual((result.present_left, result.present_right, result.margin), (0, 0, None))
+        self.assertEqual(fiducial.decode_band(encoded(9), fiducial.layout(1408, 720)["left"]), (9, "ok"))
+
     def test_rejects_non_rgb_input(self):
         with self.assertRaises(ValueError):
             fiducial.decode(numpy.zeros((720, 1408), dtype=numpy.uint8))
         with self.assertRaises(ValueError):
             fiducial.decode(numpy.zeros((720, 1408, 3), dtype=numpy.float32))
+
+
+def bark(width=1408, height=720, seed=11, low=25, high=60):
+    """Dark, textured scene like the run-1 forest edges: medians ~40, per-channel std ~10."""
+    rng = numpy.random.default_rng(seed)
+    return rng.integers(low, high, size=(height, width, 3), dtype=numpy.uint8)
+
+
+class PresenceGateTests(unittest.TestCase):
+    """Run 1: dark tree bark in both bands decoded as six black patches, code 0 "ok", on every e05 frame."""
+
+    def test_dark_textured_bands_are_absent(self):
+        image = bark()
+        result = fiducial.decode(image)
+        self.assertEqual(result.status, "absent")
+        self.assertIsNone(result.code)
+        self.assertEqual((result.present_left, result.present_right), (0, 0))
+        # the rule before the gates (margin 80, no presence test) read the same image as code 0 "ok"
+        old = fiducial.decode(image, channel_margin=80, pixel_tolerance=255, uniform_std_max=1e9,
+                              min_corner_fraction=0.0)
+        self.assertEqual((old.status, old.code), ("ok", 0))
+
+    def test_textured_patch_with_a_corner_median_is_not_present(self):
+        image = encoded(0)
+        x0, y0 = fiducial.layout(1408, 720)["left"][1]
+        rng = numpy.random.default_rng(5)
+        # median stays near 0, but the block is texture (std ~9 > 6)
+        image[y0:y0 + 32, x0:x0 + 32] = rng.integers(0, 32, size=(32, 32, 3), dtype=numpy.uint8)
+        result = fiducial.decode(image)
+        self.assertEqual(result.status, "ambiguous_left")
+        self.assertEqual(result.present_left, 5)
+
+    def test_one_band_absent_is_ambiguous(self):
+        image = encoded(77)
+        image[:, :64] = bark(64, 720)
+        result = fiducial.decode(image)
+        self.assertEqual(result.status, "ambiguous_left")
+        self.assertEqual((result.present_left, result.present_right), (0, 6))
+        self.assertEqual(result.right, 77)
+
+    def test_band_details(self):
+        band = fiducial.band_details(bark(), fiducial.layout(1408, 720)["left"])
+        self.assertEqual(band, fiducial.BandResult(None, "absent", 0, None))
+        band = fiducial.band_details(encoded(5), fiducial.layout(1408, 720)["right"])
+        self.assertEqual((band.code, band.reason, band.present), (5, "ok", 6))
+        tiny = numpy.zeros((100, 100, 3), dtype=numpy.uint8)
+        self.assertEqual(fiducial.band_details(tiny, fiducial.layout(100, 100)["left"]).reason, "out_of_bounds")
+
+    def test_the_code_domain_stays_v2(self):
+        # a flat black scene band is still the valid codeword 0: only the plausibility gate can reject it
+        image = numpy.zeros((720, 1408, 3), dtype=numpy.uint8)
+        self.assertEqual((fiducial.decode(image).status, fiducial.decode(image).code), ("ok", 0))
+        self.assertDecodesCodeword(M - 1)
+
+    def assertDecodesCodeword(self, code):
+        image = scene(1408, 720, seed=4)
+        fiducial.render(image, code)
+        self.assertEqual(fiducial.decode(image).code, code)
+
+
+class PlausibilityGateTests(unittest.TestCase):
+    def test_capture_window(self):
+        self.assertEqual(fiducial.MAX_CAPTURE_OFFSET, 2)
+        self.assertEqual(fiducial.capture_window(1000), (1000, 1002))
+        self.assertEqual(fiducial.capture_window(1000, done_frame=1002), (1000, 1001))
+        self.assertEqual(fiducial.capture_window(1000, done_frame=1001), (1000, 1000))
+        self.assertEqual(fiducial.capture_window(1000, done_frame=1077), (1000, 1002))   # backlog: late file
+        self.assertEqual(fiducial.capture_window(1000, max_offset=5), (1000, 1005))
+
+    def test_resolve_inside_the_window(self):
+        result = fiducial.decode(encoded(fiducial.code_for(20001)))
+        capture = fiducial.resolve(result, 20000, done_frame=20002)
+        self.assertEqual(capture, fiducial.Capture(20001, 1, "ok", (20000, 20001)))
+
+    def test_resolve_across_the_wrap(self):
+        result = fiducial.decode(encoded(fiducial.code_for(M + 1)))
+        capture = fiducial.resolve(result, M - 1)
+        self.assertEqual((capture.frame, capture.offset, capture.status), (M + 1, 2, "ok"))
+
+    def test_resolve_outside_is_implausible(self):
+        before = fiducial.resolve(fiducial.decode(encoded(fiducial.code_for(19999))), 20000)
+        self.assertEqual((before.frame, before.offset, before.status), (19999, -1, "implausible"))
+        late = fiducial.resolve(fiducial.decode(encoded(fiducial.code_for(20002))), 20000, done_frame=20002)
+        self.assertEqual((late.offset, late.status), (2, "implausible"))
+        # run 1: a black band read as code 0 against request frames 737..11793
+        black = fiducial.resolve(fiducial.decode(numpy.zeros((720, 1408, 3), dtype=numpy.uint8)), 737)
+        self.assertEqual((black.offset, black.status), (-737, "implausible"))
+
+    def test_resolve_passes_other_statuses_through(self):
+        capture = fiducial.resolve(fiducial.decode(bark()), 500)
+        self.assertEqual(capture, fiducial.Capture(None, None, "absent", (500, 502)))
 
 
 class LoadRgbTests(unittest.TestCase):

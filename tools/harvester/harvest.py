@@ -179,6 +179,9 @@ RETENTION_MAX_BYTES = 64 << 20
 RETENTION_EVENT_KINDS = ("collision", "stuck", "respawn", "teleport", "script_error")
 RETENTION_EVENT_WINDOW_MS = 2000
 RAW_SHOT_SUFFIXES = (".png", ".bmp.png", ".bmp")
+# frames/.retention_staging/: retention.py's private staging directory. A file it holds is a frames/ file in the
+# middle of a delete; verify_sums counts it at its frames/ name (and it must still match SHA256SUMS).
+RETENTION_STAGING = ".retention_staging"
 RAW_SHOT_RE = re.compile(r"f_([0-9]{8})(\.png|\.bmp\.png|\.bmp)")     # a raw screenshot file name; fullmatch only
 
 # The derivative of dc-2.0 10.1 (rig.derivative_wh, rig.derivative_codec) and CAPTURE_PROGRAM r2 3.9: 512x288 JPEG
@@ -1059,36 +1062,45 @@ def retention_session_rule(session_dir, listed, suffix, every_n, schema):
     return raw, keep
 
 
-def retention_deleted(session_dir, listed, sums_sha256):
-    """({relative path: sha256}, problem) of the raw screenshots _harvest/RETENTION.json records as deleted: ({},
-    None) without a record. The record is checked against the rule, never trusted: it must be a regular file of
-    this rule version naming this session, this SHA256SUMS (sums_sha256), a screenshot suffix and N; recomputed on
-    the inventory (retention_session_rule with that N), its kept files must be exactly the audit sample and its
-    deleted files exactly the other raw files, each with its SHA256SUMS sha256. Otherwise problem says why and
-    nothing is accounted for (so a protected frame listed as deleted, gone or not, fails the verification)."""
+def read_retention_record(session_dir):
+    """(bytes, problem) of _harvest/RETENTION.json, read once: (None, None) without a record."""
     path = os.path.join(session_dir, HARVEST_DIR, RETENTION_NAME)
     if not os.path.lexists(path):
-        return {}, None
-    if os.path.islink(path) or not os.path.isfile(path) or os.path.getsize(path) > RETENTION_MAX_BYTES:
-        return {}, "is a symlink, not a regular file or too large"
+        return None, None
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None, "is a symlink or not a regular file"
+    with open(path, "rb") as f:
+        data = f.read(RETENTION_MAX_BYTES + 1)
+    if len(data) > RETENTION_MAX_BYTES:
+        return None, "is larger than %d bytes" % RETENTION_MAX_BYTES
+    return data, None
+
+
+def check_retention_record(session_dir, data, listed, sums_sha256):
+    """(deleted {relative path: sha256}, record, problem) of the bytes of a session's RETENTION.json, checked
+    against the rule, never trusted: a record of this rule version naming this session, this SHA256SUMS
+    (sums_sha256), a screenshot suffix and N; recomputed on the inventory (retention_session_rule with that N), its
+    kept files must be exactly the audit sample and its deleted files exactly the other raw files, each with its
+    SHA256SUMS sha256. Otherwise problem says why and nothing is accounted for (so a protected frame listed as
+    deleted, gone or not, fails the verification)."""
     try:
-        with open(path, "rb") as f:
-            doc = json.loads(f.read().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        return {}, "does not parse"
+        doc = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {}, None, "does not parse"
     if not isinstance(doc, dict) or doc.get("schema") != RETENTION_SCHEMA or doc.get("kind") != "session" \
             or doc.get("session_id") != os.path.basename(os.path.normpath(session_dir)) \
             or doc.get("sha256sums_sha256") != sums_sha256 or not isinstance(doc.get("deleted"), list) \
             or not isinstance(doc.get("kept"), list):
-        return {}, "does not name this session and this %s" % SUMS_NAME
+        return {}, None, "does not name this session and this %s" % SUMS_NAME
     every_n, suffix = doc.get("every_n"), doc.get("screenshot_suffix")
     if doc.get("rule_version") != RETENTION_RULE_VERSION or type(every_n) is not int or every_n < 1 \
             or suffix not in RAW_SHOT_SUFFIXES:
-        return {}, "is not a record of rule %s (rule_version, every_n, screenshot_suffix)" % RETENTION_RULE_VERSION
+        return {}, None, "is not a record of rule %s (rule_version, every_n, screenshot_suffix)" % (
+            RETENTION_RULE_VERSION)
     try:
         raw, keep = retention_session_rule(session_dir, listed, suffix, every_n, reader.load_schema())
     except Held as e:
-        return {}, "cannot be checked against the rule: %s" % e
+        return {}, None, "cannot be checked against the rule: %s" % e
     want_kept = set(raw[slot] for slot in keep)
     want_deleted = set(raw.values()) - want_kept
     deleted = {}
@@ -1096,45 +1108,84 @@ def retention_deleted(session_dir, listed, sums_sha256):
         rel = entry.get("file") if isinstance(entry, dict) else None
         digest = entry.get("sha256") if isinstance(entry, dict) else None
         if rel not in want_deleted or rel in deleted or listed.get(rel) != digest:
-            return {}, ("lists %r as deleted, which the retention rule keeps, %s does not list with that sha256 or "
-                        "the record lists twice" % (rel, SUMS_NAME))
+            return {}, None, ("lists %r as deleted, which the retention rule keeps, %s does not list with that "
+                              "sha256 or the record lists twice" % (rel, SUMS_NAME))
         deleted[rel] = digest
     kept = [e.get("file") if isinstance(e, dict) else None for e in doc["kept"]]
     if set(deleted) != want_deleted or len(kept) != len(set(kept)) or set(kept) != want_kept:
-        return {}, ("does not partition the raw screenshots into the audit sample of every_n %d (kept) and the rest "
-                    "(deleted)" % every_n)
-    return deleted, None
+        return {}, None, ("does not partition the raw screenshots into the audit sample of every_n %d (kept) and "
+                          "the rest (deleted)" % every_n)
+    return deleted, doc, None
 
 
-def verify_sums(session_dir):
-    """(ok, detail): _harvest/SHA256SUMS lists exactly the files of the session (itself, RETENTION.json and its
-    .dd6tmp excepted) and every hash matches. A listed file that is gone counts as accounted for only when a valid
-    _harvest/RETENTION.json (retention_deleted) records it as deleted; a listed file that is still there is hashed
-    whatever the record says (a retention run killed before its deletes)."""
+def retention_deleted(session_dir, listed, sums_sha256):
+    """({relative path: sha256}, problem) of the raw screenshots a session's valid RETENTION.json records as
+    deleted (check_retention_record); ({}, None) without a record."""
+    data, problem = read_retention_record(session_dir)
+    if problem or data is None:
+        return {}, problem
+    deleted, _, problem = check_retention_record(session_dir, data, listed, sums_sha256)
+    return deleted, problem
+
+
+def verify_sums_snapshot(session_dir):
+    """(ok, detail, snapshot): _harvest/SHA256SUMS lists exactly the files of the session (itself, RETENTION.json and
+    its .dd6tmp excepted) and every hash matches. A listed file that is gone counts as accounted for only when a
+    valid _harvest/RETENTION.json (check_retention_record) records it as deleted; a listed file that is still there
+    is hashed whatever the record says (a retention run killed before its deletes), and a raw screenshot in
+    frames/.retention_staging/ (a delete retention.py was making) counts at its frames/ name. snapshot holds what was
+    verified, each file read once: sums_bytes, listed, record_bytes, record (the parsed valid record) and deleted;
+    a caller acts on it and never reads them again."""
+    snap = {"sums_bytes": None, "listed": {}, "record_bytes": None, "record": None, "deleted": {}}
     sums_path = os.path.join(session_dir, HARVEST_DIR, SUMS_NAME)
     if os.path.islink(sums_path) or not os.path.isfile(sums_path):
-        return False, "no %s/%s" % (HARVEST_DIR, SUMS_NAME)
+        return False, "no %s/%s" % (HARVEST_DIR, SUMS_NAME), snap
     with open(sums_path, "rb") as f:
         sums_bytes = f.read()
     listed = parse_sums(sums_bytes)
-    deleted, problem = retention_deleted(session_dir, listed, sha256_bytes(sums_bytes))
+    snap.update(sums_bytes=sums_bytes, listed=listed)
+    data, problem = read_retention_record(session_dir)
+    deleted, doc = {}, None
+    if data is not None:
+        deleted, doc, problem = check_retention_record(session_dir, data, listed, sha256_bytes(sums_bytes))
     if problem:
-        return False, "%s/%s %s" % (HARVEST_DIR, RETENTION_NAME, problem)
+        return False, "%s/%s %s" % (HARVEST_DIR, RETENTION_NAME, problem), snap
+    snap.update(record_bytes=data, record=doc, deleted=deleted)
     unlisted = ("%s/%s" % (HARVEST_DIR, SUMS_NAME), "%s/%s" % (HARVEST_DIR, RETENTION_NAME),
                 "%s/%s%s" % (HARVEST_DIR, RETENTION_NAME, TMP_SUFFIX))
-    present = dict((rel, full) for rel, full in tree_files(session_dir) if rel not in unlisted)
+    present = {}
+    staged = []
+    staging = "frames/%s/" % RETENTION_STAGING
+    for rel, full in tree_files(session_dir):
+        if rel in unlisted:
+            continue
+        name = rel[len(staging):] if rel.startswith(staging) else None
+        if name is not None and raw_shot_slot(name) is not None:
+            staged.append(("frames/" + name, full))
+        else:
+            present[rel] = full
+    for rel, full in staged:
+        if rel in present:
+            return False, "%s is both in frames/ and in frames/%s/" % (rel, RETENTION_STAGING), snap
+        present[rel] = full
     retained = (set(listed) - set(present)) & set(deleted)
     if set(present) != set(listed) - retained:
         extra = sorted(set(present) - set(listed))
         missing = sorted(set(listed) - set(present) - retained)
-        return False, "files differ from %s (unlisted %s, missing %s)" % (SUMS_NAME, extra[:2], missing[:2])
+        return False, "files differ from %s (unlisted %s, missing %s)" % (SUMS_NAME, extra[:2], missing[:2]), snap
     bad = [rel for rel, full in sorted(present.items()) if sha256_file(full) != listed[rel]]
     if bad:
-        return False, "%d file(s) do not match %s (%s)" % (len(bad), SUMS_NAME, bad[:2])
+        return False, "%d file(s) do not match %s (%s)" % (len(bad), SUMS_NAME, bad[:2]), snap
     if retained:
         return True, "%d files verified, %d raw screenshot(s) deleted by retention (%s)" % (
-            len(present), len(retained), RETENTION_NAME)
-    return True, "%d files verified" % len(present)
+            len(present), len(retained), RETENTION_NAME), snap
+    return True, "%d files verified" % len(present), snap
+
+
+def verify_sums(session_dir):
+    """(ok, detail) of verify_sums_snapshot."""
+    ok, detail, _ = verify_sums_snapshot(session_dir)
+    return ok, detail
 
 
 def parse_row(line):

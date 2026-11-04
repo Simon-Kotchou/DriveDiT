@@ -204,7 +204,14 @@ def run_subprocess(root, kill_at, *argv):
 
 
 def frame_slots(dest):
-    return sorted(int(n[2:10]) for n in os.listdir(os.path.join(dest, "frames")))
+    """The slots of the raw screenshots in frames/ (the staging directory and other names left out)."""
+    return sorted(int(n[2:10]) for n in os.listdir(os.path.join(dest, "frames")) if n.startswith("f_"))
+
+
+def staged(unit):
+    """The names in frames/.retention_staging/ (None when there is no staging directory)."""
+    sdir = os.path.join(unit, "frames", ret.STAGING)
+    return sorted(os.listdir(sdir)) if os.path.isdir(sdir) else None
 
 
 def line_of(out, status, rel):
@@ -419,14 +426,22 @@ class SessionRetentionTest(unittest.TestCase):
                 doc = read_json(os.path.join(dest, "_harvest", "RETENTION.json"))    # written before any delete
                 self.assertEqual(doc["status"], "deleting")
                 left = frame_slots(dest)
-                self.assertEqual(len(left), {"after_record": 250, "in_deletes": 249, "before_unlink": 250,
-                                             "before_done": 4}[hook])
+                self.assertEqual((len(left), staged(dest)), {
+                    "record_renamed": (250, None), "after_record": (250, None), "before_stage": (250, []),
+                    "after_stage": (249, ["f_00000001.png"]), "before_unlink": (249, ["f_00000001.png"]),
+                    "in_deletes": (249, []), "before_done": (4, None)}[hook])
                 ok, detail = harvest.verify_sums(dest)                 # consistent at every point
                 self.assertTrue(ok, detail)
                 code, out = run(root)                                   # the dry run shows what is left
-                self.assertIn("completing RETENTION.json (status deleting", out)
+                if staged(dest) is None:
+                    self.assertIn("completing RETENTION.json (status deleting", out)
+                else:
+                    self.assertIn("holds files of an interrupted retention run", out)
                 code, out = run(root, "--apply")
                 self.assertEqual(code, 0, out)
+                self.assertEqual(staged(dest), None)
+                if hook in ("before_stage", "after_stage", "before_unlink", "in_deletes"):
+                    self.assertIn("recovered ", out)
                 self.assertEqual(frame_slots(dest), [0, 100, 200, 249])
                 done = read_json(os.path.join(dest, "_harvest", "RETENTION.json"))
                 self.assertEqual((done["status"], done["deleted"], done["created_utc"]),
@@ -790,21 +805,26 @@ class ReviewFindingsTest(unittest.TestCase):
                     self.assertEqual(f.read(), b"changed after planning, before the delete")
                 self.assertEqual(len(frame_slots(unit)), 250)
 
-    def test_f2_a_file_swapped_between_its_hash_and_its_unlink_is_not_deleted(self):
+    def test_f2_a_file_swapped_between_its_last_check_and_its_move_is_not_deleted(self):
+        """The file is replaced (same bytes, another inode) between the last check in frames/ and the rename into
+        staging: the staged file is not the one planned, so it is put back and the session is held."""
         _, dest = make_captured(self.root)
         target = os.path.join(dest, "frames", "f_00000001.png")
         swapped = []
 
         def hook(r, name):
-            if name == "before_unlink" and not swapped:
-                os.rename(target, target + ".old")
-                write(target, tiny_png(1))                              # same bytes, another inode
+            if name == "before_stage" and not swapped:
+                os.rename(target, os.path.join(dest, "f_00000001.png.old"))
+                write(target, tiny_png(1))
                 swapped.append(name)
         with mock.patch.object(ret.Retention, "hook", hook):
             code, out = run(self.root, "--apply")
         self.assertEqual(code, 2, out)
         self.assertTrue(os.path.isfile(target), out)
-        self.assertIn("changed after it was hashed", out)
+        self.assertTrue(os.path.isfile(os.path.join(dest, "f_00000001.png.old")))
+        self.assertIn("frames/f_00000001.png is not the file planned once staged", out)
+        self.assertIn("it was put back in frames/", out)
+        self.assertEqual(staged(dest), None)
 
     # -- finding 3 ------------------------------------------------------------------------------------
     def test_f3_an_ancestor_replaced_after_planning_is_not_followed(self):

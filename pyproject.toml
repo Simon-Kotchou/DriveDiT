@@ -1,7 +1,7 @@
 [project]
 name = "drivedit"
 version = "0.1.0"
-description = "DriveDiT: diffusion-transformer world model for driving, plus its Enfusion capture tooling"
+description = "DriveDiT: Enfusion capture tooling for a driving world model and policy in Arma Reforger (model package being rebuilt)"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"

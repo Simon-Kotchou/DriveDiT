@@ -23,6 +23,7 @@ import importlib
 import json
 import math
 import os
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 from types import ModuleType
@@ -81,19 +82,45 @@ def _refuse_sealed_resources(shard_dir: Path, latents_dir: Path) -> None:
 
 
 def _plain_name(name: object, where: Path) -> str:
-    """``name`` if it is a plain file name: a non-empty string with no separator and no ``..``, not absolute."""
-    if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\\" in name or Path(name).is_absolute():
+    """``name`` if it is a plain file name: a non-empty string with no separator, no ``..``, no NUL or other control
+    character, and not absolute."""
+    if (
+        not isinstance(name, str)
+        or name in ("", ".", "..")
+        or "/" in name
+        or "\\" in name
+        or any(ord(c) < 32 or ord(c) == 127 for c in name)
+        or Path(name).is_absolute()
+    ):
         raise TrainingDataError(f"{where} references {name!r}; only a plain file name in its own folder is allowed")
     return name
 
 
-def _inside(folder: Path, name: str) -> Path:
-    """``folder / name`` for a resolved ``folder``: the sealed path rule applies, and the file must resolve directly
-    inside ``folder``. Only the path is resolved; nothing is opened."""
-    path = folder / name
+def _resource(folder: Path, name: object, where: Path) -> Path:
+    """The file ``name`` in the resolved ``folder``, checked before anything reads it.
+
+    Only the path is resolved and ``lstat``-ed; nothing is opened. The checks:
+    - a plain name (``_plain_name``; ``where`` is the file that names it);
+    - the sealed path rule;
+    - it resolves directly inside ``folder``;
+    - it is a regular file, not a symlink;
+    - it has exactly one hard link, since a second link could alias a file under ``heldout/`` or ``SEALED`` whatever
+      path it is opened by.
+    """
+    path = folder / _plain_name(name, where)
     _refuse_sealed(path)
     if path.resolve().parent != folder:
         raise TrainingDataError(f"{path} resolves to {path.resolve()}, outside {folder}")
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        raise TrainingDataError(f"{path} is missing") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise TrainingDataError(f"{path} is not a regular file (a symlink or another kind of file)")
+    if st.st_nlink != 1:
+        raise TrainingDataError(
+            f"{path} has {st.st_nlink} hard links; a training file has one, so it cannot alias sealed data"
+        )
     return path
 
 
@@ -105,29 +132,28 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _check_referenced_files(shard_dir: Path, latents_dir: Path, meta: dict[str, Any]) -> None:
-    """Every file the shard and latents readers open, and every file their meta.json names, as ``_inside`` its folder.
+    """Every file the shard and latents readers open, and every file their meta.json names, as a ``_resource``.
 
     The shard reader opens ``meta["arrays"][name]["file"]`` relative to the resolved shard folder (an absolute name
-    would win in that path join). The latents reader opens ``LATENTS_FILES`` in the latents folder, whose meta.json
-    names ``sha256`` entries and ``aligned_to.file`` (DD-19's pre-encoder).
+    would win in that path join). The latents reader opens ``LATENTS_FILES`` in the latents folder. The latents
+    meta.json names its own files in ``sha256`` and the shard's ``aligned_to.file`` (DD-19's pre-encoder).
     """
     arrays = meta.get("arrays", {})
     if not isinstance(arrays, dict):
         raise TrainingDataError(f"{shard_dir}/meta.json: arrays is not an object")
     for info in arrays.values():
-        _inside(shard_dir, _plain_name(info.get("file") if isinstance(info, dict) else None, shard_dir / META_NAME))
+        _resource(shard_dir, info.get("file") if isinstance(info, dict) else None, shard_dir / META_NAME)
     if not latents_dir.exists():
         return  # the latents reader raises on a missing folder
     latents_real = latents_dir.resolve()
     for name in LATENTS_FILES:
-        _inside(latents_real, name)
-    if (latents_real / META_NAME).is_file():
-        latents_meta = _read_json(latents_real / META_NAME)
-        sha256, aligned = latents_meta.get("sha256", {}), latents_meta.get("aligned_to", {})
-        named = [*(sha256 if isinstance(sha256, dict) else ())]
-        named += [aligned.get("file")] if isinstance(aligned, dict) and "file" in aligned else []
-        for name in named:
-            _plain_name(name, latents_real / META_NAME)
+        _resource(latents_real, name, latents_real)
+    latents_meta = _read_json(latents_real / META_NAME)
+    sha256, aligned = latents_meta.get("sha256", {}), latents_meta.get("aligned_to", {})
+    for name in sha256 if isinstance(sha256, dict) else ():
+        _resource(latents_real, name, latents_real / META_NAME)
+    if isinstance(aligned, dict) and "file" in aligned:
+        _resource(shard_dir, aligned["file"], latents_real / META_NAME)
 
 
 def _check_meta(session: str, meta: dict[str, Any], decision_hz: float) -> None:
@@ -167,8 +193,9 @@ def check_training_sessions(data: DataConfig, decision_hz: float) -> list[Path]:
        raises ``SealedDataError``. ``TrainingDataError`` is raised for a (map_id, split) outside
        ``TRAINING_SPLITS``, for a VAL-C session (``is_val_c``; defence in depth, since DD-11 writes the effective
        split), and for a ``decision_hz`` other than the model's.
-    3. Every file that meta.json or the latents meta.json names must be a plain name that resolves inside its own
-       resolved folder (``_check_referenced_files``); anything else raises ``TrainingDataError``.
+    3. Every file that a reader opens, or that meta.json or the latents meta.json names, is checked as a ``_resource``:
+       a plain name, inside its own resolved folder, a regular file with one hard link. Anything else raises
+       ``TrainingDataError`` (``_check_referenced_files``).
     """
     dirs = []
     for session in data.sessions:
@@ -179,7 +206,7 @@ def check_training_sessions(data: DataConfig, decision_hz: float) -> list[Path]:
         shard_dir = configured.resolve()  # what the shard reader opens ...
         latents_dir = shard_dir.parent / "latents" / data.codec_id  # ... and where it finds the latents
         _refuse_sealed_resources(shard_dir, latents_dir)
-        meta = _read_json(_inside(shard_dir, META_NAME))
+        meta = _read_json(_resource(shard_dir, META_NAME, shard_dir))
         _check_meta(session, meta, decision_hz)
         _check_referenced_files(shard_dir, latents_dir, meta)
         dirs.append(shard_dir)
@@ -220,9 +247,11 @@ def open_training_windows(cfg: RunConfig, *, chunk_rows: int = 4096) -> Dataset[
 
     Each session gives ``window``-frame windows: the latents of ``codec_id``, normalised by per-channel statistics of
     the valid rows of these sessions; the conditioning channels; and the targets of the configured aux heads.
-    ``check_training_sessions`` runs first. Training data built any other way skips those rules. The guard assumes
-    the datasets do not change while they load: it is meant for local, single-user runs, and a file swapped between
-    the check and the read is not caught.
+    ``check_training_sessions`` runs first. Training data built any other way skips those rules.
+
+    The guard defends against accidental contamination: wrong paths, symlinks, hard links, mislabelled or
+    hash-held-out splits, and sealed maps. It does not defend against a local user deliberately changing files during
+    or between the checks (TOCTOU), which is out of scope for local single-user runs.
     """
     if cfg.data is None:
         raise ValueError("RunConfig.data is required to train from shards")

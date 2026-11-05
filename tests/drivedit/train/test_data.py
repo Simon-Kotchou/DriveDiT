@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,14 +45,16 @@ VAL_C_SESSION = "arland_T0b_20261025T091512Z_wb_i00_0004"
 
 
 def _session(root: Path, session: str, **meta: object) -> str:
-    """A shard folder with only meta.json, and a latents folder with a stand-in latents.npy (never read here)."""
+    """A shard folder with only meta.json, and a latents folder with stand-in files (never read here)."""
     path = root / session / "features_v1"
     path.mkdir(parents=True)
     fields = {"schema": "drivedit.features_v1-shard/1", "session_id": session, "map_id": "arland", "split": "train"}
     (path / "meta.json").write_text(json.dumps({**fields, "decision_hz": 5.0, **meta}))
     latents = root / session / "latents" / CODEC
     latents.mkdir(parents=True)
-    (latents / "latents.npy").write_bytes(b"not read by the guard")
+    for name in ("latents.npy", "valid.npy"):
+        (latents / name).write_bytes(b"not read by the guard")
+    (latents / "meta.json").write_text("{}")
     return session
 
 
@@ -162,14 +165,20 @@ def _link_array(session_dir: Path, sealed: Path) -> None:
     (session_dir / "features_v1" / "state.npy").symlink_to(sealed / "features_v1" / "state.npy")
 
 
+def _empty(folder: Path) -> None:
+    for entry in folder.iterdir():
+        entry.unlink()
+    folder.rmdir()
+
+
 def _link_latents_dir(session_dir: Path, sealed: Path) -> None:
     latents = session_dir / "latents" / CODEC
-    (latents / "latents.npy").unlink()
-    latents.rmdir()
+    _empty(latents)
     latents.symlink_to(sealed / "latents" / CODEC)
 
 
 def _link_latents_file(session_dir: Path, sealed: Path) -> None:
+    (session_dir / "latents" / CODEC / "valid.npy").unlink()
     (session_dir / "latents" / CODEC / "valid.npy").symlink_to(sealed / "latents" / CODEC / "valid.npy")
 
 
@@ -241,8 +250,9 @@ def _pre_hardening_reader(opened: list[Path]) -> dict[str, types.ModuleType]:
 
 def _trainable(root: Path, session: str, *, value: float = 1.0) -> Path:
     """A complete session in the DD-11 / DD-19 layout: a state array named in meta.json, latents with their meta."""
-    _session(root, session, arrays={"state": {"file": "state.npy"}})
+    _session(root, session, arrays={"state": {"file": "state.npy"}, "slot_id": {"file": "slot_id.npy"}})
     np.save(root / session / "features_v1" / "state.npy", np.zeros((T, 4), np.float32))
+    np.save(root / session / "features_v1" / "slot_id.npy", np.arange(T))
     latents = root / session / "latents" / CODEC
     (latents / "latents.npy").unlink()
     np.save(latents / "latents.npy", np.full((T, *LATENT), value, np.float16))
@@ -267,7 +277,7 @@ def test_the_stand_in_reader_trains_on_a_clean_session(tmp_path: Path, monkeypat
     session = _trainable(tmp_path / "datasets", "arland_ok")
     opened: list[Path] = []
     _train(monkeypatch, tmp_path / "datasets", "arland_ok", opened)
-    assert {p.name for p in opened} == {"meta.json", "state.npy", "latents.npy", "valid.npy"}
+    assert {p.name for p in opened} == {"meta.json", "state.npy", "slot_id.npy", "latents.npy", "valid.npy"}
     assert all(p.is_relative_to(session.resolve()) for p in opened)
 
 
@@ -284,14 +294,10 @@ def test_a_redirected_shard_folder_cannot_reach_sealed_latents(tmp_path: Path, m
         )
     )
     other_latents = other / "latents" / CODEC
-    for f in other_latents.iterdir():
-        f.unlink()
-    other_latents.rmdir()
+    _empty(other_latents)
     other_latents.symlink_to(sealed / "latents" / CODEC)
     session = _trainable(root, "arland_ok")  # its own latents folder is clean, but nothing reads it
-    (session / "features_v1" / "meta.json").unlink()
-    (session / "features_v1" / "state.npy").unlink()
-    (session / "features_v1").rmdir()
+    _empty(session / "features_v1")
     (session / "features_v1").symlink_to(other / "features_v1")
     opened: list[Path] = []
     with pytest.raises(SealedDataError, match="never reads"):
@@ -348,4 +354,64 @@ def test_the_latents_meta_names_only_plain_files(tmp_path: Path, named: dict[str
     session = _trainable(root, "arland_ok")
     (session / "latents" / CODEC / "meta.json").write_text(json.dumps(named))
     with pytest.raises(TrainingDataError, match="only a plain file name"):
+        check_training_sessions(_data(root, "arland_ok"), 5.0)
+
+
+def _replace_with_hard_link(path: Path, target: Path) -> None:
+    path.unlink()
+    os.link(target, path)
+
+
+@pytest.mark.parametrize("resource", ["features_v1/meta.json", "features_v1/state.npy", f"latents/{CODEC}/latents.npy"])
+def test_a_hard_link_to_sealed_data_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource: str) -> None:
+    """Codex round-4 HIGH: a permitted path hard-linked to a file under SEALED shares its inode (st_nlink 2), so no
+    path rule can see it. A training file must have exactly one link."""
+    root = tmp_path / "datasets"
+    session = _trainable(root, "arland_ok")
+    sealed = _trainable(tmp_path / "heldout" / "everon" / "SEALED", "arland_sealed", value=99.0)
+    target = sealed / resource
+    if resource.endswith("meta.json"):  # a sealed meta that would pass every metadata check if it were read
+        meta = json.loads((session / resource).read_text())
+        target.write_text(json.dumps(meta))
+    _replace_with_hard_link(session / resource, target)
+    assert (session / resource).stat().st_nlink == 2
+    opened: list[Path] = []
+    with pytest.raises(TrainingDataError, match="2 hard links"):
+        _train(monkeypatch, root, "arland_ok", opened)
+    assert opened == []
+
+
+def test_an_array_symlinked_within_its_folder_is_refused(tmp_path: Path) -> None:
+    """It resolves inside the folder, but only a regular file passes."""
+    session = _trainable(tmp_path, "arland_ok")
+    (session / "features_v1" / "state.npy").unlink()
+    (session / "features_v1" / "state.npy").symlink_to(session / "features_v1" / "slot_id.npy")
+    with pytest.raises(TrainingDataError, match="not a regular file"):
+        check_training_sessions(_data(tmp_path, "arland_ok"), 5.0)
+
+
+@pytest.mark.parametrize("name", ["latents\x00.npy", "state\x01.npy", "valid\x7f.npy"])
+def test_control_characters_are_not_plain_names(tmp_path: Path, name: str) -> None:
+    session = _trainable(tmp_path, "arland_ok")
+    meta_path = session / "latents" / CODEC / "meta.json"
+    meta_path.write_text(json.dumps({"sha256": {name: "x"}}))
+    with pytest.raises(TrainingDataError, match="only a plain file name"):
+        check_training_sessions(_data(tmp_path, "arland_ok"), 5.0)
+
+
+def test_latents_meta_names_get_the_full_resource_check(tmp_path: Path) -> None:
+    """Codex round-4 LOW: a plain name in the latents meta, symlinked outside the latents folder, or missing."""
+    root = tmp_path / "datasets"
+    session = _trainable(root, "arland_ok")
+    elsewhere = _trainable(root, "arland_elsewhere")
+    latents = session / "latents" / CODEC
+    (latents / "extra.npy").symlink_to(elsewhere / "latents" / CODEC / "valid.npy")
+    (latents / "meta.json").write_text(json.dumps({"sha256": {"latents.npy": "x", "extra.npy": "y"}}))
+    with pytest.raises(TrainingDataError, match="outside"):
+        check_training_sessions(_data(root, "arland_ok"), 5.0)
+    (latents / "meta.json").write_text(json.dumps({"sha256": {"gone.npy": "y"}}))
+    with pytest.raises(TrainingDataError, match="missing"):
+        check_training_sessions(_data(root, "arland_ok"), 5.0)
+    (latents / "meta.json").write_text(json.dumps({"aligned_to": {"file": "gone.npy"}}))  # a shard-folder file
+    with pytest.raises(TrainingDataError, match="missing"):
         check_training_sessions(_data(root, "arland_ok"), 5.0)

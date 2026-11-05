@@ -63,3 +63,7 @@ dist/
 build/
 *.egg
 .pytest_cache/
+
+# Python tooling
+.venv/
+.ruff_cache/

@@ -40,32 +40,21 @@ We implement the emerging optimal architecture where JEPA representations **guid
 
 ## Quick Start
 
-### Using Docker (Recommended)
+### Installation (uv)
+
+Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`.
 
 ```bash
-# Build and run development environment
-docker-compose up drivedit-dev
-
-# For training
-docker-compose up drivedit-train
-
-# For inference server
-docker-compose up drivedit-inference
-```
-
-### Local Installation
-
-```bash
-# Install minimal dependencies
-pip install torch>=2.2.0 einops>=0.7.0 opencv-python==4.10.0 torchmetrics
-
-# Development tools (optional)
-pip install jupyter black ruff
-
-# Clone and run
 git clone <repository>
 cd drivedit
-python training/unified_trainer.py
+
+uv sync                                # capture tooling only: numpy + OpenCV, no torch
+uv sync --extra model                  # + world model; torch from PyPI (CUDA build on Linux)
+uv sync --extra model --extra cpu      # + world model; CPU-only torch (what CI uses)
+
+uv run pytest -m "not torch"           # capture tests
+uv run pytest -m torch                 # model tests
+uv run python training/unified_trainer.py
 ```
 
 ## Architecture

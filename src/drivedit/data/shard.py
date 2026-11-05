@@ -230,7 +230,8 @@ class LatentStats:
 
 class Latents:
     """``latents.npy`` ``[T, C, h, w]`` float16 and ``valid.npy`` ``[T]`` bool of one codec, as read-only memmaps.
-    T equals the shard's n_steps, and valid is exactly ``slot_id >= 0``."""
+    Their meta.json names the shard's session_id and, in ``aligned_to``, the sha256 of its slot_id.npy; T equals the
+    shard's n_steps, and valid is exactly ``slot_id >= 0``."""
 
     def __init__(self, shard: Shard, codec_id: str) -> None:
         if not CODEC_ID_RE.match(codec_id):
@@ -247,6 +248,19 @@ class Latents:
         self.meta = _read_meta(self.path / META_NAME, LATENTS_SCHEMA)
         if self.meta.get("codec_id") != codec_id:
             raise ShardError(f"{self.path}: meta.json codec_id {self.meta.get('codec_id')!r} is not {codec_id}")
+        # latents copied from another session can match its shape and valid mask: they must name this session and
+        # the exact slot_id.npy they were encoded against (drivedit.codec's encoder records both), checked before any
+        # array is read
+        if self.meta.get("session_id") != shard.session_id:
+            raise ShardError(
+                f"{self.path}: latents of session {self.meta.get('session_id')!r}, the shard is {shard.session_id}"
+            )
+        aligned = self.meta.get("aligned_to")
+        want = shard.meta["arrays"]["slot_id"]["sha256"]
+        if not isinstance(aligned, dict) or aligned.get("file") != "slot_id.npy" or aligned.get("sha256") != want:
+            raise ShardError(
+                f"{self.path}: aligned_to {aligned!r} is not this shard's slot_id.npy (sha256 {str(want)[:12]})"
+            )
         self._open()
         shape = tuple(int(v) for v in self.meta["latent_shape"])
         if self.latents.dtype != np.float16 or self.latents.shape != (shard.n_steps, *shape):

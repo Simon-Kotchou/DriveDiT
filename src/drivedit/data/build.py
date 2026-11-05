@@ -2,6 +2,9 @@
 
     python -m drivedit.data.build --session DIR [--session DIR ...] --out ROOT [--routes-dir DIR]
         [--vehicle-card FILE] [--include-eval-only] [--include-privileged] [--overwrite]
+        [--dataset-root DIR ...] [--capture-root DIR ...]
+
+ROOT must lie under a dataset root (default /mnt/e/DriveDiT/datasets).
 
 ``build_session(session_dir, out_root, spec=spec)`` reads the session through the dc-2.0 reader
 (``data/dc2/reader.py``, loaded by file path as the tools load it; strict, fiducials decoded) and writes
@@ -51,9 +54,12 @@ Not written by default (features_v1 classes): ``eval_only`` (``include_eval_only
 ``privileged_route`` (``include_privileged``). The C24 forbidden names stay out of every model input through
 ``FeatureSpec.access``.
 
-Output never goes inside the session directory, its captures tree (taken from the session path before symlinks are
-resolved) or a configured read-only root (``PROTECTED_ROOTS``, default /mnt/e/DriveDiT/captures), nor to the C:
-drive. An existing shard is replaced only with ``overwrite=True`` (written beside it first, then swapped).
+Outputs go only under a dataset root (``DATASET_ROOTS``, default /mnt/e/DriveDiT/datasets; ``dataset_roots=``,
+``--dataset-root`` or ``DRIVEDIT_DATASET_ROOTS`` replace it), checked on resolved paths before anything is computed or
+written. They never go inside the session, a capture store (``CAPTURE_ROOTS``, default /mnt/e/DriveDiT/captures;
+``capture_roots=``, ``--capture-root`` and ``DRIVEDIT_CAPTURE_ROOTS`` only add) or the C: drive, and a dataset root
+must lie apart from the session and every capture store. An existing shard is replaced only with ``overwrite=True``
+(written beside it first, then swapped).
 """
 
 from __future__ import annotations
@@ -103,10 +109,15 @@ PREFIX_HASH_ROUTES = {
     "arland_t0_loop": "77838c1346f2c7a6b18be78570d9f8cb560ee10a0e69718b28eb0f028cc0f66f",
 }
 FORBIDDEN_ROOTS = ("/mnt/c/",)
-# Read-only data roots the builder never writes into, whatever the session (the capture store of this program).
-# Replaced by the protected_roots keyword, else by the os.pathsep-separated DRIVEDIT_PROTECTED_ROOTS variable.
-PROTECTED_ROOTS = ("/mnt/e/DriveDiT/captures",)
-PROTECTED_ROOTS_ENV = "DRIVEDIT_PROTECTED_ROOTS"
+# Outputs go only under a dataset root (an allow-list: review round 3, after deny-list checks kept losing to path
+# aliases). Replaced by the dataset_roots keyword, else by DRIVEDIT_DATASET_ROOTS (os.pathsep-separated; an empty or
+# blank value counts as unset).
+DATASET_ROOTS = ("/mnt/e/DriveDiT/datasets",)
+DATASET_ROOTS_ENV = "DRIVEDIT_DATASET_ROOTS"
+# Capture stores no output and no dataset root may lie in. The capture_roots keyword and DRIVEDIT_CAPTURE_ROOTS ADD to
+# these; nothing removes them.
+CAPTURE_ROOTS = ("/mnt/e/DriveDiT/captures",)
+CAPTURE_ROOTS_ENV = "DRIVEDIT_CAPTURE_ROOTS"
 # Written by default, in features_v1 order; image is referenced (slot_id + deriv_dir), never copied.
 DEFAULT_TENSORS = (
     "state",
@@ -213,10 +224,11 @@ def build_session(
     routes_dir: str | Path | None = None,
     vehicle_card: str | Path | None = None,
     overwrite: bool = False,
-    protected_roots: Sequence[str | Path] | None = None,
+    dataset_roots: Sequence[str | Path] | None = None,
+    capture_roots: Sequence[str | Path] = (),
 ) -> Path:
-    """Read one session and write its shard; returns ``<out_root>/<session_id>/features_v1``. The output is checked
-    against the session as named here, before symlinks are resolved (``write_shard``)."""
+    """Read one session and write its shard; returns ``<out_root>/<session_id>/features_v1``, which must lie under a
+    dataset root (``write_shard``)."""
     session = open_dc2_session(session_dir, vehicle_card=vehicle_card)
     return write_shard(
         session,
@@ -226,8 +238,8 @@ def build_session(
         include_eval_only=include_eval_only,
         routes_dir=routes_dir,
         overwrite=overwrite,
-        session_dir=session_dir,
-        protected_roots=protected_roots,
+        dataset_roots=dataset_roots,
+        capture_roots=capture_roots,
     )
 
 
@@ -240,17 +252,21 @@ def write_shard(
     include_eval_only: bool = False,
     routes_dir: str | Path | None = None,
     overwrite: bool = False,
-    session_dir: str | Path | None = None,
-    protected_roots: Sequence[str | Path] | None = None,
+    dataset_roots: Sequence[str | Path] | None = None,
+    capture_roots: Sequence[str | Path] = (),
 ) -> Path:
     """Write the shard of a Session that ``open_dc2_session`` returned (the build without the read).
 
-    ``session_dir`` is the session directory as the caller named it (default ``session.path``, which the reader has
-    already resolved): the captures roots are taken from it before symlinks are resolved. ``protected_roots``
-    replaces the configured read-only roots (``PROTECTED_ROOTS``, or ``DRIVEDIT_PROTECTED_ROOTS``). The output
-    paths are checked (``_shard_dir``) before anything is computed or written."""
-    protected = protected_paths(session.path if session_dir is None else session_dir, session.path, protected_roots)
-    out_dir = _shard_dir(Path(out_root), protected, str(session.session_id))
+    ``dataset_roots`` replaces the allowed output roots (``allowed_dataset_roots``); ``capture_roots`` adds capture
+    stores to the configured ones (``configured_capture_roots``). The output paths are checked (``_shard_dir``)
+    before anything is computed or written."""
+    out_dir = _shard_dir(
+        Path(out_root),
+        session_real=Path(str(session.path)),
+        session_id=str(session.session_id),
+        allowed=allowed_dataset_roots(dataset_roots),
+        captures=configured_capture_roots(capture_roots),
+    )
     if out_dir.exists() and not overwrite:
         raise BuildError(f"{out_dir} exists; pass overwrite=True (--overwrite) to replace it")
     arrays, meta = session_features(
@@ -888,51 +904,54 @@ def _nonfinite_in_segments(arrays: dict[str, npt.NDArray[Any]], segments: Sequen
     return out
 
 
-def configured_roots(protected_roots: Sequence[str | Path] | None = None) -> list[Path]:
-    """The configured read-only roots: ``protected_roots`` when given, else ``DRIVEDIT_PROTECTED_ROOTS``
-    (os.pathsep-separated) when set, else ``PROTECTED_ROOTS``."""
-    if protected_roots is not None:
-        return [Path(p) for p in protected_roots]
-    env = os.environ.get(PROTECTED_ROOTS_ENV)
-    if env is not None:
-        return [Path(p) for p in env.split(os.pathsep) if p]
-    return [Path(p) for p in PROTECTED_ROOTS]
+def _env_roots(name: str) -> list[Path] | None:
+    """The os.pathsep-separated roots of an environment variable, or None when it is unset, empty or blank."""
+    entries = [e.strip() for e in os.environ.get(name, "").split(os.pathsep)]
+    roots = [Path(e) for e in entries if e]
+    return roots or None
 
 
-def protected_paths(
-    session_dir: str | Path, session_real: str | Path, protected_roots: Sequence[str | Path] | None = None
-) -> list[Path]:
-    """The resolved directories no output may lie in: the session, every ancestor named ``captures`` of the
-    session path as named and of its resolved form, and the configured roots (``configured_roots``).
-
-    The captures ancestors are taken from the absolute but unresolved path first: with ``captures`` a symlink to
-    ``storage``, the resolved session is ``storage/<id>`` and has no ``captures`` ancestor any more (review round 2).
-    Every root is then resolved, so it is compared in the same form as the resolved output paths."""
-    named = Path(os.path.abspath(session_dir))
-    real = Path(session_real).resolve()
-    roots = [named, real]
-    roots += [p for p in named.parents if p.name == "captures"]
-    roots += [p for p in real.parents if p.name == "captures"]
-    roots += configured_roots(protected_roots)
-    out: list[Path] = []
-    for p in roots:
-        r = p.resolve()
-        if r not in out:
-            out.append(r)
-    return out
+def allowed_dataset_roots(dataset_roots: Sequence[str | Path] | None = None) -> list[Path]:
+    """The roots outputs may go under: ``dataset_roots`` when given (an empty sequence allows nothing), else
+    ``DRIVEDIT_DATASET_ROOTS`` when it names a root, else ``DATASET_ROOTS``."""
+    if dataset_roots is not None:
+        return [Path(p) for p in dataset_roots]
+    return _env_roots(DATASET_ROOTS_ENV) or [Path(p) for p in DATASET_ROOTS]
 
 
-def _shard_dir(out_root: Path, protected: Sequence[Path], session_id: str) -> Path:
+def configured_capture_roots(capture_roots: Sequence[str | Path] = ()) -> list[Path]:
+    """The capture stores: ``CAPTURE_ROOTS``, plus the roots of ``DRIVEDIT_CAPTURE_ROOTS``, plus ``capture_roots``.
+    Additions only: neither the variable nor the keyword can remove a default."""
+    return [Path(p) for p in CAPTURE_ROOTS] + (_env_roots(CAPTURE_ROOTS_ENV) or []) + [Path(p) for p in capture_roots]
+
+
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or path.is_relative_to(root)
+
+
+def _shard_dir(
+    out_root: Path, *, session_real: Path, session_id: str, allowed: Sequence[Path], captures: Sequence[Path]
+) -> Path:
     """``<out_root>/<session_id>/features_v1`` under its resolved parent, checked before anything is written.
 
     Every path the build creates, renames or removes lies in that parent (the staging directories ``.features_v1.*``
-    are siblings of the shard), so the checks run on resolved paths, symlinks followed: the out root, the parent
-    ``<out_root>/<session_id>`` and the destination must each lie outside the C: drive and every ``protected``
-    directory (``protected_paths``, resolved). A symlinked destination directory is refused: the shard is replaced by
-    renames inside its parent.
+    are siblings of the shard). Symlinks resolved:
+    - the out root, the parent ``<out_root>/<session_id>`` and the destination each lie under an allowed dataset root;
+    - none of them is on the C: drive, inside the session directory or inside a capture store;
+    - every allowed root lies apart from the session and each capture store (neither inside the other).
+    A symlinked destination directory is refused: the shard is replaced by renames inside its parent.
     """
     if not session_id or "/" in session_id or session_id in (".", ".."):
         raise BuildError(f"session id {session_id!r} is not a directory name")
+    session = session_real.resolve()
+    stores = [c.resolve() for c in captures]
+    roots = [a.resolve() for a in allowed]
+    if not roots:
+        raise BuildError(f"refusing {out_root}: no dataset root is configured, so no output is allowed")
+    for a in roots:
+        for p in (session, *stores):
+            if _inside(a, p) or _inside(p, a):
+                raise BuildError(f"refusing dataset root {a}: it overlaps {p} (sessions and captures are read-only)")
     root = out_root.resolve()
     parent = (root / session_id).resolve()
     dest = parent / SHARD_DIRNAME
@@ -941,8 +960,15 @@ def _shard_dir(out_root: Path, protected: Sequence[Path], session_id: str) -> Pa
     for path in (root, parent, dest.resolve()):
         if any((str(path) + "/").startswith(r) for r in FORBIDDEN_ROOTS):
             raise BuildError(f"refusing {out_root}: {path} is on the C: drive (no writes to C:)")
-        for p in protected:
-            if path == p or path.is_relative_to(p):
+        if not any(_inside(path, a) for a in roots):
+            raise BuildError(
+                f"refusing {out_root}: {path} is not under a dataset root ({', '.join(map(str, roots))}; "
+                f"dataset_roots=, --dataset-root or {DATASET_ROOTS_ENV})"
+            )
+        # second line of defence: a path under both an allowed root and the session or a store would make those
+        # roots nested, which the overlap check above already refuses
+        for p in (session, *stores):
+            if _inside(path, p):
                 raise BuildError(f"refusing {out_root}: {path} lies inside {p} (sessions and captures are read-only)")
     return dest
 
@@ -976,12 +1002,27 @@ def summary(shard_dir: Path) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m drivedit.data.build", description=__doc__.split("\n\n")[0])
     ap.add_argument("--session", action="append", required=True, help="dc-2.0 session directory; repeatable")
-    ap.add_argument("--out", required=True, help="dataset root: writes <out>/<session_id>/features_v1/")
+    ap.add_argument(
+        "--out", required=True, help="writes <out>/<session_id>/features_v1/; <out> must lie under a dataset root"
+    )
     ap.add_argument("--routes-dir", default=None, help=f"route files (default {default_routes_dir()})")
     ap.add_argument("--vehicle-card", default=None, help="vehicle card JSON (default: the reader's card lookup)")
     ap.add_argument("--include-eval-only", action="store_true", help="also write eval_only.npy")
     ap.add_argument("--include-privileged", action="store_true", help="also build privileged_route (teacher_input)")
     ap.add_argument("--overwrite", action="store_true", help="replace an existing shard")
+    ap.add_argument(
+        "--dataset-root",
+        action="append",
+        default=None,
+        help=f"root outputs may go under; repeatable; replaces the default {', '.join(DATASET_ROOTS)} "
+        f"(else {DATASET_ROOTS_ENV})",
+    )
+    ap.add_argument(
+        "--capture-root",
+        action="append",
+        default=[],
+        help=f"another capture store outputs never go into; repeatable; adds to {', '.join(CAPTURE_ROOTS)}",
+    )
     args = ap.parse_args(argv)
     spec = load_spec()
     for session_dir in args.session:
@@ -994,6 +1035,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             routes_dir=args.routes_dir,
             vehicle_card=args.vehicle_card,
             overwrite=args.overwrite,
+            dataset_roots=args.dataset_root,
+            capture_roots=args.capture_root,
         )
         sys.stdout.write(json.dumps(summary(shard), indent=1, sort_keys=True) + "\n")
     return 0

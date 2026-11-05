@@ -108,7 +108,9 @@ SUBSTRING_MAX_CHARS = 8191  # 1.8.0.13 string.Substring bound (DC_TextFile.SUBST
 PREFIX_HASH_ROUTES = {
     "arland_t0_loop": "77838c1346f2c7a6b18be78570d9f8cb560ee10a0e69718b28eb0f028cc0f66f",
 }
-FORBIDDEN_ROOTS = ("/mnt/c/",)
+FORBIDDEN_ROOTS = ("/mnt/c",)  # the C: drive under WSL: no writes there
+# A Windows spelling of a root (E:/..., E:\..., any backslash) splits wrongly on os.pathsep and names nothing on WSL.
+WINDOWS_PATH_RE = re.compile(r"^\s*[A-Za-z]:")  # a drive letter: E:/x, E:\x, E:x, E:
 # Outputs go only under a dataset root (an allow-list: review round 3, after deny-list checks kept losing to path
 # aliases). Replaced by the dataset_roots keyword, else by DRIVEDIT_DATASET_ROOTS (os.pathsep-separated; an empty or
 # blank value counts as unset).
@@ -229,6 +231,8 @@ def build_session(
 ) -> Path:
     """Read one session and write its shard; returns ``<out_root>/<session_id>/features_v1``, which must lie under a
     dataset root (``write_shard``)."""
+    allowed_dataset_roots(dataset_roots)  # a malformed root configuration fails before the read, not after it
+    configured_capture_roots(capture_roots)
     session = open_dc2_session(session_dir, vehicle_card=vehicle_card)
     return write_shard(
         session,
@@ -904,29 +908,68 @@ def _nonfinite_in_segments(arrays: dict[str, npt.NDArray[Any]], segments: Sequen
     return out
 
 
+def _posix_root(value: str | Path, where: str) -> Path:
+    """A root as a Path; BuildError for a Windows spelling (a drive letter such as ``E:/`` or ``E:\\``, or any
+    backslash), which on WSL names another path or splits into several on os.pathsep."""
+    text = str(value)
+    if WINDOWS_PATH_RE.match(text) or "\\" in text:
+        raise BuildError(
+            f"{where}: {text!r} is a Windows path; on WSL write /mnt/<drive>/... (e.g. /mnt/e/DriveDiT/datasets)"
+        )
+    return Path(text)
+
+
 def _env_roots(name: str) -> list[Path] | None:
-    """The os.pathsep-separated roots of an environment variable, or None when it is unset, empty or blank."""
-    entries = [e.strip() for e in os.environ.get(name, "").split(os.pathsep)]
-    roots = [Path(e) for e in entries if e]
+    """The os.pathsep-separated roots of an environment variable, or None when it is unset, empty or blank. A value
+    with a Windows spelling anywhere is refused before it is split (``E:/x`` would split into ``E`` and ``/x``)."""
+    raw = os.environ.get(name, "")
+    if "\\" in raw or re.search(rf"(?:^|{re.escape(os.pathsep)})\s*[A-Za-z]:", raw):
+        raise BuildError(
+            f"{name}={raw!r} holds a Windows path; on WSL write /mnt/<drive>/... separated by {os.pathsep!r}"
+        )
+    entries = [e.strip() for e in raw.split(os.pathsep)]
+    roots = [_posix_root(e, name) for e in entries if e]
     return roots or None
 
 
 def allowed_dataset_roots(dataset_roots: Sequence[str | Path] | None = None) -> list[Path]:
     """The roots outputs may go under: ``dataset_roots`` when given (an empty sequence allows nothing), else
-    ``DRIVEDIT_DATASET_ROOTS`` when it names a root, else ``DATASET_ROOTS``."""
+    ``DRIVEDIT_DATASET_ROOTS`` when it names a root, else ``DATASET_ROOTS``. Windows spellings are refused."""
     if dataset_roots is not None:
-        return [Path(p) for p in dataset_roots]
+        return [_posix_root(p, "dataset_roots") for p in dataset_roots]
     return _env_roots(DATASET_ROOTS_ENV) or [Path(p) for p in DATASET_ROOTS]
 
 
 def configured_capture_roots(capture_roots: Sequence[str | Path] = ()) -> list[Path]:
     """The capture stores: ``CAPTURE_ROOTS``, plus the roots of ``DRIVEDIT_CAPTURE_ROOTS``, plus ``capture_roots``.
-    Additions only: neither the variable nor the keyword can remove a default."""
-    return [Path(p) for p in CAPTURE_ROOTS] + (_env_roots(CAPTURE_ROOTS_ENV) or []) + [Path(p) for p in capture_roots]
+    Additions only: neither the variable nor the keyword can remove a default. Windows spellings are refused."""
+    extra = [_posix_root(p, "capture_roots") for p in capture_roots]
+    return [Path(p) for p in CAPTURE_ROOTS] + (_env_roots(CAPTURE_ROOTS_ENV) or []) + extra
+
+
+def _identity(path: Path) -> tuple[int, int] | None:
+    """(st_dev, st_ino) of an existing path, symlinks followed; None when it does not exist."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
 
 
 def _inside(path: Path, root: Path) -> bool:
-    return path == root or path.is_relative_to(root)
+    """``path`` is ``root`` or lies under it.
+
+    Filesystem identity decides (os.path.samefile semantics): the path, or its nearest existing ancestor and every
+    ancestor above it, is compared by (st_dev, st_ino) with the root. So a drvfs case alias (/mnt/e/drivedit and
+    /mnt/e/DriveDiT are one directory, and resolve() keeps each spelling) or a bind mount counts as the same place,
+    also for an output that does not exist yet. The resolved-string test is kept as a second answer, and is the only
+    one for a root that does not exist."""
+    if path == root or path.is_relative_to(root):
+        return True
+    root_id = _identity(root)
+    if root_id is None:
+        return False
+    return any(_identity(p) == root_id for p in (path, *path.parents))
 
 
 def _shard_dir(
@@ -935,7 +978,7 @@ def _shard_dir(
     """``<out_root>/<session_id>/features_v1`` under its resolved parent, checked before anything is written.
 
     Every path the build creates, renames or removes lies in that parent (the staging directories ``.features_v1.*``
-    are siblings of the shard). Symlinks resolved:
+    are siblings of the shard). Symlinks resolved, and containment decided by filesystem identity (``_inside``):
     - the out root, the parent ``<out_root>/<session_id>`` and the destination each lie under an allowed dataset root;
     - none of them is on the C: drive, inside the session directory or inside a capture store;
     - every allowed root lies apart from the session and each capture store (neither inside the other).
@@ -946,9 +989,12 @@ def _shard_dir(
     session = session_real.resolve()
     stores = [c.resolve() for c in captures]
     roots = [a.resolve() for a in allowed]
+    forbidden = [Path(r) for r in FORBIDDEN_ROOTS]
     if not roots:
         raise BuildError(f"refusing {out_root}: no dataset root is configured, so no output is allowed")
     for a in roots:
+        if any(_inside(a, c) for c in forbidden):
+            raise BuildError(f"refusing dataset root {a}: it is on the C: drive (no writes to C:)")
         for p in (session, *stores):
             if _inside(a, p) or _inside(p, a):
                 raise BuildError(f"refusing dataset root {a}: it overlaps {p} (sessions and captures are read-only)")
@@ -958,7 +1004,7 @@ def _shard_dir(
     if dest.is_symlink():
         raise BuildError(f"refusing {dest}: the shard directory is a symlink")
     for path in (root, parent, dest.resolve()):
-        if any((str(path) + "/").startswith(r) for r in FORBIDDEN_ROOTS):
+        if any(_inside(path, c) for c in forbidden):
             raise BuildError(f"refusing {out_root}: {path} is on the C: drive (no writes to C:)")
         if not any(_inside(path, a) for a in roots):
             raise BuildError(

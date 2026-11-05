@@ -5,12 +5,14 @@ never train our own VAE. Candidates are chosen by the world model trained on the
 
 - ``drivedit.codec.base``: the ``Codec`` Protocol, its uint8 conventions, and the registry (``get_codec``, ``CODECS``).
 - ``drivedit.codec.cadre``, ``.flux2``, ``.wan21``: the bake-off arms, imported by ``get_codec`` on demand.
+- ``drivedit.codec.encode``: ``encode_session`` writes a shard's latents (DRIVEDIT_INTERFACES §3), and its CLI.
 
-Needs the ``model`` and ``codec`` extras. Importing this package imports torch and huggingface_hub, but none of the
-arms' third-party code (diffusers, the CADRE checkout).
+Needs the ``model`` and ``codec`` extras. Importing this package imports torch, numpy, OpenCV and huggingface_hub, but
+none of the arms' third-party code (diffusers, the CADRE checkout).
 """
 
 from drivedit.codec.base import CODECS, Codec, CodecInfo, WeightSource, codec_ids, get_codec, weights_cached
+from drivedit.codec.encode import encode_session
 
 __all__ = [
     "CODECS",
@@ -18,6 +20,7 @@ __all__ = [
     "CodecInfo",
     "WeightSource",
     "codec_ids",
+    "encode_session",
     "get_codec",
     "weights_cached",
 ]

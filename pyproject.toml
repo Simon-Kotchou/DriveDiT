@@ -44,6 +44,9 @@ codec = [
     "torchvision>=0.29",
 ]
 
+[project.scripts]
+dd-encode = "drivedit.codec.encode:main"   # latent pre-encoder (DD-19); needs the model and codec extras
+
 [dependency-groups]
 dev = [
     "mypy>=1.13",

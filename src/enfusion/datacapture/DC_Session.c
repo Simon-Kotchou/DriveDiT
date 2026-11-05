@@ -11,7 +11,9 @@
 //   1. Guards: edit mode, play mode, server; DC_LaunchGuard.Evaluate (DD-4-probe, reused unchanged). A refusal logs
 //      one ERROR line and writes nothing, not even a directory.
 //   2. Trial: -dcTrial <id>, else the one-line pointer $profile:dc_trials/ACTIVE; the conf
-//      $profile:dc_trials/<id>.json is read with JsonLoadContext (the loader DC_LaunchGuard already uses on 1.8).
+//      $profile:dc_trials/<id>.json is read with JsonLoadContext (the loader DC_LaunchGuard already uses on 1.8);
+//      its optional perturbation profile ("perturb", "perturb_params", DD-7-ident) by DC_NoiseConfig (DC_Noise.c),
+//      which refuses an unknown profile or parameter.
 //   3. Build and map: GetBuildVersion() must equal the launch record's engine_version_expected once a record carries
 //      one (MIGRATION_1_9 8.3); the L8 fingerprint (world size from GetBoundBox, latitude from the weather manager)
 //      must match the map card of m_sMapId. Everon is never captured here (sealed test map).
@@ -614,6 +616,7 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected bool m_bTrialRouteRead;			//!< the conf has a "route" (trial.conf holds only the keys present)
 	protected bool m_bTrialImagesRead;			//!< the conf has an "images"
 	protected string m_sTrialConfRaw;			//!< the conf file's text (observed.trial_conf_raw), empty when not copied
+	protected ref DC_NoiseConfig m_NoiseConfig = new DC_NoiseConfig();	//!< the trial's perturbation profile (none by default)
 	protected string m_sTrialConfRawNote;		//!< why it was not copied
 
 	// build and map
@@ -961,6 +964,17 @@ class DC_Session : SCR_BaseGameModeComponent
 		ReadTrialConfText(confPath);
 		if (!m_sTrialConfRawNote.IsEmpty())
 			Print(LOG + "WARNING: trial conf text not copied into session.json observed.trial_conf_raw: " + m_sTrialConfRawNote, LogLevel.WARNING);
+
+		// The perturbation profile (DD-7-ident, DC_Noise.c): "perturb" and "perturb_params"; absent = none (mode E)
+		m_NoiseConfig = new DC_NoiseConfig();
+		string noiseFailure;
+		if (!m_NoiseConfig.Read(context, m_sTrialConfRaw, noiseFailure))
+		{
+			failure = "trial conf " + confPath + ": " + noiseFailure;
+			return false;
+		}
+
+		Print(LOG + "trial " + m_sTrialId + " " + m_NoiseConfig.Describe(), LogLevel.NORMAL);
 
 		Print(string.Format(LOG + "trial %1 (%2): warm-up %3 s, duration %4 s, seed %5, route '%6', images %7", m_sTrialId, m_sTrialSource, m_fWarmupS.ToString(-1, 1), m_fDurationS.ToString(-1, 1), m_iTrialSeed, m_sTrialRoute, DC_LaunchGuard.BoolText(m_bTrialImages)), LogLevel.NORMAL);
 		return true;
@@ -1580,6 +1594,7 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (m_bTrialImageHzRead)
 			json.AddFloat("image_hz", m_fImageHz, 3);
 
+		m_NoiseConfig.WriteConf(json);
 		json.EndObject();
 		json.AddInt("seed", m_iTrialSeed);
 		json.AddFloat("warmup_s", m_fWarmupS, 3);
@@ -3259,6 +3274,13 @@ class DC_Session : SCR_BaseGameModeComponent
 	string GetTrialRoute()
 	{
 		return m_sTrialRoute;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The trial conf's perturbation profile ("perturb", "perturb_params"; none without them), see DC_Noise.c
+	DC_NoiseConfig GetNoiseConfig()
+	{
+		return m_NoiseConfig;
 	}
 
 	//------------------------------------------------------------------------------------------------

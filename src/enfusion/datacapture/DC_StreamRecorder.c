@@ -631,6 +631,16 @@ class DC_DriverContext
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The world-time decision grid period [ms] (1000 / decision_hz; 200 at the 5 Hz default, dc-2.0 section 6)
+	int GetDecisionPeriodMs()
+	{
+		if (!m_Session)
+			return 0;
+
+		return m_Session.GetDecisionPeriodMs();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Deprecated: telemetry is one row per callback since the freeze (D-A), so this is always 1
 	int GetTelemetryEveryK()
 	{
@@ -742,13 +752,24 @@ class DC_DriverContext
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! An events row (only while the session captures; kind must be a dc-2.0 event kind, e.g. nav_command)
+	//! An events row (while the session captures, or while the seal ends an episode that is still open, so a driver's
+	//! EndEpisode can close what it opened, e.g. perturb_end; kind must be a dc-2.0 event kind, e.g. nav_command)
 	bool LogEvent(string kind, string payload)
 	{
-		if (!m_Session || !m_Session.IsCapturing())
+		if (!m_Session || (!m_Session.IsCapturing() && m_Session.GetEpisodeId() < 0))
 			return false;
 
 		return m_Session.LogEvent(kind, payload);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The trial conf's perturbation profile (DC_Noise.c; "none" without "perturb"), parsed in DC_Session.ResolveTrial
+	DC_NoiseConfig GetNoiseConfig()
+	{
+		if (!m_Session)
+			return null;
+
+		return m_Session.GetNoiseConfig();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -931,6 +952,7 @@ class DC_StreamRecorder : DC_SessionModule
 	static const int EVENTS_CHUNK_ROWS = 100;
 	static const int WHEEL_COLUMNS = 4;
 	static const string LOG = "[DC_Streams] ";
+	static const string MODE_NOISE = "N";			//!< episodes.mode / ctl.mode of noise injection (r2 3.1), the only mode with noise_active 1
 
 	//! episodes.termination_reason values (dc-2.0 9.6)
 	protected static ref array<string> s_aTerminations = {"route_complete", "timeout", "offroad", "route_deviation", "stuck", "rollover", "collision", "engine_off", "script_error", "session_stop"};
@@ -1233,6 +1255,15 @@ class DC_StreamRecorder : DC_SessionModule
 			return;
 		}
 
+		// noise_active / noise_id (dc-2.0 9.1): a disturbance has an id >= 0 and exists only in a mode-N episode
+		bool noiseIdOk = (m_Pending.m_bNoise && m_Pending.m_iNoiseId >= 0) || (!m_Pending.m_bNoise && m_Pending.m_iNoiseId == -1);
+		bool noiseModeOk = !m_Pending.m_bNoise || (m_EpisodeInfo && m_EpisodeInfo.m_sMode == MODE_NOISE);
+		if (!noiseIdOk || !noiseModeOk)
+		{
+			m_Session.Fail(DC_Session.END_SCRIPT_ERROR, string.Format("driver command noise_active %1 noise_id %2 at physics step %3 (a disturbance needs an id >= 0 and a mode N episode)", DC_LaunchGuard.BoolText(m_Pending.m_bNoise), m_Pending.m_iNoiseId, physicsStep));
+			return;
+		}
+
 		m_bHasPending = true;
 	}
 
@@ -1347,8 +1378,8 @@ class DC_StreamRecorder : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The ctl row of a step (dc-2.0 9.1): hl_* of the held command, exp_*_now of PostStep, llc_* of ApplyStep, the
-	//! input readbacks; N-mode, wheel-angle and reaction fields stay empty in T0-MIN
+	//! The ctl row of a step (dc-2.0 9.1): hl_* and noise_* of the held command, exp_*_now of PostStep, llc_* of
+	//! ApplyStep, the input readbacks; wheel-angle and reaction fields stay empty in T0-MIN
 	protected void WriteCtlRow(int physicsStep, int worldMs)
 	{
 		int episodeId = m_Session.GetEpisodeId();
@@ -1415,8 +1446,17 @@ class DC_StreamRecorder : DC_SessionModule
 
 		AddInputValues(m_Pre);
 		AddInputValues(m_PostInputs);
-		m_Row.AddBool(false);		// noise_active (no N mode in T0-MIN)
-		m_Row.AddInt(-1);			// noise_id
+		// noise_active / noise_id of the held command (DD-7-ident's mode N; checked in OnStepDecide)
+		bool noiseActive = false;
+		int noiseId = -1;
+		if (m_bHasHeld)
+		{
+			noiseActive = m_Held.m_bNoise;
+			noiseId = m_Held.m_iNoiseId;
+		}
+
+		m_Row.AddBool(noiseActive);
+		m_Row.AddInt(noiseId);
 		AddEmpty(5);				// steer_signal_raw, wheel angles, react_*: reserved
 		if (!m_Ctl)
 			return;

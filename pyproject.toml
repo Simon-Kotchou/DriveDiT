@@ -57,7 +57,7 @@ minversion = "8.0"
 testpaths = ["tests", "tools/test_deploy_addon.py", "tools/pin/tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
-    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES, TORCH_TEST_IDS)",
+    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES)",
 ]
 
 [tool.ruff]

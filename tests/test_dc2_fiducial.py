@@ -4,7 +4,7 @@
     TMPDIR=/dev/shm/<x> PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
         tests/test_dc2_fiducial.py
 
-The module is loaded by file path: `import data.dc2` would run data/__init__.py, which imports torch. Images are
+The module is loaded by file path, as the probe tools load it. Images are
 synthetic and built in memory; the one file round trip (load_rgb) writes into a temporary directory under $TMPDIR
 when that lies in /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp: the WSL root is on C:), and removes it.
 """

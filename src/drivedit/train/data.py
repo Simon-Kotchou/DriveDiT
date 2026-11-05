@@ -42,6 +42,9 @@ TRAINING_SPLITS = {"arland": ("train",)}
 #: Path parts and map ids of the sealed test map (dc-2.0 section 3.2; the dc-2.0 reader's and drivedit_nav's rule).
 SEALED_PATH_PARTS = ("heldout", "sealed")
 SEALED_MAP_IDS = ("everon",)
+#: The metadata file of a shard folder and of a latents folder, and the files the latents reader opens (DD-11 Latents).
+META_NAME = "meta.json"
+LATENTS_FILES = (META_NAME, "latents.npy", "valid.npy")
 
 
 class SealedDataError(PermissionError):
@@ -67,14 +70,64 @@ def _refuse_sealed(path: Path) -> None:
 
 
 def _refuse_sealed_resources(shard_dir: Path, latents_dir: Path) -> None:
-    """Apply the sealed path rule to both directories, then to every entry in them (the files the shard and latents
-    readers open: meta.json, the arrays, latents.npy, valid.npy). Listing a directory reads no file."""
+    """Apply the sealed path rule to both directories, then to every entry in them. Listing a directory reads no
+    file."""
     for directory in (shard_dir, latents_dir):
         _refuse_sealed(directory)
     for directory in (shard_dir, latents_dir):
         if directory.is_dir():
             for entry in sorted(directory.iterdir()):
                 _refuse_sealed(entry)
+
+
+def _plain_name(name: object, where: Path) -> str:
+    """``name`` if it is a plain file name: a non-empty string with no separator and no ``..``, not absolute."""
+    if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\\" in name or Path(name).is_absolute():
+        raise TrainingDataError(f"{where} references {name!r}; only a plain file name in its own folder is allowed")
+    return name
+
+
+def _inside(folder: Path, name: str) -> Path:
+    """``folder / name`` for a resolved ``folder``: the sealed path rule applies, and the file must resolve directly
+    inside ``folder``. Only the path is resolved; nothing is opened."""
+    path = folder / name
+    _refuse_sealed(path)
+    if path.resolve().parent != folder:
+        raise TrainingDataError(f"{path} resolves to {path.resolve()}, outside {folder}")
+    return path
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    meta = json.loads(path.read_text("utf-8"))
+    if not isinstance(meta, dict):
+        raise TrainingDataError(f"{path} is not an object")
+    return meta
+
+
+def _check_referenced_files(shard_dir: Path, latents_dir: Path, meta: dict[str, Any]) -> None:
+    """Every file the shard and latents readers open, and every file their meta.json names, as ``_inside`` its folder.
+
+    The shard reader opens ``meta["arrays"][name]["file"]`` relative to the resolved shard folder (an absolute name
+    would win in that path join). The latents reader opens ``LATENTS_FILES`` in the latents folder, whose meta.json
+    names ``sha256`` entries and ``aligned_to.file`` (DD-19's pre-encoder).
+    """
+    arrays = meta.get("arrays", {})
+    if not isinstance(arrays, dict):
+        raise TrainingDataError(f"{shard_dir}/meta.json: arrays is not an object")
+    for info in arrays.values():
+        _inside(shard_dir, _plain_name(info.get("file") if isinstance(info, dict) else None, shard_dir / META_NAME))
+    if not latents_dir.exists():
+        return  # the latents reader raises on a missing folder
+    latents_real = latents_dir.resolve()
+    for name in LATENTS_FILES:
+        _inside(latents_real, name)
+    if (latents_real / META_NAME).is_file():
+        latents_meta = _read_json(latents_real / META_NAME)
+        sha256, aligned = latents_meta.get("sha256", {}), latents_meta.get("aligned_to", {})
+        named = [*(sha256 if isinstance(sha256, dict) else ())]
+        named += [aligned.get("file")] if isinstance(aligned, dict) and "file" in aligned else []
+        for name in named:
+            _plain_name(name, latents_real / META_NAME)
 
 
 def _check_meta(session: str, meta: dict[str, Any], decision_hz: float) -> None:
@@ -101,26 +154,34 @@ def _check_meta(session: str, meta: dict[str, Any], decision_hz: float) -> None:
 
 
 def check_training_sessions(data: DataConfig, decision_hz: float) -> list[Path]:
-    """The ``features_v1`` shard directories of ``data.sessions``, each checked before any of its arrays is read.
+    """The resolved ``features_v1`` shard folders of ``data.sessions``, each checked before any of its arrays is read.
 
-    1. An ``everon`` session id, or a ``heldout`` / ``SEALED`` part in the path of the shard directory, of the latents
-       directory ``<root>/<session_id>/latents/<codec_id>/`` or of any file in them, as given or resolved, raises
-       ``SealedDataError`` before any of them is opened.
-    2. Then ``meta.json`` alone. Its ``session_id`` must be the folder's. An Everon ``map_id``, ``terrain`` or split
-       raises ``SealedDataError``. ``TrainingDataError`` is raised for a (map_id, split) outside ``TRAINING_SPLITS``,
-       for a VAL-C session (``is_val_c``; defence in depth, since DD-11 writes the effective split), and for a
-       ``decision_hz`` other than the model's.
+    The checks cover the resources DD-11's reader opens. That reader resolves the shard folder, reads ``meta.json``
+    and the arrays named in it there, and finds the latents beside the resolved folder, in
+    ``<resolved shard>/../latents/<codec_id>/``.
+
+    1. An ``everon`` session id raises ``SealedDataError``. So does a ``heldout`` / ``SEALED`` part, as given or
+       resolved, in the shard folder, that latents folder or any file in them. This happens before any of them is
+       opened.
+    2. ``meta.json`` alone. Its ``session_id`` must be the folder's. An Everon ``map_id``, ``terrain`` or split
+       raises ``SealedDataError``. ``TrainingDataError`` is raised for a (map_id, split) outside
+       ``TRAINING_SPLITS``, for a VAL-C session (``is_val_c``; defence in depth, since DD-11 writes the effective
+       split), and for a ``decision_hz`` other than the model's.
+    3. Every file that meta.json or the latents meta.json names must be a plain name that resolves inside its own
+       resolved folder (``_check_referenced_files``); anything else raises ``TrainingDataError``.
     """
     dirs = []
     for session in data.sessions:
         if session.lower().startswith("everon"):
             raise SealedDataError(f"{session}: an Everon session; training code never reads it")
-        shard_dir = Path(data.root) / session / "features_v1"
-        _refuse_sealed_resources(shard_dir, Path(data.root) / session / "latents" / data.codec_id)
-        meta = json.loads((shard_dir / "meta.json").read_text("utf-8"))
-        if not isinstance(meta, dict):
-            raise TrainingDataError(f"{shard_dir}/meta.json is not an object")
+        configured = Path(data.root) / session / "features_v1"
+        _refuse_sealed(configured)
+        shard_dir = configured.resolve()  # what the shard reader opens ...
+        latents_dir = shard_dir.parent / "latents" / data.codec_id  # ... and where it finds the latents
+        _refuse_sealed_resources(shard_dir, latents_dir)
+        meta = _read_json(_inside(shard_dir, META_NAME))
         _check_meta(session, meta, decision_hz)
+        _check_referenced_files(shard_dir, latents_dir, meta)
         dirs.append(shard_dir)
     return dirs
 
@@ -159,7 +220,9 @@ def open_training_windows(cfg: RunConfig, *, chunk_rows: int = 4096) -> Dataset[
 
     Each session gives ``window``-frame windows: the latents of ``codec_id``, normalised by per-channel statistics of
     the valid rows of these sessions; the conditioning channels; and the targets of the configured aux heads.
-    ``check_training_sessions`` runs first. Training data built any other way skips those rules.
+    ``check_training_sessions`` runs first. Training data built any other way skips those rules. The guard assumes
+    the datasets do not change while they load: it is meant for local, single-user runs, and a file swapped between
+    the check and the read is not caught.
     """
     if cfg.data is None:
         raise ValueError("RunConfig.data is required to train from shards")

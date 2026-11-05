@@ -1,18 +1,28 @@
 """dd-train's data guard: only Arland ``train`` sessions outside VAL-C, at the model's decision rate, train or enter
 normalisation statistics; Everon, ``heldout/`` and ``SEALED`` data are refused before anything is read, including
-through a symlinked meta.json, array or latents resource."""
+through a symlinked meta.json, array or latents resource, a redirected shard folder, or a file named in meta.json.
+
+The bypass tests run ``open_training_windows`` on a stand-in for DD-11's reader as it was before its link hardening
+(31f328e): it resolves the shard folder, opens the arrays named in its meta.json there, and finds the latents beside
+the resolved folder, with no integrity checks of its own. It records every path it opens."""
 
 from __future__ import annotations
 
 import hashlib
 import importlib
 import json
+import types
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import pytest
+from torch.utils.data import Dataset
 
-from drivedit.train import DataConfig, RunConfig
+from drivedit.train import DataConfig, RunConfig, data
 from drivedit.train.data import (
     SEALED_MAP_IDS,
     SEALED_PATH_PARTS,
@@ -51,7 +61,8 @@ def _data(root: Path, *sessions: str) -> DataConfig:
 
 def test_arland_train_sessions_pass(tmp_path: Path) -> None:
     a, b = _session(tmp_path, "arland_a"), _session(tmp_path, "arland_b")
-    assert check_training_sessions(_data(tmp_path, a, b), 5.0) == [tmp_path / s / "features_v1" for s in (a, b)]
+    want = [(tmp_path / s / "features_v1").resolve() for s in (a, b)]
+    assert check_training_sessions(_data(tmp_path, a, b), 5.0) == want
 
 
 ROUTE_SPLITS = [(m, s) for m, splits in NAV.MAP_SPLITS.items() for s in splits]
@@ -175,3 +186,166 @@ def test_a_resource_linked_into_sealed_data_is_refused(
     link(tmp_path / "datasets" / session, sealed)
     with pytest.raises(SealedDataError, match="never reads"):
         check_training_sessions(_data(tmp_path / "datasets", session), 5.0)
+
+
+# --------------------------------------------------------------------------------------------- the reader's paths
+
+T, LATENT = 4, (2, 1, 3)
+
+
+@dataclass(frozen=True)
+class _Stats:
+    mean: tuple[float, ...]
+    std: tuple[float, ...]
+
+
+class _Windows(Dataset[dict[str, Any]]):
+    def __init__(self, index: Any, codec_id: str, *, stats: _Stats, channels: Any, aux: Any) -> None:
+        self.index, self.stats = index, stats
+
+    def __len__(self) -> int:
+        return len(self.index.shards)
+
+    def __getitem__(self, i: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+def _pre_hardening_reader(opened: list[Path]) -> dict[str, types.ModuleType]:
+    """The paths DD-11's Shard and Latents open at 31f328e, with every opened path recorded and no checks."""
+
+    def load(path: Path) -> npt.NDArray[Any]:
+        opened.append(path.resolve())
+        return np.load(path, allow_pickle=False)
+
+    class Shard:
+        def __init__(self, path: Path) -> None:
+            self.path = Path(path).resolve()
+            opened.append(self.path / "meta.json")
+            self.meta = json.loads((self.path / "meta.json").read_text())
+            self.arrays = {n: load(self.path / str(info["file"])) for n, info in self.meta["arrays"].items()}
+
+        def latents(self, codec_id: str) -> types.SimpleNamespace:
+            folder = self.path.parent / "latents" / codec_id
+            return types.SimpleNamespace(latents=load(folder / "latents.npy"), valid=load(folder / "valid.npy"))
+
+    class WindowIndex:
+        def __init__(self, shards: list[Shard], length: int, stride: int = 1) -> None:
+            self.shards = shards
+
+    shard = types.ModuleType("drivedit.data.shard")
+    shard.Shard, shard.WindowIndex, shard.LatentStats = Shard, WindowIndex, _Stats
+    torch_module = types.ModuleType("drivedit.data.torch")
+    torch_module.LatentWindowDataset = _Windows
+    return {"drivedit.data.shard": shard, "drivedit.data.torch": torch_module}
+
+
+def _trainable(root: Path, session: str, *, value: float = 1.0) -> Path:
+    """A complete session in the DD-11 / DD-19 layout: a state array named in meta.json, latents with their meta."""
+    _session(root, session, arrays={"state": {"file": "state.npy"}})
+    np.save(root / session / "features_v1" / "state.npy", np.zeros((T, 4), np.float32))
+    latents = root / session / "latents" / CODEC
+    (latents / "latents.npy").unlink()
+    np.save(latents / "latents.npy", np.full((T, *LATENT), value, np.float16))
+    np.save(latents / "valid.npy", np.ones(T, bool))
+    names = {"latents.npy": "x", "valid.npy": "y"}
+    (latents / "meta.json").write_text(json.dumps({"sha256": names, "aligned_to": {"file": "slot_id.npy"}}))
+    return root / session
+
+
+def _train(monkeypatch: pytest.MonkeyPatch, root: Path, session: str, opened: list[Path]) -> None:
+    """open_training_windows on the stand-in reader, which appends every path it opens to ``opened``."""
+    modules = _pre_hardening_reader(opened)
+    monkeypatch.setattr(data, "_module", lambda name: modules[name])
+    cfg = RunConfig(run_id="guard", model=tiny_config(), data=_data(root, session))
+    try:
+        data.open_training_windows(cfg)
+    finally:
+        monkeypatch.undo()
+
+
+def test_the_stand_in_reader_trains_on_a_clean_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _trainable(tmp_path / "datasets", "arland_ok")
+    opened: list[Path] = []
+    _train(monkeypatch, tmp_path / "datasets", "arland_ok", opened)
+    assert {p.name for p in opened} == {"meta.json", "state.npy", "latents.npy", "valid.npy"}
+    assert all(p.is_relative_to(session.resolve()) for p in opened)
+
+
+def test_a_redirected_shard_folder_cannot_reach_sealed_latents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex round-3 bypass 1: only features_v1 is linked, to another permitted session whose sibling latents link
+    into SEALED. The reader derives the latents from the resolved folder, so that is the folder the guard checks."""
+    root = tmp_path / "datasets"
+    sealed = _trainable(tmp_path / "heldout" / "everon" / "SEALED", "arland_sealed", value=99.0)
+    other = _trainable(root, "arland_other")
+    (other / "features_v1" / "meta.json").write_text(
+        json.dumps(
+            {"schema": "drivedit.features_v1-shard/1", "session_id": "arland_ok", "map_id": "arland", "split": "train"}
+            | {"decision_hz": 5.0, "arrays": {"state": {"file": "state.npy"}}}
+        )
+    )
+    other_latents = other / "latents" / CODEC
+    for f in other_latents.iterdir():
+        f.unlink()
+    other_latents.rmdir()
+    other_latents.symlink_to(sealed / "latents" / CODEC)
+    session = _trainable(root, "arland_ok")  # its own latents folder is clean, but nothing reads it
+    (session / "features_v1" / "meta.json").unlink()
+    (session / "features_v1" / "state.npy").unlink()
+    (session / "features_v1").rmdir()
+    (session / "features_v1").symlink_to(other / "features_v1")
+    opened: list[Path] = []
+    with pytest.raises(SealedDataError, match="never reads"):
+        _train(monkeypatch, root, "arland_ok", opened)
+    assert opened == []
+
+
+@pytest.mark.parametrize("where", ["sealed absolute", "outside absolute", "parent", "subfolder"])
+def test_meta_json_cannot_direct_an_array_outside_its_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """Codex round-3 bypass 2: meta.json names an array file the reader would open outside the shard folder."""
+    root = tmp_path / "datasets"
+    session = _trainable(root, "arland_ok")
+    sealed = _trainable(tmp_path / "heldout" / "everon" / "SEALED", "arland_sealed")
+    elsewhere = _trainable(root, "arland_elsewhere")
+    file = {
+        "sealed absolute": str((sealed / "features_v1" / "state.npy").resolve()),
+        "outside absolute": str((elsewhere / "features_v1" / "state.npy").resolve()),
+        "parent": "../../arland_elsewhere/features_v1/state.npy",
+        "subfolder": "sub/state.npy",
+    }[where]
+    meta_path = session / "features_v1" / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["arrays"]["state"]["file"] = file
+    meta_path.write_text(json.dumps(meta))
+    opened: list[Path] = []
+    with pytest.raises(TrainingDataError, match="only a plain file name"):
+        _train(monkeypatch, root, "arland_ok", opened)
+    assert opened == []
+
+
+@pytest.mark.parametrize("folder", ["features_v1", "latents"])
+def test_a_plain_name_must_resolve_inside_its_folder(tmp_path: Path, folder: str) -> None:
+    """A plain array or latents file name that is a symlink to a permitted file elsewhere is refused too."""
+    root = tmp_path / "datasets"
+    session = _trainable(root, "arland_ok")
+    elsewhere = _trainable(root, "arland_elsewhere")
+    name, target = (
+        ("state.npy", elsewhere / "features_v1" / "state.npy")
+        if folder == "features_v1"
+        else ("valid.npy", elsewhere / "latents" / CODEC / "valid.npy")
+    )
+    link = session / folder / (CODEC if folder == "latents" else "") / name
+    link.unlink()
+    link.symlink_to(target)
+    with pytest.raises(TrainingDataError, match="outside"):
+        check_training_sessions(_data(root, "arland_ok"), 5.0)
+
+
+@pytest.mark.parametrize("named", [{"sha256": {"../latents.npy": "x"}}, {"aligned_to": {"file": "/data/slot_id.npy"}}])
+def test_the_latents_meta_names_only_plain_files(tmp_path: Path, named: dict[str, Any]) -> None:
+    root = tmp_path / "datasets"
+    session = _trainable(root, "arland_ok")
+    (session / "latents" / CODEC / "meta.json").write_text(json.dumps(named))
+    with pytest.raises(TrainingDataError, match="only a plain file name"):
+        check_training_sessions(_data(root, "arland_ok"), 5.0)

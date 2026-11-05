@@ -59,8 +59,8 @@ jobs:
         run: uv sync
       - name: Check that torch is not installed
         run: uv run --no-sync python -I -c "import importlib.util as u, sys; sys.exit('torch is installed' if u.find_spec('torch') else 0)"
-      - name: pytest (torch-free tests; torch test modules are not collected)
-        run: uv run --no-sync pytest
+      - name: pytest (torch-free tests; torch test modules are not collected, torch-marked tests deselected)
+        run: uv run --no-sync pytest -m "not torch"
 
   model-tests:
     name: model tests (CPU torch)

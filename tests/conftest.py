@@ -5,7 +5,9 @@ Common fixtures and test utilities.
 torch is optional here: the capture tooling tests need only the stdlib, numpy and cv2, and the
 capture-tests CI job runs them with no torch installed. Test modules that need torch (the `model`
 extra) are listed in TORCH_TEST_MODULES; they get the `torch` marker, and without torch they are
-not collected at all. A new test module that imports torch must be added to that list.
+not collected at all. A new test module that imports torch must be added to that list. Single tests
+that need torch inside an otherwise torch-free module are listed in TORCH_TEST_IDS: they get the
+marker too, so the model job (`-m torch`) runs them and the capture job (`-m "not torch"`) does not.
 
 Pre-existing failures of the legacy model tests are xfailed (strict) from tests/known_failures.py.
 """
@@ -51,8 +53,17 @@ TORCH_TEST_MODULES = [
     "unit/test_utils.py",
 ]
 
+# Node ids (relative to the repo root) of torch tests in torch-free modules. Without torch they skip themselves.
+TORCH_TEST_IDS = [
+    # data/enfusion_preprocessing.py (dc-1.0) imports torch; the rest of test_dc2_reader.py does not.
+    "tests/test_dc2_reader.py::LegacyGuardTest::test_dc2_session_raises_naming_the_column",
+    "tests/test_dc2_reader.py::LegacyGuardTest::test_legacy_session_raises_naming_the_column",
+    "tests/test_dc2_reader.py::LegacyGuardTest::test_bad_row_never_desynchronises_the_arrays",
+]
+
 _HERE = Path(__file__).parent
 _TORCH_PATHS = {(_HERE / p).resolve() for p in TORCH_TEST_MODULES}
+_TORCH_IDS = set(TORCH_TEST_IDS)
 
 if torch is None:
     collect_ignore = list(TORCH_TEST_MODULES)
@@ -69,7 +80,7 @@ def _load_known_failures():
 def pytest_collection_modifyitems(config, items):
     known = _load_known_failures()  # pre-existing legacy failures, xfailed with their cause
     for item in items:
-        if Path(str(item.fspath)).resolve() in _TORCH_PATHS:
+        if item.nodeid in _TORCH_IDS or Path(str(item.fspath)).resolve() in _TORCH_PATHS:
             item.add_marker(pytest.mark.torch)
         mark = known.get(item.nodeid)
         if mark is not None:

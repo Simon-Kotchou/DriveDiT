@@ -61,7 +61,7 @@ markers = [
     "performance: timing or memory measurement",
     "benchmark: micro-benchmark",
     "slow: takes more than a few seconds",
-    "torch: needs torch (the `model` extra); applied by tests/conftest.py from TORCH_TEST_MODULES",
+    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES, TORCH_TEST_IDS)",
 ]
 
 [tool.ruff]

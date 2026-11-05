@@ -49,8 +49,9 @@ Not written by default (features_v1 classes): ``eval_only`` (``include_eval_only
 ``privileged_route`` (``include_privileged``). The C24 forbidden names stay out of every model input through
 ``FeatureSpec.access``.
 
-Output never goes inside the session directory or its captures tree, nor to the C: drive. An existing shard is
-replaced only with ``overwrite=True`` (written beside it first, then swapped).
+Output never goes inside the session directory, its captures tree (taken from the session path before symlinks are
+resolved) or a configured read-only root (``PROTECTED_ROOTS``, default /mnt/e/DriveDiT/captures), nor to the C:
+drive. An existing shard is replaced only with ``overwrite=True`` (written beside it first, then swapped).
 """
 
 from __future__ import annotations
@@ -100,6 +101,10 @@ PREFIX_HASH_ROUTES = {
     "arland_t0_loop": "77838c1346f2c7a6b18be78570d9f8cb560ee10a0e69718b28eb0f028cc0f66f",
 }
 FORBIDDEN_ROOTS = ("/mnt/c/",)
+# Read-only data roots the builder never writes into, whatever the session (the capture store of this program).
+# Replaced by the protected_roots keyword, else by the os.pathsep-separated DRIVEDIT_PROTECTED_ROOTS variable.
+PROTECTED_ROOTS = ("/mnt/e/DriveDiT/captures",)
+PROTECTED_ROOTS_ENV = "DRIVEDIT_PROTECTED_ROOTS"
 # Written by default, in features_v1 order; image is referenced (slot_id + deriv_dir), never copied.
 DEFAULT_TENSORS = (
     "state",
@@ -206,8 +211,10 @@ def build_session(
     routes_dir: str | Path | None = None,
     vehicle_card: str | Path | None = None,
     overwrite: bool = False,
+    protected_roots: Sequence[str | Path] | None = None,
 ) -> Path:
-    """Read one session and write its shard; returns ``<out_root>/<session_id>/features_v1``."""
+    """Read one session and write its shard; returns ``<out_root>/<session_id>/features_v1``. The output is checked
+    against the session as named here, before symlinks are resolved (``write_shard``)."""
     session = open_dc2_session(session_dir, vehicle_card=vehicle_card)
     return write_shard(
         session,
@@ -217,6 +224,8 @@ def build_session(
         include_eval_only=include_eval_only,
         routes_dir=routes_dir,
         overwrite=overwrite,
+        session_dir=session_dir,
+        protected_roots=protected_roots,
     )
 
 
@@ -229,11 +238,17 @@ def write_shard(
     include_eval_only: bool = False,
     routes_dir: str | Path | None = None,
     overwrite: bool = False,
+    session_dir: str | Path | None = None,
+    protected_roots: Sequence[str | Path] | None = None,
 ) -> Path:
-    """Write the shard of a Session that ``open_dc2_session`` returned (the build without the read). The output
-    paths are resolved and checked (``_shard_dir``) before anything is computed or written."""
-    session_real = Path(str(session.path)).resolve()
-    out_dir = _shard_dir(Path(out_root), session_real, str(session.session_id))
+    """Write the shard of a Session that ``open_dc2_session`` returned (the build without the read).
+
+    ``session_dir`` is the session directory as the caller named it (default ``session.path``, which the reader has
+    already resolved): the captures roots are taken from it before symlinks are resolved. ``protected_roots``
+    replaces the configured read-only roots (``PROTECTED_ROOTS``, or ``DRIVEDIT_PROTECTED_ROOTS``). The output
+    paths are checked (``_shard_dir``) before anything is computed or written."""
+    protected = protected_paths(session.path if session_dir is None else session_dir, session.path, protected_roots)
+    out_dir = _shard_dir(Path(out_root), protected, str(session.session_id))
     if out_dir.exists() and not overwrite:
         raise BuildError(f"{out_dir} exists; pass overwrite=True (--overwrite) to replace it")
     arrays, meta = session_features(
@@ -870,13 +885,48 @@ def _nonfinite_in_segments(arrays: dict[str, npt.NDArray[Any]], segments: Sequen
     return out
 
 
-def _shard_dir(out_root: Path, session_real: Path, session_id: str) -> Path:
+def configured_roots(protected_roots: Sequence[str | Path] | None = None) -> list[Path]:
+    """The configured read-only roots: ``protected_roots`` when given, else ``DRIVEDIT_PROTECTED_ROOTS``
+    (os.pathsep-separated) when set, else ``PROTECTED_ROOTS``."""
+    if protected_roots is not None:
+        return [Path(p) for p in protected_roots]
+    env = os.environ.get(PROTECTED_ROOTS_ENV)
+    if env is not None:
+        return [Path(p) for p in env.split(os.pathsep) if p]
+    return [Path(p) for p in PROTECTED_ROOTS]
+
+
+def protected_paths(
+    session_dir: str | Path, session_real: str | Path, protected_roots: Sequence[str | Path] | None = None
+) -> list[Path]:
+    """The resolved directories no output may lie in: the session, every ancestor named ``captures`` of the
+    session path as named and of its resolved form, and the configured roots (``configured_roots``).
+
+    The captures ancestors are taken from the absolute but unresolved path first: with ``captures`` a symlink to
+    ``storage``, the resolved session is ``storage/<id>`` and has no ``captures`` ancestor any more (review round 2).
+    Every root is then resolved, so it is compared in the same form as the resolved output paths."""
+    named = Path(os.path.abspath(session_dir))
+    real = Path(session_real).resolve()
+    roots = [named, real]
+    roots += [p for p in named.parents if p.name == "captures"]
+    roots += [p for p in real.parents if p.name == "captures"]
+    roots += configured_roots(protected_roots)
+    out: list[Path] = []
+    for p in roots:
+        r = p.resolve()
+        if r not in out:
+            out.append(r)
+    return out
+
+
+def _shard_dir(out_root: Path, protected: Sequence[Path], session_id: str) -> Path:
     """``<out_root>/<session_id>/features_v1`` under its resolved parent, checked before anything is written.
 
     Every path the build creates, renames or removes lies in that parent (the staging directories ``.features_v1.*``
     are siblings of the shard), so the checks run on resolved paths, symlinks followed: the out root, the parent
-    ``<out_root>/<session_id>`` and the destination must each lie outside the C: drive, the session directory and its
-    captures tree. A symlinked destination directory is refused: the shard is replaced by renames inside its parent.
+    ``<out_root>/<session_id>`` and the destination must each lie outside the C: drive and every ``protected``
+    directory (``protected_paths``, resolved). A symlinked destination directory is refused: the shard is replaced by
+    renames inside its parent.
     """
     if not session_id or "/" in session_id or session_id in (".", ".."):
         raise BuildError(f"session id {session_id!r} is not a directory name")
@@ -885,7 +935,6 @@ def _shard_dir(out_root: Path, session_real: Path, session_id: str) -> Path:
     dest = parent / SHARD_DIRNAME
     if dest.is_symlink():
         raise BuildError(f"refusing {dest}: the shard directory is a symlink")
-    protected = [session_real] + [p for p in session_real.parents if p.name == "captures"]
     for path in (root, parent, dest.resolve()):
         if any((str(path) + "/").startswith(r) for r in FORBIDDEN_ROOTS):
             raise BuildError(f"refusing {out_root}: {path} is on the C: drive (no writes to C:)")

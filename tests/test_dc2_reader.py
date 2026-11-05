@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Tests for data/dc2/reader.py (DD-5-min) and the legacy guard of data/enfusion_preprocessing.py.
+"""Tests for data/dc2/reader.py (DD-5-min).
 
     TMPDIR=/dev/shm/<x> PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
         tests/test_dc2_reader.py
 
-The reader, the fiducial decoder and the fixture generator are loaded by file path (`import data.dc2` would run
-data/__init__.py, which imports torch). The legacy-guard tests import data/enfusion_preprocessing.py, which imports
-torch and cv2, and skip when either is missing.
+The reader, the fiducial decoder and the fixture generator are loaded by file path, as the tools load them.
 
 Covered: the reader reproduces golden.json (keys exact, integers exact, values within 1e-4, pixels within 1/255;
 a NaN never compares equal); the committed golden fixture equals a fresh generation, and the 5 Hz fallback session
@@ -17,10 +15,9 @@ join ctl and telemetry; segments at gaps, episode boundaries and masks (the obs 
 between the obs and the window, react_visible at the label step); the seal (a failed status, its fields, a lost
 tail) and salvage; duplicated keys, empty chunks, img paths and files outside the session; the vehicle card hash
 and gear mapping; dc-1.0 sessions raise; Everon (incl. an Eden root world), heldout/ and SEALED paths need
-sealed_eval; C: paths are refused; enfusion_preprocessing names a missing column; the crash events of contract
-9.5.1 (payload parsing, the first terminal ego event, policy_valid 0 from the crash on, ego_destroyed as a normal
-seal). Temporary sessions live under
-$TMPDIR when that is on /dev/shm/ or /mnt/e/, else /dev/shm/, and are removed.
+sealed_eval; C: paths are refused; the crash events of contract 9.5.1 (payload parsing, the first terminal ego event,
+policy_valid 0 from the crash on, ego_destroyed as a normal seal). Temporary sessions live under $TMPDIR when that is
+on /dev/shm/ or /mnt/e/, else /dev/shm/, and are removed.
 """
 
 import importlib.util
@@ -32,7 +29,6 @@ import struct
 import tempfile
 import types
 import unittest
-import warnings
 import zlib
 
 import numpy
@@ -1196,54 +1192,6 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(reader.onset_and_confirmation("rollover", {"onset_step": 40}, 55), (40, 55))
         self.assertEqual(reader.onset_and_confirmation("collision", {"onset_step": 40}, 52), (40, 40))
         self.assertEqual(reader.onset_and_confirmation("veh_damage", {}, 52), (52, 52))
-
-
-class LegacyGuardTest(unittest.TestCase):
-    """data/enfusion_preprocessing.py raises naming the missing column instead of reading zeros (CR-081)."""
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            import torch  # noqa: F401
-            import cv2  # noqa: F401
-        except ImportError as e:
-            raise unittest.SkipTest("enfusion_preprocessing needs torch and cv2: %s" % e)
-        cls.pre = load("enfusion_preprocessing_legacy", "data/enfusion_preprocessing.py")
-
-    def setUp(self):
-        self.tmp = temp_dir("dc2_guard_")
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp)
-
-    def test_dc2_session_raises_naming_the_column(self):
-        parser = self.pre.EnfusionTelemetryParser()
-        chunk = os.path.join(GOLDEN_DIR, "telemetry", "chunk_00000.csv")
-        with self.assertRaises(self.pre.MissingTelemetryColumnError) as cm:
-            parser.parse_csv(chunk)
-        self.assertIn("'timestamp'", str(cm.exception))
-        self.assertIn("rot_pitch", cm.exception.columns)
-
-    def test_legacy_session_raises_naming_the_column(self):
-        legacy = synth.write_legacy_session(self.tmp)
-        parser = self.pre.EnfusionTelemetryParser()
-        with self.assertRaises(self.pre.MissingTelemetryColumnError) as cm:
-            parser.parse_csv(os.path.join(legacy, "telemetry.csv"))
-        self.assertIn("'timestamp'", str(cm.exception))
-        self.assertNotIn("timestamp_ms", cm.exception.columns)
-
-    def test_bad_row_never_desynchronises_the_arrays(self):
-        parser = self.pre.EnfusionTelemetryParser()
-        cols = parser.required_columns()
-        path = os.path.join(self.tmp, "telemetry.csv")
-        good = ",".join("1" for _ in cols)
-        short = ",".join("1" for _ in cols[:5])
-        with open(path, "w", encoding="ascii", newline="") as f:
-            f.write(",".join(cols) + "\n" + good + "\n" + short + "\n" + good + "\n")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            data = parser.parse_csv(path)
-        self.assertEqual(set(len(v) for v in data.values()), {2})
 
 
 if __name__ == "__main__":

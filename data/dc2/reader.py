@@ -8,8 +8,8 @@ decision samples, masks and segments.
     for step in session.decisions:
         ...
 
-Loaded by file path like data/dc2/fiducial.py: `import data.dc2.reader` would run data/__init__.py, which imports
-torch. Needs the stdlib and numpy; cv2 only when images are decoded (fiducial.load_rgb).
+Loaded by file path like data/dc2/fiducial.py (`import data.dc2.reader` also works: data/__init__.py imports
+nothing). Needs the stdlib and numpy; cv2 only when images are decoded (fiducial.load_rgb).
 
 What it reads (docs/capture_contract/dc-2.0.md; dc-2.0.streams.json is normative for names, order, types and keys,
 so no column list is written down here):

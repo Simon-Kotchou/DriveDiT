@@ -1,7 +1,7 @@
 [project]
 name = "drivedit"
 version = "0.1.0"
-description = "DriveDiT: diffusion-transformer world model for driving, plus its Enfusion capture tooling"
+description = "DriveDiT: Enfusion capture tooling for a driving world model and policy in Arma Reforger (model package being rebuilt)"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -14,7 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The world-model side (layers/ blocks/ core/ models/ training/ inference/ ...).
+# The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras
+# are kept for the model package that replaces it. Until then only tests/test_torch_smoke.py uses them.
 # `uv sync --extra model` takes torch from PyPI (the CUDA build on Linux x86_64).
 model = [
     "torch>=2.2",
@@ -56,12 +57,7 @@ minversion = "8.0"
 testpaths = ["tests", "tools/test_deploy_addon.py", "tools/pin/tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
-    "unit: fast unit test",
-    "integration: crosses several components",
-    "performance: timing or memory measurement",
-    "benchmark: micro-benchmark",
-    "slow: takes more than a few seconds",
-    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES, TORCH_TEST_IDS)",
+    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES)",
 ]
 
 [tool.ruff]

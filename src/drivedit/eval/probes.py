@@ -9,7 +9,10 @@
 - ``explained_action_information``: AIM's explained action information (EAI), the model's prediction loss with the
   action replaced by its learned null minus the loss with the true action (delta-2026-11 §5.1 item 2 and §5.2 M1).
   EAI ≈ 0 means the model ignores the action, however the video looks. The losses come from the caller: one extra
-  forward pass with the null action per evaluation window.
+  forward pass with the null action per evaluation window. The gate is delta §5.2's bar, "EAI > 0 in every speed bin":
+  every unit (all steps, and each bucket) must have a positive mean and a positive lower 95% bound, with a Student-t
+  critical value over its independent clips, and at least ``min_clusters`` clips; otherwise the gate is "fail" or
+  "insufficient", never "pass".
 """
 
 from __future__ import annotations
@@ -31,8 +34,10 @@ from drivedit.eval.linear import (
     segment_folds,
 )
 
-# Two-sided 95% normal quantile, for the lower confidence bound of a mean.
-_Z95 = 1.959963984540054
+# Fewest independent clips for a unit (the whole set, or one bucket) of the EAI gate: gap-4 §8.1 proposes "at least 50
+# clips per reported cell; otherwise mark the cell n/a".
+MIN_CLUSTERS = 50
+_COVERAGE = 0.95
 
 
 @dataclass(frozen=True)
@@ -95,39 +100,45 @@ def state_probe_r2(
 
 
 @dataclass(frozen=True)
-class EaiBucket:
-    """EAI inside one bucket (a speed bin, a κ cell): mean, standard error, its lower 95% bound and ``n`` steps in
-    ``n_clusters`` independent units."""
+class EaiUnit:
+    """EAI over one unit of the gate (all steps, or one bucket such as a speed bin or a κ cell).
+
+    ``n`` steps in ``n_clusters`` independent clips; ``eai`` the mean, ``se`` its standard error over clips, ``t_crit``
+    the two-sided 95% Student-t critical value with ``n_clusters - 1`` degrees of freedom and ``lower_95 = eai - t_crit
+    x se``. ``status`` is "insufficient" below the gate's ``min_clusters`` (a required bucket without rows included),
+    else "pass" when ``eai > 0`` and ``lower_95 > 0``, else "fail".
+    """
 
     bucket: str
     n: int
     n_clusters: int
     eai: float
     se: float
+    t_crit: float
     lower_95: float
+    status: str
 
 
 @dataclass(frozen=True)
 class ExplainedActionInformation:
-    """AIM's explained action information, ``loss(null action) - loss(true action)``, over all steps and per bucket.
+    """AIM's explained action information, ``loss(null action) - loss(true action)``, over all steps (``overall``)
+    and per bucket, with the gate verdict.
 
-    ``positive_in_every_bucket`` is delta §5.2's pass bar ("EAI > 0 in every speed bin"), read as a lower 95% bound
-    above 0 in every bucket that has at least two independent units.
+    ``gate`` is "pass" only when every unit passes; "fail" when any unit with enough clips fails; else "insufficient".
+    ``reasons`` names every unit that does not pass and why.
     """
 
     metric: str
-    n: int
-    n_clusters: int
-    eai: float
-    se: float
-    lower_95: float
-    buckets: tuple[EaiBucket, ...]
-    positive_in_every_bucket: bool
+    overall: EaiUnit
+    buckets: tuple[EaiUnit, ...]
+    min_clusters: int
+    gate: str
+    reasons: tuple[str, ...]
     defined: bool
 
     @property
     def value(self) -> float:
-        return self.eai
+        return self.overall.eai
 
 
 def explained_action_information(
@@ -135,16 +146,21 @@ def explained_action_information(
     loss_true: npt.ArrayLike,
     *,
     buckets: Sequence[Hashable] | None = None,
+    required_buckets: Sequence[Hashable] = (),
     clusters: Sequence[Hashable] | None = None,
+    min_clusters: int = MIN_CLUSTERS,
 ) -> ExplainedActionInformation:
     """EAI from per-step losses ``[N]`` of the same model on the same held-out steps: with the action replaced by the
     null token (``loss_null``) and with the true ``action_cmd`` (``loss_true``).
 
-    ``buckets`` labels each step for the per-bucket report (``drivedit.eval.strata.speed_bin``, a κ cell).
-    ``clusters`` labels each step's independent unit (its clip or rollout): neighbouring steps of one clip are
-    correlated, so the standard error is computed over cluster means; without clusters every step counts as
-    independent and the error is optimistic.
+    ``buckets`` labels each step for the per-bucket gate (``drivedit.eval.strata.speed_bin``, a κ cell); every bucket
+    that occurs is part of the gate, and so is every label in ``required_buckets`` (one without rows is
+    "insufficient", so an unvisited speed bin cannot pass). ``clusters`` labels each step's independent unit (its clip
+    or rollout): neighbouring steps of one clip are correlated, so the standard error and the degrees of freedom come
+    from clips. Without clusters every step counts as an independent clip and the bound is optimistic.
     """
+    if min_clusters < 2:
+        raise ValueError(f"min_clusters must be >= 2 (a standard error needs two clips), got {min_clusters}")
     null = np.asarray(loss_null, dtype=np.float64).ravel()
     true = np.asarray(loss_true, dtype=np.float64).ravel()
     if null.shape != true.shape or null.size == 0:
@@ -153,35 +169,50 @@ def explained_action_information(
         raise ValueError("losses must be finite")
     diff = null - true
     cluster = _codes(clusters, diff.size, "clusters") if clusters is not None else np.arange(diff.size)
-    bucket_labels: Sequence[Hashable] = buckets if buckets is not None else ["all"] * diff.size
-    bucket = _codes(bucket_labels, diff.size, "buckets")
-    mean, se, n_clusters = _clustered_mean(diff, cluster)
-    per_bucket = []
-    for code, label in enumerate(dict.fromkeys(bucket_labels)):
-        sel = bucket == code
-        b_mean, b_se, b_clusters = _clustered_mean(diff[sel], cluster[sel])
-        per_bucket.append(
-            EaiBucket(
-                bucket=str(label),
-                n=int(sel.sum()),
-                n_clusters=b_clusters,
-                eai=b_mean,
-                se=b_se,
-                lower_95=b_mean - _Z95 * b_se,
-            )
-        )
-    scored = [b for b in per_bucket if b.n_clusters >= 2]
+    overall = _unit("all", diff, cluster, min_clusters)
+    units = []
+    if buckets is not None:
+        labels = list(buckets)
+        bucket = _codes(labels, diff.size, "buckets")
+        for code, label in enumerate(dict.fromkeys(labels)):
+            sel = bucket == code
+            units.append(_unit(str(label), diff[sel], cluster[sel], min_clusters))
+        seen = set(labels)
+        units += [
+            _unit(str(label), diff[:0], cluster[:0], min_clusters) for label in required_buckets if label not in seen
+        ]
+    elif required_buckets:
+        raise ValueError("required_buckets needs bucket labels for the steps")
+    reasons = [_why(u, min_clusters) for u in (overall, *units) if u.status != "pass"]
+    statuses = {u.status for u in (overall, *units)}
+    gate = "fail" if "fail" in statuses else "insufficient" if "insufficient" in statuses else "pass"
     return ExplainedActionInformation(
         metric="explained_action_information",
-        n=int(diff.size),
-        n_clusters=n_clusters,
-        eai=mean,
-        se=se,
-        lower_95=mean - _Z95 * se,
-        buckets=tuple(per_bucket) if buckets is not None else (),
-        positive_in_every_bucket=bool(scored) and all(b.lower_95 > 0.0 for b in scored),
+        overall=overall,
+        buckets=tuple(units),
+        min_clusters=min_clusters,
+        gate=gate,
+        reasons=tuple(reasons),
         defined=True,
     )
+
+
+def _unit(name: str, values: npt.NDArray[np.float64], cluster: npt.NDArray[np.int64], min_clusters: int) -> EaiUnit:
+    nan = math.nan
+    if values.size == 0:
+        return EaiUnit(name, 0, 0, nan, nan, nan, nan, "insufficient")
+    mean, se, k = _clustered_mean(values, cluster)
+    t_crit = t_critical(k - 1) if k >= 2 else nan
+    lower = mean - t_crit * se if k >= 2 else nan
+    passes = mean > 0.0 and lower > 0.0
+    status = "insufficient" if k < min_clusters else "pass" if passes else "fail"
+    return EaiUnit(name, int(values.size), k, mean, se, t_crit, lower, status)
+
+
+def _why(unit: EaiUnit, min_clusters: int) -> str:
+    if unit.status == "insufficient":
+        return f"{unit.bucket}: {unit.n_clusters} clip(s), fewer than the {min_clusters} required"
+    return f"{unit.bucket}: EAI {unit.eai:.4g}, lower 95% bound {unit.lower_95:.4g} is not above 0"
 
 
 def _codes(labels: Sequence[Hashable], n: int, name: str) -> npt.NDArray[np.int64]:
@@ -193,7 +224,7 @@ def _codes(labels: Sequence[Hashable], n: int, name: str) -> npt.NDArray[np.int6
 
 
 def _clustered_mean(values: npt.NDArray[np.float64], cluster: npt.NDArray[np.int64]) -> tuple[float, float, int]:
-    """The mean of ``values`` and its standard error over cluster means (cluster-weighted by size)."""
+    """The mean of ``values``, its standard error over clusters (cluster-weighted by size) and the cluster count."""
     _, inverse, counts = np.unique(cluster, return_inverse=True, return_counts=True)
     sums = np.bincount(inverse, weights=values)
     k = counts.size
@@ -204,3 +235,43 @@ def _clustered_mean(values: npt.NDArray[np.float64], cluster: npt.NDArray[np.int
     resid = sums - counts * mean
     var = float((resid**2).sum()) / values.size**2 * k / (k - 1)
     return mean, math.sqrt(var), int(k)
+
+
+def t_critical(df: int, coverage: float = _COVERAGE) -> float:
+    """The two-sided Student-t critical value: ``t`` with P(|T| <= t) = ``coverage`` for ``df`` degrees of freedom.
+
+    Exact for integer ``df``: bisection on the closed-form distribution of Abramowitz & Stegun, *Handbook of
+    Mathematical Functions*, 26.7.3 (no scipy). For example 12.706 at df 1, 2.228 at df 10, 2.010 at df 49.
+    """
+    if df < 1 or not 0.0 < coverage < 1.0:
+        raise ValueError(f"need df >= 1 and 0 < coverage < 1, got {df} and {coverage}")
+    lo, hi = 0.0, 1.0
+    while _t_coverage(hi, df) < coverage:
+        lo, hi = hi, 2.0 * hi
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if _t_coverage(mid, df) < coverage:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _t_coverage(t: float, df: int) -> float:
+    """A(t | df) = P(|T| <= t), Abramowitz & Stegun 26.7.3, with theta = atan(t / sqrt(df))."""
+    theta = math.atan(t / math.sqrt(df))
+    s, c2 = math.sin(theta), math.cos(theta) ** 2
+    if df % 2:  # odd: (2/pi) [theta + sin(theta) (cos + 2/3 cos^3 + ... + (2.4...(df-3))/(1.3...(df-2)) cos^(df-2))]
+        series, term = 0.0, math.cos(theta)
+        if df > 1:
+            series = term
+            for k in range(1, (df - 3) // 2 + 1):
+                term *= c2 * (2 * k) / (2 * k + 1)
+                series += term
+        return 2.0 / math.pi * (theta + s * series)
+    # even: sin(theta) [1 + 1/2 cos^2 + (1.3)/(2.4) cos^4 + ... + (1.3...(df-3))/(2.4...(df-2)) cos^(df-2)]
+    series, term = 1.0, 1.0
+    for k in range(1, (df - 2) // 2 + 1):
+        term *= c2 * (2 * k - 1) / (2 * k)
+        series += term
+    return s * series

@@ -24,7 +24,12 @@ with the regenerated fixture. `--kind golden_10hz` writes the same session at th
 image_hz = decision_hz = 10, N = 3, `clocks.image_hz_setting` `trial_conf`); the tests generate it, it is not
 committed. `--kind client_1408` (DD-6-min) writes the golden drive as a packaged client captures it: exe `cl`,
 instance `i01`, source class `client_1408x720`, 1408x720 images (a 1280x720 core between two 64 px bands) and a
-dd-launch/1 record of exe `client`; `tests/test_harvest.py` generates it, it is not committed.
+dd-launch/1 record of exe `client`; `tests/test_harvest.py` generates it, it is not committed. `--kind t0_loop_noise`
+(DD-7-ident pilot) writes the t0_loop lap as a mode-N episode of trial T0P (trial conf `"perturb": "pilot_v1"`) with
+one disturbance of each family DC_Noise draws (k_pulse, a_pulse, k_step, stop, speed): ctl `hl_*` the applied
+command, `exp_*_now` the clean expert, `noise_active` / `noise_id` on every row that holds a disturbed command, and
+`perturb_start` / `perturb_end` events with payload `noise_id;kind;amplitude;duration_s`; `tests/test_dc2_validate.py`
+generates it (every check passes, C17 N/A: it judges mode-E episodes only), it is not committed.
 
 The clock model is the dc-2.0 freeze's (decision D-A, probe runs 3-4): render frames of about 39 FPS whose world time
 is the frame clock, a capture stall of 80 ms in the frame a screenshot is taken in, engine fixed steps of 1/30 s run

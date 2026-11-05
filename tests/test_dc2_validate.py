@@ -1766,5 +1766,65 @@ class LegacyTest(unittest.TestCase):
                 self.assertIn(check, failing(rep), (name, rep["checks"]))
 
 
+class NoisePilotTest(unittest.TestCase):
+    """DD-7-ident's pilot shape (make_synthetic --kind t0_loop_noise): one mode-N lap with a disturbance of each
+    family. Every check passes; C17 judges mode-E expert episodes only, so the disturbances are never expert
+    failures (N/A here, and an E lap next to them is judged alone); the reader takes action_cmd from the applied
+    hl_* and action_label from the clean exp_*_now, and the noise columns agree with the perturb events."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_noise_")
+        cls.routes = os.path.join(cls.tmp, "r")
+        out = synth.generate(os.path.join(cls.tmp, "noise"), kind="t0_loop_noise", routes_dir=cls.routes)
+        cls.session = out["session_dir"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_every_check_passes_and_c17_skips_mode_n(self):
+        code, rep = run_json("--session", self.session, "--routes-dir", self.routes, "--vehicle-card", CARD)
+        self.assertEqual(code, 0, [(c["id"], c["detail"]) for c in rep["checks"] if c["status"] != "PASS"])
+        c17 = by_id(rep)["C17"]
+        self.assertEqual((c17["status"], c17["detail"]), ("N/A", "no mode-E expert episode"))
+
+    def test_c17_judges_the_e_lap_only(self):
+        """The same lap tagged mode E: C17 compares it with its route (the disturbances are then its own driving)."""
+        dst = os.path.join(self.tmp, "as_e", os.path.basename(self.session))
+        shutil.copytree(self.session, dst)
+        set_column(dst, "episodes", "mode", lambda key, v: "E")
+        set_column(dst, "ctl", "mode", lambda key, v: "E" if v == "N" else v)
+        code, rep = run_json("--session", dst, "--routes-dir", self.routes, "--checks", "C17")
+        c17 = by_id(rep)["C17"]
+        self.assertNotEqual(c17["status"], "N/A", c17)
+        self.assertIn("mode-E episode", c17["detail"])
+
+    def test_reader_labels_and_noise_windows(self):
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ctl, ev = s.streams["ctl"], s.streams["events"]
+        self.assertEqual(set(s.streams["episodes"].col("mode")), {"N"})
+        starts = {}
+        ends = {}
+        for kind, step, payload in zip(ev.col("kind"), ev.col("physics_step"), ev.col("payload")):
+            if kind in ("perturb_start", "perturb_end"):
+                fields = dict(item.split("=", 1) for item in payload.split(";"))
+                self.assertEqual(sorted(fields), ["amplitude", "duration_s", "kind", "noise_id"])
+                (starts if kind == "perturb_start" else ends)[int(fields["noise_id"])] = step
+        self.assertEqual(sorted(starts), list(range(5)))
+        self.assertEqual(sorted(ends), list(range(5)))
+        for step, active, noise_id, mode in zip(ctl.col("physics_step"), ctl.col("noise_active"),
+                                                ctl.col("noise_id"), ctl.col("mode")):
+            self.assertEqual(bool(active), noise_id >= 0)
+            if active:
+                self.assertEqual(mode, "N")
+                self.assertTrue(starts[noise_id] < step <= ends[noise_id], (step, noise_id))
+        perturbed = [d for d in s.decisions if d["action_cmd"] is not None and d["mode"] == "N"
+                     and d["action_cmd"] != d["action_label"]]
+        self.assertGreater(len(perturbed), 40)
+        self.assertTrue(any(d["action_cmd"][2] == 0 and d["action_label"][2] == 1 for d in perturbed))   # the stop
+        self.assertTrue(all(d["masks"]["policy_valid"] == 1 for d in perturbed if d["obs_valid"] == 1))
+
+
 if __name__ == "__main__":
     unittest.main()

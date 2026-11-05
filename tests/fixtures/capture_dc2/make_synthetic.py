@@ -115,7 +115,7 @@ EVENT_PARAMS = {"collision_dv_mps": 4.0, "collision_window_ms": 100, "collision_
                 "crash_cooldown_ms": 3000, "episode_block_max_ms": 60000, "rollover_up_y": 0.5,
                 "rollover_hold_ms": 500, "state_poll_ms": 100,
                 "contact_source": "vanilla_process_collision"}
-KINDS = ("golden", "t0_loop", "golden_10hz", "client_1408")
+KINDS = ("golden", "t0_loop", "golden_10hz", "client_1408", "t0_loop_noise")
 RECORD_EXE = {"wb": "wb", "cl": "client", "cld": "client"}    # dd-launch exe of a session exe.kind
 
 STEP_MS3 = 100                  # one engine fixed step in thirds of a ms (1/30 s, TBD-1 decided)
@@ -216,6 +216,25 @@ SPECS = {
         "warmup_ms": 60000, "route": "t0_loop_synthetic_v1", "v_ref": 8.0,
         "episodes": [{"max_ms": 50000}], "between_ms": 0, "teleport_offset_ms": None,
         "tail_ms": 500, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": False,
+    },
+    # DD-7-ident's pilot shape: the t0_loop lap as a mode-N episode (trial T0P) with one disturbance of each family
+    # DC_Noise draws, in the decision callbacks DC_ExpertDriver applies them: ctl hl_* the applied command,
+    # exp_*_now the clean expert, noise_active / noise_id on every row holding a disturbed command, perturb_start
+    # and perturb_end events (payload noise_id, kind, amplitude, duration_s). Generated in the tests, not committed.
+    "t0_loop_noise": {
+        "session_id": "arland_T0P_20261106T101500Z_wb_i00_a01e", "trial_id": "T0P", "seed": 101,
+        "start_utc": (2026, 11, 6, 10, 15, 0), "render_frame0": 40000, "decision_hz": 5,
+        "warmup_ms": 60000, "route": "t0_loop_synthetic_v1", "v_ref": 8.0,
+        "episodes": [{"max_ms": 60000}], "between_ms": 0, "teleport_offset_ms": None,
+        "tail_ms": 500, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
+        "episode_mode": "N",
+        # (start, duration) in ms after the episode start; k_* add to kappa_target, a_pulse to a_target, speed
+        # replaces a_target with the gain law towards amplitude x v_ref, stop holds dir 0 and a_target = amplitude
+        "noise": [{"kind": "k_pulse", "start_ms": 6000, "dur_ms": 2000, "amplitude": 0.04},
+                  {"kind": "a_pulse", "start_ms": 13000, "dur_ms": 2000, "amplitude": -1.5},
+                  {"kind": "k_step", "start_ms": 19000, "dur_ms": 1200, "amplitude": -0.03},
+                  {"kind": "stop", "start_ms": 25000, "dur_ms": 5000, "amplitude": -2.5},
+                  {"kind": "speed", "start_ms": 36000, "dur_ms": 4000, "amplitude": 0.6}],
     },
 }
 
@@ -354,6 +373,27 @@ def expert(route, x, z, psi, v, progress, v_ref):
     return (kappa, accel, 1)
 
 
+def perturb(spec, exp, v, t_ms):
+    """(command, noise id, segment) at a decision t_ms after the episode start: the expert's command exp with the
+    spec's disturbance of that time (DC_Noise's kinds, the HL targets only), else (exp, -1, None)."""
+    for noise_id, seg in enumerate(spec.get("noise", ())):
+        if seg["start_ms"] <= t_ms < seg["start_ms"] + seg["dur_ms"]:
+            kappa, accel, direction = exp
+            phase = (t_ms - seg["start_ms"]) / float(seg["dur_ms"])
+            if seg["kind"] == "k_pulse":
+                kappa = kappa + seg["amplitude"] * math.sin(math.pi * phase)
+            elif seg["kind"] == "k_step":
+                kappa = kappa + seg["amplitude"]
+            elif seg["kind"] == "a_pulse":
+                accel = accel + seg["amplitude"] * math.sin(math.pi * phase)
+            elif seg["kind"] == "speed":
+                accel = max(-3.0, min(2.0, seg["amplitude"] * spec["v_ref"] - v))
+            elif seg["kind"] == "stop":
+                accel, direction = seg["amplitude"], 0
+            return (kappa, accel, direction), noise_id, seg
+    return exp, -1, None
+
+
 def _event(sim, step, episode, frame, world, kind, payload=""):
     sim.events.append({"step": step, "episode": episode, "frame": frame, "world": world, "kind": kind,
                        "payload": payload})
@@ -379,6 +419,8 @@ def simulate(spec, route):
     teleport_ms = None
     crash_ms, crash_onset_cb, crash_hit = None, None, False
     llc_gear_due = False
+    applied_noise, applied_since = -1, None
+    episode_mode = spec.get("episode_mode", "E")
     det = crash_dv.Detector()
     det.watch(0)
     world, prev_world, clock3, step, anchor, grid_d, grid_i = FIRST_FRAME_MS, 0, 0, -1, None, 0, 0
@@ -438,7 +480,8 @@ def simulate(spec, route):
                 phase, progress, llc_gear_due = "episode", 0.0, True
                 if spec.get("crash") and episode == 1:
                     crash_ms = world + spec["crash_after_ms"]
-                _event(sim, step, episode, f, world, "episode_start", "route_id=%s;mode=E" % route.route_id)
+                _event(sim, step, episode, f, world, "episode_start", "route_id=%s;mode=%s" % (route.route_id,
+                                                                                              episode_mode))
             in_ep = phase == "episode"
             cmd = held if in_ep else None
             dt_cb = covered * STEP_DT_S
@@ -456,7 +499,7 @@ def simulate(spec, route):
                 steer_c = steer_c if in_ep else 0.0
                 throttle = brake = 0.0
             cb = {"index": cb_index, "covered": covered, "frame": f, "world": world,
-                  "episode": episode if in_ep else -1, "mode": "E" if in_ep else "I",
+                  "episode": episode if in_ep else -1, "mode": episode_mode if in_ep else "I",
                   "driver": "expert" if in_ep else "none", "hl_seq": hl_count, "cmd": cmd,
                   "raw_c": raw_c, "lim_c": steer_c if cmd is not None else None, "steer_in_c": steer_c,
                   "throttle": throttle, "brake": brake, "llc_on": cmd is not None, "llc_gear": llc_gear,
@@ -514,6 +557,10 @@ def simulate(spec, route):
                 if in_ep:
                     complete = route.length_m - progress <= 1.5 and st["v"] < 0.5
                     if complete or world - ep_start_world >= max_ms:
+                        if applied_noise >= 0:          # DC_ExpertDriver.EndEpisode closes it before episode_end
+                            _perturb_event(sim, spec, "perturb_end", applied_noise, (world - applied_since) / 1000.0,
+                                           step, episode, f, world)
+                            applied_noise = -1
                         _end_episode(sim, episode, ep_start_cb, cb["index"], "route_complete" if complete
                                      else "timeout", step, f, world)
                         episode, held, pending = -1, None, None
@@ -522,8 +569,18 @@ def simulate(spec, route):
                         if phase == "between" and spec["teleport_offset_ms"] is not None:
                             teleport_ms = world + spec["teleport_offset_ms"]
                     else:
-                        pending = exp
-                        dec["cmd"] = exp
+                        cmd_d, noise_id, seg = perturb(spec, exp, st["v"], world - ep_start_world)
+                        if noise_id != applied_noise:   # DC_ExpertDriver.NoteAppliedNoise, in the decision callback
+                            if applied_noise >= 0:
+                                _perturb_event(sim, spec, "perturb_end", applied_noise,
+                                               (world - applied_since) / 1000.0, step, episode, f, world)
+                            if noise_id >= 0:
+                                _perturb_event(sim, spec, "perturb_start", noise_id, seg["dur_ms"] / 1000.0, step,
+                                               episode, f, world)
+                                applied_since = world
+                            applied_noise = noise_id
+                        pending = cmd_d + ((noise_id >= 0, noise_id),) if spec.get("noise") else exp
+                        dec["cmd"] = pending
                 sim.decisions.append(dec)
             if phase == "tail" and world >= phase_end_ms:
                 stopping = True                     # the planned end: no new slot; the drain ends the session
@@ -539,6 +596,12 @@ def simulate(spec, route):
             pattern += 1
         f += 1
     return sim
+
+
+def _perturb_event(sim, spec, kind, noise_id, duration_s, step, episode, frame, world):
+    seg = spec["noise"][noise_id]
+    _event(sim, step, episode, frame, world, kind, "noise_id=%d;kind=%s;amplitude=%.6f;duration_s=%.2f"
+           % (noise_id, seg["kind"], seg["amplitude"], duration_s))
 
 
 def _end_episode(sim, episode, start_cb, end_cb, term, step, frame, world):
@@ -675,7 +738,9 @@ def build_rows(spec, sim, route, schema, variant):
                "llc_throttle": cb["throttle"] if cb["llc_on"] else None,
                "llc_brake": cb["brake"] if cb["llc_on"] else None,
                "llc_handbrake": 0 if cb["llc_on"] else None, "llc_gear": cb["llc_gear"], "llc_clutch": None,
-               "noise_active": 0, "noise_id": -1, "steer_signal_raw": None, "wheel_angle_l_rad": None,
+               "noise_active": int(cmd is not None and len(cmd) > 3 and cmd[3][0]),
+               "noise_id": cmd[3][1] if cmd is not None and len(cmd) > 3 else -1, "steer_signal_raw": None,
+               "wheel_angle_l_rad": None,
                "wheel_angle_r_rad": None, "react_veh_slot_id": None, "react_visible": None}
         for when in ("pre", "post"):
             ctl.update({"input_%s_steer" % when: in_e, "input_%s_throttle" % when: cb["throttle"],
@@ -712,7 +777,8 @@ def build_rows(spec, sim, route, schema, variant):
             "start_world_ms": a["world"], "end_world_ms": b["world"], "ego_slot_id": ego_slot,
             "ego_entity_id": entity_b if reused else entity, "ego_prefab": "synthetic/S105.et",
             "vehicle_card_id": "S105_synthetic", "route_id": route.route_id,
-            "route_sha256": route.sha256 if spec["fill_route_sha"] else None, "mode": "E", "driver": "expert",
+            "route_sha256": route.sha256 if spec["fill_route_sha"] else None,
+            "mode": spec.get("episode_mode", "E"), "driver": "expert",
             "style_speed_factor": 1.0, "style_lane_offset_m": 0.0, "style_alat_max_mps2": 2.75,
             "env_weather_state": "Clear", "env_tod_h_start": 12.0, "env_rain": 0.0, "env_fog": 0.0,
             "env_wetness": 0.0, "seed": spec["seed"] * 100 + ep["episode_id"],
@@ -846,6 +912,8 @@ def trial_conf(spec):
             "synthetic": True}
     if spec["decision_hz"] != 5:
         conf["image_hz"] = spec["decision_hz"]
+    if spec.get("noise"):
+        conf["perturb"] = "pilot_v1"            # DC_NoiseConfig's profile key (DD-7-ident)
     return conf
 
 

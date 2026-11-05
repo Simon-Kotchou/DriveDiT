@@ -532,8 +532,9 @@ def simulate(spec, route):
             stalls = spec.get("stall_ms", (STALL_MS,))
             world += stalls[sum(1 for sl in sim.slots if sl.get("issue_frame") is not None and
                                 sl["issue_frame"] < f) % len(stalls)]
-        else:
-            world += FRAME_MS[pattern % len(FRAME_MS)]
+        else:                               # a spec may set its own ordinary frame times (the C21 tests)
+            frame_ms = spec.get("frame_ms", FRAME_MS)
+            world += frame_ms[pattern % len(frame_ms)]
         if not frame["issued"]:
             pattern += 1
         f += 1

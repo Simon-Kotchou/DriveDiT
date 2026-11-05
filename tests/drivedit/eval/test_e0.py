@@ -80,7 +80,8 @@ def test_commands_the_next_state_ignores_show_none() -> None:
         assert not result.shown
         assert abs(result.gain) < 0.02
         assert any("folds" in r or "pooled" in r for r in result.reasons)  # the reasons say which way it lost
-        assert any("does not disable can_show" in r for r in result.reasons)
+        assert any("out-of-fold R² from the state features" in r for r in result.reasons)
+        assert not any("predictable" in r for r in result.reasons)  # R² <= 0 here: no claim the state predicts it
 
 
 def test_shuffled_commands_show_no_gain() -> None:

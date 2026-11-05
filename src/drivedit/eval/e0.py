@@ -286,8 +286,8 @@ def _cannot_show(target: str, y: FloatArray, diags: tuple[ActionDiagnostic, ...]
 
 
 def _not_shown(gain: float, fold_gains: tuple[float, ...], diags: tuple[ActionDiagnostic, ...]) -> tuple[str, ...]:
-    """Why a gain the data could show is not shown: the pooled gain or the folds that lose, and how predictable from
-    the state the commands are."""
+    """Why a gain the data could show is not shown: the pooled gain or the folds that lose, and each command's
+    out-of-fold R² from the state features, reported as measured (it may be negative)."""
     out = []
     if not (math.isfinite(gain) and gain > 0.0):
         out.append(f"the pooled gain {gain:.4g} is not positive")
@@ -295,8 +295,8 @@ def _not_shown(gain: float, fold_gains: tuple[float, ...], diags: tuple[ActionDi
     if losing:
         out.append(f"the gain is not positive in {len(losing)} of {len(fold_gains)} folds: {', '.join(losing)}")
     out.extend(
-        f"{d.channel} is partly predictable from the state features (out-of-fold R² {d.r2_from_state:.3g}): "
-        f"that lowers the gain but does not disable can_show, which takes R² >= {_DETERMINED_R2}"
+        f"{d.channel}: out-of-fold R² from the state features {d.r2_from_state:.3g} "
+        f"(can_show is disabled only at R² >= {_DETERMINED_R2})"
         for d in diags
         if not d.constant
     )

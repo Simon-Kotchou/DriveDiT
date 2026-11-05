@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -399,6 +400,55 @@ def test_overwrite_and_output_refusals(golden_session: Any, spec: FeatureSpec, t
         build.write_shard(golden_session, GOLDEN_DIR / "out", spec=spec, routes_dir=ROUTES_DIR)
     with pytest.raises(build.BuildError, match="C: drive"):
         build.write_shard(golden_session, "/mnt/c/dd11", spec=spec, routes_dir=ROUTES_DIR)
+
+
+def test_a_symlinked_captures_root_stays_protected(spec: FeatureSpec, tmp: Path) -> None:
+    """Review round 2, unmocked: with captures -> storage, the reader resolves captures/<id> to storage/<id>, which
+    has no captures ancestor. The captures root comes from the session path as named, before resolution, so an out
+    root under captures/ is refused and nothing is written. No configured root takes part (protected_roots=())."""
+    storage = tmp / "storage"
+    session_dir = storage / GOLDEN_DIR.name
+    shutil.copytree(GOLDEN_DIR, session_dir)
+    (tmp / "captures").symlink_to(storage)
+    named = tmp / "captures" / GOLDEN_DIR.name
+    before = sorted(p.relative_to(storage) for p in storage.rglob("*"))
+    with pytest.raises(build.BuildError, match="read-only"):
+        build.build_session(
+            named,
+            tmp / "captures" / "new_output",
+            spec=spec,
+            routes_dir=ROUTES_DIR,
+            vehicle_card=CARD,
+            protected_roots=(),
+        )
+    assert sorted(p.relative_to(storage) for p in storage.rglob("*")) == before
+    shard = build.build_session(
+        named, tmp / "datasets", spec=spec, routes_dir=ROUTES_DIR, vehicle_card=CARD, protected_roots=()
+    )
+    assert Shard(shard).n_steps == 68  # the same session builds outside the capture tree
+    assert sorted(p.relative_to(storage) for p in storage.rglob("*")) == before
+
+
+def test_configured_protected_roots(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PROTECTED_ROOTS (default /mnt/e/DriveDiT/captures) is replaced by protected_roots, else by
+    DRIVEDIT_PROTECTED_ROOTS; each root is compared in its resolved form, also through a symlink to it."""
+    monkeypatch.delenv(build.PROTECTED_ROOTS_ENV, raising=False)
+    assert build.configured_roots() == [Path("/mnt/e/DriveDiT/captures")]
+    session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
+    with pytest.raises(build.BuildError, match="read-only"):
+        build.write_shard(session, "/mnt/e/DriveDiT/captures/new_output", spec=None)
+    vault = tmp / "vault"
+    vault.mkdir()
+    (tmp / "vault_link").symlink_to(vault)
+    with pytest.raises(build.BuildError, match="read-only"):
+        build.write_shard(session, tmp / "vault_link" / "x", spec=None, protected_roots=[vault])
+    with pytest.raises(build.BuildError, match="read-only"):
+        build.write_shard(session, vault / "x", spec=None, protected_roots=[tmp / "vault_link"])
+    monkeypatch.setenv(build.PROTECTED_ROOTS_ENV, f"{tmp / 'other'}{os.pathsep}{vault}")
+    assert build.configured_roots() == [tmp / "other", vault]
+    with pytest.raises(build.BuildError, match="read-only"):
+        build.write_shard(session, vault / "y", spec=None)
+    assert list(vault.iterdir()) == []
 
 
 def test_image_derivatives(spec: FeatureSpec, tmp: Path) -> None:

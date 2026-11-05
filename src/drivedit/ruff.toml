@@ -9,3 +9,8 @@ ignore = [
     "PLR0913",  # dataclass-style constructors and pure math functions take many arguments
     "PLR2004",  # numeric constants are normal in model code; name them where they carry meaning
 ]
+
+[lint.isort]
+# The configs that extend this one resolve `src` relative to their own folder, so first-party detection fails under
+# tests/drivedit; name the package explicitly.
+known-first-party = ["drivedit"]

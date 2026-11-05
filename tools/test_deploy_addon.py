@@ -344,7 +344,7 @@ class DeployAddonTest(unittest.TestCase):
             with open(os.path.join(self.target, rel), "wb") as f:
                 f.write(data)
         self.assertEqual(self.run_tool()[0], 0)
-        smaller = ["addon addons/DataCapture/addon.gproj", "script src/enfusion/datacapture/SCR_MLDataCollector.c"]
+        smaller = ["addon addons/DataCapture/addon.gproj", "script src/enfusion/datacapture/DC_LaunchGuard.c"]
         rc, out = self.run_tool("--manifest", self.write_manifest(smaller))
         self.assertEqual(rc, 0, out)
         for rel, data in generated.items():
@@ -358,11 +358,11 @@ class DeployAddonTest(unittest.TestCase):
             f.write("class Unrelated_Handmade {}\n")
         keep = ["addon addons/DataCapture/addon.gproj", "addon addons/DataCapture/worlds/DataCapture/DC_Arland.ent",
                 "addon addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
-                "script src/enfusion/datacapture/SCR_MLDataCollector.c",
-                "script src/enfusion/datacapture/SCR_MLScreenshotCapture.c"]
+                "script src/enfusion/datacapture/DC_Gates.c",
+                "script src/enfusion/datacapture/DC_LaunchGuard.c"]
         rc, out = self.run_tool("--manifest", self.write_manifest(keep))
         self.assertEqual(rc, 0, out)
-        self.assertFalse(os.path.exists(os.path.join(self.target, SCRIPT_DST, "SCR_AnchorFrameSelector.c")))
+        self.assertFalse(os.path.exists(os.path.join(self.target, SCRIPT_DST, "DC_RoadDump.c")))
         self.assertTrue(os.path.exists(foreign), "a file the tool never deployed was deleted")
 
     def test_refuses_to_overwrite_a_changed_file_without_force(self):

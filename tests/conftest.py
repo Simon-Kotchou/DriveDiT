@@ -19,6 +19,7 @@ import pytest
 # Paths relative to this directory.
 TORCH_TEST_MODULES = [
     "test_torch_smoke.py",
+    "drivedit/data/test_torch_dataset.py",
     "drivedit/eval/test_idm.py",
 ]
 

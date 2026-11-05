@@ -1,10 +1,18 @@
 """
 Pytest configuration and fixtures for DriveDiT tests.
 Common fixtures and test utilities.
+
+torch is optional here: the capture tooling tests need only the stdlib, numpy and cv2, and the
+capture-tests CI job runs them with no torch installed. Test modules that need torch (the `model`
+extra) are listed in TORCH_TEST_MODULES; they get the `torch` marker, and without torch they are
+not collected at all. A new test module that imports torch must be added to that list.
 """
 
+from __future__ import annotations
+
+import random
+
 import pytest
-import torch
 import numpy as np
 from typing import Tuple, Dict, Any
 import tempfile
@@ -15,9 +23,43 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import ModelConfig, get_small_config, get_medium_config
-from models import VAE3D, DiTStudent, DiTTeacher
-from utils import set_seed
+try:
+    import torch
+except ImportError:  # capture-only environment
+    torch = None
+
+if torch is not None:
+    from config import ModelConfig, get_small_config, get_medium_config
+    from models import VAE3D, DiTStudent, DiTTeacher
+    from utils import set_seed
+
+# Paths relative to this directory.
+TORCH_TEST_MODULES = [
+    "integration/test_inference.py",
+    "integration/test_training.py",
+    "test_e2e_pipeline.py",
+    "test_kernels.py",
+    "test_math_components.py",
+    "test_pipeline_math.py",
+    "test_rust_loader.py",
+    "test_self_forcing_plus.py",
+    "test_training_pipeline.py",
+    "unit/test_layers.py",
+    "unit/test_models.py",
+    "unit/test_utils.py",
+]
+
+_HERE = Path(__file__).parent
+_TORCH_PATHS = {(_HERE / p).resolve() for p in TORCH_TEST_MODULES}
+
+if torch is None:
+    collect_ignore = list(TORCH_TEST_MODULES)
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if Path(str(item.fspath)).resolve() in _TORCH_PATHS:
+            item.add_marker(pytest.mark.torch)
 
 
 @pytest.fixture(scope="session")
@@ -35,7 +77,11 @@ def seed():
 @pytest.fixture(autouse=True)
 def setup_seed(seed):
     """Automatically set seed for all tests."""
-    set_seed(seed)
+    if torch is not None:
+        set_seed(seed)
+    else:  # what set_seed does, minus torch
+        random.seed(seed)
+        np.random.seed(seed)
 
 
 @pytest.fixture
@@ -273,13 +319,15 @@ def memory_profiler():
 
 
 # Skip conditions for different test types
+_cuda = torch is not None and torch.cuda.is_available()
+
 skip_if_no_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not _cuda,
     reason="CUDA not available"
 )
 
 skip_if_no_memory = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 8 * 1024**3,
+    _cuda and torch.cuda.get_device_properties(0).total_memory < 8 * 1024**3,
     reason="Insufficient GPU memory (< 8GB)"
 )
 

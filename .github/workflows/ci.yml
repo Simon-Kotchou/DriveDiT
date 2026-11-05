@@ -39,6 +39,8 @@ jobs:
         run: uv sync --only-group dev
       - name: ruff check
         run: uv run --no-sync ruff check --output-format=github .
+      - name: ruff format --check (the drivedit package and its tests)
+        run: uv run --no-sync ruff format --check src/drivedit tests/drivedit
 
   capture-tests:
     name: capture tests (no torch)
@@ -86,6 +88,8 @@ jobs:
         run: uv run --no-sync python -I -c "import torch; print(torch.__version__, 'cuda' if torch.cuda.is_available() else 'cpu')"
       - name: pytest (torch-marked tests)
         run: uv run --no-sync pytest -m torch
+      - name: mypy --strict on src/drivedit (torch types available here)
+        run: uv run --no-sync mypy
 
   secret-scan:
     name: secret scan

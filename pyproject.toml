@@ -1,7 +1,11 @@
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
 [project]
 name = "drivedit"
 version = "0.1.0"
-description = "DriveDiT: Enfusion capture tooling for a driving world model and policy in Arma Reforger (model package being rebuilt)"
+description = "DriveDiT: an action-conditioned world model of Arma Reforger driving, a policy trained inside it, and the Enfusion capture tooling"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -31,13 +35,15 @@ cuda = ["torch>=2.2"]
 
 [dependency-groups]
 dev = [
+    "mypy>=1.13",
     "pytest>=8",
     "ruff>=0.14",
 ]
 
 [tool.uv]
-# Not installable yet: the code still lives in flat top-level folders (src/drivedit move comes later).
-package = false
+# The drivedit package lives in src/drivedit (uv_build). The capture tooling (tools/, data/dc2, drivedit_nav) still
+# runs from the source tree until the package move (DD-17).
+package = true
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
 ]
@@ -69,3 +75,11 @@ target-version = "py311"
 # misplaced statements (F7), undefined names (F82) and pylint errors (PLE). Widen in later PRs.
 select = ["E9", "F5", "F6", "F7", "F82", "PLE"]
 ignore = ["F541"]
+
+[tool.mypy]
+# Strict typing for the drivedit package (DD-18); CI runs it in the torch job, where torch's own types are installed.
+python_version = "3.11"
+files = ["src/drivedit"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true

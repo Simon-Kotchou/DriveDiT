@@ -18,8 +18,9 @@ engine, not by visual quality.
 
 - **Capture side: works and is tested.** It has the capture contract, the Enforce writer and expert driver, deploy,
   the validator, the harvester and retention, nav_v1 and the dc-2.0 reader.
-- **Model side: being rebuilt.** There is no world model, trainer or evaluator in the tree today. The plan is a small
-  latent DiT on a frozen pretrained tokenizer, reading features_v1 (contract section 12).
+- **Model side: being rebuilt in `src/drivedit/`.** The package skeleton exists (DD-18); the data layer, codecs, the
+  world model, training and evaluation land there as separate PRs. The plan is a small causal latent DiT on a frozen
+  pretrained tokenizer, reading features_v1 (contract section 12). There is no trained model yet.
 - **The March 2026 model stack never trained a world model.** DD-16 removed it from main: `layers/`, `blocks/`,
   `core/`, `models/`, `training/`, `inference/`, `evaluation/`, `config/`, `utils/`, `scripts/`, the pre-dc-2.0
   `data/` pipeline and their tests. It is kept in tag `archive/model-2026-03`.
@@ -41,6 +42,7 @@ engine, not by visual quality.
 | `tools/probes/t0eng/`, `tools/routes/`, `tools/ident/`, `tools/roads/` | T0-ENG probe analyses, the route builder, steering identification with vehicle cards, the road-dump comparison |
 | `tools/enfusion-mcp/` | Wrapper scripts and patches for the Enfusion MCP server |
 | `tools/ci/secret_scan.py` | Privacy scan of tracked files (stdlib only; a CI job) |
+| `src/drivedit/` | The installable model package (uv_build): `data` (features_v1, numpy only), `codec`, `model`, `train`, `eval`. Stricter lint (`src/drivedit/ruff.toml`) and `mypy --strict` apply here |
 | `drivedit_nav/` | nav_v1 and the route schema (pure Python). The validator and the route builder use it. The planned dataset builder and closed-loop bridge must use the same code, so their nav values agree (C22) |
 | `data/dc2/` | dc-2.0 reader (`reader.py`: rows, joins, decisions, masks, segments), fiducial decoder, reference crash detector. Stdlib and numpy; cv2 only for images |
 | `tests/` | Contract, reader, validator, harvester, tooling and Enforce-source tests. `tests/fixtures/capture_dc2/` holds the synthetic golden session |
@@ -55,11 +57,13 @@ Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`. The base 
 ```bash
 uv sync                                    # capture tooling: numpy + OpenCV, plus pytest and ruff
 uv run pytest -m "not torch"               # capture tests (the CI capture job)
-uv run ruff check .                        # lint (CI gate: correctness rules, see pyproject.toml)
+uv run ruff check .                        # lint (CI gate; src/drivedit has its own stricter ruff.toml)
+uv run ruff format src/drivedit tests/drivedit     # formatting (CI checks it for the drivedit package)
 python3 -I -B tools/ci/secret_scan.py      # privacy scan; run it before every push
 
 uv sync --extra model --extra cpu          # adds the model extra with CPU torch (--extra cuda: PyPI torch)
-uv run --extra model --extra cpu pytest -m torch   # torch tests (today only tests/test_torch_smoke.py)
+uv run --extra model --extra cpu pytest -m torch   # torch tests
+uv run --extra model --extra cpu mypy              # mypy --strict on src/drivedit (CI runs it in the torch job)
 
 python3 -I -B tools/deploy_addon.py --dry-run       # deploy plan: review it before any real deploy
 uv run python -I -B tools/validator/dc_validate.py --session DIR
@@ -73,9 +77,9 @@ road-dump comparison.
 
 CI (`.github/workflows/ci.yml`) has four jobs:
 
-- ruff;
+- ruff (plus `ruff format --check` on the drivedit package);
 - the capture tests, with no torch installed;
-- the torch tests, with CPU torch;
+- the torch tests, with CPU torch, and `mypy --strict` on `src/drivedit`;
 - the secret scan.
 
 ## Rules
@@ -95,8 +99,10 @@ CI (`.github/workflows/ci.yml`) has four jobs:
     identity. The full list is `c24_forbidden_inputs` in `features_v1.json`.
   - Training augmentation never flips images.
 - **The capture side stays torch-free.** `data/`, `drivedit_nav/` and `tools/` need only the stdlib, numpy and
-  OpenCV, and the capture CI job runs without torch. A test module that imports torch must be added to
-  `TORCH_TEST_MODULES` in `tests/conftest.py`.
+  OpenCV, and the capture CI job runs without torch. So do `drivedit`, `drivedit.data` and `drivedit.eval` at
+  import (`tests/drivedit/test_package.py`); ruff bans torch in `drivedit.data` except `data/torch.py`. A test module
+  that imports torch goes in `TORCH_TEST_MODULES`, or in a directory listed in `TORCH_TEST_DIRS`
+  (`tests/conftest.py`).
 - **Deploy only through `tools/deploy_addon.py`.** It copies exactly `addons/DataCapture/deploy_manifest.txt`, so a
   new Enforce file needs a manifest line. Run `--dry-run` first.
 - **The repository is public.** Never commit any of these:
@@ -118,3 +124,18 @@ CI (`.github/workflows/ci.yml`) has four jobs:
   prefab, and code finds them with `FindComponent`.
 - After editing a world layer by hand, run `python3 -I -B tools/check_layer.py <file>`. Numeric vectors are never
   quoted.
+
+### Code standards for `src/drivedit/`
+
+- **One implementation per concept.** No parallel variants (`_v2`, alternate trainers, duplicate configs). An A/B arm
+  is a config value of the one implementation, not a second module.
+- **Nothing pretends to work.** No placeholder returns, random stand-ins, constant metrics or swallowed errors. An
+  unbuilt piece does not exist yet; a missing input raises.
+- **Typed and small.** `mypy --strict` passes; modules have one job; configs are frozen dataclasses; no import-time
+  side effects or global state; randomness takes an explicit seed or generator.
+- **Shapes and names are explicit.** Docstrings give tensor shapes (`[B, T, C, H, W]`) and use features_v1 names
+  verbatim (`action_cmd`, `state`, `image`, ...).
+- **Tests check behaviour, not only shapes**: causality (a future frame never changes a past output), action
+  sensitivity on toy dynamics, overfitting one batch, round trips, and the contract offsets.
+- **Every design choice has a source** (a paper, the research notes, or a measurement in this repo) in the docstring
+  or the commit message. No performance number without a reproducible measurement.

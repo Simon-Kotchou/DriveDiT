@@ -6,7 +6,6 @@ Needs torch: listed in tests/conftest.py TORCH_TEST_MODULES (the rest of tests/d
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -16,23 +15,14 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from drivedit.data.shard import LatentStats, Shard, WindowIndex
+from drivedit.data.shard import LatentStats, Shard, ShardError, WindowIndex
 from drivedit.data.spec import AccessError, FeatureSpec
 from drivedit.data.torch import LatentWindowDataset
 
-from .conftest import write_latents
+from .conftest import rewrite_array, write_latents
 
 CODEC = "toy-2x3x4"
 STATS = LatentStats(mean=(1.0, 2.0), std=(2.0, 4.0))
-
-
-def _rewrite(shard_dir: Path, name: str, array: np.ndarray) -> None:
-    """Replace one array of a shard copy and keep its meta.json sha256 true."""
-    path = shard_dir / f"{name}.npy"
-    np.save(path, array)
-    meta = json.loads((shard_dir / "meta.json").read_text("utf-8"))
-    meta["arrays"][name]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    (shard_dir / "meta.json").write_text(json.dumps(meta), "utf-8")
 
 
 def test_items_are_aligned_and_normalised(shard_copy: Path, spec: FeatureSpec) -> None:
@@ -58,17 +48,43 @@ def test_items_are_aligned_and_normalised(shard_copy: Path, spec: FeatureSpec) -
     assert item["future_pose"].shape == (6, 30, 3)
 
 
-def test_a_row_the_codec_did_not_encode(shard_copy: Path, spec: FeatureSpec) -> None:
+def test_a_row_the_codec_did_not_encode_is_refused(shard_copy: Path, spec: FeatureSpec) -> None:
+    """valid.npy is exactly slot_id >= 0 (section 3), so no window frame can lack its latent."""
     shard = Shard(shard_copy)
     write_latents(shard, CODEC)
     root = shard.path.parent / "latents" / CODEC
     valid = np.load(root / "valid.npy")
     valid[12] = False
     np.save(root / "valid.npy", valid)
-    data = LatentWindowDataset(WindowIndex([shard], 4), CODEC, stats=STATS, spec=spec)
-    item = next(data[i] for i in range(len(data)) if data.index[i].start == 10)
-    assert item["valid"].tolist() == [True, True, False, True]
-    assert float(item["latents"][2].abs().sum()) == 0.0
+    with pytest.raises(ShardError, match="slot_id"):
+        LatentWindowDataset(WindowIndex([shard], 4), CODEC, stats=STATS, spec=spec)
+
+
+def test_action_exec_padding_is_nan_only(shard_copy: Path, spec: FeatureSpec) -> None:
+    """Empty action_exec entries (NaN past P_t+1) pass; an entry of infinities or a partly empty one is refused
+    (review round 1)."""
+    exec_ = np.array(np.load(shard_copy / "action_exec.npy"))
+    t = 20
+    assert np.isfinite(exec_[t, 0]).all()
+    for bad in (np.full(4, np.inf), np.array([np.nan, 0.5, 0.0, 0.1])):
+        mutated = exec_.copy()
+        mutated[t, 0] = bad
+        rewrite_array(shard_copy, "action_exec", mutated)
+        shard = Shard(shard_copy)
+        if not (shard.path.parent / "latents" / CODEC).exists():
+            write_latents(shard, CODEC)
+        data = LatentWindowDataset(WindowIndex([shard], 4), CODEC, stats=STATS, channels=("action_exec",), spec=spec)
+        hits = [i for i in range(len(data)) if data.index[i].start <= t < data.index[i].stop]
+        with pytest.raises(ValueError, match="action_exec is not finite"):
+            data[hits[0]]
+    mutated = exec_.copy()
+    mutated[t, 0] = np.nan  # a whole empty entry, as past P_t+1
+    rewrite_array(shard_copy, "action_exec", mutated)
+    data = LatentWindowDataset(
+        WindowIndex([Shard(shard_copy)], 4), CODEC, stats=STATS, channels=("action_exec",), spec=spec
+    )
+    item = next(data[i] for i in range(len(data)) if data.index[i].start == t)
+    assert torch.isnan(item["action_exec"][0, 0]).all()
 
 
 @pytest.mark.parametrize(
@@ -119,7 +135,7 @@ def test_build_scoped_channels_are_not_pooled_across_builds(
 def test_non_finite_inputs_raise(shard_copy: Path, spec: FeatureSpec) -> None:
     state = np.array(np.load(shard_copy / "state.npy"))
     state[20, 3] = np.nan
-    _rewrite(shard_copy, "state", state)
+    rewrite_array(shard_copy, "state", state)
     shard = Shard(shard_copy)
     write_latents(shard, CODEC)
     data = LatentWindowDataset(WindowIndex([shard], 4), CODEC, stats=STATS, spec=spec)

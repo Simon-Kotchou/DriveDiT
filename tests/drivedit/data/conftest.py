@@ -7,6 +7,7 @@ the C: drive on the development host, and make_synthetic.py writes only under /m
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -124,3 +125,12 @@ def write_latents(shard: Shard, codec_id: str, *, channels: int = 2, hw: tuple[i
     }
     (root / "meta.json").write_text(json.dumps(meta), "utf-8")
     return latents
+
+
+def rewrite_array(shard_dir: Path, name: str, array: np.ndarray) -> None:
+    """Replace one array of a shard copy and keep its meta.json sha256 true."""
+    path = shard_dir / f"{name}.npy"
+    np.save(path, array)
+    meta = json.loads((shard_dir / "meta.json").read_text("utf-8"))
+    meta["arrays"][name]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (shard_dir / "meta.json").write_text(json.dumps(meta), "utf-8")

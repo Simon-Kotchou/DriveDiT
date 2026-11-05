@@ -13,7 +13,7 @@ import pytest
 
 from drivedit.data.shard import LatentStats, Shard, ShardError, WindowIndex
 
-from .conftest import write_latents
+from .conftest import rewrite_array, write_latents
 
 
 def test_arrays_are_read_only_memmaps(golden_shard_dir: Path) -> None:
@@ -92,6 +92,11 @@ def test_latents_refuse_misalignment(shard_copy: Path) -> None:
     np.save(root / "valid.npy", valid)
     with pytest.raises(ShardError, match="slot_id"):
         shard.latents("toy-2x3x4")
+    valid = np.asarray(shard.array("slot_id")) >= 0
+    valid[12] = False  # a slot the codec did not encode: an encoder failure, not a gap (section 3)
+    np.save(root / "valid.npy", valid)
+    with pytest.raises(ShardError, match="slot_id"):
+        shard.latents("toy-2x3x4")
     np.save(root / "valid.npy", np.asarray(shard.array("slot_id")) >= 0)
     np.save(root / "latents.npy", np.zeros((shard.n_steps, 2, 3, 4), dtype=np.float32))
     with pytest.raises(ShardError, match="float16"):
@@ -109,3 +114,22 @@ def test_latent_stats() -> None:
         LatentStats(mean=(0.0,), std=(0.0,))
     with pytest.raises(ValueError, match="channels"):
         stats.normalise(np.ones((1, 3, 2, 2)))
+
+
+def test_segment_steps_need_an_image(shard_copy: Path) -> None:
+    """Review round 1 (DD-20): a step without an image (slot_id -1, decision_index.obs_valid 0) never lies inside a
+    segment, so no window frame lacks an observation."""
+    slot = np.array(np.load(shard_copy / "slot_id.npy"))
+    assert (slot[10:36] >= 0).all()
+    slot[15] = -1
+    rewrite_array(shard_copy, "slot_id", slot)
+    with pytest.raises(ShardError, match="no image"):
+        Shard(shard_copy)
+
+
+def test_segments_follow_obs_valid(golden_shard_dir: Path) -> None:
+    shard = Shard(golden_shard_dir)
+    obs_valid = shard.array("decision_index")[:, shard.meta["decision_index_columns"].index("obs_valid")]
+    for seg in shard.segments:
+        assert (obs_valid[seg.start : seg.stop] == 1).all()
+        assert (shard.array("slot_id")[seg.start : seg.stop] >= 0).all()

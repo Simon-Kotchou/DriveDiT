@@ -10,7 +10,7 @@ import json
 import math
 import shutil
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -147,19 +147,123 @@ def test_nav_invalid_clears_masks_and_splits_segments(
     assert shard.meta["counts"]["nav_invalid_in_route_episodes"] == 3
 
 
-def test_nav_follows_nav_v1(golden_shard_dir: Path, golden_session: Any) -> None:
+def _per_row_nav(session: Any, route: Any, episode_id: int) -> dict[int, dict[str, Any]]:
+    """The contract's nav view, written out independently of the builder: nav_v1 over every telemetry row of the
+    episode in row order (dc-2.0 section 9.8, streams JSON derived.nav; validator C17 walks the rows the same way)."""
+    nav = build.nav_module()
+    tel = session.streams["telemetry"]
+    heading = session.telemetry_export["heading_rad"]
+    rows = [i for i, e in enumerate(tel.data["episode_id"]) if e == episode_id]
+    poses = [(tel.data["pos_x"][i], tel.data["pos_z"][i], float(heading[i])) for i in rows]
+    return {tel.data["physics_step"][i]: r for i, r in zip(rows, nav.nav_sequence(route, poses), strict=True)}
+
+
+def test_nav_is_nav_v1_over_every_telemetry_row(golden_shard_dir: Path, golden_session: Any) -> None:
     nav = build.nav_module()
     shard = _shard(golden_shard_dir)
     route = nav.load_route(str(ROUTES_DIR / "golden_s_curve_v1.json"))
-    tel = golden_session.streams["telemetry"]
-    index = tel.index()
-    heading = golden_session.telemetry_export["heading_rad"]
     for e in shard.episodes:
+        per_row = _per_row_nav(golden_session, route, e.episode_id)
         steps = shard.array("step")[e.start : e.stop].tolist()
-        poses = [(tel.data["pos_x"][index[p]], tel.data["pos_z"][index[p]], float(heading[index[p]])) for p in steps]
-        want = [nav.nav_vector(r) for r in nav.nav_sequence(route, poses)]
+        want = [nav.nav_vector(per_row[p]) for p in steps]
         np.testing.assert_allclose(shard.array("nav")[e.start : e.stop], want, atol=TOL)
     assert np.isnan(shard.array("nav")[:10]).all()  # warm-up: no episode, no route
+
+
+def _straight_route() -> Any:
+    """A 100 m route due north (+z) from the origin: progress is the ego's z."""
+    obj = {
+        "schema": "drivedit.route/1",
+        "route_id": "straight_north_v1",
+        "map_id": "arland",
+        "split": "train",
+        "nav_version": "nav_v1",
+        "lane_side": "right",
+        "closed": False,
+        "polyline": [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
+        "maneuvers": [],
+        "stops": [{"s_m": 100.0, "kind": "route_end"}],
+    }
+    return build.nav_module().route_from_dict(obj)
+
+
+def test_progress_carries_through_rows_between_decisions() -> None:
+    """The counterexample of review round 1: decisions at steps 1 and 3, and a row between them that advances to
+    11 m before the ego is back at 10 m. Per telemetry row (the contract) progress is 11 m at the second decision
+    and p20 lies 21 m ahead; evaluating the decision poses only would give 10 m and 20 m."""
+    nav = build.nav_module()
+    route = _straight_route()
+    rows = [(1, (0.0, 0.0, 0.0)), (2, (0.0, 11.0, 0.0)), (3, (0.0, 10.0, 0.0))]
+    at = build.episode_nav(route, rows)
+    assert at[3]["progress_m"] == pytest.approx(11.0)
+    assert at[3]["p20_x"] == pytest.approx(21.0)
+    subsampled = nav.nav_sequence(route, [rows[0][1], rows[2][1]])
+    assert subsampled[1]["progress_m"] == pytest.approx(10.0)
+    assert subsampled[1]["p20_x"] == pytest.approx(20.0)
+
+
+def _rewrite_telemetry_row(session_dir: Path, physics_step: int, values: dict[str, float]) -> None:
+    """Change fields of one committed telemetry row in place and keep its chunk's commit line (n_bytes) true."""
+    sdir = session_dir / "telemetry"
+    commit = (sdir / "commit.csv").read_text("ascii").split("\n")
+    header = commit[0].split(",")
+    for n, line in enumerate(commit[1:-1], start=1):
+        c = dict(zip(header, line.split(","), strict=True))
+        if int(c["first_key"]) <= physics_step <= int(c["last_key"]):
+            path = sdir / f"chunk_{int(c['chunk_id']):05d}.csv"
+            lines = path.read_text("ascii").split("\n")
+            cols = lines[0].split(",")
+            for i, row in enumerate(lines[1:-1], start=1):
+                fields = row.split(",")
+                if int(fields[0]) == physics_step:
+                    for name, v in values.items():
+                        fields[cols.index(name)] = f"{v:.4f}"
+                    lines[i] = ",".join(fields)
+            data = "\n".join(lines).encode("ascii")
+            path.write_bytes(data)
+            c["n_bytes"] = str(len(data))
+            commit[n] = ",".join(c[h] for h in header)
+            (sdir / "commit.csv").write_text("\n".join(commit), "ascii")
+            return
+    raise AssertionError(f"no telemetry chunk holds physics step {physics_step}")
+
+
+def test_nav_uses_the_rows_between_decisions(golden_session: Any, spec: FeatureSpec, tmp: Path) -> None:
+    """End to end: a telemetry row between two decision callbacks moved 3 m ahead along the route moves the next
+    decision's progress and route points; the shard follows the per-row view, not the decision poses alone."""
+    nav = build.nav_module()
+    route = nav.load_route(str(ROUTES_DIR / "golden_s_curve_v1.json"))
+    steps = [int(d["decision_step"]) for d in golden_session.decisions]
+    t = 21
+    tel = golden_session.streams["telemetry"]
+    between = [p for p in tel.data["physics_step"] if steps[t - 1] < p < steps[t]]
+    assert between
+    i = tel.index()[steps[t]]
+    h = float(golden_session.telemetry_export["heading_rad"][i])
+    x, z = tel.data["pos_x"][i] + 3.0 * math.sin(h), tel.data["pos_z"][i] + 3.0 * math.cos(h)
+    session_dir = tmp / "s" / GOLDEN_DIR.name
+    shutil.copytree(GOLDEN_DIR, session_dir)
+    _rewrite_telemetry_row(session_dir, between[-1], {"pos_x": x, "pos_z": z})
+    moved = build.open_dc2_session(session_dir, vehicle_card=CARD)
+    shard = _shard(build.write_shard(moved, tmp / "out", spec=spec, routes_dir=ROUTES_DIR, include_eval_only=True))
+    per_row = _per_row_nav(moved, route, 0)
+    np.testing.assert_allclose(shard.array("nav")[t], nav.nav_vector(per_row[steps[t]]), atol=TOL)
+    progress = shard.array("eval_only")[:, list(build.EVAL_ONLY_BUILT).index("route_progress_m")]
+    m_tel = moved.streams["telemetry"]
+    m_heading = moved.telemetry_export["heading_rad"]
+    decision_only = nav.nav_sequence(
+        route,
+        [
+            (
+                m_tel.data["pos_x"][m_tel.index()[p]],
+                m_tel.data["pos_z"][m_tel.index()[p]],
+                float(m_heading[m_tel.index()[p]]),
+            )
+            for p in steps[10 : t + 1]
+        ],
+    )
+    assert progress[t] > decision_only[-1]["progress_m"] + 2.0
+    assert abs(float(shard.array("nav")[t, 0]) - decision_only[-1]["p20_x"]) > 1.0
 
 
 def test_future_pose_and_anchors(golden_shard_dir: Path, golden_session: Any) -> None:
@@ -195,6 +299,41 @@ def test_future_pose_and_anchors(golden_shard_dir: Path, golden_session: Any) ->
     np.testing.assert_array_equal(anchors[:, 0:2], fut[:, 9, :2])
     np.testing.assert_array_equal(anchors[:, 2:4], fut[:, 19, :2])
     np.testing.assert_array_equal(anchors[:, 4:6], fut[:, 29, :2])
+
+
+def _timeline(episode: list[int], grid: list[int], tele_steps: tuple[int, ...] = ()) -> Any:
+    """A synthetic decision timeline: one decision every 6 physics steps, the ego 2 m further north at each."""
+    n = len(episode)
+    return build._Timeline(
+        steps=np.arange(n, dtype=np.int64) * 6,
+        grid=np.array(grid, dtype=np.int64),
+        episode=np.array(episode, dtype=np.int64),
+        poses=np.array([[0.0, 2.0 * t, 0.0] for t in range(n)]),
+        tele_steps=tele_steps,
+        decision_hz=5.0,
+        n_exec=6,
+        horizon=3,
+    )
+
+
+def test_pose_deltas_stop_at_every_boundary() -> None:
+    """future_pose never spans two episodes (even back to back, with no teleport between them), a teleport or
+    respawn inside an episode, or a skipped grid point. On the golden session the teleport between the episodes
+    would hide a missing episode check, so the checks are tested one at a time here."""
+    k = [1, 2, 3]
+    adjacent = build._ego_deltas(_timeline([0, 0, 0, 1, 1, 1], list(range(6))), k)
+    np.testing.assert_allclose(adjacent[0, :2], [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+    assert np.isnan(adjacent[0, 2]).all()  # t=0 + 3 is in episode 1
+    assert np.isnan(adjacent[2]).all()  # the last step of episode 0
+    teleported = build._ego_deltas(_timeline([0] * 6, list(range(6)), tele_steps=(13,)), k)
+    assert np.isfinite(teleported[0, 1]).all()  # (0, 12] holds no teleport
+    assert np.isnan(teleported[0, 2]).all()  # (0, 18] holds step 13
+    assert np.isnan(teleported[2, 0]).all()  # (12, 18]
+    assert np.isfinite(teleported[3, :2]).all()  # after the teleport
+    skipped = build._ego_deltas(_timeline([0] * 6, [0, 1, 2, 4, 5, 6]), k)
+    assert np.isfinite(skipped[0, :2]).all()
+    assert np.isnan(skipped[0, 2]).all()  # three decisions later is four grid points later
+    assert np.isfinite(skipped[3, :2]).all()
 
 
 def test_style_per_episode(golden_shard_dir: Path) -> None:
@@ -295,21 +434,85 @@ def test_route_provenance(golden_session: Any, spec: FeatureSpec, tmp: Path) -> 
 
 
 def test_logged_route_hash_forms(tmp: Path) -> None:
-    """The 8191-character prefix form of route_sha256 (the pre-cc31f07 Substring defect) identifies the same route
-    only when the route is longer than that."""
+    """The 8191-byte prefix form of route_sha256 (the DD-7 Substring defect) is accepted only for the allow-listed,
+    unedited deployed route version (PREFIX_HASH_ROUTES)."""
     nav = build.nav_module()
-    long_route = build.default_routes_dir() / "arland_t0_loop.json"
-    route = nav.load_route(str(long_route))
-    text = nav.canonical_json(json.loads(long_route.read_text("utf-8"))).encode("ascii")
-    assert len(text) > 8191
-    assert build._logged_route_hash(route.sha256, route, long_route) == "exact"
-    assert build._logged_route_hash(hashlib.sha256(text[:8191]).hexdigest(), route, long_route) == "prefix_8191"
-    assert build._logged_route_hash(hashlib.sha256(text[:8190]).hexdigest(), route, long_route) is None
-    short = ROUTES_DIR / "golden_s_curve_v1.json"
-    short_route = nav.load_route(str(short))
-    short_text = nav.canonical_json(json.loads(short.read_text("utf-8"))).encode("ascii")
-    assert len(short_text) <= 8191
-    assert build._logged_route_hash(hashlib.sha256(short_text[:100]).hexdigest(), short_route, short) is None
+    deployed = build.default_routes_dir() / "arland_t0_loop.json"
+    raw = deployed.read_bytes()
+    route = nav.load_route(str(deployed))
+    assert route.sha256 == build.PREFIX_HASH_ROUTES["arland_t0_loop"]
+    assert len(raw) > 8191
+    prefix = hashlib.sha256(raw[:8191]).hexdigest()
+    assert prefix.startswith("6370fc78f426")  # the value the first T0L session logged
+    assert build._logged_route_hash(route.sha256, route, deployed) == {
+        "logged": route.sha256,
+        "form": "exact",
+        "verified_against": route.sha256,
+    }
+    assert build._logged_route_hash(prefix, route, deployed) == {
+        "logged": prefix,
+        "form": "prefix_8191",
+        "verified_against": build.PREFIX_HASH_ROUTES["arland_t0_loop"],
+    }
+    assert build._logged_route_hash(hashlib.sha256(raw[:8190]).hexdigest(), route, deployed) is None
+
+    def edited(obj: dict[str, Any], name: str, *, pretty: bool = False) -> tuple[Any, Path]:
+        path = tmp / name / "arland_t0_loop.json"
+        path.parent.mkdir()
+        text = json.dumps(obj, indent=1) if pretty else nav.canonical_json(obj)
+        path.write_text(text + "\n", "ascii")
+        return nav.load_route(str(path)), path
+
+    # review round 1: an edit after the first 8191 bytes (the split) keeps the prefix hash but is another route
+    obj = json.loads(raw)
+    obj["split"] = "val_l"
+    split_route, split_path = edited(obj, "split")
+    assert hashlib.sha256(split_path.read_bytes()[:8191]).hexdigest() == prefix  # the prefix alone cannot tell
+    assert split_route.sha256 != route.sha256
+    assert build._logged_route_hash(prefix, split_route, split_path) is None
+    # the same content in another layout: the bytes the engine hashed differ
+    same_route, same_path = edited(json.loads(raw), "pretty", pretty=True)
+    assert same_route.sha256 == route.sha256
+    assert build._logged_route_hash(prefix, same_route, same_path) is None
+    # a long route that is not allow-listed never matches by prefix
+    obj = json.loads(raw)
+    obj["route_id"] = "arland_t0_loop_copy"
+    other, other_path = edited(obj, "other")
+    other_prefix = hashlib.sha256(other_path.read_bytes()[:8191]).hexdigest()
+    assert build._logged_route_hash(other_prefix, other, other_path) is None
+
+
+def test_output_paths_are_checked_after_resolving_symlinks(tmp: Path) -> None:
+    """Review round 1: <out_root>/<session_id> (or its features_v1) linked into a session must be refused before
+    anything is written, also without overwrite."""
+    session_dir = tmp / "captures" / "arland" / GOLDEN_DIR.name
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text("{}", "ascii")
+    session = SimpleNamespace(path=str(session_dir), session_id=GOLDEN_DIR.name)
+    linked = tmp / "out_a"
+    linked.mkdir()
+    (linked / GOLDEN_DIR.name).symlink_to(session_dir)
+    shard_link = tmp / "out_b" / GOLDEN_DIR.name
+    shard_link.mkdir(parents=True)
+    (shard_link / "features_v1").symlink_to(session_dir)
+    elsewhere = tmp / "out_c"
+    elsewhere.mkdir()
+    (elsewhere / GOLDEN_DIR.name).symlink_to(tmp / "captures")
+    for out_root in (linked, tmp / "out_b", elsewhere, session_dir, tmp / "captures"):
+        for overwrite in (False, True):
+            with pytest.raises(build.BuildError, match="refusing"):
+                build.write_shard(session, out_root, spec=None, overwrite=overwrite)
+    assert sorted(p.name for p in session_dir.iterdir()) == ["session.json"]
+    assert sorted(p.name for p in (tmp / "captures").iterdir()) == ["arland"]
+    # a shard directory that is a symlink, even to a harmless place, is refused: shards are replaced by renames
+    harmless = tmp / "harmless"
+    harmless.mkdir()
+    shard_dir = tmp / "out_d" / GOLDEN_DIR.name
+    shard_dir.mkdir(parents=True)
+    (shard_dir / "features_v1").symlink_to(harmless)
+    with pytest.raises(build.BuildError, match="symlink"):
+        build.write_shard(session, tmp / "out_d", spec=None, overwrite=True)
+    assert list(harmless.iterdir()) == []
 
 
 def test_a_session_without_a_vehicle_card_is_refused(spec: FeatureSpec, tmp: Path) -> None:

@@ -545,7 +545,7 @@ class TestMathUtils:
         f = X**2 + Y**2  # f(x,y) = x^2 + y^2
         f = f.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
         
-        grad_y, grad_x = finite_difference_gradient(f)
+        grad_y, grad_x = finite_difference_gradient(f, spacing=4.0 / (W - 1))  # the linspace(-2, 2) grid step
         
         assert grad_y.shape == f.shape
         assert grad_x.shape == f.shape

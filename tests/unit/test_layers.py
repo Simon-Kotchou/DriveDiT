@@ -30,8 +30,8 @@ class TestRoPE:
         
         # Precompute frequencies
         sin, cos = precompute_rope_freqs(D, T, device=device)
-        sin = sin.unsqueeze(0).unsqueeze(0)  # [1, 1, T, D//2]
-        cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, T, D//2]
+        sin = sin[None, :, None]  # [1, T, 1, D//2], broadcast over x's [B, T, H, D]
+        cos = cos[None, :, None]  # [1, T, 1, D//2]
         
         # Apply RoPE
         rotated = rope(x, sin, cos)
@@ -69,7 +69,7 @@ class TestRoPE:
             dim, max_time, max_height, max_width, device=device
         )
         
-        expected_shape = (max_time, max_height, max_width, dim)
+        expected_shape = (max_time, max_height, max_width, dim // 2)  # one angle per rotated pair
         assert sin.shape == expected_shape
         assert cos.shape == expected_shape
         
@@ -345,7 +345,7 @@ class TestNeuralNetworkHelpers:
         
         # Check that mean is approximately 0 and std is approximately 1
         means = torch.mean(output, dim=-1)
-        stds = torch.std(output, dim=-1)
+        stds = torch.std(output, dim=-1, correction=0)  # LayerNorm uses the biased variance
         
         assert torch.allclose(means, torch.zeros_like(means), atol=1e-5)
         assert torch.allclose(stds, torch.ones_like(stds), atol=1e-3)

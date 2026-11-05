@@ -64,10 +64,12 @@
 // seed gives one schedule (only when a segment can start depends on the state). Vary the trial seed per session.
 //
 // TRIAL CONF ($profile:dc_trials/<id>.json, read by DC_Session.ResolveTrial through DC_NoiseConfig.Read; dc-2.0 5.2:
-// "the conf holds at least ..."): "perturb": "none" | "pilot_v1" (absent = none) and optionally "perturb_params": a
-// flat object of numbers overriding the profile's defaults (DC_NoiseConfig's table, each key with a range; an
-// unknown key, a value out of range or perturb_params without a profile refuses the session). session.json
-// trial.conf records both as given; the console log the resolved parameters and the sha256 of this file.
+// "the conf holds at least ..."): the top-level keys "perturb": "none" | "pilot_v1" (absent = none) and optionally
+// "perturb_params": a flat object of JSON numbers overriding the profile's defaults (DC_NoiseConfig's table, each key
+// with a range; an unknown key, a value out of range, a top-level perturb_params twice or without a profile, or a
+// misspelt top-level perturb key next to them refuses the session). Only the root object's own keys count: a string
+// value, an array item or a nested object's key is never one. session.json trial.conf records both as given (each
+// number as written); the console log the resolved parameters and the sha256 of this file.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -186,6 +188,13 @@ class DC_NoiseConfig
 	static const int CHAR_OBJECT_CLOSE = 125;	//!< '}'
 	static const int CHAR_BACKSLASH = 92;
 	static const int MAX_NUMBER_CHARS = 32;
+	static const int CHAR_PLUS = 43;
+	static const int CHAR_MINUS = 45;
+	static const int CHAR_POINT = 46;
+	static const int CHAR_ZERO = 48;
+	static const int CHAR_NINE = 57;
+	static const int CHAR_E_UPPER = 69;
+	static const int CHAR_E_LOWER = 101;
 
 	//! The parameters of pilot_v1: key, default, lowest and highest allowed value (index-aligned)
 	protected static ref array<string> s_aKeys = {
@@ -309,12 +318,18 @@ class DC_NoiseConfig
 		}
 
 		m_aValues.Copy(s_aPilotV1);
-		bool hasParams = context.DoesKeyExist(KEY_PARAMS) || rawText.Contains("\"" + KEY_PARAMS + "\"");
+		// the root object's own keys only: a string value, an array item or a nested object's key is never one
+		int paramsAt;
+		string misspelt;
+		if (!ScanTopLevelKeys(rawText, paramsAt, misspelt, failure))
+			return false;
+
+		bool hasParams = paramsAt >= 0 || (rawText.IsEmpty() && context.DoesKeyExist(KEY_PARAMS));
 		// a misspelt perturb key refuses a conf that asks for perturbation; without "perturb" and "perturb_params"
 		// the conf is read as before DD-7-ident (a WARNING only)
-		string keyFailure;
-		if (!CheckKeyNames(rawText, keyFailure))
+		if (!misspelt.IsEmpty())
 		{
+			string keyFailure = "the conf has a top-level key starting with \"" + KEY_PROFILE + "\" that is neither \"" + KEY_PROFILE + "\" nor \"" + KEY_PARAMS + "\": \"" + misspelt + "\"";
 			if (m_bProfileGiven || hasParams)
 			{
 				failure = keyFailure;
@@ -339,7 +354,7 @@ class DC_NoiseConfig
 			return false;
 		}
 
-		if (!ScanParams(rawText, failure))
+		if (!ScanParams(rawText, paramsAt, failure))
 			return false;
 
 		m_bParamsGiven = true;
@@ -347,24 +362,36 @@ class DC_NoiseConfig
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Every key of the conf text that starts with "perturb" is "perturb" or "perturb_params" (a misspelt one would be
-	//! ignored by JsonLoadContext, which cannot list keys on 1.8). A key is a string followed by ':' outside every
-	//! string; string values are never keys (a "note": "perturbation deferred" is not one). true without the text;
-	//! false (failure) names the first other key
-	static bool CheckKeyNames(string rawText, out string failure)
+	//! The keys of the conf's root object: a string at depth 1 (inside the root object, outside every string, nested
+	//! object and array; a backslash escapes the next character of a string) followed by ':'. A string value, an array
+	//! item or a key of a nested object is never one. paramsAt = the index of the top-level "perturb_params" value
+	//! (its first character after the ':' and spaces), -1 without one; misspelt = the first top-level key that starts
+	//! with "perturb" and is neither "perturb" nor "perturb_params" (JsonLoadContext, which cannot list keys on 1.8,
+	//! would ignore it), empty when none. false (failure) when "perturb_params" is a top-level key twice. Without the
+	//! text: true, -1 and empty
+	static bool ScanTopLevelKeys(string rawText, out int paramsAt, out string misspelt, out string failure)
 	{
+		paramsAt = -1;
+		misspelt = string.Empty;
 		failure = string.Empty;
 		int length = rawText.Length();
+		int depth = 0;
 		int index = 0;
 		while (index < length)
 		{
-			if (rawText.ToAscii(index) != DC_JsonScan.CHAR_QUOTE)
+			int code = rawText.ToAscii(index);
+			if (code == CHAR_OBJECT_OPEN || code == DC_JsonScan.CHAR_OPEN)
+				depth++;
+			else if (code == CHAR_OBJECT_CLOSE || code == DC_JsonScan.CHAR_CLOSE)
+				depth--;
+
+			if (code != DC_JsonScan.CHAR_QUOTE)
 			{
 				index++;
 				continue;
 			}
 
-			// a string from index: its closing quote (a backslash escapes the next character)
+			// a string from index: its closing quote
 			int close = index + 1;
 			while (close < length && rawText.ToAscii(close) != DC_JsonScan.CHAR_QUOTE)
 			{
@@ -379,15 +406,22 @@ class DC_NoiseConfig
 
 			int after = DC_JsonScan.SkipSpace(rawText, close + 1);
 			int keyLength = close - index - 1;
-			if (after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON && keyLength >= KEY_PROFILE.Length())
+			bool isKey = depth == 1 && after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON;
+			if (isKey && keyLength >= KEY_PROFILE.Length())
 			{
 				string head = rawText.Substring(index + 1, Math.MinInt(keyLength, MAX_KEY_CHARS));
-				bool known = (keyLength == KEY_PROFILE.Length() && head == KEY_PROFILE) || (keyLength == KEY_PARAMS.Length() && head == KEY_PARAMS);
-				if (head.StartsWith(KEY_PROFILE) && !known)
+				bool isProfile = keyLength == KEY_PROFILE.Length() && head == KEY_PROFILE;
+				bool isParams = keyLength == KEY_PARAMS.Length() && head == KEY_PARAMS;
+				if (isParams && paramsAt >= 0)
 				{
-					failure = "the conf has a key starting with \"" + KEY_PROFILE + "\" that is neither \"" + KEY_PROFILE + "\" nor \"" + KEY_PARAMS + "\": \"" + head + "\"";
+					failure = "\"" + KEY_PARAMS + "\" is a top-level key twice";
 					return false;
 				}
+
+				if (isParams)
+					paramsAt = DC_JsonScan.SkipSpace(rawText, after + 1);
+				else if (!isProfile && head.StartsWith(KEY_PROFILE) && misspelt.IsEmpty())
+					misspelt = head;
 			}
 
 			index = close + 1;
@@ -397,15 +431,16 @@ class DC_NoiseConfig
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! "perturb_params": {"key": number, ...}, scanned with DC_JsonScan (JsonLoadContext cannot list an object's keys
-	//! on 1.8, and an unknown key must be refused, not ignored)
-	protected bool ScanParams(string text, out string failure)
+	//! The top-level "perturb_params" value at valueAt (ScanTopLevelKeys): {"key": number, ...}, scanned with
+	//! DC_JsonScan (JsonLoadContext cannot list an object's keys on 1.8, and an unknown key must be refused, not
+	//! ignored)
+	protected bool ScanParams(string text, int valueAt, out string failure)
 	{
 		failure = string.Empty;
-		int index = DC_JsonScan.FindValue(text, KEY_PARAMS);
+		int index = valueAt;
 		if (index < 0 || !DC_JsonScan.Expect(text, index, CHAR_OBJECT_OPEN, index))
 		{
-			failure = "\"" + KEY_PARAMS + "\" is repeated or not an object";
+			failure = "\"" + KEY_PARAMS + "\" is not an object";
 			return false;
 		}
 
@@ -467,23 +502,66 @@ class DC_NoiseConfig
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! text[start, end) is a JSON number of 1 to MAX_NUMBER_CHARS characters (digits, '-', '+', '.', 'e', 'E'), so
-	//! session.json can carry it as written
+	//! text[start, end) is one JSON number (RFC 8259: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?) of at most
+	//! MAX_NUMBER_CHARS characters, so session.json can carry it as written (DC_JsonWriter.AddNumberText copies
+	//! whatever it is given)
 	protected static bool IsNumberText(string text, int start, int end)
 	{
 		if (end <= start || end - start > MAX_NUMBER_CHARS)
 			return false;
 
-		for (int i = start; i < end; i++)
+		int i = start;
+		if (text.ToAscii(i) == CHAR_MINUS)
+			i++;
+
+		if (i >= end || !IsDigit(text.ToAscii(i)))
+			return false;
+
+		if (text.ToAscii(i) == CHAR_ZERO)
+			i++;
+		else
+			i = SkipDigits(text, i, end);
+
+		if (i < end && text.ToAscii(i) == CHAR_POINT)
 		{
-			int code = text.ToAscii(i);
-			bool digit = code >= 48 && code <= 57;
-			bool mark = code == 43 || code == 45 || code == 46 || code == 69 || code == 101;	// + - . E e
-			if (!digit && !mark)
+			int fraction = i + 1;
+			i = SkipDigits(text, fraction, end);
+			if (i == fraction)
 				return false;
 		}
 
-		return true;
+		if (i < end && (text.ToAscii(i) == CHAR_E_LOWER || text.ToAscii(i) == CHAR_E_UPPER))
+		{
+			i++;
+			if (i < end && (text.ToAscii(i) == CHAR_PLUS || text.ToAscii(i) == CHAR_MINUS))
+				i++;
+
+			int exponent = i;
+			i = SkipDigits(text, exponent, end);
+			if (i == exponent)
+				return false;
+		}
+
+		return i == end;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected static bool IsDigit(int code)
+	{
+		return code >= CHAR_ZERO && code <= CHAR_NINE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The first index at or after i (before end) that is not a digit
+	protected static int SkipDigits(string text, int i, int end)
+	{
+		int at = i;
+		while (at < end && IsDigit(text.ToAscii(at)))
+		{
+			at++;
+		}
+
+		return at;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -989,10 +1067,11 @@ class DC_Noise
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Decision steps of a duration (rounded, at least 0)
+	//! Decision steps of a duration: floor(seconds / dt + 0.5), at least 0 (Math.Floor, so the result never depends on
+	//! how Math.Round breaks a tie, which the 1.8 API does not document)
 	protected int Steps(float seconds)
 	{
-		int steps = Math.Round(seconds / m_fDecisionDtS);
+		int steps = Math.Floor(seconds / m_fDecisionDtS + 0.5);
 		if (steps < 0)
 			steps = 0;
 

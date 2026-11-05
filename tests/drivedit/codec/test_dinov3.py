@@ -40,6 +40,13 @@ def _verified_checkout() -> Path | None:
 CHECKOUT = _verified_checkout()
 
 
+@pytest.fixture(autouse=True)
+def no_loaded_dinov3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide the dinov3 modules an earlier test loaded (test_pretrained builds the real CADRE); restored afterwards."""
+    for name in [name for name in sys.modules if name.split(".")[0] == "dinov3"]:
+        monkeypatch.delitem(sys.modules, name)
+
+
 def test_the_directory_is_keyword_then_environment_then_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(DINOV3_DIR_ENV, raising=False)
     assert dinov3_dir() == DEFAULT_DINOV3_DIR

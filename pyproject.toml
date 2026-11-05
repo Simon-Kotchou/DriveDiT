@@ -20,7 +20,8 @@ dependencies = [
 [project.optional-dependencies]
 # The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras
 # are kept for the model package that replaces it. Until then only tests/test_torch_smoke.py uses them.
-# `uv sync --extra model` takes torch from PyPI (the CUDA build on Linux x86_64).
+# `uv sync --extra model` alone takes torch from PyPI (2.15.0+cu132 on Linux x86_64), which segfaults at CUDA init
+# under WSL on this machine; use it with one of the selectors below.
 model = [
     "torch>=2.2",
     "einops>=0.7",
@@ -29,7 +30,9 @@ model = [
 ]
 # Torch variant selectors, used together with `model`; they are mutually exclusive.
 #   uv sync --extra model --extra cpu    # torch from the PyTorch CPU wheel index (CI)
-#   uv sync --extra model --extra cuda   # torch from PyPI (same as `model` alone)
+#   uv sync --extra model --extra cuda   # torch 2.14.1+cu130 from the PyTorch cu130 index, the newest build there.
+#                                        # Verified on the local RTX 3080 Ti under WSL (DD-19, 2026-11-05); PyPI's
+#                                        # 2.15.0+cu132 segfaults at torch.cuda.is_available() there.
 cpu = ["torch>=2.2", "torchvision>=0.29"]
 cuda = ["torch>=2.2", "torchvision>=0.29"]
 # The frozen pretrained tokenizers of drivedit.codec (DD-19), used together with `model`. Weights are not packages:
@@ -65,14 +68,21 @@ conflicts = [
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "cuda" },
 ]
 torchvision = [
     { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "cuda" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.pytest.ini_options]

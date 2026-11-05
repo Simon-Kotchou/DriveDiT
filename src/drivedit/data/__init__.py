@@ -4,6 +4,8 @@ Builds the model-boundary tensors of ``docs/capture_contract/features_v1.json`` 
 memory-mapped shards, and samples episode-aware windows. Offsets and the C24 forbidden inputs are enforced here.
 
 - ``spec``: ``load_spec()`` and ``FeatureSpec.access(role, name)``, the features_v1 registry and its C24 check.
+- ``build``: ``drivedit.data.build.build_session()`` and ``python -m drivedit.data.build``, one session to one shard.
+  It is not re-exported here, so running the module as a script loads it once.
 
 numpy only. torch is confined to ``drivedit.data.torch`` (a thin Dataset over the shards), and ruff bans it elsewhere
 in this package.

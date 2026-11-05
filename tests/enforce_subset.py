@@ -12,14 +12,22 @@ those classes that leaves the subset fails the tests that run them instead of be
   - expressions with C precedence (fully parenthesised in the output): ! - unary, * / %, + -, << >>, < <= > >=,
     == !=, &, ^, |, &&, ||; calls, member access, indexing, new Class(), string literals, int (decimal or hex) and
     float literals, true / false / null, string.Empty, string.Format, Math.*, Print, LogLevel.*, x.ToString(...).
-Enforce semantics kept: int is 32-bit two's complement (every store to an int is wrapped, << wraps, >> is arithmetic),
-int / int truncates toward zero, a float stored in an int truncates toward zero, Math.Round rounds half away from
-zero, arrays are array<T> (Count, Insert, Clear, Find, Copy, IsEmpty, Remove, indexing). Floats are Python doubles
-(Enforce's are 32-bit), so values agree to about 1e-7 relative, not bit for bit.
+Enforce semantics kept (every operation goes through binop / neg, typed by the values it gets):
+  - int is 32-bit two's complement: the result of every int operation (+ - * / % << >> & | ^, unary -) is wrapped,
+    not only stores, so (2147483647 + 1) / 2 is -1073741824; int / int and % truncate toward zero;
+  - float is IEEE binary32 (round to nearest, ties to even; struct 'f'): every float literal, constant, operation
+    result and store is rounded to binary32, an int meeting a float is converted to binary32 first, comparisons of
+    an int with a float compare in binary32. +, -, *, / and Math.Sqrt are then exact binary32 results; Math.Sin, Cos,
+    Log and Pow are the binary32 rounding of the double result, which may differ by one ulp from the engine's own
+    single-precision functions (an open approximation);
+  - a float stored in an int truncates toward zero; Math.Floor is exact; Math.Round rounds half away from zero, which
+    the 1.8 API does not document (DC_Noise does not call it: its Steps uses Math.Floor(x + 0.5));
+  - arrays are array<T> (Count, Insert, Clear, Find, Copy, IsEmpty, Remove, indexing).
 """
 
 import math
 import re
+import struct
 
 
 class TranslateError(ValueError):
@@ -29,6 +37,20 @@ class TranslateError(ValueError):
 def i32(v):
     v = int(v) & 0xFFFFFFFF
     return v - (1 << 32) if v & 0x80000000 else v
+
+
+class F32(float):
+    """A value of an Enforce float: always exactly representable in binary32."""
+    __slots__ = ()
+
+
+def f32(v):
+    """The binary32 value of v (round to nearest, ties to even)."""
+    return F32(struct.unpack("<f", struct.pack("<f", float(v)))[0])
+
+
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
 
 
 def to_int(v):
@@ -43,27 +65,85 @@ def to_int(v):
 
 
 def to_float(v):
-    return float(v)
+    if isinstance(v, bool):
+        return f32(int(v))
+    return f32(v)
 
 
-def div(a, b):
-    """Enforce /: int / int truncates toward zero, anything else is a float division."""
-    if isinstance(a, int) and isinstance(b, int) and not isinstance(a, bool) and not isinstance(b, bool):
-        if b == 0:
-            raise ZeroDivisionError("int division by zero")
-        q = abs(a) // abs(b)
-        return i32(q if (a >= 0) == (b >= 0) else -q)
-    return float(a) / float(b)
+def _c_div(a, b):
+    if b == 0:
+        raise ZeroDivisionError("int division by zero")
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b >= 0) else -q
 
 
-def mod(a, b):
-    if isinstance(a, int) and isinstance(b, int):
-        return i32(int(math.fmod(a, b)))
-    return math.fmod(a, b)
+COMPARE = {"==": lambda x, y: x == y, "!=": lambda x, y: x != y, "<": lambda x, y: x < y, "<=": lambda x, y: x <= y,
+           ">": lambda x, y: x > y, ">=": lambda x, y: x >= y}
 
 
-def shl(a, b):
-    return i32(int(a) << int(b))
+def binop(op, a, b):
+    """One Enforce binary operation with the semantics of the module docstring."""
+    if op in COMPARE:
+        if is_int(a) and is_int(b):
+            return COMPARE[op](a, b)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) \
+                and not isinstance(b, bool):
+            return COMPARE[op](f32(a), f32(b))
+        return COMPARE[op](a, b)
+    if isinstance(a, str) or isinstance(b, str):
+        if op != "+" or not (isinstance(a, str) and isinstance(b, str)):
+            raise TypeError("string operation %r on %r, %r" % (op, a, b))
+        return a + b
+    if isinstance(a, bool) or isinstance(b, bool):
+        raise TypeError("arithmetic %r on a bool" % op)
+    if is_int(a) and is_int(b):
+        if op == "+":
+            return i32(a + b)
+        if op == "-":
+            return i32(a - b)
+        if op == "*":
+            return i32(a * b)
+        if op == "/":
+            return i32(_c_div(a, b))
+        if op == "%":
+            return i32(a - _c_div(a, b) * b)
+        if op == "<<":
+            return i32(a << b)
+        if op == ">>":
+            return i32(a >> b)
+        if op == "&":
+            return i32(a & b)
+        if op == "|":
+            return i32(a | b)
+        if op == "^":
+            return i32(a ^ b)
+        raise TypeError("int operation %r" % op)
+    if op in ("<<", ">>", "&", "|", "^"):
+        raise TypeError("bit operation %r on a float" % op)
+    x, y = f32(a), f32(b)
+    if op == "+":
+        return f32(x + y)
+    if op == "-":
+        return f32(x - y)
+    if op == "*":
+        return f32(x * y)
+    if op == "/":
+        return f32(x / y)
+    if op == "%":
+        return f32(math.fmod(x, y))
+    raise TypeError("float operation %r" % op)
+
+
+def neg(a):
+    if is_int(a):
+        return i32(-a)
+    return f32(-a)
+
+
+def bitnot(a):
+    if not is_int(a):
+        raise TypeError("~ on a float")
+    return i32(~a)
 
 
 class EArray(list):
@@ -97,28 +177,30 @@ class EArray(list):
 
 
 class _Math:
-    PI = math.pi
-    PI2 = 2.0 * math.pi
-    PI_HALF = math.pi / 2.0
-    E = math.e
-    DEG2RAD = math.pi / 180.0
-    RAD2DEG = 180.0 / math.pi
+    """Math.*: binary32 in and out (see the module docstring)."""
+    PI = f32(math.pi)
+    PI2 = f32(2.0 * math.pi)
+    PI_HALF = f32(math.pi / 2.0)
+    E = f32(math.e)
+    DEG2RAD = f32(math.pi / 180.0)
+    RAD2DEG = f32(180.0 / math.pi)
 
     @staticmethod
     def Round(f):
-        return float(math.floor(abs(f) + 0.5) * (1 if f >= 0 else -1))
+        f = f32(f)
+        return f32(math.floor(abs(f) + 0.5) * (1 if f >= 0 else -1))
 
     @staticmethod
     def Floor(f):
-        return float(math.floor(f))
+        return f32(math.floor(f32(f)))
 
     @staticmethod
     def Min(a, b):
-        return float(min(a, b))
+        return f32(min(f32(a), f32(b)))
 
     @staticmethod
     def Max(a, b):
-        return float(max(a, b))
+        return f32(max(f32(a), f32(b)))
 
     @staticmethod
     def MinInt(a, b):
@@ -130,7 +212,7 @@ class _Math:
 
     @staticmethod
     def Clamp(v, lo, hi):
-        return float(min(max(v, lo), hi))
+        return f32(min(max(f32(v), f32(lo)), f32(hi)))
 
     @staticmethod
     def ClampInt(v, lo, hi):
@@ -138,7 +220,7 @@ class _Math:
 
     @staticmethod
     def AbsFloat(f):
-        return float(abs(f))
+        return f32(abs(f32(f)))
 
     @staticmethod
     def AbsInt(i):
@@ -146,23 +228,23 @@ class _Math:
 
     @staticmethod
     def Sqrt(f):
-        return math.sqrt(f)
+        return f32(math.sqrt(f32(f)))
 
     @staticmethod
     def Log(f):
-        return math.log(f)
+        return f32(math.log(f32(f)))
 
     @staticmethod
     def Sin(f):
-        return math.sin(f)
+        return f32(math.sin(f32(f)))
 
     @staticmethod
     def Cos(f):
-        return math.cos(f)
+        return f32(math.cos(f32(f)))
 
     @staticmethod
     def Pow(v, p):
-        return math.pow(v, p)
+        return f32(math.pow(f32(v), f32(p)))
 
 
 def to_string(v, *args):
@@ -182,7 +264,7 @@ def format_string(fmt, *args):
     return out
 
 
-RUNTIME = {"i32": i32, "_int": to_int, "_float": to_float, "_div": div, "_mod": mod, "_shl": shl, "EArray": EArray,
+RUNTIME = {"_f32": f32, "F32": F32, "i32": i32, "_int": to_int, "_float": to_float, "_bin": binop, "_neg": neg, "_bitnot": bitnot, "EArray": EArray,
            "Math": _Math, "_tostr": to_string, "_format": format_string, "math": math}
 
 TOKEN_RE = re.compile(r'\s*(?:(?P<str>"(?:\\.|[^"\\])*")|(?P<num>0x[0-9A-Fa-f]+|\d+\.\d*|\.\d+|\d+)|'
@@ -422,7 +504,7 @@ class MethodTranslator:
             if self.peek()[1] == "=":
                 self.take()
                 if self.peek()[1] == "{":
-                    value = self.list_literal()
+                    value = self.list_literal(typ[6:-1] if typ.startswith("array<") else None)
                 else:
                     value = self.cast(typ, self.expression(";", ","))
             else:
@@ -432,11 +514,12 @@ class MethodTranslator:
                 break
             self.take(",")
 
-    def list_literal(self):
+    def list_literal(self, element=None):
+        """{a, b, ...} as an EArray; items cast to the element type of array<element>."""
         self.take("{")
         items = []
         while self.peek()[1] != "}":
-            items.append(self.expression("}", ","))
+            items.append(self.cast(element, self.expression("}", ",")))
             if self.peek()[1] == ",":
                 self.take()
         self.take("}")
@@ -447,7 +530,7 @@ class MethodTranslator:
         if typ == "int":
             return "0"
         if typ == "float":
-            return "0.0"
+            return "_f32(0.0)"
         if typ == "bool":
             return "False"
         if typ == "string":
@@ -497,15 +580,13 @@ class MethodTranslator:
                 tgt = self.sub_expression(target)
                 typ = self.target_type(target)
                 if op in ("++", "--"):
-                    value = "%s %s 1" % (tgt, "+" if op == "++" else "-")
+                    value = '_bin("%s", %s, 1)' % ("+" if op == "++" else "-", tgt)
                 else:
                     rhs = self.expression(*stops)
                     if op == "=":
                         value = rhs
-                    elif op == "/=":
-                        value = "_div(%s, %s)" % (tgt, rhs)
                     else:
-                        value = "(%s %s (%s))" % (tgt, op[0], rhs)
+                        value = '_bin("%s", %s, %s)' % (op[0], tgt, rhs)
                 return "%s = %s" % (tgt, self.cast(typ, value) if typ in ("int", "float") else value)
             self.take()
         self.i = start
@@ -533,14 +614,8 @@ class MethodTranslator:
                 left = "(%s and %s)" % (left, right)
             elif op == "||":
                 left = "(%s or %s)" % (left, right)
-            elif op == "/":
-                left = "_div(%s, %s)" % (left, right)
-            elif op == "%":
-                left = "_mod(%s, %s)" % (left, right)
-            elif op == "<<":
-                left = "_shl(%s, %s)" % (left, right)
             else:
-                left = "(%s %s %s)" % (left, op, right)
+                left = '_bin("%s", %s, %s)' % (op, left, right)
         return left
 
     def unary(self, stops):
@@ -550,13 +625,13 @@ class MethodTranslator:
             return "(not %s)" % self.unary(stops)
         if v == "-":
             self.take()
-            return "(-%s)" % self.unary(stops)
+            return "_neg(%s)" % self.unary(stops)
         if v == "+":
             self.take()
             return self.unary(stops)
         if v == "~":
             self.take()
-            return "(~%s)" % self.unary(stops)
+            return "_bitnot(%s)" % self.unary(stops)
         return self.postfix(stops)
 
     def postfix(self, stops):
@@ -603,7 +678,11 @@ class MethodTranslator:
             self.take(")")
             return "(%s)" % inner, "value"
         if k == "num":
-            return (str(int(v, 16)) if v.startswith("0x") else v), "value"
+            if v.startswith("0x"):
+                return str(int(v, 16)), "value"
+            if "." in v:
+                return "_f32(%r)" % float(v), "value"
+            return v, "value"
         if k == "str":
             return v, "value"
         if k != "id":
@@ -755,7 +834,11 @@ def translate(source, class_names, externals=None):
                     value = "None"
             else:
                 mt = MethodTranslator(init + [("op", ";")], scope, field_types, typ)
-                value = mt.list_literal() if init[0][1] == "{" else MethodTranslator.cast(typ, mt.expression(";"))
+                element = typ[6:-1] if typ.startswith("array<") else None
+                value = mt.list_literal(element) if init[0][1] == "{" else MethodTranslator.cast(typ, mt.expression(";"))
+                if mt.peek()[1] != ";" or mt.i != len(init):
+                    raise TranslateError("%s.%s: initializer not translated whole near %s" % (cls, name,
+                                                                                           mt.context()))
             lines.append("    _init_%s = staticmethod(lambda self: %s)" % (name, value))
         lines.append("    def __init__(self):")
         for name, _, _, _ in fields:

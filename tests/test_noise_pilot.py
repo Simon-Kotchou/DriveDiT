@@ -173,12 +173,25 @@ class ConfigError(ValueError):
     pass
 
 
-def check_key_names(text):
-    """DC_NoiseConfig.CheckKeyNames: None, or the first key (a string followed by ':' outside strings) that starts
-    with "perturb" and is neither "perturb" nor "perturb_params"."""
-    index, length = 0, len(text)
+def skip_space(text, index):
+    """DC_JsonScan.SkipSpace: the first index at or after index that is not a space, tab, CR or LF."""
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    return index
+
+
+def scan_top_level_keys(text):
+    """DC_NoiseConfig.ScanTopLevelKeys, statement for statement: (params_at, misspelt); ConfigError when
+    "perturb_params" is a top-level key twice."""
+    params_at, misspelt = -1, ""
+    length, depth, index = len(text), 0, 0
     while index < length:
-        if text[index] != '"':
+        code = text[index]
+        if code in "{[":
+            depth += 1
+        elif code in "}]":
+            depth -= 1
+        if code != '"':
             index += 1
             continue
         close = index + 1
@@ -187,23 +200,74 @@ def check_key_names(text):
                 close += 1
             close += 1
         if close >= length:
-            return None
-        after = close + 1
-        while after < length and text[after] in " \t\r\n":
-            after += 1
+            return params_at, misspelt
+        after = skip_space(text, close + 1)
         key_length = close - index - 1
-        if after < length and text[after] == ":" and key_length >= len("perturb"):
+        is_key = depth == 1 and after < length and text[after] == ":"
+        if is_key and key_length >= len("perturb"):
             head = text[index + 1:index + 1 + min(key_length, 64)]
-            known = (key_length == 7 and head == "perturb") or (key_length == 14 and head == "perturb_params")
-            if head.startswith("perturb") and not known:
-                return head
+            is_profile = key_length == len("perturb") and head == "perturb"
+            is_params = key_length == len("perturb_params") and head == "perturb_params"
+            if is_params and params_at >= 0:
+                raise ConfigError("perturb_params is a top-level key twice")
+            if is_params:
+                params_at = skip_space(text, after + 1)
+            elif not is_profile and head.startswith("perturb") and not misspelt:
+                misspelt = head
         index = close + 1
-    return None
+    return params_at, misspelt
+
+
+NUMBER_RE = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?")
+TOFLOAT_RE = re.compile(r"[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?")   # what string.ToFloat parses
+
+
+def is_number_text(text, start, end):
+    """DC_NoiseConfig.IsNumberText: one JSON number (RFC 8259) of 1 to 32 characters."""
+    return 0 < end - start <= 32 and NUMBER_RE.fullmatch(text, start, end) is not None
+
+
+def scan_params(text, at, known):
+    """DC_NoiseConfig.ScanParams from the top-level value at `at`: {key: number text}; ConfigError otherwise."""
+    def expect(index, char):
+        nxt = skip_space(text, index)
+        return (nxt < len(text) and text[nxt] == char), nxt + 1
+
+    ok, index = expect(at, "{")
+    if at < 0 or not ok:
+        raise ConfigError("perturb_params is not an object")
+    if expect(index, "}")[0]:
+        return {}
+    given = {}
+    while True:
+        close = -1
+        ok, index = expect(index, '"')
+        if ok:
+            close = text.find('"', index)
+        if close < index or close - index > 64:
+            raise ConfigError("a key that is not a plain string")
+        key = text[index:close]
+        if key not in known or key in given:
+            raise ConfigError("unknown or repeated key %s" % key)
+        ok, index = expect(close + 1, ":")
+        number_start = skip_space(text, index) if ok else -1
+        m = TOFLOAT_RE.match(text, number_start) if number_start >= 0 else None
+        if m is None or not is_number_text(text, number_start, m.end()):
+            raise ConfigError("%s has no JSON number of at most 32 characters" % key)
+        index = m.end()
+        given[key] = text[number_start:index]
+        ok, nxt = expect(index, "}")
+        if ok:
+            return given
+        ok, index = expect(index, ",")
+        if not ok:
+            raise ConfigError("%s is not followed by a comma or the closing brace" % key)
 
 
 def read_config(table, conf_text):
     """Mirror of DC_NoiseConfig.Read on a trial conf's text: (profile, {key: value}, given, warning) or ConfigError;
-    given is {key: the number text as written} (what WriteConf records), None without perturb_params."""
+    given is {key: the number text as written} (what WriteConf records), None without a top-level perturb_params.
+    The profile comes from the parsed JSON, as JsonLoadContext.ReadValue gives it."""
     conf = json.loads(conf_text)
     profile = "none"
     if "perturb" in conf:
@@ -213,10 +277,10 @@ def read_config(table, conf_text):
             raise ConfigError("unknown profile")
         profile = conf["perturb"]
     values = dict(zip(table.keys, table.defaults))
-    has_params = "perturb_params" in conf
-    misspelt = check_key_names(conf_text)
+    params_at, misspelt = scan_top_level_keys(conf_text)
+    has_params = params_at >= 0
     warning = None
-    if misspelt is not None:
+    if misspelt:
         if "perturb" in conf or has_params:
             raise ConfigError("misspelt perturb key %s" % misspelt)
         warning = misspelt
@@ -224,21 +288,9 @@ def read_config(table, conf_text):
         return profile, values, None, warning
     if profile == "none":
         raise ConfigError("perturb_params without a profile")
-    if conf_text.count('"perturb_params"') != 1 or not isinstance(conf["perturb_params"], dict):
-        raise ConfigError("perturb_params is repeated or not an object")
-    body = conf_text[conf_text.index('"perturb_params"') + 16:].split(":", 1)[1].split("}", 1)[0]
-    pairs = re.findall(r'"(\w+)"\s*:\s*([^,\s}]+)', body)
-    keys = [k for k, _ in pairs]
-    if len(keys) != len(set(keys)):
-        raise ConfigError("repeated key")
-    given = {}
-    for key, text in pairs:
-        if key not in values:
-            raise ConfigError("unknown key %s" % key)
-        if not re.fullmatch(r"[-+.eE0-9]{1,32}", text):
-            raise ConfigError("not a number of at most 32 characters")
+    given = scan_params(conf_text, params_at, set(values))
+    for key, text in given.items():
         values[key] = float(text)
-        given[key] = text
     for key, lo, hi in zip(table.keys, table.lo, table.hi):
         if not lo <= values[key] <= hi:
             raise ConfigError("%s out of range" % key)
@@ -263,10 +315,11 @@ def written_conf(profile_given, profile, given):
 
 
 class Cmd:
-    """DC_HLCommand (DC_StreamRecorder.c): the fields DC_Noise reads and writes."""
+    """DC_HLCommand (DC_StreamRecorder.c): the fields DC_Noise reads and writes (floats binary32, as in Enforce)."""
 
     def __init__(self, kappa=0.0, accel=0.0, direction=1):
-        self.m_fKappa, self.m_fAccel, self.m_iDir = kappa, accel, direction
+        f32 = enforce_subset.f32
+        self.m_fKappa, self.m_fAccel, self.m_iDir = f32(kappa), f32(accel), direction
         self.m_bNoise, self.m_iNoiseId = False, -1
 
     def CopyFrom(self, other):
@@ -278,15 +331,16 @@ class NoiseInput:
     """DC_NoiseInput."""
 
     def __init__(self, speed, remaining, lateral, heading_err, profile_ahead, world_ms):
-        self.m_fSpeedMps, self.m_fRemainingM, self.m_fLateralM = speed, remaining, lateral
-        self.m_fHeadingErrRad, self.m_fProfileAheadMps, self.m_iWorldMs = heading_err, profile_ahead, world_ms
+        f32 = enforce_subset.f32
+        self.m_fSpeedMps, self.m_fRemainingM, self.m_fLateralM = f32(speed), f32(remaining), f32(lateral)
+        self.m_fHeadingErrRad, self.m_fProfileAheadMps, self.m_iWorldMs = f32(heading_err), f32(profile_ahead), world_ms
 
 
 class ConfigStub:
     """DC_NoiseConfig as DC_Noise uses it: Get(key) of the resolved parameters."""
 
     def __init__(self, values):
-        self.values = dict(values)
+        self.values = {k: enforce_subset.f32(v) for k, v in values.items()}
 
     def Get(self, key):
         return self.values[key]
@@ -588,6 +642,69 @@ class NoisePilotTest(unittest.TestCase):
         with self.assertRaises(enforce_subset.TranslateError):
             enforce_noise_classes(broken)
 
+    def test_translator_arithmetic_is_enforce(self):
+        """Codex round 2: the translator computed in doubles and wrapped ints only at stores. Now every float value is
+        binary32 and every int operation wraps: Math.Round(1.3 / 0.2) is 6 (the binary32 quotient 6.4999995 is below
+        6.5; in doubles it is 6.5, which half-away rounding makes 7), (2147483647 + 1) / 2 is -1073741824, 1 << 31 is
+        -2147483648. DC_Noise.Steps uses Math.Floor(x + 0.5), so it never depends on Math.Round's tie rule
+        (undocumented on 1.8): Steps(1.3) is floor(6.4999995 + 0.5 = 6.9999995) = 6, as numpy's float32 computes it."""
+        import numpy
+        probe = enforce_subset.translate("""
+class DC_ArithProbe
+{
+	static const float DT = 0.2;
+
+	int RoundSteps(float seconds)
+	{
+		int steps = Math.Round(seconds / DT);
+		return steps;
+	}
+
+	int HalfOfOverflow()
+	{
+		int a = 2147483647;
+		return (a + 1) / 2;
+	}
+
+	int ShiftWrap()
+	{
+		int x = 1;
+		return x << 31;
+	}
+
+	float Third()
+	{
+		float x = 1;
+		return x / 3;
+	}
+}
+""", ["DC_ArithProbe"])["DC_ArithProbe"]()
+        self.assertEqual(probe.RoundSteps(1.3), 6)
+        self.assertEqual(math.floor(1.3 / 0.2 + 0.5), 7)                       # what doubles would give
+        self.assertEqual(probe.HalfOfOverflow(), -1073741824)
+        self.assertEqual(probe.ShiftWrap(), -2147483648)
+        self.assertEqual(probe.Third(), float(numpy.float32(1) / numpy.float32(3)))
+        noise = enforce_noise_classes(self.source)["DC_Noise"]()
+        noise.Init(ConfigStub(self.defaults), DECISION_DT, 0.2, 1.5, 4.0, 1.0 / 3.6)
+        f = numpy.float32
+        want = int(numpy.floor(f(f(1.3) / f(DECISION_DT)) + f(0.5)))
+        self.assertEqual((noise.Steps(1.3), want), (6, 6))
+        for seconds in (0.5, 1.0, 1.5, 2.5, 3.0, 8.0, 20.0, 0.1, 0.3, 0.7, 2.3):
+            self.assertEqual(noise.Steps(seconds), int(numpy.floor(f(f(seconds) / f(DECISION_DT)) + f(0.5))), seconds)
+        self.assertNotIn("Math.Round", code_only(class_text(self.source, "DC_Noise")))
+        steps = flat(method_body(self.source, "DC_Noise", "Steps"))
+        self.assertIn("int steps = Math.Floor(seconds / m_fDecisionDtS + 0.5);", steps)
+
+    def test_initializers_are_translated_whole(self):
+        """Codex round 2: `int x = true ? 7 : 9;` as a member initializer translated to x = 1. Every initializer
+        must now be consumed whole, as method bodies are."""
+        for member in ("static const int X = true ? 7 : 9;", "protected float m_fX = 1 2;"):
+            with self.assertRaises(enforce_subset.TranslateError, msg=member):
+                enforce_subset.translate("class DC_InitProbe\n{\n\t%s\n}\n" % member, ["DC_InitProbe"])
+        ok = enforce_subset.translate("class DC_InitProbe\n{\n\tstatic const int X = (7 + 2) * 3;\n}\n",
+                                      ["DC_InitProbe"])["DC_InitProbe"]()
+        self.assertEqual(ok.X, 27)
+
     def test_table_is_complete(self):
         t = self.table
         self.assertEqual(len(t.keys), len(set(t.keys)))
@@ -775,7 +892,7 @@ class NoisePilotTest(unittest.TestCase):
         for k in range(200):
             pilot.decide(clean, NoiseInput(10.0, 1000.0, 0.0, 0.0, 11.0, 200 * k))
             self.assertEqual((clean.m_fKappa, clean.m_fAccel, clean.m_iDir, clean.m_bNoise, clean.m_iNoiseId),
-                             (0.01, 0.5, 1, False, -1))
+                             (enforce_subset.f32(0.01), 0.5, 1, False, -1))
 
     def test_events_and_core(self):
         note = flat(method_body(self.expert_source, "DC_ExpertDriver", "NoteAppliedNoise"))
@@ -829,36 +946,75 @@ class NoisePilotTest(unittest.TestCase):
             with self.assertRaises(ConfigError, msg=bad):
                 read_config(self.table, base + bad)
         read_fn = flat(method_body(self.source, "DC_NoiseConfig", "Read"))
-        for statement in ("string keyFailure; if (!CheckKeyNames(rawText, keyFailure)) { if (m_bProfileGiven || "
-                          "hasParams) { failure = keyFailure; return false; }",
+        for statement in ("int paramsAt; string misspelt; if (!ScanTopLevelKeys(rawText, paramsAt, misspelt, failure)) "
+                          "return false; bool hasParams = paramsAt >= 0 || (rawText.IsEmpty() && "
+                          "context.DoesKeyExist(KEY_PARAMS));",
+                          "if (m_bProfileGiven || hasParams) { failure = keyFailure; return false; }",
+                          "if (!ScanParams(rawText, paramsAt, failure)) return false;",
                           "if (profile != PROFILE_NONE && profile != PROFILE_PILOT_V1)",
                           "if (!IsActive()) { failure = \"\\\"\" + KEY_PARAMS + \"\\\" without a perturbation profile\";",
-                          "if (!ScanParams(rawText, failure)) return false; m_bParamsGiven = true; "
-                          "return CheckValues(failure);"):
+                          "m_bParamsGiven = true; return CheckValues(failure);"):
             self.assertIn(statement, read_fn)
         scan = flat(method_body(self.source, "DC_NoiseConfig", "ScanParams"))
         self.assertIn("if (keyIndex < 0 || m_aGivenKeys.Find(key) >= 0)", scan)
 
     def test_string_values_are_not_keys(self):
-        """CheckKeyNames scans keys only: a T0L conf with "note": "perturbation deferred" is read as on main; a
-        misspelt perturb key is refused with a profile and only warned about without one; escaped quotes inside a
-        value do not end it."""
-        keys = flat(method_body(self.source, "DC_NoiseConfig", "CheckKeyNames"))
-        for statement in ("if (rawText.ToAscii(close) == CHAR_BACKSLASH) close++; close++;",
-                          "int after = DC_JsonScan.SkipSpace(rawText, close + 1);",
-                          "if (after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON && keyLength >= "
-                          "KEY_PROFILE.Length())"):
+        """ScanTopLevelKeys reads the root object's own keys only: a string value, an array item or a nested object's
+        key named perturb_params (or perturb...) is never one, so a T0L conf carrying them is read as on main, and
+        with a profile a nested perturb_params is never taken as the overrides; a misspelt top-level perturb key is
+        refused with a profile and only warned about without one; escaped quotes inside a value do not end it."""
+        keys = flat(method_body(self.source, "DC_NoiseConfig", "ScanTopLevelKeys"))
+        for statement in ("if (code == CHAR_OBJECT_OPEN || code == DC_JsonScan.CHAR_OPEN) depth++; else if (code == "
+                          "CHAR_OBJECT_CLOSE || code == DC_JsonScan.CHAR_CLOSE) depth--;",
+                          "if (rawText.ToAscii(close) == CHAR_BACKSLASH) close++; close++;",
+                          "bool isKey = depth == 1 && after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON;",
+                          "if (isParams) paramsAt = DC_JsonScan.SkipSpace(rawText, after + 1);"):
             self.assertIn(statement, keys)
+        scan = flat(method_body(self.source, "DC_NoiseConfig", "ScanParams"))
+        self.assertIn("int index = valueAt; if (index < 0 || !DC_JsonScan.Expect(text, index, CHAR_OBJECT_OPEN, index))",
+                      scan)
+        self.assertNotIn("FindValue", code_only(class_text(self.source, "DC_NoiseConfig")))
+        self.assertNotIn("Contains(", code_only(class_text(self.source, "DC_NoiseConfig")))
         t0l = ('{"trial_id": "T0L", "duration_s": 600.0, "warmup_s": 20.0, "seed": 1, "route": "arland_t0_loop", '
-               '"images": true, "note": "perturbation deferred"}')
-        self.assertEqual(read_config(self.table, t0l)[0::3], ("none", None))
-        self.assertIsNone(check_key_names(t0l))
-        quoted = t0l.replace('"perturbation deferred"', '"say \\"perturb_x\\": later"')
-        self.assertIsNone(check_key_names(quoted))
-        typo = t0l.replace('"note"', '"perturbs"')
+               '"images": true%s}')
+        for extra in (', "note": "perturbation deferred"', ', "note": "perturb_params"', ', "note":"perturb_params"',
+                      ', "tags": ["perturb_params", "perturb"]', ', "meta": {"perturb_params": {"gap_mean_s": 400}}',
+                      ', "meta": {"perturbs": 1}', ', "note": "say \\"perturb_x\\": later"'):
+            conf = t0l % extra
+            self.assertEqual(scan_top_level_keys(conf), (-1, ""), extra)
+            self.assertEqual(read_config(self.table, conf)[0::2], ("none", None), extra)
+        # with a profile, only the top-level object is the overrides: a nested one (even out of range) is ignored
+        pilot = t0l % (', "perturb": "pilot_v1", "meta": {"perturb_params": {"gap_mean_s": 400}}, '
+                       '"perturb_params": {"gap_mean_s": 4}')
+        profile, values, given, _ = read_config(self.table, pilot)
+        self.assertEqual((profile, given, values["gap_mean_s"]), ("pilot_v1", {"gap_mean_s": "4"}, 4.0))
+        nested_only = t0l % ', "perturb": "pilot_v1", "meta": {"perturb_params": {"gap_mean_s": 400}}'
+        self.assertEqual(read_config(self.table, nested_only)[2], None)
+        with self.assertRaises(ConfigError):         # a top-level perturb_params twice
+            read_config(self.table, t0l % ', "perturb": "pilot_v1", "perturb_params": {}, "perturb_params": {}')
+        typo = t0l % ', "perturbs": "pilot_v1"'
         self.assertEqual(read_config(self.table, typo)[0::3], ("none", "perturbs"))         # warned, mode E
         with self.assertRaises(ConfigError):
-            read_config(self.table, typo.replace("}", ', "perturb": "pilot_v1"}'))
+            read_config(self.table, t0l % ', "perturbs": "pilot_v1", "perturb": "pilot_v1"')
+
+    def test_number_texts_follow_the_json_grammar(self):
+        """IsNumberText accepts exactly one JSON number (RFC 8259) of at most 32 characters, so AddNumberText (which
+        copies whatever it is given) only ever receives one."""
+        body = flat(method_body(self.source, "DC_NoiseConfig", "IsNumberText"))
+        for statement in ("if (text.ToAscii(i) == CHAR_MINUS) i++; if (i >= end || !IsDigit(text.ToAscii(i))) return "
+                          "false; if (text.ToAscii(i) == CHAR_ZERO) i++; else i = SkipDigits(text, i, end);",
+                          "int fraction = i + 1; i = SkipDigits(text, fraction, end); if (i == fraction) return false;",
+                          "int exponent = i; i = SkipDigits(text, exponent, end); if (i == exponent) return false;",
+                          "return i == end;"):
+            self.assertIn(statement, body)
+        for good in ("0", "-0", "4", "-1.5", "0.0000004", "4e0", "1E+3", "2.5e-7", "12345678901234567890123456789012"):
+            self.assertTrue(is_number_text(good, 0, len(good)), good)
+        for bad in ("+1", "01", "1.", ".5", "1e", "--1", "1.2.3", "1e+", "-", "", "0x1", "123456789012345678901234567890123"):
+            self.assertFalse(is_number_text(bad, 0, len(bad)), bad)
+        base = '{"trial_id": "T0P", "seed": 1, "perturb": "pilot_v1", "perturb_params": {"gap_mean_s": %s}}'
+        for bad in ("+4", "04"):
+            with self.assertRaises((ConfigError, ValueError)):
+                read_config(self.table, base % bad)
 
     def test_overrides_round_trip_exactly(self):
         """session.json trial.conf carries every accepted override as the conf wrote it, and an empty

@@ -291,8 +291,9 @@ class DC_TextFile
 
 	//------------------------------------------------------------------------------------------------
 	//! The file's bytes as one string: FileHandle.Read of GetLength() bytes, else (a short read) line by line with
-	//! ReadLine joined by LF. false (failure) when the file is missing or cannot be opened, when neither read gives
-	//! exactly GetLength() bytes, or when a character is not 7-bit ASCII (the inputs are ASCII with LF line ends)
+	//! ReadLine joined by LF (ReadLines: refused for a line of SUBSTRING_MAX_CHARS or more, the final LF as the file
+	//! has it). false (failure) when the file is missing or cannot be opened, when neither read gives exactly
+	//! GetLength() bytes, or when a character is not 7-bit ASCII (the inputs are ASCII with LF line ends)
 	static bool Read(string path, out string text, out string failure)
 	{
 		text = string.Empty;
@@ -336,7 +337,11 @@ class DC_TextFile
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Fallback: the lines of the file joined by LF, with a final LF when the joined text is one byte short
+	//! Fallback after a short FileHandle.Read: the lines of the file joined by LF, and a final LF only when the file's
+	//! last byte, read at GetLength() - 1, is one (never inferred from the length). Empty, so the read fails, when a
+	//! line has SUBSTRING_MAX_CHARS or more characters: 1.8 documents no line limit for ReadLine, and a line cut or
+	//! split at such a limit could join to GetLength() characters with other bytes. A route (one line of tens of kB)
+	//! can therefore never be read this way; it needs the whole-file read
 	protected static void ReadLines(string path, int length, out string text)
 	{
 		text = string.Empty;
@@ -344,20 +349,37 @@ class DC_TextFile
 		if (!file)
 			return;
 
+		string joined;
 		string line;
 		bool first = true;
+		bool lineAtLimit = false;
 		while (file.ReadLine(line) >= 0)
 		{
-			if (!first)
-				text += "\n";
+			if (line.Length() >= SUBSTRING_MAX_CHARS)
+				lineAtLimit = true;
 
-			text += line;
+			if (!first)
+				joined += "\n";
+
+			joined += line;
 			first = false;
 		}
 
+		string lastByte;
+		if (length > 0)
+		{
+			file.Seek(length - 1);
+			file.Read(lastByte, 1);
+		}
+
 		file.Close();
-		if (text.Length() == length - 1)
-			text += "\n";
+		if (lineAtLimit)
+			return;
+
+		if (lastByte == "\n")
+			joined += "\n";
+
+		text = joined;
 	}
 }
 

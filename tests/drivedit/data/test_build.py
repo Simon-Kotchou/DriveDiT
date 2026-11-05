@@ -525,6 +525,80 @@ def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monk
     assert list(store.iterdir()) == []
 
 
+def test_containment_is_decided_by_filesystem_identity(tmp: Path) -> None:
+    """Review round 4: on drvfs /mnt/e/drivedit and /mnt/e/DriveDiT are one directory while resolve() keeps each
+    spelling. tmpfs is case-sensitive, so an unresolved symlink alias stands in for the second spelling here: only
+    (st_dev, st_ino) can tell that alias/x lies in store, also for an output that does not exist yet."""
+    store = tmp / "store"
+    (store / "sub").mkdir(parents=True)
+    alias = tmp / "alias"
+    alias.symlink_to(store)
+    assert not (alias / "new" / "x").is_relative_to(store)  # the strings disagree
+    assert build._inside(alias / "new" / "x", store)  # a path that does not exist yet
+    assert build._inside(alias / "sub", store)
+    assert build._inside(store / "sub", alias)
+    assert build._inside(alias, store)
+    assert not build._inside(tmp / "elsewhere" / "x", store)
+    assert not build._inside(tmp, store)
+    assert build._inside(tmp / "missing_root" / "x", tmp / "missing_root")  # no root yet: the string decides
+
+
+DRVFS_CAPTURES = Path("/mnt/e/DriveDiT/captures")
+
+
+@pytest.mark.skipif(
+    not (DRVFS_CAPTURES.is_dir() and Path("/mnt/e/drivedit/captures").is_dir()),
+    reason="needs the case-insensitive /mnt/e (drvfs) capture store",
+)
+def test_drvfs_case_alias_of_the_capture_store_is_refused(tmp: Path) -> None:
+    """The real case alias, read only: the guard refuses before anything is computed (a stand-in session, so even a
+    wrong decision could write nothing)."""
+    assert os.path.samefile(DRVFS_CAPTURES, "/mnt/e/drivedit/captures")
+    assert Path("/mnt/e/drivedit/captures").resolve() != DRVFS_CAPTURES  # resolve() keeps the spelling
+    session = SimpleNamespace(path=str(DRVFS_CAPTURES / "arland" / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
+    for alias in ("/mnt/e/drivedit/captures", "/mnt/e/DRIVEDIT/CAPTURES", "/mnt/e/drivedit"):
+        with pytest.raises(build.BuildError, match="overlaps"):
+            build.write_shard(session, Path(alias) / "new-output", spec=None, dataset_roots=(alias,))
+    assert not (DRVFS_CAPTURES / "new-output").exists()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["E:/DriveDiT/datasets", "E:\\DriveDiT\\datasets", "e:/x", "E:", "E:relative", "/mnt/e/x\\y"],
+)
+def test_windows_spellings_are_refused(value: str, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 4: E:/x splits on ':' into E and /x, and backslashes name other paths, so a root given in Windows
+    spelling would protect or allow nothing it names. Refused in the variables (also inside a list), the keywords
+    and the CLI, with the WSL spelling in the message."""
+    session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
+    datasets = tmp / "datasets"
+    for name in (build.CAPTURE_ROOTS_ENV, build.DATASET_ROOTS_ENV):
+        for raw in (value, f"{tmp / 'a'}{os.pathsep}{value}"):
+            monkeypatch.setenv(name, raw)
+            with pytest.raises(build.BuildError, match="/mnt/<drive>"):
+                build.write_shard(session, datasets, spec=None)
+        monkeypatch.delenv(name)
+    with pytest.raises(build.BuildError, match="/mnt/<drive>"):
+        build.write_shard(session, datasets, spec=None, dataset_roots=(datasets, value))
+    with pytest.raises(build.BuildError, match="/mnt/<drive>"):
+        build.write_shard(session, datasets, spec=None, dataset_roots=(datasets,), capture_roots=(value,))
+    for flag in ("--dataset-root", "--capture-root"):
+        with pytest.raises(build.BuildError, match="/mnt/<drive>"):  # before the session is read
+            build.main(
+                [
+                    "--session",
+                    str(tmp / "no_session"),
+                    "--out",
+                    str(datasets),
+                    "--dataset-root",
+                    str(datasets),
+                    flag,
+                    value,
+                ]
+            )
+    assert not datasets.exists()
+
+
 def _c02_split(session_dir: Path) -> Any:
     """The split validator C02 reports for a session (tools/validator/dc_validate.py, run in process)."""
     module_spec = importlib.util.spec_from_file_location("dc_validate_dd11", REPO / "tools/validator/dc_validate.py")

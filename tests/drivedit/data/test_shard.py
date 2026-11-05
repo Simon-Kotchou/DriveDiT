@@ -187,3 +187,29 @@ def test_symlinked_latents_are_refused(shard_copy: Path, tmp: Path) -> None:
     root.symlink_to(tmp / "latents_store")  # the latents directory
     with pytest.raises(ShardError, match="is a symlink"):
         shard.latents("toy-2x3x4")
+
+
+def test_latents_copied_from_another_session_are_refused(shard_copy: Path, golden_shard_dir: Path, tmp: Path) -> None:
+    """Latents of one session copied under another session's shard match its shape and valid mask; they must name
+    the shard's session_id and the sha256 of its slot_id.npy (aligned_to), and are refused otherwise."""
+    other = tmp / "other" / "arland_T0b_20261025T091512Z_wb_i00_0000" / "features_v1"
+    shutil.copytree(golden_shard_dir, other)
+    meta = json.loads((other / "meta.json").read_text("utf-8"))
+    meta["session_id"] = other.parent.name
+    (other / "meta.json").write_text(json.dumps(meta), "utf-8")
+    source, target = Shard(shard_copy), Shard(other)
+    write_latents(source, "toy-2x3x4")
+    shutil.copytree(source.path.parent / "latents", target.path.parent / "latents")
+    with pytest.raises(ShardError, match="latents of session"):
+        target.latents("toy-2x3x4")
+    # the right session id but another slot_id.npy
+    lmeta_path = source.path.parent / "latents" / "toy-2x3x4" / "meta.json"
+    lmeta = json.loads(lmeta_path.read_text("utf-8"))
+    lmeta["aligned_to"]["sha256"] = "0" * 64
+    lmeta_path.write_text(json.dumps(lmeta), "utf-8")
+    with pytest.raises(ShardError, match="aligned_to"):
+        source.latents("toy-2x3x4")
+    del lmeta["aligned_to"]
+    lmeta_path.write_text(json.dumps(lmeta), "utf-8")
+    with pytest.raises(ShardError, match="aligned_to"):
+        source.latents("toy-2x3x4")

@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -54,7 +55,8 @@ def scratch() -> Iterator[Path]:
 @pytest.fixture
 def tmp(scratch: Path, request: pytest.FixtureRequest) -> Path:
     """A fresh directory per test under the session scratch."""
-    return Path(tempfile.mkdtemp(prefix=request.node.name[:40] + "_", dir=scratch))
+    prefix = re.sub(r"[^A-Za-z0-9_]", "_", request.node.name)[:40]  # parametrized ids may hold '/' or ':'
+    return Path(tempfile.mkdtemp(prefix=prefix + "_", dir=scratch))
 
 
 @pytest.fixture(scope="session")
@@ -116,6 +118,8 @@ def write_latents(shard: Shard, codec_id: str, *, channels: int = 2, hw: tuple[i
     meta = {
         "schema": "drivedit.latents/1",
         "codec_id": codec_id,
+        "session_id": shard.session_id,
+        "aligned_to": {"file": "slot_id.npy", "sha256": shard.meta["arrays"]["slot_id"]["sha256"]},
         "weights": {"source": "synthetic test", "revision": "none"},
         "input_size": [288, 512],
         "latent_shape": [channels, *hw],

@@ -87,8 +87,9 @@ class DC_EgoSession : DC_SessionModule
 	static const string TERMINATION_SCRIPT_ERROR = "script_error";
 	static const string LOG = "[DC_Ego] ";
 
-	//! Episode modes the core can record: N, R and X need disturbance, recovery and exploration support (not in T0-MIN)
-	protected static ref array<string> s_aEpisodeModes = {"E", "D", "H", "A"};
+	//! Episode modes the core can record: N since DD-7-ident (ctl noise_active / noise_id come from the held command);
+	//! R and X need recovery starts and reverse, which nothing drives yet
+	protected static ref array<string> s_aEpisodeModes = {"E", "N", "D", "H", "A"};
 	protected static ref array<string> s_aDrivers = {"expert", "policy", "human", "ai", "none"};
 
 	// === STATE ===
@@ -602,7 +603,7 @@ class DC_EgoSession : DC_SessionModule
 
 		if (s_aEpisodeModes.Find(info.m_sMode) < 0 || s_aDrivers.Find(info.m_sDriver) < 0)
 		{
-			m_Session.Fail(DC_Session.END_SCRIPT_ERROR, "driver episode mode '" + info.m_sMode + "' / driver '" + info.m_sDriver + "' cannot be recorded (modes E, D, H, A; drivers expert, policy, human, ai, none)");
+			m_Session.Fail(DC_Session.END_SCRIPT_ERROR, "driver episode mode '" + info.m_sMode + "' / driver '" + info.m_sDriver + "' cannot be recorded (modes E, N, D, H, A; drivers expert, policy, human, ai, none)");
 			return;
 		}
 

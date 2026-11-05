@@ -32,6 +32,7 @@ import glob
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -1764,6 +1765,187 @@ class LegacyTest(unittest.TestCase):
             self.assertEqual(code, 1, name)
             for check in expected:
                 self.assertIn(check, failing(rep), (name, rep["checks"]))
+
+
+class NoisePilotTest(unittest.TestCase):
+    """DD-7-ident's pilot shape (make_synthetic --kind t0_loop_noise): one mode-N lap with a disturbance of each
+    family. Every check passes; C17 judges mode-E expert episodes only, so the disturbances are never expert
+    failures (N/A here, and an E lap next to them is judged alone); the reader takes action_cmd from the applied
+    hl_* and action_label from the clean exp_*_now, and the noise columns agree with the perturb events."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = temp_dir("dc2_noise_")
+        cls.routes = os.path.join(cls.tmp, "r")
+        out = synth.generate(os.path.join(cls.tmp, "noise"), kind="t0_loop_noise", routes_dir=cls.routes)
+        cls.session = out["session_dir"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_every_check_passes_and_c17_skips_mode_n(self):
+        code, rep = run_json("--session", self.session, "--routes-dir", self.routes, "--vehicle-card", CARD)
+        self.assertEqual(code, 0, [(c["id"], c["detail"]) for c in rep["checks"] if c["status"] != "PASS"])
+        c17 = by_id(rep)["C17"]
+        self.assertEqual((c17["status"], c17["detail"]), ("N/A", "no mode-E expert episode"))
+
+    def test_c17_judges_the_e_lap_only(self):
+        """The same lap tagged mode E: C17 compares it with its route (the disturbances are then its own driving)."""
+        dst = os.path.join(self.tmp, "as_e", os.path.basename(self.session))
+        shutil.copytree(self.session, dst)
+        set_column(dst, "episodes", "mode", lambda key, v: "E")
+        set_column(dst, "ctl", "mode", lambda key, v: "E" if v == "N" else v)
+        code, rep = run_json("--session", dst, "--routes-dir", self.routes, "--checks", "C17")
+        c17 = by_id(rep)["C17"]
+        self.assertNotEqual(c17["status"], "N/A", c17)
+        self.assertIn("mode-E episode", c17["detail"])
+
+    def test_reader_labels_and_noise_windows(self):
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ctl, ev = s.streams["ctl"], s.streams["events"]
+        self.assertEqual(set(s.streams["episodes"].col("mode")), {"N"})
+        starts = {}
+        ends = {}
+        for kind, step, payload in zip(ev.col("kind"), ev.col("physics_step"), ev.col("payload")):
+            if kind in ("perturb_start", "perturb_end"):
+                fields = dict(item.split("=", 1) for item in payload.split(";"))
+                self.assertEqual(sorted(fields), ["amplitude", "duration_s", "kind", "noise_id"])
+                (starts if kind == "perturb_start" else ends)[int(fields["noise_id"])] = step
+        self.assertEqual(sorted(starts), list(range(5)))
+        self.assertEqual(sorted(ends), list(range(5)))
+        for step, active, noise_id, mode in zip(ctl.col("physics_step"), ctl.col("noise_active"),
+                                                ctl.col("noise_id"), ctl.col("mode")):
+            self.assertEqual(bool(active), noise_id >= 0)
+            if active:
+                self.assertEqual(mode, "N")
+                self.assertTrue(starts[noise_id] < step <= ends[noise_id], (step, noise_id))
+        perturbed = [d for d in s.decisions if d["action_cmd"] is not None and d["mode"] == "N"
+                     and d["action_cmd"] != d["action_label"]]
+        self.assertGreater(len(perturbed), 40)
+        self.assertTrue(any(d["action_cmd"][2] == 0 and d["action_label"][2] == 1 for d in perturbed))   # the stop
+        self.assertTrue(all(d["masks"]["policy_valid"] == 1 for d in perturbed if d["obs_valid"] == 1))
+
+    def test_fixture_amplitudes_mean_what_dc_noise_logs(self):
+        """The k_pulse disturbance (amplitude 0.4 in its payload) is DC_Noise's: 0.4 x kappa_max(v) x
+        sin(pi (i + 0.5) / n) on kappa_target at decision i of n = 10, kappa_max(v) = min(0.2, 4 / max(v, 3)^2)."""
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ctl = s.streams["ctl"]
+        noise_of_seq = dict(zip(ctl.col("hl_seq"), ctl.col("noise_id")))
+        pulse = [d for d in s.decisions if d["hl_seq"] is not None and noise_of_seq.get(d["hl_seq"]) == 0]
+        self.assertEqual(len(pulse), 10)
+        for i, d in enumerate(pulse):
+            v = max(d["state"][0], 3.0)
+            scale = min(0.2, 4.0 / (v * v))
+            got = (d["action_cmd"][0] - d["action_label"][0]) / (0.4 * scale)
+            self.assertAlmostEqual(got, math.sin(math.pi * (i + 0.5) / 10), delta=2e-3)
+
+    def test_c07_checks_the_disturbance(self):
+        """C07 owns the held command and its R-01 boundary, the disturbance included: each mutation of the noise
+        metadata fails it (Codex: every noise_id -1 with the rows still active passed every check before)."""
+        def mutated(name, edit):
+            dst = os.path.join(self.tmp, name, os.path.basename(self.session))
+            shutil.copytree(self.session, dst)
+            edit(dst)
+            return run_json("--session", dst, "--routes-dir", self.routes, "--checks", "C07")
+
+        def first_active(dst):
+            s = dc_validate.base.load_reader().open_session(dst, decode_images=False)
+            ctl = s.streams["ctl"]
+            return [k for k, a in zip(ctl.col("physics_step"), ctl.col("noise_active")) if a]
+
+        code, rep = run_json("--session", self.session, "--routes-dir", self.routes, "--checks", "C07")
+        self.assertEqual((code, by_id(rep)["C07"]["status"]), (0, "PASS"))
+        active = first_active(self.session)
+        cases = {
+            "ids_dropped": (lambda d: set_column(d, "ctl", "noise_id", lambda k, v: "-1"), "disagree"),
+            "mode_e": (lambda d: (set_column(d, "ctl", "mode", lambda k, v: "E" if v == "N" else v),
+                                  set_column(d, "episodes", "mode", lambda k, v: "E")), "outside a mode-N episode"),
+            "row_off": (lambda d: (set_column(d, "ctl", "noise_active", lambda k, v: "0" if k == active[3] else v),
+                                   set_column(d, "ctl", "noise_id", lambda k, v: "-1" if k == active[3] else v)),
+                        "inside a decision interval"),
+            "id_swapped": (lambda d: set_column(d, "ctl", "noise_id",
+                                                lambda k, v: "4" if v == "0" else ("0" if v == "4" else v)),
+                           "perturbation windows"),
+        }
+        for name, (edit, detail) in cases.items():
+            code, rep = mutated(name, edit)
+            c07 = by_id(rep)["C07"]
+            self.assertEqual((code, c07["status"]), (1, "FAIL"), (name, c07["detail"]))
+            self.assertIn(detail, c07["detail"], name)
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ev = s.streams["events"]
+        end = [q for q, kind in zip(ev.col("event_seq"), ev.col("kind")) if kind == "perturb_end"][0]
+
+        def drop_end(dst):
+            set_column(dst, "events", "kind", lambda k, v: "nav_command" if k == end else v)
+        code, rep = mutated("end_dropped", drop_end)
+        self.assertEqual(by_id(rep)["C07"]["status"], "FAIL")
+        self.assertIn("0 perturb_end", by_id(rep)["C07"]["detail"])
+
+    def test_c07_refuses_an_orphan_window(self):
+        """Codex round 2: disturbance 0's active rows cleared and its perturb events moved to episode 999 (which does
+        not exist) passed every check, the expected and observed rows both empty. Now the window's episode must
+        exist and be mode N, and the window must hold rows."""
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ev = s.streams["events"]
+        marks = [q for q, kind, payload in zip(ev.col("event_seq"), ev.col("kind"), ev.col("payload"))
+                 if kind in ("perturb_start", "perturb_end") and payload.startswith("noise_id=0;")]
+        self.assertEqual(len(marks), 2)
+        dst = os.path.join(self.tmp, "orphan", os.path.basename(self.session))
+        shutil.copytree(self.session, dst)
+        set_column(dst, "ctl", "noise_id", lambda k, v: "-1" if v == "0" else v)
+        ids = dict(zip(s.streams["ctl"].col("physics_step"), s.streams["ctl"].col("noise_id")))
+        set_column(dst, "ctl", "noise_active", lambda k, v: "0" if ids.get(k) == 0 else v)
+        set_column(dst, "events", "episode_id", lambda k, v: "999" if k in marks else v)
+        code, rep = run_json("--session", dst, "--routes-dir", self.routes, "--vehicle-card", CARD)
+        c07 = by_id(rep)["C07"]
+        self.assertEqual((code, c07["status"]), (1, "FAIL"), c07["detail"])
+        self.assertIn("episode 999 noise_id 0", c07["detail"])
+        self.assertIn("does not have", c07["detail"])
+
+    def test_c07_ids_are_per_episode(self):
+        """Codex round 2: two valid N episodes that both use noise_id 0 failed C07 (the ids were grouped across the
+        session). dc-2.0 9.1 declares no session-wide uniqueness, so windows are per (episode, noise_id); a window
+        outside its episode's steps, in a mode-E episode or without rows still fails."""
+        stream_checks = dc_validate.checks.streams
+
+        class Stream:
+            def __init__(self, **cols):
+                self.cols = cols
+
+            def col(self, name):
+                return self.cols[name]
+
+        def session(events, modes=("N", "N"), rows=None):
+            # two episodes of 6 callbacks each (steps 10..15 and 20..25); decisions at 10, 13, 20, 23
+            steps = list(range(10, 16)) + list(range(20, 26))
+            ep = [0] * 6 + [1] * 6
+            seq = [0, 1, 1, 1, 2, 2, 3, 4, 4, 4, 5, 5]
+            rows = rows or {11: 0, 12: 0, 13: 0, 21: 0, 22: 0, 23: 0}
+            ctl = Stream(physics_step=steps, episode_id=ep, hl_seq=seq, mode=[modes[e] for e in ep],
+                         noise_active=[1 if k in rows else 0 for k in steps],
+                         noise_id=[rows.get(k, -1) for k in steps],
+                         hl_kappa=[0.0] * 12, hl_accel=[0.0] * 12, hl_dir=[1] * 12)
+            evs = Stream(kind=[e[0] for e in events], physics_step=[e[1] for e in events],
+                         episode_id=[e[2] for e in events], payload=["noise_id=%d;kind=k_pulse;amplitude=0.1;"
+                                                                     "duration_s=0.6" % e[3] for e in events])
+            eps = Stream(episode_id=[0, 1], mode=list(modes), start_physics_step=[10, 20], end_physics_step=[15, 25])
+            return types.SimpleNamespace(streams={"ctl": ctl, "events": evs, "episodes": eps})
+
+        both = [("perturb_start", 10, 0, 0), ("perturb_end", 13, 0, 0), ("perturb_start", 20, 1, 0),
+                ("perturb_end", 23, 1, 0)]
+        self.assertEqual(stream_checks._noise_boundary(session(both)), [])
+        cases = {
+            "episode 1 noise_id 0: its episode is mode E, not N": session(both, modes=("N", "E")),
+            "not ordered inside the episode's steps": session(both[:3] + [("perturb_end", 27, 1, 0)]),
+            "episode 999 noise_id 0: its perturb events name an episode that the episodes stream does not have":
+                session([(k, st, 999 if e == 1 else e, n) for k, st, e, n in both]),
+            "episode 0 noise_id 0 has 2 perturb_start and 1 perturb_end": session(both + [("perturb_start", 14, 0, 0)]),
+        }
+        for want, sess in cases.items():
+            issues = stream_checks._noise_boundary(sess)
+            self.assertTrue(any(want in i for i in issues), (want, issues))
 
 
 if __name__ == "__main__":

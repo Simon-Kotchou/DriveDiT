@@ -11,7 +11,9 @@
 //   1. Guards: edit mode, play mode, server; DC_LaunchGuard.Evaluate (DD-4-probe, reused unchanged). A refusal logs
 //      one ERROR line and writes nothing, not even a directory.
 //   2. Trial: -dcTrial <id>, else the one-line pointer $profile:dc_trials/ACTIVE; the conf
-//      $profile:dc_trials/<id>.json is read with JsonLoadContext (the loader DC_LaunchGuard already uses on 1.8).
+//      $profile:dc_trials/<id>.json is read with JsonLoadContext (the loader DC_LaunchGuard already uses on 1.8);
+//      its optional perturbation profile ("perturb", "perturb_params", DD-7-ident) by DC_NoiseConfig (DC_Noise.c),
+//      which refuses an unknown profile or parameter.
 //   3. Build and map: GetBuildVersion() must equal the launch record's engine_version_expected once a record carries
 //      one (MIGRATION_1_9 8.3); the L8 fingerprint (world size from GetBoundBox, latitude from the weather manager)
 //      must match the map card of m_sMapId. Everon is never captured here (sealed test map).
@@ -142,6 +144,14 @@ class DC_JsonWriter
 	void AddFloat(string key, float value, int decimals)
 	{
 		AddLine(KeyText(key) + value.ToString(-1, decimals));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A number as the JSON number text given (a value copied from a trial conf as written, so it round-trips
+	//! exactly; the caller checks that it is a JSON number)
+	void AddNumberText(string key, string numberText)
+	{
+		AddLine(KeyText(key) + numberText);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -568,6 +578,9 @@ class DC_Session : SCR_BaseGameModeComponent
 	static const string STEP_DT_MEASURED = "measured";
 	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
 	static const int TRIAL_CONF_MAX_BYTES = 4096;
+	//! The trial conf is read whole up to this size for DC_NoiseConfig's key scan (a longer one is not scanned, and a
+	//! conf that sets a perturb key is then refused); only TRIAL_CONF_MAX_BYTES of it are ever recorded
+	static const int TRIAL_CONF_SCAN_MAX_BYTES = 65536;
 	//! The longest string string.Substring, string.Trim and string.Format return on 1.8.0.13 (Types/string.c:92, :106,
 	//! :119): a longer result is cut without an error, so a value written into session data never passes through
 	//! them when it may be longer (DD-7)
@@ -618,6 +631,8 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected bool m_bTrialRouteRead;			//!< the conf has a "route" (trial.conf holds only the keys present)
 	protected bool m_bTrialImagesRead;			//!< the conf has an "images"
 	protected string m_sTrialConfRaw;			//!< the conf file's text (observed.trial_conf_raw), empty when not copied
+	protected string m_sTrialConfScan;			//!< the conf file's text for the key scan (at most TRIAL_CONF_SCAN_MAX_BYTES), empty when not read whole
+	protected ref DC_NoiseConfig m_NoiseConfig = new DC_NoiseConfig();	//!< the trial's perturbation profile (none by default)
 	protected string m_sTrialConfRawNote;		//!< why it was not copied
 
 	// build and map
@@ -966,18 +981,31 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (!m_sTrialConfRawNote.IsEmpty())
 			Print(LOG + "WARNING: trial conf text not copied into session.json observed.trial_conf_raw: " + m_sTrialConfRawNote, LogLevel.WARNING);
 
+		// The perturbation profile (DD-7-ident, DC_Noise.c): "perturb" and "perturb_params"; absent = none (mode E)
+		m_NoiseConfig = new DC_NoiseConfig();
+		string noiseFailure;
+		if (!m_NoiseConfig.Read(context, m_sTrialConfScan, noiseFailure))
+		{
+			failure = "trial conf " + confPath + ": " + noiseFailure;
+			return false;
+		}
+
+		Print(LOG + "trial " + m_sTrialId + " " + m_NoiseConfig.Describe(), LogLevel.NORMAL);
+
 		Print(string.Format(LOG + "trial %1 (%2): warm-up %3 s, duration %4 s, seed %5, route '%6', images %7", m_sTrialId, m_sTrialSource, m_fWarmupS.ToString(-1, 1), m_fDurationS.ToString(-1, 1), m_iTrialSeed, m_sTrialRoute, DC_LaunchGuard.BoolText(m_bTrialImages)), LogLevel.NORMAL);
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! The conf file's text for session.json observed.trial_conf_raw (dc-2.0 10.1 asks for the conf as parsed; the 1.8
-	//! JsonLoadContext cannot list a file's keys, so trial.conf holds only the keys this component reads). Copied only
-	//! when the whole file was read back (FileHandle.Read count = GetLength), is at most TRIAL_CONF_MAX_BYTES long and
-	//! holds printable ASCII, TAB, CR and LF only (session.json stays ASCII); otherwise m_sTrialConfRawNote says why
+	//! JsonLoadContext cannot list a file's keys, so trial.conf holds only the keys this component reads). Read whole
+	//! (FileHandle.Read count = GetLength) when at most TRIAL_CONF_SCAN_MAX_BYTES long and printable ASCII, TAB, CR and
+	//! LF only: then it is m_sTrialConfScan (DC_NoiseConfig's key scan), and when also at most TRIAL_CONF_MAX_BYTES long
+	//! m_sTrialConfRaw (recorded; session.json stays ASCII); otherwise m_sTrialConfRawNote says why
 	protected void ReadTrialConfText(string confPath)
 	{
 		m_sTrialConfRaw = string.Empty;
+		m_sTrialConfScan = string.Empty;
 		m_sTrialConfRawNote = string.Empty;
 		FileHandle file = FileIO.OpenFile(confPath, FileMode.READ);
 		if (!file)
@@ -989,13 +1017,13 @@ class DC_Session : SCR_BaseGameModeComponent
 		int length = file.GetLength();
 		string text;
 		int read = -1;
-		if (length > 0 && length <= TRIAL_CONF_MAX_BYTES)
+		if (length > 0 && length <= TRIAL_CONF_SCAN_MAX_BYTES)
 			read = file.Read(text, length);
 
 		file.Close();
-		if (length <= 0 || length > TRIAL_CONF_MAX_BYTES)
+		if (length <= 0 || length > TRIAL_CONF_SCAN_MAX_BYTES)
 		{
-			m_sTrialConfRawNote = string.Format("the conf has %1 bytes (copied when 1 to %2)", length, TRIAL_CONF_MAX_BYTES);
+			m_sTrialConfRawNote = string.Format("the conf has %1 bytes (copied when 1 to %2, scanned when 1 to %3)", length, TRIAL_CONF_MAX_BYTES, TRIAL_CONF_SCAN_MAX_BYTES);
 			return;
 		}
 
@@ -1014,6 +1042,13 @@ class DC_Session : SCR_BaseGameModeComponent
 				m_sTrialConfRawNote = string.Format("byte %1 at offset %2 is not printable ASCII", c, i);
 				return;
 			}
+		}
+
+		m_sTrialConfScan = text;
+		if (length > TRIAL_CONF_MAX_BYTES)
+		{
+			m_sTrialConfRawNote = string.Format("the conf has %1 bytes (copied when 1 to %2)", length, TRIAL_CONF_MAX_BYTES);
+			return;
 		}
 
 		m_sTrialConfRaw = text;
@@ -1584,6 +1619,7 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (m_bTrialImageHzRead)
 			json.AddFloat("image_hz", m_fImageHz, 3);
 
+		m_NoiseConfig.WriteConf(json);
 		json.EndObject();
 		json.AddInt("seed", m_iTrialSeed);
 		json.AddFloat("warmup_s", m_fWarmupS, 3);
@@ -3269,6 +3305,13 @@ class DC_Session : SCR_BaseGameModeComponent
 	string GetTrialRoute()
 	{
 		return m_sTrialRoute;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The trial conf's perturbation profile ("perturb", "perturb_params"; none without them), see DC_Noise.c
+	DC_NoiseConfig GetNoiseConfig()
+	{
+		return m_NoiseConfig;
 	}
 
 	//------------------------------------------------------------------------------------------------

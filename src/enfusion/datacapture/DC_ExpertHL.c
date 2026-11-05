@@ -20,7 +20,8 @@
 //                  evaluate the expert (CanEvaluate), so an admitted episode's first Decide never returns false;
 //   BeginEpisode   in a decision callback after the warm-up, when the ego stands at the route start (distance,
 //                  heading, speed), at most m_iMaxEpisodes, m_fEpisodeGapS after the previous one: mode E, driver
-//                  expert;
+//                  expert; mode N when the trial conf names a perturbation profile (DC_Noise.c, DD-7-ident: the
+//                  episode's draw of episode_n_share);
 //   ApplyStep      every fixed-frame callback with a held command (EOnFixedFrame): llc_v1 over the callback's
 //                  timeSlice = covered_steps x the measured step dt (dc-2.0 D-A: 1 to 3 steps of 1/30 s per callback);
 //   PostStep       every callback of the episode (EOnPostFixedFrame): ordered route progress and lane errors on
@@ -29,7 +30,10 @@
 //                  of the world-time grid, every 1000 / decision_hz ms) that evaluation is also the decision;
 //   Decide         in every decision callback of the episode (only there: the core asks on the world-time grid, never
 //                  on physics_step mod N): the decision PostStep of the same callback took, so in mode E action_cmd
-//                  of decision t equals exp_*_now at P_t (dc-2.0 section 6, R-01);
+//                  of decision t equals exp_*_now at P_t (dc-2.0 section 6, R-01). In mode N that decision is
+//                  DC_Noise's: exp_*_now stays the clean expert (action_label), the decision carries the disturbance
+//                  (action_cmd, noise_active / noise_id), and perturb_start / perturb_end are logged here, where a
+//                  disturbance is first applied and where the clean command returns (or in EndEpisode);
 //   EndEpisode / EndDriver   log lines (the core parks the ego).
 //
 // EXPERT (pure pursuit and a speed profile on the route polyline, the driving line of the drivedit_nav route)
@@ -853,6 +857,17 @@ class DC_ExpertDriver : DC_DriverInterface
 	protected string m_sExpertSha;
 	protected string m_sUseClass;
 
+	// perturbations (DD-7-ident, DC_Noise.c): only with a trial conf profile
+	protected ref DC_Noise m_Noise;
+	protected ref DC_NoiseInput m_NoiseInput = new DC_NoiseInput();
+	protected string m_sNoiseSha;
+	protected bool m_bEpisodeN;
+	protected string m_sDecisionPayload;	//!< "noise_id=..;kind=..;amplitude=.." of m_Decision's disturbance
+	protected float m_fDecisionPlannedS;
+	protected int m_iAppliedNoiseId = -1;	//!< the disturbance of the last command Decide gave (-1 none)
+	protected string m_sAppliedPayload;
+	protected int m_iAppliedStartMs;
+
 	// episode
 	protected bool m_bInEpisode;
 	protected int m_iEpisodes;
@@ -947,6 +962,12 @@ class DC_ExpertDriver : DC_DriverInterface
 			return false;
 		}
 
+		if (!BeginNoise(ctx, failure))
+		{
+			ctx.Error("perturbation: " + failure);
+			return false;
+		}
+
 		ctx.SetStamps(m_sLlcSha, m_sExpertSha, m_Card.m_sCardId, m_Card.m_sSha256);
 		ctx.SetSigns(m_Card.m_iSteerSign, m_Card.m_iYawAxisSign);
 		float lowest;
@@ -1012,7 +1033,15 @@ class DC_ExpertDriver : DC_DriverInterface
 
 		m_LLC.Reset();
 		m_Expert.Reset();
+		m_bEpisodeN = false;
+		if (m_Noise)
+			m_bEpisodeN = m_Noise.BeginEpisode(m_Context.GetTrialSeed(), episodeId);
+
+		m_iAppliedNoiseId = -1;
 		info.m_sMode = "E";
+		if (m_bEpisodeN)
+			info.m_sMode = DC_StreamRecorder.MODE_NOISE;
+
 		info.m_sDriver = "expert";
 		info.m_sVehicleCardId = m_Card.m_sCardId;
 		info.m_sRouteId = m_Route.m_sRouteId;
@@ -1034,7 +1063,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		m_iSamples = 0;
 		m_fSumAbsLateral = 0;
 		m_fMaxAbsLateral = 0;
-		m_Context.Log(string.Format("episode %1 begins at physics step %2 on route %3 (seed %4)", episodeId, firstPhysicsStep, m_Route.m_sRouteId, info.m_iSeed));
+		m_Context.Log(string.Format("episode %1 begins at physics step %2 on route %3 (seed %4, mode %5)", episodeId, firstPhysicsStep, m_Route.m_sRouteId, info.m_iSeed, info.m_sMode));
 		return true;
 	}
 
@@ -1072,6 +1101,9 @@ class DC_ExpertDriver : DC_DriverInterface
 		if (m_Context.IsDecisionStep())
 		{
 			m_Decision.CopyFrom(m_Now);
+			if (m_bEpisodeN)
+				PerturbDecision(speed);
+
 			m_iDecisionStep = physicsStep;
 		}
 
@@ -1108,7 +1140,91 @@ class DC_ExpertDriver : DC_DriverInterface
 			return false;
 
 		command.CopyFrom(m_Decision);
+		NoteAppliedNoise(m_Decision.m_iNoiseId, m_sDecisionPayload, m_fDecisionPlannedS);
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! BeginDriver: with a perturbation profile in the trial conf, DC_Noise's rng self-test, the sha256 of DC_Noise.c
+	//! as deployed (logged), DC_Noise bound to the expert's limits and the decision period (the world-time grid's,
+	//! 1000 / decision_hz ms). true and nothing to do without a profile
+	protected bool BeginNoise(notnull DC_DriverContext ctx, out string failure)
+	{
+		failure = string.Empty;
+		DC_NoiseConfig config = ctx.GetNoiseConfig();
+		if (!config || !config.IsActive())
+		{
+			ctx.Log("no perturbation profile: every episode is mode E");
+			return true;
+		}
+
+		if (!DC_NoiseRng.SelfTest(failure))
+			return false;
+
+		m_sNoiseSha = HashSource(DC_Noise.SOURCE_FILE, failure);
+		if (m_sNoiseSha.IsEmpty())
+			return false;
+
+		float decisionDtS = ctx.GetDecisionPeriodMs() / 1000.0;
+		if (decisionDtS <= 0)
+		{
+			failure = "no decision period";
+			return false;
+		}
+
+		m_Noise = new DC_Noise();
+		m_Noise.Init(config, decisionDtS, m_fKappaMax, m_fAccelMaxMps2, m_fBrakeMaxMps2, m_fStopKmh / 3.6);
+		ctx.Log(config.Describe());
+		ctx.Log(string.Format("%1 (%2) sha256 %3; decision period %4 s; perturbs action_cmd only, exp_*_now stays the clean expert", DC_Noise.VERSION, DC_Noise.SOURCE_FILE, m_sNoiseSha, decisionDtS.ToString(-1, 4)));
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The decision of a mode-N episode: DC_Noise on the clean expert m_Now and the state after this callback
+	protected void PerturbDecision(float speed)
+	{
+		float progress = m_Expert.GetProgress();
+		m_NoiseInput.m_fSpeedMps = speed;
+		m_NoiseInput.m_fRemainingM = m_Route.m_fLengthM - progress;
+		m_NoiseInput.m_fLateralM = m_Expert.GetLateral();
+		m_NoiseInput.m_fHeadingErrRad = m_Expert.GetHeadingError();
+		m_NoiseInput.m_fProfileAheadMps = m_Expert.ProfileAt(progress + speed * m_fSpeedPreviewS);
+		m_NoiseInput.m_iWorldMs = m_Context.GetWorldMs();
+		m_Noise.Decide(m_Now, m_NoiseInput, m_Decision);
+		m_sDecisionPayload = string.Empty;
+		m_fDecisionPlannedS = 0;
+		if (m_Decision.m_bNoise)
+		{
+			m_sDecisionPayload = m_Noise.PayloadBase();
+			m_fDecisionPlannedS = m_Noise.GetPlannedDurationS();
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The disturbance of the command just given (Decide) or of none (-1, EndEpisode): perturb_end for the one that
+	//! stops being applied (its realised duration_s, world time from its first decision), perturb_start for a new one
+	//! (its planned duration_s); payload noise_id, kind, amplitude, duration_s (dc-2.0 9.5)
+	protected void NoteAppliedNoise(int noiseId, string payload, float plannedS)
+	{
+		if (noiseId == m_iAppliedNoiseId)
+			return;
+
+		int now = m_Context.GetWorldMs();
+		if (m_iAppliedNoiseId >= 0)
+		{
+			float realisedS = (now - m_iAppliedStartMs) / 1000.0;
+			if (!m_Context.LogEvent("perturb_end", m_sAppliedPayload + ";duration_s=" + realisedS.ToString(-1, 2)))
+				m_Context.Warn("perturb_end of disturbance " + m_iAppliedNoiseId.ToString() + " was not recorded");
+		}
+
+		m_iAppliedNoiseId = noiseId;
+		if (noiseId < 0)
+			return;
+
+		m_sAppliedPayload = payload;
+		m_iAppliedStartMs = now;
+		if (!m_Context.LogEvent("perturb_start", payload + ";duration_s=" + plannedS.ToString(-1, 2)))
+			m_Context.Warn("perturb_start of disturbance " + noiseId.ToString() + " was not recorded");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1120,6 +1236,16 @@ class DC_ExpertDriver : DC_DriverInterface
 		m_bInEpisode = false;
 		m_iEpisodes++;
 		m_iLastEndMs = m_Context.GetWorldMs();
+		// a disturbance still applied ends with the episode (perturb_end before the core's episode_end)
+		NoteAppliedNoise(-1, string.Empty, 0);
+		if (m_Noise)
+		{
+			string noiseLine = m_Noise.EndEpisode();
+			if (!noiseLine.IsEmpty())
+				m_Context.Log(string.Format("episode %1 %2", episodeId, noiseLine));
+		}
+
+		m_bEpisodeN = false;
 		float meanAbs = 0;
 		if (m_iSamples > 0)
 			meanAbs = m_fSumAbsLateral / m_iSamples;
@@ -1134,6 +1260,11 @@ class DC_ExpertDriver : DC_DriverInterface
 	{
 		if (m_Context)
 			m_Context.Log(string.Format("driver ends (%1) after %2 episode(s)", endReason, m_iEpisodes));
+
+		if (m_Context && m_Noise)
+			m_Context.Log(m_Noise.Summary());
+
+		m_Noise = null;
 
 		CheckGates(true);
 		m_Gates = null;

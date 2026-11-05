@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from drivedit.eval.linear import (
+    Folds,
     check_segments,
     cross_val_predict,
     fit_ridge,
@@ -97,6 +98,58 @@ def test_bad_segments_and_too_many_folds_raise() -> None:
         check_segments([(0, 21)], 20)
     with pytest.raises(ValueError, match="blocked folds"):
         segment_folds([(0, 3)], n_folds=5, gap=0)
+
+
+def _two_regimes() -> tuple[np.ndarray, np.ndarray]:
+    """400 rows whose second half is scaled x5 and shifted, with one far extreme in each half: each fold's mean, spread
+    and range differ from the all-row ones, and each held-out half holds a value outside the other half's range."""
+    rng = np.random.default_rng(11)
+    x = rng.normal(size=(400, 3))
+    x[200:] = 5.0 * x[200:] + 3.0
+    x[17] = [40.0, -40.0, 30.0]
+    x[333] = [-90.0, 80.0, -70.0]
+    y = x @ np.array([[1.0], [-0.5], [0.25]]) + 0.1 * rng.normal(size=(400, 1))
+    return x, y
+
+
+def _reference_cv(
+    x: np.ndarray, y: np.ndarray, folds: Folds, lam: float, *, clip: bool, leak: bool = False
+) -> np.ndarray:
+    """Out-of-fold ridge written out independently of fit_ridge: standardisation, intercept and clipping bounds from
+    the training rows only (``leak`` takes them from all rows instead, the bug the tests must catch)."""
+    out = np.full(y.shape, np.nan)
+    for fold in folds.folds:
+        stats = x if leak else x[fold.train]
+        mean, std = stats.mean(axis=0), stats.std(axis=0)
+        z = (x[fold.train] - mean) / std
+        y_mean = y[fold.train].mean(axis=0)
+        beta = np.linalg.solve(z.T @ z + lam * np.eye(x.shape[1]), z.T @ (y[fold.train] - y_mean))
+        test = x[fold.test]
+        if clip:
+            test = np.clip(test, stats.min(axis=0), stats.max(axis=0))
+        out[fold.test] = ((test - mean) / std) @ beta + y_mean
+    return out
+
+
+def test_cross_validated_clipping_uses_training_rows_only() -> None:
+    """Review round 1: replacing each fold's clipping bounds with the all-row bounds passed every test."""
+    x, y = _two_regimes()
+    folds = segment_folds([(0, 400)], n_folds=2, gap=0)
+    honest = _reference_cv(x, y, folds, 1.0, clip=True)
+    leaked = _reference_cv(x, y, folds, 1.0, clip=True, leak=True)
+    assert np.max(np.abs(honest - leaked)) > 1.0  # the data tell the two apart
+    np.testing.assert_allclose(cross_val_predict(x, y, folds, lam=1.0, clip=True), honest, rtol=1e-9, atol=1e-9)
+
+
+def test_cross_validated_scaling_uses_training_rows_only() -> None:
+    """Standardisation and intercept come from the training fold; with a strong penalty all-row statistics would
+    give other coefficients."""
+    x, y = _two_regimes()
+    folds = segment_folds([(0, 400)], n_folds=2, gap=0)
+    honest = _reference_cv(x, y, folds, 50.0, clip=False)
+    leaked = _reference_cv(x, y, folds, 50.0, clip=False, leak=True)
+    assert np.max(np.abs(honest - leaked)) > 1.0
+    np.testing.assert_allclose(cross_val_predict(x, y, folds, lam=50.0), honest, rtol=1e-9, atol=1e-9)
 
 
 def test_cross_val_predict_scores_a_signal_and_not_noise() -> None:

@@ -8,7 +8,8 @@
     index.sample(64, np.random.default_rng(0))
 
 A shard is the directory ``drivedit.data.build`` writes (DRIVEDIT_INTERFACES section 2). Its arrays are opened as
-read-only memmaps; ``Shard(path)`` checks every array file against the sha256 in ``meta.json`` first (``verify``).
+read-only memmaps; ``Shard(path)`` checks every array file against the sha256 in ``meta.json`` first (``verify``), and
+that every segment step is wm-valid, after the warm-up and has an image (slot_id >= 0).
 ``Shard.latents(codec_id)`` opens ``<root>/<session_id>/latents/<codec_id>/`` (section 3), the latents of
 ``drivedit.codec``'s pre-encoder, aligned to ``slot_id.npy``.
 
@@ -106,6 +107,7 @@ class Shard:
         self._arrays: dict[str, npt.NDArray[Any]] = {}
         if verify:
             self.verify()
+        self._check_segments()
 
     def __repr__(self) -> str:
         return f"Shard({self.session_id}, n_steps={self.n_steps})"
@@ -163,6 +165,22 @@ class Shard:
         """The latents of ``codec_id`` for this shard (``<root>/<session_id>/latents/<codec_id>/``)."""
         return Latents(self, codec_id)
 
+    def _check_segments(self) -> None:
+        """Every segment step is wm-valid, after the warm-up and has an image (slot_id >= 0): the world model sees an
+        observation at every frame of a window (features_v1 wm_valid: 0 at decision_index.obs_valid 0)."""
+        names = list(self.meta["channels"]["masks"])
+        masks = self.array("masks")
+        slot = self.array("slot_id")
+        for seg in self.segments:
+            rows = masks[seg.start : seg.stop]
+            ok = (
+                (rows[:, names.index("wm_valid")] == 1).all()
+                and (rows[:, names.index("warmup")] == 0).all()
+                and (slot[seg.start : seg.stop] >= 0).all()
+            )
+            if not ok:
+                raise ShardError(f"{self.path}: segment {seg} holds a step that is not wm-valid or has no image")
+
     def _check_ranges(self) -> None:
         bounds = {e.episode_id: e for e in self.episodes}
         last = 0
@@ -200,7 +218,7 @@ class LatentStats:
 
 class Latents:
     """``latents.npy`` ``[T, C, h, w]`` float16 and ``valid.npy`` ``[T]`` bool of one codec, as read-only memmaps.
-    T equals the shard's n_steps, and no row without an image (slot_id -1) is valid."""
+    T equals the shard's n_steps, and valid is exactly ``slot_id >= 0``."""
 
     def __init__(self, shard: Shard, codec_id: str) -> None:
         if not CODEC_ID_RE.match(codec_id):
@@ -220,8 +238,10 @@ class Latents:
             )
         if self.valid.dtype != np.bool_ or self.valid.shape != (shard.n_steps,):
             raise ShardError(f"{self.path}/valid.npy: {self.valid.shape} {self.valid.dtype}, expected [T] bool")
-        if bool((self.valid & (shard.array("slot_id") < 0)).any()):
-            raise ShardError(f"{self.path}: valid rows without an image (slot_id -1); not aligned to slot_id.npy")
+        # section 3: rows with slot_id -1 are zeros and valid.npy marks them, so valid is exactly slot_id >= 0. A slot
+        # the codec could not encode is an encoder failure, never a gap inside a segment.
+        if not np.array_equal(np.asarray(self.valid), np.asarray(shard.array("slot_id")) >= 0):
+            raise ShardError(f"{self.path}: valid.npy differs from slot_id >= 0; not aligned to slot_id.npy")
 
     def _open(self) -> None:
         self.latents = np.load(self.path / "latents.npy", mmap_mode="r", allow_pickle=False)

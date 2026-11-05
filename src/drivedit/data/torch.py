@@ -3,8 +3,8 @@
     index = WindowIndex(shards, length=10)
     data = LatentWindowDataset(index, "cadre-1x16x16", stats=stats)
     item = data[0]
-    item["latents"]          # [L, C, h, w] float32, (x - mean) / std per channel; 0 where valid is False
-    item["valid"]            # [L] bool: the latent row exists (valid.npy)
+    item["latents"]          # [L, C, h, w] float32, (x - mean) / std per channel
+    item["valid"]            # [L] bool (valid.npy): True at every step, since windows lie inside segments
     item["action_cmd"]       # [L, 3] float32, item["state"] [L, 4]: aligned at t, unshifted
     item["future_pose"]      # [L, H, 3] float32 aux target (NaN = no target at that step and horizon)
     item["contact_events"]   # [L, 2] float32 aux target
@@ -14,7 +14,8 @@ Every channel is delivered aligned at its decision step t (DRIVEDIT_INTERFACES s
 itself (frame f is conditioned on ``action_cmd[f-1]`` and ``state[f-1]``). So each requested input channel must be
 an input of ``role`` at offset 0 (``FeatureSpec.access``): C24 forbidden names, aux targets, eval_only channels and
 the policy's history-only actions are refused here. Each aux name must be a target of ``role``. A non-finite value in
-an input channel raises, except the empty action_exec entries past P_t+1 (whole entries of NaN, ``EMPTY_ENTRIES``);
+an input channel raises, except the empty action_exec entries past P_t+1 (entries that are all NaN, never inf:
+``EMPTY_ENTRIES``);
 aux targets keep NaN, which the loss masks. ``masks`` rides along for the loss (never an
 input). A build-scoped channel (``action_exec``) is never pooled across build_keys (features_v1 rules).
 
@@ -88,18 +89,18 @@ class LatentWindowDataset(Dataset[dict[str, torch.Tensor]]):
         window = self.index[i]
         latents = self._latents[window.shard.session_id]
         valid = np.array(latents.valid[window.start : window.stop], dtype=np.bool_)
+        if not valid.all():  # Shard and Latents guarantee an image at every segment step
+            raise ShardError(f"{_where(window)}: a latent row inside the window is not valid")
         x = self.stats.normalise(np.asarray(latents.latents[window.start : window.stop]))
-        x[~valid] = 0.0
         item = {"latents": torch.from_numpy(x), "valid": torch.from_numpy(valid)}
         for name in self.channels:
             values = window.take(name).astype(np.float32)
-            finite = np.isfinite(values)
             if name in EMPTY_ENTRIES:
-                # an entry is empty (all NaN) or whole; the empty ones pass through for the model to mask
-                entries = finite.reshape(*finite.shape[:2], -1)
-                ok = bool((entries.all(axis=-1) | ~entries.any(axis=-1)).all())
+                # an entry is whole (all finite) or empty (all NaN); the empty ones pass through for the model to mask
+                entries = values.reshape(*values.shape[:2], -1)
+                ok = bool((np.isfinite(entries).all(axis=-1) | np.isnan(entries).all(axis=-1)).all())
             else:
-                ok = bool(finite.all())
+                ok = bool(np.isfinite(values).all())
             if not ok:
                 raise ValueError(f"{_where(window)}: {name} is not finite inside the window")
             item[name] = torch.from_numpy(values)

@@ -181,10 +181,11 @@ def skip_space(text, index):
 
 
 def scan_top_level_keys(text):
-    """DC_NoiseConfig.ScanTopLevelKeys, statement for statement: (params_at, misspelt); ConfigError when
-    "perturb_params" is a top-level key twice."""
+    """DC_NoiseConfig.ScanTopLevelKeys, statement for statement: (params_at, misspelt); ConfigError when "perturb" or
+    "perturb_params" is a top-level key twice or a top-level key holds a backslash escape."""
     params_at, misspelt = -1, ""
     length, depth, index = len(text), 0, 0
+    profile_seen = False
     while index < length:
         code = text[index]
         if code in "{[":
@@ -195,8 +196,10 @@ def scan_top_level_keys(text):
             index += 1
             continue
         close = index + 1
+        escaped = False
         while close < length and text[close] != '"':
             if text[close] == "\\":
+                escaped = True
                 close += 1
             close += 1
         if close >= length:
@@ -204,12 +207,16 @@ def scan_top_level_keys(text):
         after = skip_space(text, close + 1)
         key_length = close - index - 1
         is_key = depth == 1 and after < length and text[after] == ":"
+        if is_key and escaped:
+            raise ConfigError("a top-level key with a backslash escape")
         if is_key and key_length >= len("perturb"):
             head = text[index + 1:index + 1 + min(key_length, 64)]
             is_profile = key_length == len("perturb") and head == "perturb"
             is_params = key_length == len("perturb_params") and head == "perturb_params"
-            if is_params and params_at >= 0:
-                raise ConfigError("perturb_params is a top-level key twice")
+            if (is_params and params_at >= 0) or (is_profile and profile_seen):
+                raise ConfigError("%s is a top-level key twice" % head)
+            if is_profile:
+                profile_seen = True
             if is_params:
                 params_at = skip_space(text, after + 1)
             elif not is_profile and head.startswith("perturb") and not misspelt:
@@ -347,10 +354,14 @@ class ConfigStub:
 
 
 def enforce_noise_classes(source):
-    """DC_NoiseRng and DC_Noise of the source, translated statement for statement (tests/enforce_subset.py)."""
+    """DC_NoiseRng and DC_Noise of the source, translated statement for statement (tests/enforce_subset.py); the
+    field types of DC_HLCommand (DC_StreamRecorder.c) and DC_NoiseInput, which DC_Noise stores into, come from their
+    Enforce declarations."""
+    fields = {"DC_HLCommand": enforce_subset.class_field_types(read(RECORDER_SOURCE), "DC_HLCommand"),
+              "DC_NoiseInput": enforce_subset.class_field_types(source, "DC_NoiseInput"), "DC_NoiseConfig": {}}
     return enforce_subset.translate(source, ["DC_NoiseRng", "DC_Noise"],
                                     externals={"DC_NoiseConfig": ConfigStub, "DC_HLCommand": Cmd,
-                                               "DC_NoiseInput": NoiseInput})
+                                               "DC_NoiseInput": NoiseInput}, external_fields=fields)
 
 
 class Pilot:
@@ -646,8 +657,9 @@ class NoisePilotTest(unittest.TestCase):
         """Codex round 2: the translator computed in doubles and wrapped ints only at stores. Now every float value is
         binary32 and every int operation wraps: Math.Round(1.3 / 0.2) is 6 (the binary32 quotient 6.4999995 is below
         6.5; in doubles it is 6.5, which half-away rounding makes 7), (2147483647 + 1) / 2 is -1073741824, 1 << 31 is
-        -2147483648. DC_Noise.Steps uses Math.Floor(x + 0.5), so it never depends on Math.Round's tie rule
-        (undocumented on 1.8): Steps(1.3) is floor(6.4999995 + 0.5 = 6.9999995) = 6, as numpy's float32 computes it."""
+        -2147483648. DC_Noise.Steps rounds by comparing the exact fractional part with 0.5 (never Math.Round, whose
+        tie rule 1.8 does not document, nor floor(x + 0.5), which turns 0.4999999702 into 1 in binary32: Codex round
+        3): Steps(1.3) = 6 and Steps(0.099999994) = 0, as numpy's float32 computes them."""
         import numpy
         probe = enforce_subset.translate("""
 class DC_ArithProbe
@@ -687,13 +699,72 @@ class DC_ArithProbe
         noise = enforce_noise_classes(self.source)["DC_Noise"]()
         noise.Init(ConfigStub(self.defaults), DECISION_DT, 0.2, 1.5, 4.0, 1.0 / 3.6)
         f = numpy.float32
-        want = int(numpy.floor(f(f(1.3) / f(DECISION_DT)) + f(0.5)))
-        self.assertEqual((noise.Steps(1.3), want), (6, 6))
-        for seconds in (0.5, 1.0, 1.5, 2.5, 3.0, 8.0, 20.0, 0.1, 0.3, 0.7, 2.3):
-            self.assertEqual(noise.Steps(seconds), int(numpy.floor(f(f(seconds) / f(DECISION_DT)) + f(0.5))), seconds)
+
+        def nearest_half_up(seconds):
+            q = f(f(seconds) / f(DECISION_DT))
+            if not q > 0:
+                return 0
+            whole = numpy.floor(q)
+            return int(whole) + (1 if f(q - whole) >= f(0.5) else 0)
+
+        self.assertEqual((noise.Steps(1.3), nearest_half_up(1.3)), (6, 6))
+        tiny = 0.099999994
+        self.assertEqual(float(f(f(tiny) / f(DECISION_DT))), 0.4999999701976776)
+        self.assertEqual(float(f(f(f(tiny) / f(DECISION_DT)) + f(0.5))), 1.0)       # why floor(x + 0.5) was wrong
+        self.assertEqual((noise.Steps(tiny), nearest_half_up(tiny)), (0, 0))
+        for seconds in (0.5, 1.0, 1.5, 2.5, 3.0, 8.0, 20.0, 0.1, 0.3, 0.7, 2.3, 0.0, -1.0, 0.299999982, 1e-7):
+            self.assertEqual(noise.Steps(seconds), nearest_half_up(seconds), seconds)
         self.assertNotIn("Math.Round", code_only(class_text(self.source, "DC_Noise")))
         steps = flat(method_body(self.source, "DC_Noise", "Steps"))
-        self.assertIn("int steps = Math.Floor(seconds / m_fDecisionDtS + 0.5);", steps)
+        self.assertIn("float quotient = seconds / m_fDecisionDtS; if (!(quotient > 0)) return 0; float whole = "
+                      "Math.Floor(quotient); int steps = whole; if (quotient - whole >= 0.5) steps++; return steps;",
+                      steps)
+
+    def test_translator_stores_convert(self):
+        """Codex round 3: a store to an object's field or into an array kept the stored value's type, so
+        `b.x = 1; b.x / 3` and `a.Insert(1); a[0] / 3` with float x and array<float> gave 0.0. Now every store
+        converts to its destination type (the field types of other classes come from their declarations), and a
+        store whose destination type is unknown is refused."""
+        probe = enforce_subset.translate("""
+class DC_StoreProbe
+{
+	float x;
+	ref array<int> m_aCounts = {};
+
+	float Member()
+	{
+		DC_StoreProbe b = new DC_StoreProbe();
+		b.x = 1;
+		return b.x / 3;
+	}
+
+	float Element()
+	{
+		array<float> a = {};
+		a.Insert(1);
+		return a[0] / 3;
+	}
+
+	int Counts()
+	{
+		m_aCounts.Insert(2.9);
+		m_aCounts[0] = m_aCounts[0] + 0.5;
+		return m_aCounts[0];
+	}
+}
+""", ["DC_StoreProbe"])["DC_StoreProbe"]()
+        third = enforce_subset.f32(1.0 / 3.0)
+        self.assertEqual((probe.Member(), probe.Element(), probe.Counts()), (third, third, 2))
+        with self.assertRaises(enforce_subset.TranslateError):
+            enforce_subset.translate("class DC_StoreProbe\n{\n\tvoid Set(DC_Other o)\n\t{\n\t\to.y = 1;\n\t}\n}\n",
+                                     ["DC_StoreProbe"], externals={"DC_Other": object})
+        # DC_Noise's own stores into DC_HLCommand convert by DC_HLCommand's declared field types
+        fields = enforce_subset.class_field_types(read(RECORDER_SOURCE), "DC_HLCommand")
+        self.assertEqual(fields, {"m_fKappa": "float", "m_fAccel": "float", "m_iDir": "int", "m_bNoise": "bool",
+                                  "m_iNoiseId": "int"})
+        program = enforce_noise_classes(self.source)["__program__"]
+        self.assertIn("applied.m_iDir = _int(0)", program)
+        self.assertIn("applied.m_fAccel = _float(self.m_fAmplitude)", program)
 
     def test_initializers_are_translated_whole(self):
         """Codex round 2: `int x = true ? 7 : 9;` as a member initializer translated to x = 1. Every initializer
@@ -966,7 +1037,9 @@ class DC_ArithProbe
         keys = flat(method_body(self.source, "DC_NoiseConfig", "ScanTopLevelKeys"))
         for statement in ("if (code == CHAR_OBJECT_OPEN || code == DC_JsonScan.CHAR_OPEN) depth++; else if (code == "
                           "CHAR_OBJECT_CLOSE || code == DC_JsonScan.CHAR_CLOSE) depth--;",
-                          "if (rawText.ToAscii(close) == CHAR_BACKSLASH) close++; close++;",
+                          "if (rawText.ToAscii(close) == CHAR_BACKSLASH) { escaped = true; close++; } close++;",
+                          "if (isKey && escaped) { failure =",
+                          "if ((isParams && paramsAt >= 0) || (isProfile && profileSeen)) {",
                           "bool isKey = depth == 1 && after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON;",
                           "if (isParams) paramsAt = DC_JsonScan.SkipSpace(rawText, after + 1);"):
             self.assertIn(statement, keys)
@@ -992,6 +1065,20 @@ class DC_ArithProbe
         self.assertEqual(read_config(self.table, nested_only)[2], None)
         with self.assertRaises(ConfigError):         # a top-level perturb_params twice
             read_config(self.table, t0l % ', "perturb": "pilot_v1", "perturb_params": {}, "perturb_params": {}')
+        # Codex round 3: an escaped top-level key is the same JSON key as its plain spelling, so it is refused, not
+        # compared as written (which silently kept the default gap with a profile, or called it misspelt)
+        for extra in (', "perturb": "pilot_v1", "\\u0070erturb_params": {"gap_mean_s": 400}',
+                      ', "perturb": "pilot_v1", "perturb_params": {}, "perturb_param\\u0073": {"gap_mean_s": 400}',
+                      ', "perturb_param\\u0073": {"gap_mean_s": 4}', ', "no\\u0074e": "x"'):
+            conf = t0l % extra
+            self.assertTrue(json.loads(conf))                                     # valid JSON
+            with self.assertRaises(ConfigError, msg=extra):
+                read_config(self.table, conf)
+        self.assertEqual(json.loads(t0l % ', "\\u0070erturb_params": {}'), json.loads(t0l % ', "perturb_params": {}'))
+        # a duplicated perturb key: which one a JSON loader keeps is not defined
+        for dup in (', "perturb": "none", "perturb": "pilot_v1"', ', "perturb": "pilot_v1", "perturb": "pilot_v1"'):
+            with self.assertRaises(ConfigError, msg=dup):
+                read_config(self.table, t0l % dup)
         typo = t0l % ', "perturbs": "pilot_v1"'
         self.assertEqual(read_config(self.table, typo)[0::3], ("none", "perturbs"))         # warned, mode E
         with self.assertRaises(ConfigError):

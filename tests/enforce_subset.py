@@ -147,13 +147,31 @@ def bitnot(a):
 
 
 class EArray(list):
-    """array<T>."""
+    """array<T>: every stored value (initializer, Insert, Copy, element store) is converted to T when T is int or
+    float, as an Enforce store converts to its destination type."""
+
+    def __init__(self, items=(), element=None):
+        self.element = element
+        list.__init__(self, [self.convert(v) for v in items])
+
+    def convert(self, v):
+        if self.element == "int":
+            return to_int(v)
+        if self.element == "float":
+            return to_float(v)
+        return v
+
+    def __setitem__(self, index, value):
+        if isinstance(index, slice):
+            list.__setitem__(self, index, [self.convert(v) for v in value])
+        else:
+            list.__setitem__(self, index, self.convert(value))
 
     def Count(self):
         return len(self)
 
     def Insert(self, v):
-        self.append(v)
+        self.append(self.convert(v))
         return len(self) - 1
 
     def Clear(self):
@@ -166,7 +184,7 @@ class EArray(list):
             return -1
 
     def Copy(self, other):
-        self[:] = list(other)
+        self[:] = list(other)            # __setitem__ converts
         return len(self)
 
     def IsEmpty(self):
@@ -309,8 +327,9 @@ def tokenize(text):
 
 
 class Scope:
-    def __init__(self, fields, methods, classes, statics):
+    def __init__(self, fields, methods, classes, statics, class_fields=None):
         self.fields, self.methods, self.classes, self.statics = fields, methods, classes, statics
+        self.class_fields = class_fields or {}      # class name -> {field: declared type}
         self.locals = [{}]
 
     def push(self):
@@ -523,7 +542,7 @@ class MethodTranslator:
             if self.peek()[1] == ",":
                 self.take()
         self.take("}")
-        return "EArray([%s])" % ", ".join(items)
+        return "EArray([%s], %r)" % (", ".join(items), element)
 
     @staticmethod
     def default(typ):
@@ -548,16 +567,27 @@ class MethodTranslator:
         return value
 
     def target_type(self, target_tokens):
-        """The declared type of an assignment target: a local, a field, an element of an int / float array."""
-        names = [v for k, v in target_tokens if k == "id"]
-        if len(target_tokens) == 1:
-            name = names[0]
-            return self.scope.local_type(name) or self.field_types.get(name)
-        if target_tokens and target_tokens[-1][1] == "]" and names:
-            typ = self.scope.local_type(names[0]) or self.field_types.get(names[0])
-            if typ and typ.startswith("array<"):
-                return typ[6:-1]
-        return None
+        """The declared type of an assignment target: a local or a field (name), a field of an object of a known
+        class (name.field...), an element of an array (name[...]). Any other target, or a field of a class whose
+        fields are not known, is refused: a store must convert to its destination type."""
+        values = [v for _, v in target_tokens]
+        if not target_tokens or target_tokens[0][0] != "id":
+            raise TranslateError("store to %s" % " ".join(values))
+        typ = self.scope.local_type(values[0]) or self.field_types.get(values[0])
+        if len(values) == 1:
+            return typ
+        if values[1] == "[" and values[-1] == "]" and typ and typ.startswith("array<"):
+            return typ[6:-1]
+        k = 1
+        while k < len(values) and values[k] == "." and k + 1 < len(values):
+            fields = self.scope.class_fields.get(typ)
+            if fields is None or values[k + 1] not in fields:
+                raise TranslateError("store to %s: the fields of %s are not known" % (" ".join(values), typ))
+            typ = fields[values[k + 1]]
+            k += 2
+        if k != len(values):
+            raise TranslateError("store to %s is not translated" % " ".join(values))
+        return typ
 
     def simple(self, *stops):
         """An expression statement: an assignment (= += -= *= /=), ++ / --, or a call."""
@@ -797,35 +827,49 @@ def parse_params(tokens):
     return params
 
 
-def translate(source, class_names, externals=None):
-    """{class name: Python class} of the given Enforce classes of source (one module, in order)."""
+def class_text_of(code, cls):
+    """The body (between its braces) of class cls in comment-free code."""
+    m = re.search(r"\nclass %s(?:\s*:\s*\w+)?\s*\{" % cls, "\n" + code)
+    if not m:
+        raise TranslateError("no class %s" % cls)
+    start = m.end()
+    depth, j = 1, start
+    body = "\n" + code
+    while depth:
+        if body[j] == "{":
+            depth += 1
+        elif body[j] == "}":
+            depth -= 1
+        elif body[j] == '"':
+            j = re.compile(r'"(?:\\.|[^"\\])*"').match(body, j).end() - 1
+        j += 1
+    return body[start:j - 1]
+
+
+def class_field_types(source, cls):
+    """{field: declared type} of an Enforce class of source (for external_fields of translate)."""
+    fields, _ = split_members(tokenize(class_text_of(strip_comments(source), cls)))
+    return {name: typ for name, typ, _, _ in fields}
+
+
+def translate(source, class_names, externals=None, external_fields=None):
+    """{class name: Python class} of the given Enforce classes of source (one module, in order). externals maps the
+    other class names the code uses to Python stand-ins; external_fields gives their {field: type}, which a store to
+    one of their fields needs (without it the store is refused)."""
     externals = dict(externals or {})
     code = strip_comments(source)
-    texts = {}
-    for cls in class_names:
-        m = re.search(r"\nclass %s(?:\s*:\s*\w+)?\s*\{" % cls, "\n" + code)
-        if not m:
-            raise TranslateError("no class %s" % cls)
-        start = m.end()
-        depth, j = 1, start
-        body = "\n" + code
-        while depth:
-            if body[j] == "{":
-                depth += 1
-            elif body[j] == "}":
-                depth -= 1
-            elif body[j] == '"':
-                j = re.compile(r'"(?:\\.|[^"\\])*"').match(body, j).end() - 1
-            j += 1
-        texts[cls] = body[start:j - 1]
-    known_classes = set(class_names) | set(externals) | {"DC_HLCommand", "DC_NoiseInput"}
+    texts = {cls: class_text_of(code, cls) for cls in class_names}
+    known_classes = set(class_names) | set(externals)
+    parsed = {cls: split_members(tokenize(texts[cls])) for cls in class_names}
+    class_fields = dict(external_fields or {})
+    for cls, (fields, _) in parsed.items():
+        class_fields[cls] = {name: typ for name, typ, _, _ in fields}
     out = []
     for cls in class_names:
-        tokens = tokenize(texts[cls])
-        fields, methods = split_members(tokens)
-        field_types = {name: typ for name, typ, _, _ in fields}
+        fields, methods = parsed[cls]
+        field_types = class_fields[cls]
         scope = Scope(set(field_types), set(m[0] for m in methods), known_classes,
-                      set(n for n, _, _, s in fields if s))
+                      set(n for n, _, _, s in fields if s), class_fields)
         lines = ["class %s(object):" % cls]
         for name, typ, init, _ in fields:
             if not init:

@@ -227,7 +227,7 @@ CODECS: Final[Mapping[str, CodecInfo]] = _registry(
             revision="bfd521d77858b5e8d663dbdffb8fa315fe4bc6bf",
             files=("config.json", "model.safetensors", "LICENSE-DINOv3"),
             licence="CC-BY-NC-4.0 + DINOv3 License (frozen DINOv3 ViT-B/16 inside)",
-            code="kyutai-labs/cadre-autoencoders-and-world-models@3b07314 (MIT) + facebookresearch/dinov3@1e358a23",
+            code="drivedit.codec._vendor.cadre (MIT, CADRE @3b07314) + facebookresearch/dinov3@1e358a23 (local)",
         ),
     ),
     CodecInfo(
@@ -238,7 +238,7 @@ CODECS: Final[Mapping[str, CodecInfo]] = _registry(
             revision="5e364c9706aa3de4b0453a4ea0ea544e15bcb6e0",
             files=("config.json", "model.safetensors", "LICENSE-DINOv3"),
             licence="CC-BY-NC-4.0 + DINOv3 License (frozen DINOv3 ViT-B/16 inside)",
-            code="kyutai-labs/cadre-autoencoders-and-world-models@3b07314 (MIT) + facebookresearch/dinov3@1e358a23",
+            code="drivedit.codec._vendor.cadre (MIT, CADRE @3b07314) + facebookresearch/dinov3@1e358a23 (local)",
         ),
     ),
     CodecInfo(

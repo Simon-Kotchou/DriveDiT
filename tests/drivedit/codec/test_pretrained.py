@@ -1,7 +1,8 @@
 """Every registered codec with its real pinned weights on the GPU: conformance, determinism and a reconstruction floor.
 
-Local only. Each case skips without CUDA, without the weights already in the Hugging Face cache (nothing downloads
-here), and for CADRE without the pinned checkout (``DRIVEDIT_CADRE_SRC``). CI has CPU torch and no weights.
+Local only. Each case skips without CUDA, without the weights already in the Hugging Face cache, and for CADRE
+without a verified DINOv3 checkout (``DRIVEDIT_DINOV3_DIR`` or the default directory). Nothing here downloads weights or
+code. CI has CPU torch and no weights.
 
 The PSNR floors only check that the weights loaded into the right places: a wrong mapping or normalisation decodes
 noise (below 12 dB on these frames). They are not a quality measurement; tools/codec/measure_codecs.py measures that,
@@ -10,13 +11,11 @@ and reconstruction never selects a codec (MODELING_PLAN P2).
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
 
 from drivedit.codec.base import CODECS, Codec, codec_ids, get_codec, weights_cached
-from drivedit.codec.cadre import CADRE_SOURCE_ENV
+from drivedit.codec.dinov3 import DinoV3SourceError, dinov3_dir, verify_checkout
 from tests.drivedit.codec.helpers import frames
 
 PSNR_FLOOR_DB = 18.0
@@ -27,8 +26,11 @@ def _skip_reason(codec_id: str) -> str | None:
         return "needs CUDA"
     if not weights_cached(codec_id):
         return f"{CODECS[codec_id].weights.repo_id} is not in the Hugging Face cache"
-    if CODECS[codec_id].module == "cadre" and not os.environ.get(CADRE_SOURCE_ENV):
-        return f"{CADRE_SOURCE_ENV} is not set"
+    if CODECS[codec_id].module == "cadre":
+        try:
+            verify_checkout(dinov3_dir())
+        except DinoV3SourceError as error:
+            return f"no verified DINOv3 checkout: {error}"
     return None
 
 

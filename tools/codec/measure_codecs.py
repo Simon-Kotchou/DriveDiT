@@ -18,13 +18,14 @@ Per codec it reports:
 Every codec also gets a few side-by-side PNGs (original | reconstruction) in ``<out>/<codec_id>/``. The results go to
 ``<out>/measurements.json`` and ``<out>/measurements.md``.
 
-Run it in an environment with CUDA torch and the ``codec`` extra, with HF_HOME and TORCH_HOME on E: and the CADRE
-checkout named by DRIVEDIT_CADRE_SRC (see ``drivedit.codec.cadre``)::
+Run it in an environment with CUDA torch and the ``codec`` extra (``uv sync --extra model --extra cuda --extra codec``),
+with HF_HOME on E:. The CADRE codecs need the verified DINOv3 checkout of ``drivedit.codec.dinov3``
+(``DRIVEDIT_DINOV3_DIR`` or its default directory); it is checked first and never fetched::
 
     python -I -B tools/codec/measure_codecs.py --deriv <session>/_harvest/deriv --out <reports>/codec \\
         --frames 128 --start 1000 --batch 8 --dtype bfloat16
 
-The derivative directory is only read. Weights download on first use unless ``--local-only``.
+The derivative directory is only read. Weights download on first use unless ``--local-only``; code never downloads.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ import torch
 
 from drivedit.codec import CODECS, codec_ids, get_codec
 from drivedit.codec.base import fetch_weights
+from drivedit.codec.dinov3 import dinov3_dir, verify_checkout
 
 # The DiT patch size planned for each arm, so that every arm feeds the probe model about 144 tokens per frame
 # (66 for CADRE-1x48x48): delta-2026-11 §2, candidate table and recommendation.
@@ -226,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("needs a CUDA device")
     if args.frames < CLIP:
         raise SystemExit(f"--frames must be at least {CLIP}")
+    if any(CODECS[codec_id].module == "cadre" for codec_id in args.codecs):
+        verify_checkout(dinov3_dir())  # DinoV3SourceError, naming the fetch command, before any work
     if args.local_only:
         for codec_id in args.codecs:
             fetch_weights(CODECS[codec_id].weights, local_only=True)

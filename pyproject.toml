@@ -38,18 +38,18 @@ model = [
 #   uv sync --extra model --extra cuda   # torch 2.14.1+cu130 from the PyTorch cu130 index, the newest build there.
 #                                        # Verified on the local RTX 3080 Ti under WSL (DD-19, 2026-11-05); PyPI's
 #                                        # 2.15.0+cu132 segfaults at torch.cuda.is_available() there.
-cpu = ["torch>=2.2", "torchvision>=0.29"]
-cuda = ["torch>=2.2", "torchvision>=0.29"]
+cpu = ["torch>=2.2"]
+cuda = ["torch>=2.2"]
 # The frozen pretrained tokenizers of drivedit.codec (DD-19), used together with `model`. Weights are not packages:
 # they download from the Hugging Face Hub at pinned revisions on first use, into HF_HOME. diffusers loads the FLUX.2
-# and Wan2.1 VAEs. CADRE is a pinned source checkout named by DRIVEDIT_CADRE_SRC, not a dependency: its pyproject has
-# no build system (`package = false`) and pins torch==2.8.0. pydantic is its config model; torchvision is imported by
-# the DINOv3 torch.hub entry point CADRE builds its encoder from (hubconf.py imports DINOv3's detection code).
+# and Wan2.1 VAEs. CADRE's autoencoder code is vendored (src/drivedit/codec/_vendor/cadre): pydantic is its config
+# model and safetensors reads its checkpoint. DINOv3's code is a verified local checkout, not a dependency
+# (drivedit.codec.dinov3).
 codec = [
     "diffusers>=0.37",
     "huggingface-hub>=1.32",
     "pydantic>=2.10",
-    "torchvision>=0.29",
+    "safetensors>=0.6",
 ]
 
 [project.scripts]
@@ -72,10 +72,6 @@ conflicts = [
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu130", extra = "cuda" },
-]
-torchvision = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu130", extra = "cuda" },
 ]
@@ -115,3 +111,9 @@ files = ["src/drivedit"]
 mypy_path = "src"
 strict = true
 warn_unreachable = true
+
+[[tool.mypy.overrides]]
+# Vendored third-party code, kept close to upstream (src/drivedit/codec/_vendor): checked, but its own errors are not
+# reported. Calls into it from drivedit are still checked against its annotations.
+module = ["drivedit.codec._vendor.*"]
+ignore_errors = true

@@ -57,14 +57,6 @@ uv run pytest -m torch                 # model tests
 uv run python training/unified_trainer.py
 ```
 
-### Rust Data Pipeline (Optional)
-
-```bash
-cd rust/drivedit-data
-pip install maturin
-maturin develop --release
-```
-
 ## Architecture
 
 ```
@@ -108,8 +100,6 @@ drivedit/
 │   ├── video_chunking.py      # Intelligent video chunking
 │   ├── video_loader.py        # Video dataset loader
 │   ├── large_scale_processing.py  # 100k+ hour dataset processing
-│   ├── enfusion_loader.py     # Enfusion ENFCAP format loader
-│   ├── rust_loader.py         # High-performance Rust data loader
 │   ├── transforms.py          # Video augmentations
 │   └── collate.py             # Batch collation utilities
 │
@@ -158,13 +148,8 @@ drivedit/
 │   ├── process_data.py        # Data processing
 │   └── profile_codebase.py    # Dead code detection & throughput profiling
 │
-└── src/enfusion/        # Enfusion script library (synthetic data)
-    ├── datacapture/           # Data capture components
-    │   ├── SCR_MLDataCollector.c
-    │   ├── SCR_AnchorFrameSelector.c
-    │   ├── SCR_BinarySerializer.c
-    │   └── ...
-    └── navigation/            # Road extraction utilities
+└── src/enfusion/        # Enfusion (Enforce) scripts for synthetic data
+    └── datacapture/           # dc-2.0 capture addon scripts (DC_*.c)
 ```
 
 ## Core Features
@@ -468,22 +453,13 @@ model_dim=768, num_layers=24, num_heads=24
 
 ## Enfusion Data Capture (Synthetic Data)
 
-The `src/enfusion/` directory contains Arma Reforger scripts for synthetic driving data:
+Capture is contract dc-2.0: see [`docs/capture_contract/dc-2.0.md`](docs/capture_contract/dc-2.0.md). The Arma
+Reforger capture addon's scripts are `src/enfusion/datacapture/DC_*.c`; the addon and its deploy manifest are in
+[`addons/DataCapture/`](addons/DataCapture/README.md).
 
-### Components
-- **SCR_MLDataCollector**: Main telemetry capture (CSV/binary)
-- **SCR_AnchorFrameSelector**: Anchor frame selection for Self-Forcing++
-- **SCR_BinarySerializer**: High-performance ENFCAP format
-- **SCR_MultiCameraRig**: Multi-view capture (5-7 cameras)
-- **SCR_DepthRaycaster**: Ground-truth depth generation
-
-### Anchor Frame Triggers
-- `PERIODIC`: Regular interval anchors (default: every 30 seconds)
-- `ROAD_CHANGE`: Road type transitions
-- `JUNCTION`: Intersection approach/exit
-- `STOP/START`: Vehicle stop and restart events
-- `STEERING`: Large steering angle changes
-- `SPEED_CHANGE`: Significant acceleration/deceleration
+The dc-1.0 capture path (the `SCR_*` scripts, the ENFCAP format, the anchor frame selector, the road extractors, the
+in-repo `DriveDiT_DataCapture/` addon) and the Rust workspace (`rust/`) were deleted from main in DD-12. They are kept
+in tag `archive/dc1-rust`; restore a path with `git checkout archive/dc1-rust -- <path>`.
 
 ## References
 

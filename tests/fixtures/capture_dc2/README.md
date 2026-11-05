@@ -61,4 +61,6 @@ the session, so the decoder's unwrap is exercised.
 Legacy self-test: `tests/test_dc2_validate.py` runs `dc_validate --legacy` on sessions 4811, 2702 and 2929 under
 `/mnt/e/DriveDiT/captures/_legacy_DrivingData_C/` when that copy exists. It does not exist yet (TICKETS_UNIFIED
 decision 13 is open), so that test skips. The synthetic dc-1.0 session the other legacy tests use takes its columns
-from the writer source (`SCR_MLDataCollector.c` `WriteTelemetryHeader`), never from an invented schema (CR-109).
+from the writer source, never from an invented schema (CR-109): `make_synthetic.LEGACY_HEADER` is copied verbatim
+from `WriteTelemetryHeader` of the dc-1.0 writer `SCR_MLDataCollector.c`. DD-12 deleted that writer from main; it is
+in tag `archive/dc1-rust`.

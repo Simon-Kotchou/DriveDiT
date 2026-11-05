@@ -1220,22 +1220,27 @@ def image_hz_setting(spec):
 # ------------------------------------------------------------------------------------------------
 # dc-1.0 legacy session (the legacy self-test and the enfusion_preprocessing guard test)
 # ------------------------------------------------------------------------------------------------
-LEGACY_WRITER = os.path.join(REPO, "src", "enfusion", "datacapture", "SCR_MLDataCollector.c")
+# The dc-1.0 telemetry.csv columns in writer order, copied verbatim from WriteTelemetryHeader of the dc-1.0 writer
+# src/enfusion/datacapture/SCR_MLDataCollector.c, so the legacy fixture never invents a schema (CR-109). DD-12 deleted
+# that writer from main; it is kept in tag archive/dc1-rust:
+#     git show archive/dc1-rust:src/enfusion/datacapture/SCR_MLDataCollector.c
+LEGACY_HEADER = (
+    "frame_id", "timestamp_ms",
+    "pos_x", "pos_y", "pos_z",
+    "fwd_x", "fwd_y", "fwd_z",
+    "up_x", "up_y", "up_z",
+    "right_x", "right_y", "right_z",
+    "speed_kmh", "steering", "throttle", "brake", "clutch",
+    "gear", "engine_rpm", "engine_on", "handbrake",
+    "acceleration_kmh_s", "distance_total_m",
+    "waypoint_type", "speed_limit_kmh",
+    "waypoint_idx", "vehicle_id",
+)
 
 
 def legacy_header():
-    """The dc-1.0 telemetry.csv columns, read from the writer's WriteTelemetryHeader (SCR_MLDataCollector.c), so the
-    legacy fixture never invents a schema (CR-109)."""
-    with open(LEGACY_WRITER, "rb") as f:
-        src = f.read().decode("utf-8", errors="replace")
-    start = src.index("bool WriteTelemetryHeader()")
-    stop = src.index("WriteLine(header)", start)
-    text = ""
-    for line in src[start:stop].splitlines():
-        line = line.strip()
-        if line.startswith("string header =") or line.startswith("header +="):
-            text += line.split('"')[1]
-    return text.split(",")
+    """The dc-1.0 telemetry.csv columns (LEGACY_HEADER, from the dc-1.0 writer's WriteTelemetryHeader)."""
+    return list(LEGACY_HEADER)
 
 
 def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, frames_present=(0, 10, 20)):

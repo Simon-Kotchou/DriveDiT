@@ -36,7 +36,8 @@ def test_data_loading(config=None):
     default, so pytest asks for no fixture): it asserts, and run_all_tests turns an exception into a FAIL line.
 
     The invented telemetry.csv this test used to write (to /tmp, on the C: drive here) is gone (CR-109, DD-5-min):
-    it followed no writer's schema, and the legacy EnfusionDataset now refuses a CSV without its columns.
+    it followed no writer's schema, and the legacy telemetry parser (data/enfusion_preprocessing.py) refuses a CSV
+    without its columns.
     """
     print("\n=== Testing Data Loading ===")
     import importlib.util

@@ -93,7 +93,17 @@ class DC_Sha256
 	//! Hex digest of the text's bytes; empty when a character is not 7-bit ASCII (1..127)
 	static string HashText(string text)
 	{
-		int length = text.Length();
+		return HashPrefix(text, text.Length());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Hex digest of the first count characters of text (count clamped to [0, text.Length()]), read in place by
+	//! ToAscii. A prefix is never cut with string.Substring, whose result is at most DC_TextFile.SUBSTRING_MAX_CHARS
+	//! (8191) characters long (string.c:92): a route file is one line of tens of kB. Empty when one of the characters
+	//! is not 7-bit ASCII (1..127)
+	static string HashPrefix(string text, int count)
+	{
+		int length = Math.ClampInt(count, 0, text.Length());
 		array<int> bytes = {};
 		bytes.Reserve(length + 72);
 		for (int i = 0; i < length; i++)
@@ -257,6 +267,11 @@ class DC_Sha256
 //! Whole-file reads of the text inputs of llc_v1 and the expert (vehicle card, route, their own sources)
 class DC_TextFile
 {
+	//! The longest string string.Substring, string.Trim and string.Format return (string.c:92, :106, :119 of 1.8.0.13):
+	//! a longer result is cut there without an error. File text is read whole by FileHandle.Read (not limited for a
+	//! string, FileHandle.c) and never passed through these three; a token cut from it is checked against this bound
+	static const int SUBSTRING_MAX_CHARS = 8191;
+
 	//------------------------------------------------------------------------------------------------
 	//! The first of the comma-separated roots (each ending in '/' or ':') under which fileName exists, joined; empty
 	//! when there is none
@@ -490,6 +505,13 @@ class DC_JsonScan
 			int close = -1;
 			if (Expect(text, index, CHAR_QUOTE, index))
 				close = text.IndexOfFrom(index, "\"");
+
+			// Substring returns at most SUBSTRING_MAX_CHARS characters: a longer item would be cut silently
+			if (close - index > DC_TextFile.SUBSTRING_MAX_CHARS)
+			{
+				failure = string.Format("\"%1\" item %2 is longer than %3 characters", key, values.Count(), DC_TextFile.SUBSTRING_MAX_CHARS);
+				return false;
+			}
 
 			string item;
 			if (close >= 0)

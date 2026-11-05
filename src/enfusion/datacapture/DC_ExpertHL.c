@@ -106,11 +106,14 @@ class DC_Route
 			return false;
 
 		m_sPath = path;
-		string hashed = text;
+		// sha256 of the file without its final LF, hashed in place: string.Substring returns at most
+		// DC_TextFile.SUBSTRING_MAX_CHARS (8191) characters, and a canonical route is one line (arland_t0_loop: 39,692
+		// characters), so a Substring copy hashed only its first 8191 bytes (DD-7, validator C17 on the first session)
+		int hashedLength = text.Length();
 		if (text.EndsWith("\n"))
-			hashed = text.Substring(0, text.Length() - 1);
+			hashedLength--;
 
-		m_sSha256 = DC_Sha256.HashText(hashed);
+		m_sSha256 = DC_Sha256.HashPrefix(text, hashedLength);
 		JsonLoadContext context = new JsonLoadContext(false);
 		if (!context.LoadFromString(text))
 		{

@@ -24,8 +24,8 @@ engine, not by visual quality.
   `core/`, `models/`, `training/`, `inference/`, `evaluation/`, `config/`, `utils/`, `scripts/`, the pre-dc-2.0
   `data/` pipeline and their tests. It is kept in tag `archive/model-2026-03`.
 - **The dc-1.0 capture path and the Rust workspace** are kept in tag `archive/dc1-rust`.
-- Restore an archived path with `git checkout <tag> -- <path>`. Treat archived code as reference only: none of it
-  reads dc-2.0 data.
+- Restore an archived path with `git checkout <tag> -- <path>`. Treat archived code as reference only: the removed
+  model training stack does not consume dc-2.0 data.
 
 ## Layout
 

@@ -63,7 +63,3 @@ dist/
 build/
 *.egg
 .pytest_cache/
-
-# Rust
-rust/target/
-rust/*/target/

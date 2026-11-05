@@ -9,7 +9,9 @@
 
 A shard is the directory ``drivedit.data.build`` writes (DRIVEDIT_INTERFACES section 2). Its arrays are opened as
 read-only memmaps; ``Shard(path)`` checks every array file against the sha256 in ``meta.json`` first (``verify``), and
-that every segment step is wm-valid, after the warm-up and has an image (slot_id >= 0).
+that every segment step is wm-valid, after the warm-up and has an image (slot_id >= 0). Every file a shard or its
+latents are read from must be a regular file, not a symlink, directly inside its own directory, and the latents
+directory must not be a symlink.
 ``Shard.latents(codec_id)`` opens ``<root>/<session_id>/latents/<codec_id>/`` (section 3), the latents of
 ``drivedit.codec``'s pre-encoder, aligned to ``slot_id.npy``.
 
@@ -75,9 +77,21 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _read_meta(path: Path, schema: str) -> dict[str, Any]:
+def _regular_file(path: Path, directory: Path) -> Path:
+    """``path`` when it is a regular file, not a symlink, that resolves directly inside ``directory`` (a resolved
+    shard or latents directory); ShardError otherwise. Integrity, not a sealed-data rule: every file a shard or its
+    latents are read from is the shard's own."""
+    if path.is_symlink():
+        raise ShardError(f"{path} is a symlink; a shard reads only its own regular files")
     if not path.is_file():
-        raise ShardError(f"{path} not found")
+        raise ShardError(f"{path} not found or not a regular file")
+    if path.resolve().parent != directory:
+        raise ShardError(f"{path} resolves outside {directory}")
+    return path
+
+
+def _read_meta(path: Path, schema: str) -> dict[str, Any]:
+    path = _regular_file(path, path.parent.resolve())
     meta = json.loads(path.read_text("utf-8"))
     if not isinstance(meta, dict) or meta.get("schema") != schema:
         raise ShardError(f"{path}: schema {meta.get('schema') if isinstance(meta, dict) else None!r} is not {schema}")
@@ -134,7 +148,7 @@ class Shard:
                 missing = self.meta.get("missing", {})
                 why = f": {missing[name]}" if name in missing else ""
                 raise ShardError(f"{self.path} has no array {name!r}{why}")
-            array = np.load(self.path / str(info["file"]), mmap_mode="r", allow_pickle=False)
+            array = np.load(_regular_file(self.path / str(info["file"]), self.path), mmap_mode="r", allow_pickle=False)
             if list(array.shape) != list(info["shape"]) or str(array.dtype) != str(info["dtype"]):
                 raise ShardError(
                     f"{self.path}/{info['file']}: shape {array.shape} {array.dtype}, meta.json says "
@@ -146,9 +160,7 @@ class Shard:
     def verify(self) -> None:
         """Check every array file against the sha256 in meta.json; ShardError names the first mismatch."""
         for name, info in sorted(self.meta["arrays"].items()):
-            path = self.path / str(info["file"])
-            if not path.is_file():
-                raise ShardError(f"{path} is missing")
+            path = _regular_file(self.path / str(info["file"]), self.path)
             if _sha256(path) != info["sha256"]:
                 raise ShardError(f"{path}: sha256 differs from meta.json ({name})")
 
@@ -226,6 +238,12 @@ class Latents:
         self.shard = shard
         self.codec_id = codec_id
         self.path = shard.path.parent / "latents" / codec_id
+        for d in (self.path.parent, self.path):
+            if d.is_symlink():
+                raise ShardError(f"{d} is a symlink; latents are read only from the shard's own directory")
+        if not self.path.is_dir():
+            raise ShardError(f"{self.path} not found")
+        self.path = self.path.resolve()
         self.meta = _read_meta(self.path / META_NAME, LATENTS_SCHEMA)
         if self.meta.get("codec_id") != codec_id:
             raise ShardError(f"{self.path}: meta.json codec_id {self.meta.get('codec_id')!r} is not {codec_id}")
@@ -244,8 +262,8 @@ class Latents:
             raise ShardError(f"{self.path}: valid.npy differs from slot_id >= 0; not aligned to slot_id.npy")
 
     def _open(self) -> None:
-        self.latents = np.load(self.path / "latents.npy", mmap_mode="r", allow_pickle=False)
-        self.valid = np.load(self.path / "valid.npy", mmap_mode="r", allow_pickle=False)
+        self.latents = np.load(_regular_file(self.path / "latents.npy", self.path), mmap_mode="r", allow_pickle=False)
+        self.valid = np.load(_regular_file(self.path / "valid.npy", self.path), mmap_mode="r", allow_pickle=False)
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)

@@ -22,6 +22,10 @@ dependencies = [
     "opencv-python-headless>=4.10.0.82,<4.11",
 ]
 
+[project.scripts]
+dd-encode = "drivedit.codec.encode:main"   # latent pre-encoder (DD-19); needs the model and codec extras
+dd-train = "drivedit.train.cli:main"     # world-model training (DD-20); needs the model extra
+
 [project.optional-dependencies]
 # The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras
 # are kept for the model package that replaces it. Until then only tests/test_torch_smoke.py uses them.
@@ -51,9 +55,6 @@ codec = [
     "pydantic>=2.10",
     "safetensors>=0.6",
 ]
-
-[project.scripts]
-dd-encode = "drivedit.codec.encode:main"   # latent pre-encoder (DD-19); needs the model and codec extras
 
 [dependency-groups]
 dev = [

@@ -67,6 +67,17 @@ class SecretScanTest(unittest.TestCase):
         for ok in ("/home/x/play_01", "/home/<name>/", "~/home/", "/homebrew/"):
             self.assertEqual(kinds(ok), [], ok)
 
+    def test_bare_home_path(self):
+        # The account name alone, with no child path, ends at a quote, space, separator or the end of the line.
+        name = "jd" + "oe"
+        for bad in ("/home/" + name, "HOME=/home/" + name, '"/home/' + name + '"', "'/home/" + name + "',",
+                    "/home/" + name + ":/bin/bash", "dirs: [/home/" + name + "]", "(/home/" + name + ")",
+                    "at /home/" + name + ".", "/home/" + "john.doe"):
+            self.assertEqual(kinds(bad), ["home-path"], bad)
+        for ok in ("/home/x", "/home/x.json", '"/home/<name>"', "/home/$USER", "/home/${USER}", "/home/",
+                   "/homepage", "$ROOT/home/.npmrc", "a/home/" + name):
+            self.assertEqual(kinds(ok), [], ok)
+
     def test_allowlist_is_path_specific(self):
         line = "/home/" + "drivedit/app"
         self.assertEqual(kinds(line, "Dockerfile"), [])
@@ -117,6 +128,11 @@ class SecretScanFileTest(unittest.TestCase):
     def test_utf16_without_bom(self):
         for enc in ("utf-16-le", "utf-16-be"):
             self.assert_found(self.write("nobom_%s.txt" % enc, ("mail " + self.email + "\n").encode(enc)), "email")
+
+    def test_bare_home_path_in_a_file(self):
+        rc, out = scan_files(self.write("env.txt", ("HOME=/home/" + "jd" + "oe\n").encode()))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(": home-path: ", out)
 
     def test_binary_without_text_is_clean(self):
         data = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 16 + b"\0" * 64

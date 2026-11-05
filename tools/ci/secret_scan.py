@@ -6,7 +6,7 @@ Flags, in every git-tracked text file (default) or in the files named on the com
   steam64       Steam64 account ids: 7656119 followed by 10 digits
   email         e-mail addresses, except noreply ones (noreply@anthropic.com, GitHub noreply addresses)
   win-profile   Windows profile paths: C:\\Users\\<name>, C:/Users/<name>, /mnt/c/Users/<name>
-  home-path     Linux home paths: /home/<name>/
+  home-path     Linux home paths: /home/<name>, with or without a child path
 
 The patterns are generic on purpose: this file names no real account, host or address. Matches are
 printed redacted (kind, file, line, first characters only) so a CI log never repeats what it found.
@@ -34,7 +34,8 @@ PATTERNS = {
     "steam64": re.compile(r"(?<!\d)7656119\d{10}(?!\d)"),
     "email": re.compile(r"(?<![\w.%+-])[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
     "win-profile": re.compile(r"(?i)(?:\b[A-Z]:[\\/]+|/mnt/[a-z]/)Users[\\/]+(?P<name>[^\\/\s\"'`<>|:*?]+)"),
-    "home-path": re.compile(r"(?<![\w.~-])/home/(?P<name>[^/\s\"'`<>|:*?]+)/"),
+    # The name ends at "/" or at a quote, space, separator or bracket, or at the end of the line (a bare /home/<name>).
+    "home-path": re.compile(r"(?<![\w.~-])/home/(?P<name>[^/\s\"'`<>|:*?,;=()\[\]]+)"),
 }
 
 # E-mail addresses that are public by design.
@@ -101,6 +102,13 @@ def read_text(path: str) -> tuple[str, str] | None:
     return data.decode("utf-8", "replace"), ""
 
 
+def is_placeholder(name: str) -> bool:
+    """A placeholder account name, also when a sentence full stop or a file extension follows it (/home/x.json)."""
+    stripped = name.rstrip(".")
+    candidates = (name, stripped, re.sub(r"\.\w+$", "", stripped))
+    return any(c and PLACEHOLDER_NAMES.match(c) for c in candidates)
+
+
 def redact(s: str) -> str:
     return s[:4] + "..." if len(s) > 4 else s[:1] + "..."
 
@@ -113,7 +121,7 @@ def findings(path: str, text: str):
                 if kind == "email" and (ALLOWED_EMAILS.match(hit) or RESERVED_EMAIL_DOMAIN.search(hit)):
                     continue
                 name = m.groupdict().get("name")
-                if name is not None and (PLACEHOLDER_NAMES.match(name) or (path, kind, name) in ALLOWLIST):
+                if name is not None and (is_placeholder(name) or (path, kind, name) in ALLOWLIST):
                     continue
                 yield lineno, kind, hit
 

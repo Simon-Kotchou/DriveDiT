@@ -6,3 +6,7 @@ extend = "../ruff.toml"
 
 [lint.per-file-ignores]
 "torch.py" = ["TID251"]
+
+# isort would take `import torch` inside data/torch.py for a first-party import of that module itself.
+[lint.isort]
+known-third-party = ["torch"]

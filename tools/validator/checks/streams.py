@@ -136,10 +136,11 @@ def check_c07(ctx):
     hl_dir) changes only together with that increment or at an episode boundary. The disturbance of the held command
     (dc-2.0 9.1 noise_active / noise_id, DD-7-ident) follows the same boundary: noise_active 1 exactly when noise_id
     >= 0 (-1 when none), only on a row that holds a command of a mode-N episode (ctl.mode N, episodes.mode N); the
-    pair changes only together with an hl_seq increment or at an episode boundary; every disturbance id has one
-    perturb_start and one perturb_end (payload noise_id) in its episode, start before end, and its rows are exactly
-    the rows after the start's decision callback through the end's (R-01: the command decided at C_t applies from
-    P_t + 1). 0 violations."""
+    pair changes only together with an hl_seq increment or at an episode boundary; per episode, every disturbance id
+    has one perturb_start and one perturb_end (payload noise_id; ids need not be unique across episodes, dc-2.0 9.1
+    does not say so), the episode exists in episodes and is mode N, the start lies before the end and both inside
+    the episode's steps, and the id's rows are exactly the episode's rows after the start's decision callback
+    through the end's (R-01: the command decided at C_t applies from P_t + 1). 0 violations."""
     if ctx.load_error:
         return unreadable(ctx, "C07")
     s = ctx.session
@@ -313,7 +314,9 @@ def _noise_boundary(s):
     if held_bad:
         issues.append("ctl noise_active/noise_id change inside a decision interval at %d row(s): %s"
                       % (len(held_bad), first(held_bad, 4)))
-    # the perturb events: one start and one end per id, in its episode; the id's rows are (start step, end step]
+    # the perturb events, per (episode, noise_id): one start and one end in an existing mode-N episode, inside its
+    # steps; the id's rows of that episode are exactly (start step, end step]
+    episode_steps = dict(zip(eps.col("episode_id"), zip(eps.col("start_physics_step"), eps.col("end_physics_step"))))
     marks = {}
     for kind, step, episode, payload in zip(ev.col("kind"), ev.col("physics_step"), ev.col("episode_id"),
                                             ev.col("payload")):
@@ -323,32 +326,42 @@ def _noise_boundary(s):
         if noise_id is None or noise_id < 0:
             issues.append("events: %s without a noise_id >= 0 in its payload (%r)" % (kind, payload))
             continue
-        marks.setdefault(noise_id, {}).setdefault(kind, []).append((step, episode))
+        marks.setdefault((episode, noise_id), {}).setdefault(kind, []).append(step)
     rows = {}
     for i in range(len(steps)):
         if active[i] and nid[i] is not None and nid[i] >= 0:
-            rows.setdefault(nid[i], []).append((steps[i], ep[i]))
+            rows.setdefault((ep[i], nid[i]), []).append(steps[i])
     window_bad = []
-    for noise_id in sorted(set(marks) | set(rows)):
-        m = marks.get(noise_id, {})
+    for episode, noise_id in sorted(set(marks) | set(rows), key=lambda k: (k[0] if k[0] is not None else -2, k[1])):
+        name = "episode %s noise_id %d" % (episode, noise_id)
+        m = marks.get((episode, noise_id), {})
         starts, ends = m.get("perturb_start", []), m.get("perturb_end", [])
         if len(starts) != 1 or len(ends) != 1:
-            window_bad.append("noise_id %d has %d perturb_start and %d perturb_end" % (noise_id, len(starts),
-                                                                                       len(ends)))
+            window_bad.append("%s has %d perturb_start and %d perturb_end" % (name, len(starts), len(ends)))
             continue
-        (start, start_ep), (end, end_ep) = starts[0], ends[0]
-        if not start < end or start_ep != end_ep or start_ep is None or start_ep < 0:
-            window_bad.append("noise_id %d: perturb_start at step %s (episode %s) is not before its perturb_end at "
-                              "step %s in the same episode (%s)" % (noise_id, start, start_ep, end, end_ep))
+        start, end = starts[0], ends[0]
+        if episode not in episode_steps:
+            window_bad.append("%s: its perturb events name an episode that the episodes stream does not have" % name)
             continue
-        want = [k for k, e in zip(steps, ep) if start < k <= end and e == start_ep]
-        have = [k for k, _ in rows.get(noise_id, [])]
-        if have != want:
+        if episode_mode.get(episode) != NOISE_MODE:
+            window_bad.append("%s: its episode is mode %s, not %s" % (name, episode_mode.get(episode), NOISE_MODE))
+            continue
+        first_step, last_step = episode_steps[episode]
+        if not (first_step <= start < end <= last_step):
+            window_bad.append("%s: perturb_start at step %s and perturb_end at step %s are not ordered inside the "
+                              "episode's steps %s..%s" % (name, start, end, first_step, last_step))
+            continue
+        want = [k for k, e in zip(steps, ep) if start < k <= end and e == episode]
+        have = rows.get((episode, noise_id), [])
+        if not want:
+            window_bad.append("%s: no ctl row lies after perturb_start (step %d) through perturb_end (step %d)"
+                              % (name, start, end))
+        elif have != want:
             extra = sorted(set(have) - set(want))
             missing = sorted(set(want) - set(have))
-            window_bad.append("noise_id %d: its rows are not exactly the rows after perturb_start (step %d) through "
+            window_bad.append("%s: its rows are not exactly the rows after perturb_start (step %d) through "
                               "perturb_end (step %d): %d outside %s, %d missing %s" % (
-                                  noise_id, start, end, len(extra), first(extra, 3), len(missing), first(missing, 3)))
+                                  name, start, end, len(extra), first(extra, 3), len(missing), first(missing, 3)))
     if window_bad:
         issues.append("perturbation windows: %s" % first(window_bad, 3))
     return issues

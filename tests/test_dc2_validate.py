@@ -1883,6 +1883,70 @@ class NoisePilotTest(unittest.TestCase):
         self.assertEqual(by_id(rep)["C07"]["status"], "FAIL")
         self.assertIn("0 perturb_end", by_id(rep)["C07"]["detail"])
 
+    def test_c07_refuses_an_orphan_window(self):
+        """Codex round 2: disturbance 0's active rows cleared and its perturb events moved to episode 999 (which does
+        not exist) passed every check, the expected and observed rows both empty. Now the window's episode must
+        exist and be mode N, and the window must hold rows."""
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ev = s.streams["events"]
+        marks = [q for q, kind, payload in zip(ev.col("event_seq"), ev.col("kind"), ev.col("payload"))
+                 if kind in ("perturb_start", "perturb_end") and payload.startswith("noise_id=0;")]
+        self.assertEqual(len(marks), 2)
+        dst = os.path.join(self.tmp, "orphan", os.path.basename(self.session))
+        shutil.copytree(self.session, dst)
+        set_column(dst, "ctl", "noise_id", lambda k, v: "-1" if v == "0" else v)
+        ids = dict(zip(s.streams["ctl"].col("physics_step"), s.streams["ctl"].col("noise_id")))
+        set_column(dst, "ctl", "noise_active", lambda k, v: "0" if ids.get(k) == 0 else v)
+        set_column(dst, "events", "episode_id", lambda k, v: "999" if k in marks else v)
+        code, rep = run_json("--session", dst, "--routes-dir", self.routes, "--vehicle-card", CARD)
+        c07 = by_id(rep)["C07"]
+        self.assertEqual((code, c07["status"]), (1, "FAIL"), c07["detail"])
+        self.assertIn("episode 999 noise_id 0", c07["detail"])
+        self.assertIn("does not have", c07["detail"])
+
+    def test_c07_ids_are_per_episode(self):
+        """Codex round 2: two valid N episodes that both use noise_id 0 failed C07 (the ids were grouped across the
+        session). dc-2.0 9.1 declares no session-wide uniqueness, so windows are per (episode, noise_id); a window
+        outside its episode's steps, in a mode-E episode or without rows still fails."""
+        stream_checks = dc_validate.checks.streams
+
+        class Stream:
+            def __init__(self, **cols):
+                self.cols = cols
+
+            def col(self, name):
+                return self.cols[name]
+
+        def session(events, modes=("N", "N"), rows=None):
+            # two episodes of 6 callbacks each (steps 10..15 and 20..25); decisions at 10, 13, 20, 23
+            steps = list(range(10, 16)) + list(range(20, 26))
+            ep = [0] * 6 + [1] * 6
+            seq = [0, 1, 1, 1, 2, 2, 3, 4, 4, 4, 5, 5]
+            rows = rows or {11: 0, 12: 0, 13: 0, 21: 0, 22: 0, 23: 0}
+            ctl = Stream(physics_step=steps, episode_id=ep, hl_seq=seq, mode=[modes[e] for e in ep],
+                         noise_active=[1 if k in rows else 0 for k in steps],
+                         noise_id=[rows.get(k, -1) for k in steps],
+                         hl_kappa=[0.0] * 12, hl_accel=[0.0] * 12, hl_dir=[1] * 12)
+            evs = Stream(kind=[e[0] for e in events], physics_step=[e[1] for e in events],
+                         episode_id=[e[2] for e in events], payload=["noise_id=%d;kind=k_pulse;amplitude=0.1;"
+                                                                     "duration_s=0.6" % e[3] for e in events])
+            eps = Stream(episode_id=[0, 1], mode=list(modes), start_physics_step=[10, 20], end_physics_step=[15, 25])
+            return types.SimpleNamespace(streams={"ctl": ctl, "events": evs, "episodes": eps})
+
+        both = [("perturb_start", 10, 0, 0), ("perturb_end", 13, 0, 0), ("perturb_start", 20, 1, 0),
+                ("perturb_end", 23, 1, 0)]
+        self.assertEqual(stream_checks._noise_boundary(session(both)), [])
+        cases = {
+            "episode 1 noise_id 0: its episode is mode E, not N": session(both, modes=("N", "E")),
+            "not ordered inside the episode's steps": session(both[:3] + [("perturb_end", 27, 1, 0)]),
+            "episode 999 noise_id 0: its perturb events name an episode that the episodes stream does not have":
+                session([(k, st, 999 if e == 1 else e, n) for k, st, e, n in both]),
+            "episode 0 noise_id 0 has 2 perturb_start and 1 perturb_end": session(both + [("perturb_start", 14, 0, 0)]),
+        }
+        for want, sess in cases.items():
+            issues = stream_checks._noise_boundary(sess)
+            self.assertTrue(any(want in i for i in issues), (want, issues))
+
 
 if __name__ == "__main__":
     unittest.main()

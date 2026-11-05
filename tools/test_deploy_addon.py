@@ -76,6 +76,11 @@ def listing(root):
     return out
 
 
+# Off this machine (CI) there is no E: drive at /mnt/e and the checkout lies on the device of /.
+E_MOUNTED = os.path.ismount("/mnt/e")
+REPO_ON_ROOT_DEVICE = os.stat(REPO).st_dev == os.stat("/").st_dev
+
+
 class DeployAddonTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dd_deploy_test_", dir=tmp_base())
@@ -244,6 +249,7 @@ class DeployAddonTest(unittest.TestCase):
                        "/mnt/d/__dd_deploy_selftest_missing__/DataCapture"):
             self.assertIsNotNone(deploy_addon.target_reason(target, [self.tmp]), target)
 
+    @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
     def test_refuses_targets_outside_the_allowed_roots(self):
         # A sibling of the allowed root is not inside it, E: outside DriveDiT/addons is not allowed, and an allowed
         # root itself is not a target.
@@ -259,6 +265,7 @@ class DeployAddonTest(unittest.TestCase):
         for target in probes[:2]:
             self.assertFalse(os.path.exists(os.path.dirname(target)), target)
 
+    @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
     def test_default_root_is_accepted_without_allow_root(self):
         self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/DataCapture"))
         self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/__dd_deploy_selftest__/DataCapture"))
@@ -275,6 +282,7 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("--allow-root /mnt/e resolves to /mnt/e", out)
 
+    @unittest.skipIf(REPO_ON_ROOT_DEVICE, "the repo is on the device of / here, so the device check refuses first")
     def test_refuses_target_inside_repo(self):
         rc, out = self.run_tool("--dry-run", target=os.path.join(REPO, "build_addon_test"))
         self.assertEqual(rc, 2, out)

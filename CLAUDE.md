@@ -61,7 +61,7 @@ uv run ruff check .                        # lint (CI gate; src/drivedit has its
 uv run ruff format src/drivedit tests/drivedit     # formatting (CI checks it for the drivedit package)
 python3 -I -B tools/ci/secret_scan.py      # privacy scan; run it before every push
 
-uv sync --extra model --extra cpu          # adds the model extra with CPU torch (--extra cuda: PyPI torch)
+uv sync --extra model --extra cpu          # adds the model extra with CPU torch (--extra cuda: torch 2.14.1+cu130)
 uv run --extra model --extra cpu pytest -m torch   # torch tests
 uv run --extra model --extra cpu mypy              # mypy --strict on src/drivedit (CI runs it in the torch job)
 

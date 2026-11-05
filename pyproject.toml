@@ -25,7 +25,8 @@ dependencies = [
 [project.optional-dependencies]
 # The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras
 # are kept for the model package that replaces it. Until then only tests/test_torch_smoke.py uses them.
-# `uv sync --extra model` takes torch from PyPI (the CUDA build on Linux x86_64).
+# `uv sync --extra model` alone takes torch from PyPI (2.15.0+cu132 on Linux x86_64), which segfaults at CUDA init
+# under WSL on this machine; use it with one of the selectors below.
 model = [
     "torch>=2.2",
     "einops>=0.7",
@@ -34,9 +35,25 @@ model = [
 ]
 # Torch variant selectors, used together with `model`; they are mutually exclusive.
 #   uv sync --extra model --extra cpu    # torch from the PyTorch CPU wheel index (CI)
-#   uv sync --extra model --extra cuda   # torch from PyPI (same as `model` alone)
+#   uv sync --extra model --extra cuda   # torch 2.14.1+cu130 from the PyTorch cu130 index, the newest build there.
+#                                        # Verified on the local RTX 3080 Ti under WSL (DD-19, 2026-11-05); PyPI's
+#                                        # 2.15.0+cu132 segfaults at torch.cuda.is_available() there.
 cpu = ["torch>=2.2"]
 cuda = ["torch>=2.2"]
+# The frozen pretrained tokenizers of drivedit.codec (DD-19), used together with `model`. Weights are not packages:
+# they download from the Hugging Face Hub at pinned revisions on first use, into HF_HOME. diffusers loads the FLUX.2
+# and Wan2.1 VAEs. CADRE's autoencoder code is vendored (src/drivedit/codec/_vendor/cadre): pydantic is its config
+# model and safetensors reads its checkpoint. DINOv3's code is a verified local checkout, not a dependency
+# (drivedit.codec.dinov3).
+codec = [
+    "diffusers>=0.37",
+    "huggingface-hub>=1.32",
+    "pydantic>=2.10",
+    "safetensors>=0.6",
+]
+
+[project.scripts]
+dd-encode = "drivedit.codec.encode:main"   # latent pre-encoder (DD-19); needs the model and codec extras
 
 [dependency-groups]
 dev = [
@@ -56,11 +73,17 @@ conflicts = [
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "cuda" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.pytest.ini_options]
@@ -88,3 +111,9 @@ files = ["src/drivedit"]
 mypy_path = "src"
 strict = true
 warn_unreachable = true
+
+[[tool.mypy.overrides]]
+# Vendored third-party code, kept close to upstream (src/drivedit/codec/_vendor): checked, but its own errors are not
+# reported. Calls into it from drivedit are still checked against its annotations.
+module = ["drivedit.codec._vendor.*"]
+ignore_errors = true

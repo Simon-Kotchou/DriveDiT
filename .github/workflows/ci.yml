@@ -82,8 +82,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           cache-suffix: model-cpu
-      - name: Install with the model extra, torch from the PyTorch CPU index
-        run: uv sync --extra model --extra cpu
+      # The codec extra (diffusers, huggingface_hub) is needed by tests/drivedit/codec and by mypy on drivedit.codec.
+      # It installs code only: no test downloads weights.
+      - name: Install with the model and codec extras, torch from the PyTorch CPU index
+        run: uv sync --extra model --extra cpu --extra codec
       - name: Show torch build
         run: uv run --no-sync python -I -c "import torch; print(torch.__version__, 'cuda' if torch.cuda.is_available() else 'cpu')"
       - name: pytest (torch-marked tests)

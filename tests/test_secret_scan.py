@@ -3,8 +3,12 @@
 Every positive sample is assembled at run time, so this file never holds a string the scan would flag.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
+import shutil
+import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,6 +23,24 @@ AT = "@"
 
 def kinds(text, path="x.txt"):
     return [kind for _, kind, _ in scan.findings(path, text)]
+
+
+def temp_dir():
+    """A new directory under $TMPDIR when that is on /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp)."""
+    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
+    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
+        base = "/dev/shm"
+    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
+        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
+    return tempfile.mkdtemp(prefix="dd_secret_scan_", dir=base)
+
+
+def scan_files(*paths):
+    """Run the scanner's command line on `paths`: (exit status, stdout)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = scan.main(list(paths))
+    return rc, out.getvalue()
 
 
 class SecretScanTest(unittest.TestCase):
@@ -54,6 +76,52 @@ class SecretScanTest(unittest.TestCase):
         hit = "jane.doe" + AT + "corp-mail.de"
         self.assertNotIn(hit, scan.redact(hit))
         self.assertTrue(scan.redact(hit).endswith("..."))
+
+
+class SecretScanFileTest(unittest.TestCase):
+    """Whole files, as the CI job reads them: text that holds NUL bytes or is UTF-16/32 is scanned, not skipped."""
+
+    def setUp(self):
+        self.tmp = temp_dir()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.email = "jane.doe" + AT + "corp-mail.de"
+
+    def write(self, name, data):
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def assert_found(self, path, kind):
+        rc, out = scan_files(path)
+        self.assertEqual(rc, 1, out)
+        self.assertIn(": %s: " % kind, out)
+        self.assertNotIn(self.email, out)  # still redacted
+
+    def test_plain_text(self):
+        self.assert_found(self.write("plain.txt", ("mail " + self.email + "\n").encode()), "email")
+
+    def test_nul_prefixed_text(self):
+        self.assert_found(self.write("nul.txt", b"\0" + ("mail " + self.email + "\n").encode()), "email")
+
+    def test_nul_inside_binary_framing(self):
+        data = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + bytes(range(256)) + ("tEXt " + self.email).encode() + b"\0\0"
+        self.assert_found(self.write("blob.png", data), "email")
+
+    def test_utf16_with_bom(self):
+        for enc in ("utf-16", "utf-16-be", "utf-32"):
+            text = "mail " + self.email + "\n"
+            data = text.encode(enc) if enc != "utf-16-be" else b"\xfe\xff" + text.encode(enc)
+            self.assert_found(self.write("bom_%s.txt" % enc, data), "email")
+
+    def test_utf16_without_bom(self):
+        for enc in ("utf-16-le", "utf-16-be"):
+            self.assert_found(self.write("nobom_%s.txt" % enc, ("mail " + self.email + "\n").encode(enc)), "email")
+
+    def test_binary_without_text_is_clean(self):
+        data = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 16 + b"\0" * 64
+        rc, out = scan_files(self.write("noise.bin", data))
+        self.assertEqual((rc, out), (0, ""))
 
 
 if __name__ == "__main__":

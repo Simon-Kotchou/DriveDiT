@@ -11,8 +11,12 @@ ceiling"; causal-memory-2026-11 §7 exit gates, "within margin of decoded-GT").
 Sources: the yaw gain is delta §5.2 M3 (ψ̇ ≈ v·κ after the controller's response; gain 1 = faithful, 0 = ignores);
 the response slope is ActionRoPE's motion slope (causal-memory §5.1 and §5.4: every feature-conditioned baseline
 under-responds, slope < 1); the sign test is ForgeWM's opposite-action test (causal-memory §2.1, §5.5); the brake test
-checks that a commanded deceleration slows the ego (causal-memory §5.4 and §5.5, after DIAMOND's brake case; whether
-*other* traffic reacts needs the other agents' tracks and is not measured here).
+measures ego deceleration tracking only: whether a commanded deceleration slows the ego, and by how much
+(causal-memory §5.4 and §5.5). It is *not* DIAMOND's brake test of causal confusion, whether the *other* traffic
+stops; that needs the other agents' tracks and is not measured here.
+
+Ratios (``grade``, the brake tracking, and ARR in ``drivedit.eval.idm``) share one rule, ``stable_ratio``: a ratio
+whose denominator is below a stated floor is undefined, with a reason, never a huge number.
 
 Alignment (features_v1 ``offsets``): ``action_cmd[t]`` applies over the decision interval (P_t, P_t+1], so the realised
 response to it is read at the end of that interval, ``state[t+1]``. Every metric here takes the commanded value at t
@@ -45,27 +49,45 @@ class MetricResult(Protocol):
     def defined(self) -> bool: ...
 
 
+def stable_ratio(numerator: float, denominator: float, *, floor: float) -> tuple[float, str]:
+    """``numerator / denominator``, or NaN with the reason when either is not finite or ``|denominator| < floor``
+    (``floor`` > 0). Without a floor a near-zero ceiling turns noise into ratios of 1e16 (review round 1)."""
+    if not floor > 0.0:
+        raise ValueError(f"floor must be > 0, got {floor}")
+    if not (math.isfinite(numerator) and math.isfinite(denominator)):
+        return math.nan, "undefined: a side is not finite"
+    if abs(denominator) < floor:
+        return math.nan, f"undefined: |denominator| {abs(denominator):.3g} is below the floor {floor:.3g}"
+    return numerator / denominator, ""
+
+
 @dataclass(frozen=True)
 class Graded:
     """One metric on a world model next to the same metric on real data (the ceiling).
 
-    ``ratio`` = model / real: NaN when either side is undefined or the real value is 0.
+    ``ratio`` = model / real, NaN with a ``reason`` when either side is undefined or ``|real| < min_real``.
     """
 
     metric: str
     real: float
     model: float
     ratio: float
+    reason: str
 
 
-def grade(real: MetricResult, model: MetricResult) -> Graded:
-    """Pair a model result with the real-data result of the same metric."""
+def grade(real: MetricResult, model: MetricResult, *, min_real: float) -> Graded:
+    """Pair a model result with the real-data result of the same metric. ``min_real`` (> 0) is the smallest real
+    value a ratio is taken against, in the metric's unit: a ceiling near 0 means real data shows no response, and a
+    ratio to it means nothing. There is no default; the caller states it per metric."""
     if real.metric != model.metric:
         raise ValueError(f"cannot grade {model.metric} against {real.metric}")
     r = real.value if real.defined else math.nan
     m = model.value if model.defined else math.nan
-    ratio = m / r if math.isfinite(r) and math.isfinite(m) and r != 0.0 else math.nan
-    return Graded(metric=real.metric, real=r, model=m, ratio=ratio)
+    ratio, reason = stable_ratio(m, r, floor=min_real)
+    undefined = [side for side, result in (("real", real), ("model", model)) if not result.defined]
+    if undefined:
+        reason = f"undefined: the {' and '.join(undefined)} result is undefined"
+    return Graded(metric=real.metric, real=r, model=m, ratio=ratio, reason=reason)
 
 
 @dataclass(frozen=True)
@@ -79,6 +101,12 @@ class LlcResponse:
     kappa realised needs llc_v1 sessions", CC-08, DD-7-ident). So there is no default here: callers pass the
     identified values (delta §5.2 M3: identify the response once from real N-mode pulses). A constant offset would not
     change any slope, so the model has none.
+
+    The response has state: the lag's output and the commands still inside the dead time. Counterfactual arms branch
+    from one shared state, so pass the context's real commands before the branch (``prehistory``) and, when known,
+    the realised curvature at its start (``initial``). Without them each arm starts settled at its own command and
+    skips the transient it commands (review round 1: a faithful 2 s response with dead time 0.4 s and lag 0.5 s
+    then scored 0.605 instead of 1).
     """
 
     dead_time_s: float
@@ -89,20 +117,45 @@ class LlcResponse:
         if not (self.dead_time_s >= 0.0 and self.tau_s >= 0.0 and math.isfinite(self.gain) and self.gain != 0.0):
             raise ValueError(f"invalid llc response {self}")
 
-    def realised_kappa(self, kappa_target: npt.ArrayLike, *, step_s: float) -> FloatArray:
+    def realised_kappa(
+        self,
+        kappa_target: npt.ArrayLike,
+        *,
+        step_s: float,
+        prehistory: npt.ArrayLike | None = None,
+        initial: npt.ArrayLike | None = None,
+    ) -> FloatArray:
         """The realised curvature at the end of each decision interval, ``[..., T]`` like ``kappa_target``.
 
         ``kappa_target[..., t]`` is held over interval t (zero-order hold of ``action_cmd``; ``step_s`` is the
         decision period, 1 / features_v1 ``offsets.decision_hz``). The response is integrated exactly over each
-        interval, including a dead time that is not a multiple of ``step_s``. Before the first interval the command
-        is taken to have been held at its first value long enough to settle (steady state), so callers drop the first
-        few steps of each window (``settle_steps``).
+        interval, including a dead time that is not a multiple of ``step_s``.
+
+        ``prehistory`` ``[..., P]`` (or ``[P]``, shared by every window) is the commands of the P intervals before the
+        window: they are integrated first and fill the dead time, so arms that share them branch from one state.
+        ``initial`` (``[...]`` or a scalar) is the realised curvature at the start of the integration, the start of
+        the prehistory if there is one. Before the first integrated interval the first command is taken to have been
+        held; without ``initial`` the response starts settled at it. For an exact branch the prehistory must cover the
+        dead time, and either reach back far enough to settle the lag or come with ``initial``.
         """
         if not step_s > 0.0:
             raise ValueError(f"step_s must be > 0, got {step_s}")
-        u = np.asarray(kappa_target, dtype=np.float64)
-        if u.ndim == 0 or u.shape[-1] == 0 or not np.all(np.isfinite(u)):
+        window = np.asarray(kappa_target, dtype=np.float64)
+        if window.ndim == 0 or window.shape[-1] == 0 or not np.all(np.isfinite(window)):
             raise ValueError("kappa_target must be a finite [..., T] array with T >= 1")
+        n_pre = 0
+        u = window
+        if prehistory is not None:
+            pre = np.asarray(prehistory, dtype=np.float64)
+            if pre.ndim == 0 or not np.all(np.isfinite(pre)):
+                raise ValueError("prehistory must be a finite [..., P] or [P] array")
+            n_pre = pre.shape[-1]
+            u = np.concatenate([np.broadcast_to(pre, (*window.shape[:-1], n_pre)), window], axis=-1)
+        y0 = self.gain * u[..., 0]
+        if initial is not None:
+            y0 = np.broadcast_to(np.asarray(initial, dtype=np.float64), window.shape[:-1]).copy()
+            if not np.all(np.isfinite(y0)):
+                raise ValueError("initial must be finite")
         # dead time = m whole intervals + `part` seconds (the 1e-9 absorbs float error at whole multiples)
         q = self.dead_time_s / step_s
         m = math.floor(q + 1e-9)
@@ -110,15 +163,16 @@ class LlcResponse:
         early = _delayed(u, m + 1)  # input over the first `part` seconds of interval t
         late = _delayed(u, m)  # input over the rest of it
         if self.tau_s == 0.0:
-            return self.gain * late
+            pure: FloatArray = self.gain * late[..., n_pre:]
+            return pure
         e_full = math.exp(-step_s / self.tau_s)
         e_late = math.exp(-(step_s - part) / self.tau_s)
         out = np.empty_like(u)
-        y = self.gain * u[..., 0]
+        y = y0
         for t in range(u.shape[-1]):
             y = y * e_full + self.gain * (early[..., t] * (e_late - e_full) + late[..., t] * (1.0 - e_late))
             out[..., t] = y
-        return out
+        return out[..., n_pre:]
 
 
 def _delayed(u: FloatArray, steps: int) -> FloatArray:
@@ -208,6 +262,8 @@ def yaw_gain(
     response: LlcResponse,
     step_s: float,
     contexts: Sequence[Hashable] | npt.ArrayLike | None = None,
+    prehistory_kappa: npt.ArrayLike | None = None,
+    initial_kappa: npt.ArrayLike | None = None,
     settle_steps: int = 0,
 ) -> Slope:
     """The yaw-gain test (delta §5.2 M3): the slope of the realised yaw rate against the commanded one,
@@ -220,8 +276,12 @@ def yaw_gain(
       interval t: ``state[t+1]`` for real data, the estimate from generated frame t+1 for a rollout.
 
     ``contexts`` (``[N]``): windows with the same label are arms of one counterfactual set (the same context under
-    different κ offsets, delta §5.2 M3); the gain is then the within-(context, step) slope. ``settle_steps`` leading
-    steps of each window are left out, because the response model starts from steady state.
+    different κ offsets, delta §5.2 M3); the gain is then the within-(context, step) slope. Arms branch from their
+    context's state: pass the context's real ``kappa_target`` before the branch as ``prehistory_kappa`` (``[N, P]``,
+    or ``[P]`` for all) and, when known, the realised curvature at its start as ``initial_kappa`` (``[N]`` or a
+    scalar; ``LlcResponse.realised_kappa``). Without a prehistory the reference starts each window settled at its
+    first command, which is only right for windows that start in steady state; ``settle_steps`` leading steps of each
+    window can then be left out.
     """
     k = np.atleast_2d(np.asarray(kappa_target, dtype=np.float64))
     v = np.atleast_2d(np.asarray(speed_mps, dtype=np.float64))
@@ -233,7 +293,7 @@ def yaw_gain(
         )
     if not 0 <= settle_steps < k.shape[1]:
         raise ValueError(f"settle_steps must be in [0, {k.shape[1]}), got {settle_steps}")
-    commanded = v * response.realised_kappa(k, step_s=step_s)
+    commanded = v * response.realised_kappa(k, step_s=step_s, prehistory=prehistory_kappa, initial=initial_kappa)
     groups = None
     if contexts is not None:
         ctx = np.asarray(contexts).ravel()
@@ -296,11 +356,13 @@ def sign_accuracy(commanded: npt.ArrayLike, realised: npt.ArrayLike, *, deadband
 
 @dataclass(frozen=True)
 class BrakeTest:
-    """Commanded decelerations and what was achieved over the same intervals.
+    """Ego deceleration tracking: commanded decelerations and what the ego achieved over the same intervals. Not
+    DIAMOND's test of whether other traffic stops (module docstring).
 
     ``tracking`` = mean achieved / mean commanded acceleration over the steps with ``a_target < 0`` (1 = the commanded
-    deceleration is achieved, 0 = no deceleration, < 0 = the car speeds up); ``decel_fraction`` is the share of those
-    steps that decelerate at all.
+    deceleration is achieved, 0 = no deceleration, < 0 = the car speeds up); undefined, with a ``reason``, when the
+    mean commanded deceleration is below ``min_decel_mps2``. ``decel_fraction`` is the share of those steps that
+    decelerate at all.
     """
 
     metric: str
@@ -317,10 +379,13 @@ class BrakeTest:
         return self.tracking
 
 
-def brake_test(a_target: npt.ArrayLike, achieved_mps2: npt.ArrayLike) -> BrakeTest:
-    """The brake test over decision steps (any equal shapes): ``a_target`` is ``action_cmd.a_target`` (m/s²) held over
-    interval t, ``achieved_mps2`` the mean longitudinal acceleration over the same interval, ``(v[t+1] - v[t]) /
-    step_s`` from telemetry or from the speeds a rollout's estimator reads off frames t and t+1."""
+def brake_test(a_target: npt.ArrayLike, achieved_mps2: npt.ArrayLike, *, min_decel_mps2: float) -> BrakeTest:
+    """Ego deceleration tracking over decision steps (any equal shapes): ``a_target`` is ``action_cmd.a_target``
+    (m/s²) held over interval t, ``achieved_mps2`` the ego's mean longitudinal acceleration over the same interval,
+    ``(v[t+1] - v[t]) / step_s`` from telemetry or from the speeds a rollout's estimator reads off frames t and t+1.
+
+    ``min_decel_mps2`` (> 0) is the floor of the tracking ratio's denominator, for example the vehicle card's
+    ``llc_v1.coast_band_mps2``, below which llc_v1 neither brakes nor throttles (DC_LLCv1.c). There is no default."""
     a = np.asarray(a_target, dtype=np.float64).ravel()
     got = np.asarray(achieved_mps2, dtype=np.float64).ravel()
     if a.shape != got.shape:
@@ -334,13 +399,14 @@ def brake_test(a_target: npt.ArrayLike, achieved_mps2: npt.ArrayLike) -> BrakeTe
         return BrakeTest("brake_test", 0, nan, nan, nan, nan, False, "no step commands a deceleration (a_target < 0)")
     mean_cmd = float(a[brake].mean())
     mean_got = float(got[brake].mean())
+    tracking, reason = stable_ratio(mean_got, mean_cmd, floor=min_decel_mps2)
     return BrakeTest(
         metric="brake_test",
         n_brake=n,
-        tracking=mean_got / mean_cmd,
+        tracking=tracking,
         decel_fraction=float((got[brake] < 0.0).mean()),
         mean_commanded_mps2=mean_cmd,
         mean_achieved_mps2=mean_got,
-        defined=True,
-        reason="",
+        defined=not reason,
+        reason=reason,
     )

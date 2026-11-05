@@ -112,6 +112,6 @@ def test_the_verified_checkout_builds_vitb16_from_manifest_files_only(tmp_path: 
         "x = torch.zeros(1, 3, 288, 512)\n"
         "assert model.get_intermediate_layers(x, n=(2, 11), norm=True, reshape=True)[0].shape == (1, 768, 18, 32)\n"
     )
-    env = {"PYTHONPATH": str(SRC), "PATH": os.environ.get("PATH", "")}
+    env = {**os.environ, "PYTHONPATH": str(SRC)}  # inherit TMPDIR, CUDA_VISIBLE_DEVICES, HF_HUB_OFFLINE, ...
     result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

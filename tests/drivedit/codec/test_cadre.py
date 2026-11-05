@@ -7,6 +7,7 @@ in CI. The real codec, with the real DINOv3 and weights, is exercised in test_pr
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +37,11 @@ def test_the_vendored_code_imports_nothing_by_a_global_name() -> None:
         "assert not hasattr(m, 'load_dinov3') and not hasattr(m, 'DINOV3_HUB')\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", code], env={"PYTHONPATH": str(SRC)}, capture_output=True, text=True, check=False
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": str(SRC)},  # inherit TMPDIR, CUDA_VISIBLE_DEVICES, HF_HUB_OFFLINE, ...
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
 

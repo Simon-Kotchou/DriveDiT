@@ -79,7 +79,7 @@ def test_writes_the_section_3_layout(tmp_path: Path, pool_codec: PoolCodec) -> N
     assert meta["compute_dtype"] == "float32"
     assert meta["n_steps"] == len(SLOTS)
     assert meta["n_valid"] == int(valid.sum())
-    assert meta["session_id"] == shard.shard_dir.parent.name
+    assert meta["session_id"] == shard_meta["session_id"] == shard.shard_dir.parent.name
     assert meta["build_key"] == shard_meta["build_key"]
     assert meta["image"] == shard_meta["image"]
     assert meta["aligned_to"] == {"file": "slot_id.npy", "sha256": shard_meta["arrays"]["slot_id"]["sha256"]}

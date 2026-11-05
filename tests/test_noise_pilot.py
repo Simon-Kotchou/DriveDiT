@@ -3,25 +3,34 @@
 
     TMPDIR=/dev/shm/<x> python3 -I -B -m pytest --noconftest -p no:cacheprovider -q tests/test_noise_pilot.py
 
-The Enforce code cannot run here, so these tests read it, as tests/test_expert_driver_dc2.py does:
-  - DC_NoiseRng: the xorshift32 port on emulated Enforce ints gives the SelfTest constants of the source;
-  - NoiseMirror is DC_Noise statement for statement (the parameter table is parsed from the source, the order of
-    the five draws of a segment and the formulas of every kind are asserted in the source), and over a simulated hour
-    of the pilot (the T0 loop both ways round, DC_ExpertHL's pure pursuit and speed profile, a lagged kinematic car,
-    5 Hz decisions over 30 Hz steps) the pilot_v1 defaults meet the research targets (delta 2026-11 section 3.3):
-    at least 30% of decision steps off-expert, at least 40% of the segments longitudinal, at least 10 stops (stand
-    still, then drive off) per hour, the turns of each signed kind balanced within 2 per episode, the applied
-    curvature's left and right turning within 1.2x over the two directions, at least 90% of the segments recovered
-    (|lane_lat_err| < 0.5 m and |lane_head_err| < 3 deg held 2 s, reached within 10 s) and no termination;
+The Enforce code cannot run in the engine here, so these tests run it in Python: tests/enforce_subset.py translates
+DC_NoiseRng and DC_Noise of the source statement for statement (32-bit ints, C division, Math.Round half away from
+zero) and the simulation calls the translated Init, BeginEpisode, Decide, DrawSegment and EndEpisode. A change of
+the scheduler or the recovery gate changes what the tests see (removing UpdateRecovery, breaking the sign balance,
+the gap count-down, the hold or the kind draw each fails them); a statement outside the subset fails the translation.
+  - DC_NoiseRng (translated, and an independent port) gives the SelfTest constants of the source;
+  - over a simulated hour of the pilot (the T0 loop both ways round, DC_ExpertHL's pure pursuit and speed profile,
+    5 Hz decisions on a 200 ms world-time grid over 30 Hz steps, pilot_v1 defaults) DC_Noise meets the research
+    targets (delta 2026-11 section 3.3): at least 30% of decision steps off-expert, at least 40% of the segments
+    longitudinal, at least 10 stops (stand still, then drive off) per hour, the turns of each signed kind balanced
+    within 2 per episode, the applied curvature's left and right turning within 1.2x over the two directions, at
+    least 90% of the segments recovered within 10 s, no termination. The car is kinematic with lags: it bypasses
+    llc_v1 and the S105, so this checks the scheduler and the gate, not the vehicle;
+  - the recovery gate holds 2 s of world time from the first decision inside the bounds (the 11th decision at
+    200 ms, not the 10th) and restarts on a decision outside;
   - one seed gives one schedule (kinds, signs, amplitudes, durations, gaps), another seed another;
   - the contract: the perturbation acts on the HL command (action_cmd) only, exp_*_now stays the clean expert
     (action_label), noise_active / noise_id come from the held command, a disturbance only in a mode-N episode, the
     perturb_start / perturb_end payload is noise_id, kind, amplitude, duration_s, the core records mode N, and a trial
     conf without "perturb" (T0L) keeps every episode mode E;
-  - the trial conf: DC_NoiseConfig refuses an unknown profile, perturb_params without one, an unknown, misspelt or
-    repeated key, a value out of range and a lo above its hi (a Python mirror of Read on the same text).
+  - the trial conf (a Python port of DC_NoiseConfig.Read with its statements asserted): an unknown profile,
+    perturb_params without one, an unknown or repeated parameter, a value out of range, a lo above its hi and a
+    misspelt perturb key with a profile refuse the session; string values are never keys (a T0L conf with "note":
+    "perturbation deferred" is read as before), a misspelt key without a profile is only warned about; every
+    accepted override and an empty perturb_params reach session.json trial.conf exactly as written.
 """
 
+import importlib.util
 import json
 import math
 import os
@@ -32,6 +41,10 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
+_SPEC = importlib.util.spec_from_file_location("enforce_subset",
+                                               os.path.join(REPO, "tests", "enforce_subset.py"))
+enforce_subset = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(enforce_subset)
 
 SOURCES = os.path.join(REPO, "src", "enfusion", "datacapture")
 NOISE_SOURCE = os.path.join(SOURCES, "DC_Noise.c")
@@ -138,11 +151,6 @@ class Rng:
         return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
 
 
-def enforce_round(x):
-    """Math.Round: half away from zero."""
-    return int(math.floor(abs(x) + 0.5)) * (1 if x >= 0 else -1)
-
-
 # ------------------------------------------------------------------------------------------------
 # DC_NoiseConfig and DC_Noise, statement for statement
 # ------------------------------------------------------------------------------------------------
@@ -165,14 +173,37 @@ class ConfigError(ValueError):
     pass
 
 
+def check_key_names(text):
+    """DC_NoiseConfig.CheckKeyNames: None, or the first key (a string followed by ':' outside strings) that starts
+    with "perturb" and is neither "perturb" nor "perturb_params"."""
+    index, length = 0, len(text)
+    while index < length:
+        if text[index] != '"':
+            index += 1
+            continue
+        close = index + 1
+        while close < length and text[close] != '"':
+            if text[close] == "\\":
+                close += 1
+            close += 1
+        if close >= length:
+            return None
+        after = close + 1
+        while after < length and text[after] in " \t\r\n":
+            after += 1
+        key_length = close - index - 1
+        if after < length and text[after] == ":" and key_length >= len("perturb"):
+            head = text[index + 1:index + 1 + min(key_length, 64)]
+            known = (key_length == 7 and head == "perturb") or (key_length == 14 and head == "perturb_params")
+            if head.startswith("perturb") and not known:
+                return head
+        index = close + 1
+    return None
+
+
 def read_config(table, conf_text):
-    """Mirror of DC_NoiseConfig.Read on a trial conf's text: (profile, {key: value}, given) or ConfigError."""
-    at = conf_text.find('"perturb')
-    while at >= 0:
-        nxt = at + len('"perturb')
-        if not (conf_text.startswith('"', nxt) or conf_text.startswith('_params"', nxt)):
-            raise ConfigError("misspelt perturb key")
-        at = conf_text.find('"perturb', nxt)
+    """Mirror of DC_NoiseConfig.Read on a trial conf's text: (profile, {key: value}, given, warning) or ConfigError;
+    given is {key: the number text as written} (what WriteConf records), None without perturb_params."""
     conf = json.loads(conf_text)
     profile = "none"
     if "perturb" in conf:
@@ -182,23 +213,32 @@ def read_config(table, conf_text):
             raise ConfigError("unknown profile")
         profile = conf["perturb"]
     values = dict(zip(table.keys, table.defaults))
-    if "perturb_params" not in conf:
-        return profile, values, {}
+    has_params = "perturb_params" in conf
+    misspelt = check_key_names(conf_text)
+    warning = None
+    if misspelt is not None:
+        if "perturb" in conf or has_params:
+            raise ConfigError("misspelt perturb key %s" % misspelt)
+        warning = misspelt
+    if not has_params:
+        return profile, values, None, warning
     if profile == "none":
         raise ConfigError("perturb_params without a profile")
     if conf_text.count('"perturb_params"') != 1 or not isinstance(conf["perturb_params"], dict):
         raise ConfigError("perturb_params is repeated or not an object")
-    keys = re.findall(r'"(\w+)"\s*:', conf_text[conf_text.index('"perturb_params"') + 16:].split("}", 1)[0])
+    body = conf_text[conf_text.index('"perturb_params"') + 16:].split(":", 1)[1].split("}", 1)[0]
+    pairs = re.findall(r'"(\w+)"\s*:\s*([^,\s}]+)', body)
+    keys = [k for k, _ in pairs]
     if len(keys) != len(set(keys)):
         raise ConfigError("repeated key")
     given = {}
-    for key, value in conf["perturb_params"].items():
+    for key, text in pairs:
         if key not in values:
             raise ConfigError("unknown key %s" % key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigError("not a number")
-        values[key] = float(value)
-        given[key] = float(value)
+        if not re.fullmatch(r"[-+.eE0-9]{1,32}", text):
+            raise ConfigError("not a number of at most 32 characters")
+        values[key] = float(text)
+        given[key] = text
     for key, lo, hi in zip(table.keys, table.lo, table.hi):
         if not lo <= values[key] <= hi:
             raise ConfigError("%s out of range" % key)
@@ -209,244 +249,88 @@ def read_config(table, conf_text):
         raise ConfigError("no weight")
     if values["stop_dwell_s_hi"] > values["stop_max_s"]:
         raise ConfigError("dwell above the cap")
-    return profile, values, given
+    return profile, values, given, warning
+
+
+def written_conf(profile_given, profile, given):
+    """DC_NoiseConfig.WriteConf through DC_JsonWriter: the trial.conf members it adds, as JSON text."""
+    lines = []
+    if profile_given:
+        lines.append('"perturb": "%s"' % profile)
+    if given is not None:
+        lines.append('"perturb_params": {%s}' % ", ".join('"%s": %s' % (k, t) for k, t in given.items()))
+    return "{" + ", ".join(lines) + "}"
 
 
 class Cmd:
-    __slots__ = ("kappa", "accel", "dir", "noise", "noise_id")
+    """DC_HLCommand (DC_StreamRecorder.c): the fields DC_Noise reads and writes."""
 
-    def __init__(self, kappa=0.0, accel=0.0, direction=1, noise=False, noise_id=-1):
-        self.kappa, self.accel, self.dir, self.noise, self.noise_id = kappa, accel, direction, noise, noise_id
+    def __init__(self, kappa=0.0, accel=0.0, direction=1):
+        self.m_fKappa, self.m_fAccel, self.m_iDir = kappa, accel, direction
+        self.m_bNoise, self.m_iNoiseId = False, -1
 
-    def copy(self):
-        return Cmd(self.kappa, self.accel, self.dir, self.noise, self.noise_id)
+    def CopyFrom(self, other):
+        self.m_fKappa, self.m_fAccel, self.m_iDir = other.m_fKappa, other.m_fAccel, other.m_iDir
+        self.m_bNoise, self.m_iNoiseId = other.m_bNoise, other.m_iNoiseId
 
 
-class NoiseMirror:
-    """DC_Noise: BeginEpisode, Decide, ApplySegment, CanStart, StartSegment, EndSegment, DrawSegment, UpdateRecovery,
-    EndEpisode."""
+class NoiseInput:
+    """DC_NoiseInput."""
+
+    def __init__(self, speed, remaining, lateral, heading_err, profile_ahead, world_ms):
+        self.m_fSpeedMps, self.m_fRemainingM, self.m_fLateralM = speed, remaining, lateral
+        self.m_fHeadingErrRad, self.m_fProfileAheadMps, self.m_iWorldMs = heading_err, profile_ahead, world_ms
+
+
+class ConfigStub:
+    """DC_NoiseConfig as DC_Noise uses it: Get(key) of the resolved parameters."""
+
+    def __init__(self, values):
+        self.values = dict(values)
+
+    def Get(self, key):
+        return self.values[key]
+
+
+def enforce_noise_classes(source):
+    """DC_NoiseRng and DC_Noise of the source, translated statement for statement (tests/enforce_subset.py)."""
+    return enforce_subset.translate(source, ["DC_NoiseRng", "DC_Noise"],
+                                    externals={"DC_NoiseConfig": ConfigStub, "DC_HLCommand": Cmd,
+                                               "DC_NoiseInput": NoiseInput})
+
+
+class Pilot:
+    """DC_Noise itself (translated from the Enforce source) bound as DC_ExpertDriver binds it: Init with the
+    expert's limits and the 200 ms grid; per segment the kind, sign, amplitude and episode, read from its fields
+    when a new noise id is first applied."""
     K_PULSE, K_STEP, K_OU, A_PULSE, A_OU, SPEED, STOP, BRAKE = range(8)
-    BALANCE_MAX = 2
 
-    def __init__(self, table, values, decision_dt, kappa_cmd_max, accel_max, brake_max, stop_speed):
-        self.p, self.dt = values, decision_dt
-        self.kappa_cmd_max, self.accel_max, self.brake_max, self.stop_speed = (kappa_cmd_max, accel_max, brake_max,
-                                                                              stop_speed)
-        self.weights = [values[k] for k in table.weight_keys]
-        self.schedule, self.innovation = Rng(), Rng()
-        self.next_noise_id = 0
-        self.kind_count = [0] * 8
-        self.decisions = self.perturbed = 0
-        self.recovered_in_window = self.recovered_late = self.not_recovered = 0
-        self.stood = 0                  # stop segments that reached a standstill (a stop and start)
-        self.drawn = []                 # (kind, sign, amplitude, planned steps, gap steps) per DrawSegment
-        self.segments = []              # per started segment: dict(kind, id, sign, amplitude, steps applied)
-        self.episode_n = False
-        self.active = False
-
-    def steps(self, seconds):
-        return max(enforce_round(seconds / self.dt), 0)
+    def __init__(self, source, values):
+        self.classes = enforce_noise_classes(source)
+        self.noise = self.classes["DC_Noise"]()
+        self.noise.Init(ConfigStub(values), DECISION_DT, EXPERT["kappa_max"], EXPERT["accel_max"],
+                        EXPERT["brake_max"], EXPERT["stop_kmh"] / 3.6)
+        self.segments = []
+        self.episode = None
+        self.last_id = -1
 
     def begin_episode(self, trial_seed, episode_id):
         self.episode = episode_id
-        self.schedule.seed(trial_seed, episode_id * 2)
-        self.innovation.seed(trial_seed, episode_id * 2 + 1)
-        self.episode_n = self.schedule.uniform01() < self.p["episode_n_share"]
-        self.balance = [0] * 8
-        self.active = False
-        self.noise_id = -1
-        self.await_recovery = False
-        self.recovered_steps = 0
-        self.draw_segment()
-        self.gap_steps = self.steps(self.p["start_delay_s"])
-        return self.episode_n
+        self.last_id = -1
+        return self.noise.BeginEpisode(trial_seed, episode_id)
 
     def decide(self, clean, inp):
-        applied = clean.copy()
-        applied.noise, applied.noise_id = False, -1
-        if not self.episode_n:
-            return applied
-        self.decisions += 1
-        self.update_recovery(inp)
-        if not self.active:
-            if self.gap_steps > 0:
-                self.gap_steps -= 1
-                return applied
-            if not self.can_start(clean, inp):
-                return applied
-            self.start_segment()
-        if clean.dir != 1 or not self.apply_segment(clean, inp, applied):
-            self.end_segment()
-            applied = clean.copy()
-            applied.noise, applied.noise_id = False, -1
-            return applied
-        applied.noise, applied.noise_id = True, self.noise_id
-        self.step += 1
-        self.perturbed += 1
-        self.segments[-1]["applied"] += 1
+        applied = Cmd()
+        self.noise.Decide(clean, inp, applied)
+        if applied.m_iNoiseId >= 0 and applied.m_iNoiseId != self.last_id:
+            n = self.noise
+            self.segments.append({"kind": n.m_iKind, "id": applied.m_iNoiseId, "sign": int(n.m_fSign),
+                                  "episode": self.episode, "amplitude": n.m_fAmplitude})
+        self.last_id = applied.m_iNoiseId
         return applied
 
-    def kappa_scale(self, v):
-        v = max(v, self.p["min_speed_mps"])
-        return min(self.kappa_cmd_max, self.p["kappa_alat_mps2"] / (v * v))
-
-    def pulse(self, i, n):
-        return math.sin(math.pi * (i + 0.5) / n)
-
-    def next_ou(self, tau):
-        rho = math.exp(-self.dt / tau)
-        self.ou = rho * self.ou + self.amplitude * math.sqrt(1.0 - rho * rho) * self.innovation.gauss()
-        return self.ou
-
-    def apply_segment(self, clean, inp, applied):
-        v = inp["speed"]
-        k = self.kind
-        if k in (self.K_PULSE, self.K_STEP, self.K_OU):
-            if self.step >= self.planned:
-                return False
-            dk = self.amplitude * self.kappa_scale(v)
-            if k == self.K_PULSE:
-                dk *= self.pulse(self.step, self.planned)
-            elif k == self.K_OU:
-                dk = self.next_ou(self.p["k_ou_tau_s"]) * self.kappa_scale(v)
-            applied.kappa = min(max(clean.kappa + dk, -self.kappa_cmd_max), self.kappa_cmd_max)
-            return True
-        if k in (self.A_PULSE, self.A_OU):
-            if self.step >= self.planned:
-                return False
-            da = self.amplitude * self.pulse(self.step, self.planned)
-            if k == self.A_OU:
-                da = self.next_ou(self.p["a_ou_tau_s"])
-            applied.accel = min(max(clean.accel + da, -self.p["decel_cmd_max"]), self.p["accel_cmd_max"])
-            return True
-        if k == self.SPEED:
-            if self.step >= self.planned:
-                return False
-            target = self.amplitude * inp["profile_ahead"]
-            applied.accel = min(max(self.p["speed_gain"] * (target - v), -self.brake_max), self.accel_max)
-            return True
-        if k == self.STOP:
-            if self.step >= self.cap:
-                return False
-            if not self.stopped and v < self.stop_speed:
-                self.stopped = True
-                self.stood += 1
-            if self.stopped:
-                if self.dwell_done >= self.planned:
-                    return False
-                self.dwell_done += 1
-            applied.dir = 0
-            applied.accel = self.amplitude
-            return True
-        if self.step >= self.cap or v < self.p["brake_end_mps"]:
-            return False
-        applied.accel = self.amplitude
-        return True
-
-    def can_start(self, clean, inp):
-        if clean.dir != 1 or inp["speed"] < self.p["min_speed_mps"]:
-            return False
-        if inp["remaining"] < self.p["end_margin_m"]:
-            return False
-        return self.recovered_steps >= self.steps(self.p["recover_hold_s"])
-
-    def start_segment(self):
-        self.active = True
-        self.noise_id = self.next_noise_id
-        self.next_noise_id += 1
-        self.step = 0
-        self.stopped = False
-        self.dwell_done = 0
-        self.ou = 0.0
-        self.await_recovery = False
-        self.kind_count[self.kind] += 1
-        self.segments.append({"kind": self.kind, "id": self.noise_id, "sign": self.sign, "episode": self.episode,
-                              "amplitude": self.amplitude, "applied": 0})
-
-    def end_segment(self):
-        self.active = False
-        self.noise_id = -1
-        self.await_recovery = True
-        self.since_end = 0
-        self.draw_segment()
-
-    def lerp(self, key, u):
-        lo, hi = self.p[key + "_lo"], self.p[key + "_hi"]
-        return lo + (hi - lo) * u
-
-    def draw_segment(self):
-        u_kind, u_sign, u_amp, u_dur = (self.schedule.uniform01() for _ in range(4))
-        u_gap = self.schedule.uniform_open01()
-        total = sum(self.weights)
-        self.kind = -1
-        cumulative = 0.0
-        for k, w in enumerate(self.weights):
-            cumulative += w
-            if self.kind < 0 and w > 0 and u_kind * total < cumulative:
-                self.kind = k
-        for last in range(len(self.weights) - 1, -1, -1):
-            if self.kind >= 0:
-                break
-            if self.weights[last] > 0:
-                self.kind = last
-        sign = -1 if u_sign >= 0.5 else 1
-        balance = self.balance[self.kind]
-        if balance >= self.BALANCE_MAX:
-            sign = -1
-        elif balance <= -self.BALANCE_MAX:
-            sign = 1
-        self.sign = sign
-        self.cap = 0
-        k, p = self.kind, self.p
-        if k == self.K_PULSE:
-            self.amplitude, duration = sign * self.lerp("k_pulse_amp", u_amp), self.lerp("k_pulse_s", u_dur)
-        elif k == self.K_STEP:
-            self.amplitude, duration = sign * self.lerp("k_step_amp", u_amp), self.lerp("k_step_s", u_dur)
-        elif k == self.K_OU:
-            self.amplitude, duration = p["k_ou_sigma"], self.lerp("ou_s", u_dur)
-        elif k == self.A_PULSE:
-            self.amplitude, duration = sign * self.lerp("a_pulse_amp", u_amp), self.lerp("a_pulse_s", u_dur)
-        elif k == self.A_OU:
-            self.amplitude, duration = p["a_ou_sigma"], self.lerp("ou_s", u_dur)
-        elif k == self.SPEED:
-            self.amplitude, duration = self.lerp("speed_f", u_amp), self.lerp("speed_s", u_dur)
-        elif k == self.STOP:
-            self.amplitude, duration = -self.lerp("stop_decel", u_amp), self.lerp("stop_dwell_s", u_dur)
-            self.cap = self.steps(p["stop_max_s"])
-        else:
-            self.amplitude, duration = -p["brake_mps2"], p["brake_max_s"]
-            self.cap = self.steps(duration)
-        if k in (self.K_PULSE, self.K_STEP, self.A_PULSE):
-            self.balance[k] = balance + sign
-        self.planned = max(self.steps(duration), 1)
-        self.gap_steps = self.steps(p["gap_min_s"] - p["gap_mean_s"] * math.log(u_gap))
-        self.drawn.append((k, sign, round(self.amplitude, 6), self.planned, self.gap_steps))
-
-    def update_recovery(self, inp):
-        inside = (abs(inp["lateral"]) < self.p["recover_lat_m"]
-                  and abs(inp["heading_err"]) < math.radians(self.p["recover_head_deg"]))
-        self.recovered_steps = self.recovered_steps + 1 if inside else 0
-        if not self.await_recovery:
-            return
-        self.since_end += 1
-        hold = self.steps(self.p["recover_hold_s"])
-        if self.recovered_steps < hold or self.recovered_steps < 1:
-            return
-        self.await_recovery = False
-        if self.since_end - self.recovered_steps <= self.steps(self.p["recover_window_s"]):
-            self.recovered_in_window += 1
-        else:
-            self.recovered_late += 1
-
     def end_episode(self):
-        if self.active:
-            self.active = False
-            self.noise_id = -1
-            self.await_recovery = True
-        if self.await_recovery:
-            self.not_recovered += 1
-        self.await_recovery = False
-        self.episode_n = False
+        return self.noise.EndEpisode()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -594,9 +478,9 @@ class Car:
         self.x, self.z, self.psi, self.v, self.kappa, self.acc = x, z, psi, 0.0, 0.0, 0.0
 
     def step(self, cmd, dt):
-        self.kappa += (cmd.kappa - self.kappa) * (1.0 - math.exp(-dt / self.TAU_KAPPA_S))
-        want = cmd.accel if cmd.dir == 1 else min(cmd.accel, 0.0) if self.v > 0 else 0.0
-        if cmd.dir == 0 and self.v <= 0.05:
+        self.kappa += (cmd.m_fKappa - self.kappa) * (1.0 - math.exp(-dt / self.TAU_KAPPA_S))
+        want = cmd.m_fAccel if cmd.m_iDir == 1 else min(cmd.m_fAccel, 0.0) if self.v > 0 else 0.0
+        if cmd.m_iDir == 0 and self.v <= 0.05:
             want = 0.0
         self.acc += (want - self.acc) * (1.0 - math.exp(-dt / self.TAU_ACCEL_S))
         self.acc = min(max(self.acc, -self.DECEL_LIMIT), self.ACCEL_LIMIT)
@@ -606,14 +490,15 @@ class Car:
         self.z += self.v * math.cos(self.psi) * dt
 
 
-def simulate(table, values, routes, seconds_per_route, trial_seed=1, profile_active=True):
+def simulate(source, values, routes, seconds_per_route, trial_seed=1, profile_active=True):
     """The pilot on each route for seconds_per_route: episodes (laps from standstill at the start, 3 s apart) of
-    5 Hz decisions over 30 Hz steps; DC_Noise on the clean expert in mode-N episodes. Returns the mirror and the
-    per-decision records."""
+    5 Hz decisions (world time +200 ms each) over 30 Hz steps; DC_Noise (translated from source) on the clean expert
+    in mode-N episodes. The car is kinematic with lags: it bypasses llc_v1 and the S105, so the recovery and
+    termination results check the scheduler and the gate, not the vehicle. Returns (Pilot, records, terminations)."""
     records = []
-    noise = NoiseMirror(table, values, DECISION_DT, EXPERT["kappa_max"], EXPERT["accel_max"], EXPERT["brake_max"],
-                        EXPERT["stop_kmh"] / 3.6)
+    pilot = Pilot(source, values)
     episode_id = 0
+    world_ms = 0
     terminations = []
     for route_index, route in enumerate(routes):
         expert = ExpertMirror(route)
@@ -622,26 +507,26 @@ def simulate(table, values, routes, seconds_per_route, trial_seed=1, profile_act
             x0, z0 = route.xz[0]
             car = Car(x0, z0, route.heading_at(0.0))
             expert.reset()
-            mode_n = profile_active and noise.begin_episode(trial_seed, episode_id)
-            held = Cmd(0.0, 0.0, 1)
+            mode_n = profile_active and pilot.begin_episode(trial_seed, episode_id)
             t_ep, off_s, slow_s, term = 0.0, 0.0, 0.0, None
             while term is None:
                 expert.update(car.x, car.z, car.psi)
                 clean = expert.evaluate(car.x, car.z, car.psi, car.v)
-                inp = {"speed": car.v, "remaining": route.length - expert.progress, "lateral": expert.lateral,
-                       "heading_err": expert.heading_err,
-                       "profile_ahead": expert.profile_at(expert.progress + car.v * EXPERT["preview_s"])}
-                held = noise.decide(clean, inp) if mode_n else clean
-                active = noise.segments[-1] if held.noise else None
+                inp = NoiseInput(car.v, route.length - expert.progress, expert.lateral, expert.heading_err,
+                                 expert.profile_at(expert.progress + car.v * EXPERT["preview_s"]), world_ms)
+                held = pilot.decide(clean, inp) if mode_n else clean
+                active = pilot.segments[-1] if held.m_bNoise else None
                 records.append({"route": route_index, "episode": episode_id, "mode": "N" if mode_n else "E",
-                                "noise": held.noise,
-                                "noise_id": held.noise_id, "kind": active["kind"] if active else None,
-                                "speed": car.v, "kappa_cmd": held.kappa, "kappa_label": clean.kappa,
-                                "accel_cmd": held.accel, "accel_label": clean.accel, "dir_cmd": held.dir,
-                                "dir_label": clean.dir, "lateral": expert.lateral})
+                                "noise": held.m_bNoise, "noise_id": held.m_iNoiseId,
+                                "kind": active["kind"] if active else None, "speed": car.v,
+                                "kappa_cmd": held.m_fKappa, "kappa_label": clean.m_fKappa,
+                                "accel_cmd": held.m_fAccel, "accel_label": clean.m_fAccel,
+                                "dir_cmd": held.m_iDir, "dir_label": clean.m_iDir, "lateral": expert.lateral,
+                                "world_ms": world_ms})
                 for _ in range(STEPS_PER_DECISION):
                     car.step(held, STEP_DT)
                 t_ep += DECISION_DT
+                world_ms += int(round(DECISION_DT * 1000))
                 if expert.dir == 0 and expert.progress >= 0.98 * route.length:
                     term = "route_complete"
                 elif abs(expert.lateral) > 30.0:
@@ -656,11 +541,12 @@ def simulate(table, values, routes, seconds_per_route, trial_seed=1, profile_act
                 elif t_ep >= EXPERT["timeout_s"]:
                     term = "timeout"
             if mode_n:
-                noise.end_episode()
+                pilot.end_episode()
             terminations.append(term)
             t_route += t_ep + 3.0
+            world_ms += 3000
             episode_id += 1
-    return noise, records, terminations
+    return pilot, records, terminations
 
 
 class NoisePilotTest(unittest.TestCase):
@@ -671,23 +557,36 @@ class NoisePilotTest(unittest.TestCase):
         cls.table = Table(cls.source)
         cls.defaults = dict(zip(cls.table.keys, cls.table.defaults))
         cls.routes = [RouteMirror(ROUTE_CW), RouteMirror(ROUTE_CCW)]
-        cls.noise, cls.records, cls.terms = simulate(cls.table, cls.defaults, cls.routes, 1800.0)
+        cls.pilot, cls.records, cls.terms = simulate(cls.source, cls.defaults, cls.routes, 1800.0)
+        cls.noise = cls.pilot.noise
 
-    # -------------------------------------------------------------------------------------- the mirror is the code
+    # -------------------------------------------------------------------------------------- the code runs here
     def test_rng_self_test_constants(self):
-        rng = Rng()
-        rng.seed(1, 0)
-        got = [rng.next_int() for _ in range(3)]
+        """DC_NoiseRng translated from the source gives its own SelfTest constants, and so does an independent
+        port on emulated Enforce ints."""
         body = method_body(self.source, "DC_NoiseRng", "SelfTest")
         expected = [int(v) for v in re.search(r"array<int> expected = \{([^}]*)\}", body).group(1).split(",")]
-        self.assertEqual(got, expected)
-        seed = flat(method_body(self.source, "DC_NoiseRng", "Seed"))
-        self.assertIn("int x = (seed << 8) ^ stream ^ SEED_MIX; if (x == 0) x = SEED_ZERO;", seed)
-        self.assertIn("for (int i = 0; i < WARMUP_ROUNDS; i++) { NextInt(); }", seed)
-        nxt = flat(method_body(self.source, "DC_NoiseRng", "NextInt"))
-        self.assertIn("x = x ^ (x << 13); x = x ^ Shr(x, 17); x = x ^ (x << 5);", nxt)
-        for name, value in (("SEED_MIX", 0x5DEECE66), ("SEED_ZERO", 0x6D2B79F5), ("WARMUP_ROUNDS", 8)):
-            self.assertRegex(self.source, r"static const int %s = (0x%X|%d);" % (name, value, value))
+        enforce = enforce_noise_classes(self.source)["DC_NoiseRng"]()
+        enforce.Seed(1, 0)
+        self.assertEqual([enforce.NextInt() for _ in range(3)], expected)
+        rng = Rng()
+        rng.seed(1, 0)
+        self.assertEqual([rng.next_int() for _ in range(3)], expected)
+        for seed, stream in ((0, 0), (7, 3), (1000003, 255), (-5, 1)):
+            a, b = enforce_noise_classes(self.source)["DC_NoiseRng"](), Rng()
+            a.Seed(seed, stream)
+            b.seed(seed, stream)
+            self.assertEqual([a.NextInt() for _ in range(50)], [b.next_int() for _ in range(50)], (seed, stream))
+            a.Seed(seed, stream)
+            u = [a.Uniform01() for _ in range(2000)]
+            self.assertTrue(all(0.0 <= x < 1.0 for x in u))
+            self.assertAlmostEqual(sum(u) / len(u), 0.5, delta=0.03)
+
+    def test_the_translator_refuses_what_it_does_not_know(self):
+        """A statement outside the translated subset fails the translation (it is never skipped)."""
+        broken = self.source.replace("x = x ^ (x << 13);", "x = x ^ (x << 13) ? 1 : 0;")
+        with self.assertRaises(enforce_subset.TranslateError):
+            enforce_noise_classes(broken)
 
     def test_table_is_complete(self):
         t = self.table
@@ -699,47 +598,11 @@ class NoisePilotTest(unittest.TestCase):
             self.assertLessEqual(self.defaults[pair + "_lo"], self.defaults[pair + "_hi"], pair)
         self.assertEqual(t.kinds, ["k_pulse", "k_step", "k_ou", "a_pulse", "a_ou", "speed", "stop", "brake"])
         self.assertEqual(t.weight_keys, ["w_" + k for k in t.kinds])
-        # every key the code asks for exists in the table
         asked = set(re.findall(r'Get\("(\w+)"\)', code_only(self.source)))
         asked |= {k + suffix for k in re.findall(r'Lerp\("(\w+)"', code_only(self.source)) for suffix in ("_lo", "_hi")}
         self.assertTrue(asked <= set(t.keys), asked - set(t.keys))
-        # the stop cap stays inside the expert's stuck rule (slower than 1 km/h for 20 s)
-        self.assertLess(t.hi[t.keys.index("stop_max_s")], EXPERT["stuck_s"])
-
-    def test_draw_order_and_formulas(self):
-        draw = flat(method_body(self.source, "DC_Noise", "DrawSegment"))
-        order = ["float uKind = m_Schedule.Uniform01();", "float uSign = m_Schedule.Uniform01();",
-                 "float uAmplitude = m_Schedule.Uniform01();", "float uDuration = m_Schedule.Uniform01();",
-                 "float uGap = m_Schedule.UniformOpen01();"]
-        positions = [draw.index(s) for s in order]
-        self.assertEqual(positions, sorted(positions))
-        self.assertEqual(draw.count("m_Schedule."), 5)          # five draws per segment, always
-        for statement in ("if (m_iKind < 0 && m_aWeights[k] > 0 && uKind * total < cumulative) m_iKind = k;",
-                          "if (uSign >= 0.5) sign = -1;", "if (balance >= SIGN_BALANCE_MAX) sign = -1; else if "
-                          "(balance <= -SIGN_BALANCE_MAX) sign = 1;",
-                          'm_fAmplitude = sign * Lerp("k_pulse_amp", uAmplitude); durationS = Lerp("k_pulse_s", '
-                          'uDuration);',
-                          'm_fAmplitude = -Lerp("stop_decel", uAmplitude); durationS = Lerp("stop_dwell_s", uDuration); '
-                          'm_iCapSteps = Steps(m_Config.Get("stop_max_s"));',
-                          'float gapS = m_Config.Get("gap_min_s") - m_Config.Get("gap_mean_s") * Math.Log(uGap);'):
-            self.assertIn(statement, draw)
-        apply = flat(method_body(self.source, "DC_Noise", "ApplySegment"))
-        for statement in ("applied.m_fKappa = Math.Clamp(clean.m_fKappa + kappaDelta, -m_fKappaCmdMax, m_fKappaCmdMax);",
-                          "applied.m_fAccel = Math.Clamp(clean.m_fAccel + accelDelta, -decelMax, accelMax);",
-                          "float target = m_fAmplitude * input.m_fProfileAheadMps;",
-                          'applied.m_fAccel = Math.Clamp(m_Config.Get("speed_gain") * (target - speed), '
-                          '-m_fExpertBrakeMax, m_fExpertAccelMax);',
-                          "applied.m_iDir = 0; applied.m_fAccel = m_fAmplitude; return true;",
-                          'if (m_iStep >= m_iCapSteps || speed < m_Config.Get("brake_end_mps")) return false;'):
-            self.assertIn(statement, apply)
-        # the perturbation touches the HL targets only (kappa, accel, dir), never llc or a setter
+        self.assertLess(t.hi[t.keys.index("stop_max_s")], EXPERT["stuck_s"])      # under the stuck rule (20 s)
         self.assertNotRegex(code_only(self.source), r"\b(SetSteering|SetThrottle|SetBreak|Apply\(|DC_LLCOutput)\b")
-        decide = flat(method_body(self.source, "DC_Noise", "Decide"))
-        self.assertIn("applied.CopyFrom(clean); applied.m_bNoise = false; applied.m_iNoiseId = -1;", decide)
-        self.assertIn("applied.m_bNoise = true; applied.m_iNoiseId = m_iNoiseId;", decide)
-        start = flat(method_body(self.source, "DC_Noise", "CanStart"))
-        self.assertIn('if (input.m_fRemainingM < m_Config.Get("end_margin_m")) return false;', start)
-        self.assertIn('return m_iRecoveredSteps >= Steps(m_Config.Get("recover_hold_s"));', start)
 
     def test_expert_defaults(self):
         """The simulation's expert is DC_ExpertDriver with its attribute defaults."""
@@ -754,36 +617,46 @@ class NoisePilotTest(unittest.TestCase):
         n = [r for r in self.records if r["mode"] == "N"]
         off = sum(1 for r in n if r["noise"]) / float(len(n))
         self.assertGreaterEqual(off, TARGET_OFF_EXPERT)
-        # every perturbed decision differs from the label in at least one channel, and no clean one does
-        for r in n:
-            differs = (abs(r["kappa_cmd"] - r["kappa_label"]) > 1e-9 or abs(r["accel_cmd"] - r["accel_label"]) > 1e-9
+        self.assertLessEqual(off, 0.6)
+        for r in n:          # a clean decision is the expert's; a perturbed one differs from the label somewhere
+            differs = (abs(r["kappa_cmd"] - r["kappa_label"]) > 1e-12 or abs(r["accel_cmd"] - r["accel_label"]) > 1e-12
                        or r["dir_cmd"] != r["dir_label"])
             if not r["noise"]:
                 self.assertFalse(differs)
-        self.assertGreater(sum(1 for r in n if r["noise"] and r["kind"] is not None), 0)
+        # DC_Noise's own counters agree with the applied commands
+        self.assertEqual(self.noise.m_iPerturbedDecisions, sum(1 for r in n if r["noise"]))
+        self.assertEqual(self.noise.m_iDecisions, len(n))
 
     def test_longitudinal_share_and_stops(self):
-        segments = self.noise.segments
-        longitudinal = sum(1 for s in segments if s["kind"] >= NoiseMirror.A_PULSE)
+        segments = self.pilot.segments
+        longitudinal = sum(1 for seg in segments if seg["kind"] >= Pilot.A_PULSE)
         self.assertGreaterEqual(longitudinal / float(len(segments)), TARGET_LONGITUDINAL)
-        hours = sum(DECISION_DT for _ in self.records) / 3600.0
-        self.assertGreaterEqual(self.noise.stood / hours, TARGET_STOPS_PER_HOUR)
-        brakes = [s for s in segments if s["kind"] == NoiseMirror.BRAKE]
-        self.assertGreater(len(brakes), 0)
-        # every kind occurs
-        self.assertTrue(all(c > 0 for c in self.noise.kind_count), self.noise.kind_count)
+        hours = len(self.records) * DECISION_DT / 3600.0
+        self.assertGreaterEqual(self.noise.m_iStops / hours, TARGET_STOPS_PER_HOUR)
+        self.assertEqual(sorted(set(seg["kind"] for seg in segments)), list(range(8)))
+        self.assertEqual(list(self.noise.m_aKindCount), [sum(1 for seg in segments if seg["kind"] == k)
+                                                         for k in range(8)])
+        # a stop stands, then the expert drives off; a full brake asks for -brake_mps2
+        stops = [r for r in self.records if r["noise"] and r["kind"] == Pilot.STOP]
+        self.assertTrue(stops and all(r["dir_cmd"] == 0 for r in stops))
+        self.assertTrue(any(r["speed"] < 0.1 for r in stops))
+        brakes = [r for r in self.records if r["noise"] and r["kind"] == Pilot.BRAKE]
+        self.assertTrue(brakes and all(r["accel_cmd"] == -self.defaults["brake_mps2"] for r in brakes))
 
     def test_turn_balance(self):
         """Signed kinds: right and left within SIGN_BALANCE_MAX per kind and episode; the applied curvature's right
         and left turning (kappa x v) over the two directions within TARGET_LR_RATIO, though the clockwise loop alone
         turns mostly right."""
         sums = {}
-        for seg in self.noise.segments:
-            if seg["kind"] in (NoiseMirror.K_PULSE, NoiseMirror.K_STEP, NoiseMirror.A_PULSE):
+        for seg in self.pilot.segments:
+            if seg["kind"] in (Pilot.K_PULSE, Pilot.K_STEP, Pilot.A_PULSE):
                 key = (seg["episode"], seg["kind"])
                 sums[key] = sums.get(key, 0) + seg["sign"]
+                self.assertEqual(seg["sign"], 1 if seg["amplitude"] > 0 else -1)
         self.assertTrue(sums)
-        self.assertLessEqual(max(abs(v) for v in sums.values()), NoiseMirror.BALANCE_MAX)
+        self.assertLessEqual(max(abs(v) for v in sums.values()), 2)
+        signs = [seg["sign"] for seg in self.pilot.segments if seg["kind"] in (Pilot.K_PULSE, Pilot.K_STEP)]
+        self.assertLessEqual(abs(sum(signs)), 2 * len(set(seg["episode"] for seg in self.pilot.segments)))
 
         def turning(records):
             right = sum(r["kappa_cmd"] * r["speed"] for r in records if r["kappa_cmd"] > 0)
@@ -797,52 +670,87 @@ class NoisePilotTest(unittest.TestCase):
 
     def test_recovery_and_no_termination(self):
         n = self.noise
-        judged = n.recovered_in_window + n.recovered_late + n.not_recovered
+        judged = n.m_iRecoveredInWindow + n.m_iRecoveredLate + n.m_iNotRecovered
         self.assertGreater(judged, 100)
-        self.assertGreaterEqual(n.recovered_in_window / float(judged), TARGET_RECOVERED)
+        self.assertGreaterEqual(n.m_iRecoveredInWindow / float(judged), TARGET_RECOVERED)
         self.assertEqual(set(self.terms), {"route_complete"}, self.terms)
-        # recovery between segments: a segment starts only after recover_hold_s inside the bounds
-        for prev, nxt in zip(self.records, self.records[1:]):
-            if nxt["noise"] and not prev["noise"]:
-                self.assertLess(abs(prev["lateral"]), self.defaults["recover_lat_m"])
+        # every segment starts after recover_hold_s inside the bounds (world time from the first decision inside)
+        hold_ms = self.defaults["recover_hold_s"] * 1000
+        inside_since = None
+        for r in self.records:
+            if r["mode"] != "N":
+                continue
+            inside = abs(r["lateral"]) < self.defaults["recover_lat_m"]
+            if r["noise"] and r["noise_id"] != getattr(self, "_last", -1):
+                self.assertIsNotNone(inside_since, r)
+                self.assertGreaterEqual(r["world_ms"] - inside_since, hold_ms)
+            self._last = r["noise_id"]
+            if not inside:
+                inside_since = None
+            elif inside_since is None:
+                inside_since = r["world_ms"]
+
+    def test_recovery_gate_holds_two_seconds(self):
+        """Decision by decision on the translated DC_Noise: with the gap over, a segment starts at the first
+        decision 2000 ms after the first decision inside the bounds (the 11th at 200 ms, not the 10th), and a
+        decision outside the bounds restarts the hold."""
+        def first_start(lateral_by_decision):
+            pilot = Pilot(self.source, dict(self.defaults, start_delay_s=0.0))
+            pilot.begin_episode(11, 0)
+            pilot.noise.m_iGapSteps = 0
+            clean = Cmd(0.0, 0.0, 1)
+            for k, lateral in enumerate(lateral_by_decision):
+                applied = pilot.decide(clean, NoiseInput(10.0, 1000.0, lateral, 0.0, 11.0, 200 * k))
+                if applied.m_bNoise:
+                    return k
+            return None
+
+        self.assertEqual(first_start([0.0] * 30), 10)
+        self.assertEqual(first_start([0.9] * 3 + [0.0] * 30), 13)
+        self.assertEqual(first_start([0.0] * 9 + [0.9] + [0.0] * 30), 20)
+        self.assertIsNone(first_start([0.9] * 30))
 
     # -------------------------------------------------------------------------------------- determinism
     def test_schedule_is_a_function_of_the_seed(self):
         def schedule(seed):
-            m = NoiseMirror(self.table, self.defaults, DECISION_DT, 0.2, 1.5, 4.0, 1.0 / 3.6)
+            pilot = Pilot(self.source, self.defaults)
             out = []
             for episode in range(3):
-                m.begin_episode(seed, episode)
+                pilot.begin_episode(seed, episode)
+                drawn = []
                 for _ in range(40):
-                    m.end_segment()
-                out.append(list(m.drawn))
-                m.drawn = []
+                    n = pilot.noise
+                    drawn.append((n.m_iKind, n.m_fSign, round(n.m_fAmplitude, 9), n.m_iPlannedSteps, n.m_iGapSteps,
+                                  n.m_iCapSteps))
+                    n.DrawSegment()
+                out.append(drawn)
             return out
 
         self.assertEqual(schedule(7), schedule(7))
         self.assertNotEqual(schedule(7), schedule(8))
         self.assertNotEqual(schedule(7)[0], schedule(7)[1])         # episodes differ within a session
-        again = simulate(self.table, self.defaults, self.routes[:1], 300.0, trial_seed=3)[1]
-        self.assertEqual(again, simulate(self.table, self.defaults, self.routes[:1], 300.0, trial_seed=3)[1])
+        again = simulate(self.source, self.defaults, self.routes[:1], 300.0, trial_seed=3)[1]
+        self.assertEqual(again, simulate(self.source, self.defaults, self.routes[:1], 300.0, trial_seed=3)[1])
 
     # -------------------------------------------------------------------------------------- contract and wiring
     def test_profile_none_keeps_mode_e(self):
-        """T0L: no "perturb" in the conf, no DC_Noise, every episode mode E (the mirror without a profile too)."""
+        """T0L: no "perturb" in the conf, no DC_Noise, every episode mode E."""
         begin = flat(method_body(self.expert_source, "DC_ExpertDriver", "BeginNoise"))
         self.assertIn('if (!config || !config.IsActive()) { ctx.Log("no perturbation profile: every episode is mode E"); '
                       'return true; }', begin)
-        # the decision period is the world-time grid's (200 ms at 5 Hz, the mirror's DECISION_DT)
-        self.assertIn("float decisionDtS = ctx.GetDecisionPeriodMs() / 1000.0;", begin)
+        self.assertIn("float decisionDtS = ctx.GetDecisionPeriodMs() / 1000.0;", begin)    # the 200 ms grid
         self.assertAlmostEqual(DECISION_DT, 0.2)
         self.assertIn("if (!DC_NoiseRng.SelfTest(failure)) return false;", begin)
         episode = flat(method_body(self.expert_source, "DC_ExpertDriver", "BeginEpisode"))
         self.assertIn("m_bEpisodeN = false; if (m_Noise) m_bEpisodeN = m_Noise.BeginEpisode(m_Context.GetTrialSeed(), "
                       "episodeId);", episode)
         self.assertIn('info.m_sMode = "E"; if (m_bEpisodeN) info.m_sMode = DC_StreamRecorder.MODE_NOISE;', episode)
-        profile, _, _ = read_config(self.table, '{"trial_id": "T0L", "duration_s": 600.0, "warmup_s": 20.0, '
-                                                '"seed": 1, "route": "arland_t0_loop", "images": true}')
-        self.assertEqual(profile, "none")
-        _, records, _ = simulate(self.table, self.defaults, self.routes[:1], 300.0, profile_active=False)
+        perturb = flat(method_body(self.expert_source, "DC_ExpertDriver", "PerturbDecision"))
+        self.assertIn("m_NoiseInput.m_iWorldMs = m_Context.GetWorldMs();", perturb)
+        t0l = ('{"trial_id": "T0L", "duration_s": 600.0, "warmup_s": 20.0, "seed": 1, "route": "arland_t0_loop", '
+               '"images": true}')
+        self.assertEqual(read_config(self.table, t0l)[0], "none")
+        _, records, _ = simulate(self.source, self.defaults, self.routes[:1], 300.0, profile_active=False)
         self.assertTrue(all(r["mode"] == "E" and not r["noise"] for r in records))
         self.assertTrue(all(r["kappa_cmd"] == r["kappa_label"] and r["accel_cmd"] == r["accel_label"]
                             for r in records))
@@ -859,15 +767,26 @@ class NoisePilotTest(unittest.TestCase):
         decide = flat(method_body(self.expert_source, "DC_ExpertDriver", "Decide"))
         self.assertIn("command.CopyFrom(m_Decision); NoteAppliedNoise(m_Decision.m_iNoiseId, m_sDecisionPayload, "
                       "m_fDecisionPlannedS);", decide)
+        # the translated Decide never touches the clean command
+        pilot = Pilot(self.source, dict(self.defaults, start_delay_s=0.0))
+        pilot.begin_episode(5, 0)
+        pilot.noise.m_iGapSteps = 0
+        clean = Cmd(0.01, 0.5, 1)
+        for k in range(200):
+            pilot.decide(clean, NoiseInput(10.0, 1000.0, 0.0, 0.0, 11.0, 200 * k))
+            self.assertEqual((clean.m_fKappa, clean.m_fAccel, clean.m_iDir, clean.m_bNoise, clean.m_iNoiseId),
+                             (0.01, 0.5, 1, False, -1))
 
     def test_events_and_core(self):
         note = flat(method_body(self.expert_source, "DC_ExpertDriver", "NoteAppliedNoise"))
         self.assertIn('m_Context.LogEvent("perturb_end", m_sAppliedPayload + ";duration_s=" + realisedS.ToString(-1, 2))',
                       note)
         self.assertIn('m_Context.LogEvent("perturb_start", payload + ";duration_s=" + plannedS.ToString(-1, 2))', note)
-        payload = flat(method_body(self.source, "DC_Noise", "PayloadBase"))
-        self.assertIn('return "noise_id=" + m_iNoiseId.ToString() + ";kind=" + KindName(m_iKind) + ";amplitude=" + '
-                      'm_fAmplitude.ToString(-1, 6);', payload)
+        pilot = Pilot(self.source, self.defaults)
+        pilot.begin_episode(3, 0)
+        payload = pilot.noise.PayloadBase()
+        self.assertRegex(payload, r"^noise_id=-?\d+;kind=(k_pulse|k_step|k_ou|a_pulse|a_ou|speed|stop|brake);"
+                                  r"amplitude=-?\d+\.\d{6}$")
         end = flat(method_body(self.expert_source, "DC_ExpertDriver", "EndEpisode"))
         self.assertIn("NoteAppliedNoise(-1, string.Empty, 0);", end)
         recorder = read(RECORDER_SOURCE)
@@ -895,9 +814,9 @@ class NoisePilotTest(unittest.TestCase):
         self.assertIn("m_NoiseConfig.WriteConf(json);", session)
         base = '{"trial_id": "T0P", "duration_s": 600, "warmup_s": 20, "seed": 101, "route": "arland_t0_loop"'
         self.assertEqual(read_config(self.table, base + ', "perturb": "pilot_v1"}')[0], "pilot_v1")
-        prof, values, given = read_config(self.table, base + ', "perturb": "pilot_v1", "perturb_params": '
-                                                             '{"gap_mean_s": 4, "w_stop": 0.2}}')
-        self.assertEqual((prof, values["gap_mean_s"], given), ("pilot_v1", 4.0, {"gap_mean_s": 4.0, "w_stop": 0.2}))
+        prof, values, given, _ = read_config(self.table, base + ', "perturb": "pilot_v1", "perturb_params": '
+                                                                '{"gap_mean_s": 4, "w_stop": 0.2}}')
+        self.assertEqual((prof, values["gap_mean_s"], given), ("pilot_v1", 4.0, {"gap_mean_s": "4", "w_stop": "0.2"}))
         for bad in (', "perturb": "pilot_v2"}', ', "perturb_params": {"gap_mean_s": 4}}',
                     ', "perturb": "none", "perturb_params": {}}',
                     ', "perturb": "pilot_v1", "perturb_params": {"gap_mean": 4}}',
@@ -910,20 +829,66 @@ class NoisePilotTest(unittest.TestCase):
             with self.assertRaises(ConfigError, msg=bad):
                 read_config(self.table, base + bad)
         read_fn = flat(method_body(self.source, "DC_NoiseConfig", "Read"))
-        for statement in ("if (!CheckKeyNames(rawText, failure)) return false;",
+        for statement in ("string keyFailure; if (!CheckKeyNames(rawText, keyFailure)) { if (m_bProfileGiven || "
+                          "hasParams) { failure = keyFailure; return false; }",
                           "if (profile != PROFILE_NONE && profile != PROFILE_PILOT_V1)",
                           "if (!IsActive()) { failure = \"\\\"\" + KEY_PARAMS + \"\\\" without a perturbation profile\";",
-                          "if (!ScanParams(rawText, failure)) return false; return CheckValues(failure);"):
+                          "if (!ScanParams(rawText, failure)) return false; m_bParamsGiven = true; "
+                          "return CheckValues(failure);"):
             self.assertIn(statement, read_fn)
         scan = flat(method_body(self.source, "DC_NoiseConfig", "ScanParams"))
         self.assertIn("if (keyIndex < 0 || m_aGivenKeys.Find(key) >= 0)", scan)
+
+    def test_string_values_are_not_keys(self):
+        """CheckKeyNames scans keys only: a T0L conf with "note": "perturbation deferred" is read as on main; a
+        misspelt perturb key is refused with a profile and only warned about without one; escaped quotes inside a
+        value do not end it."""
+        keys = flat(method_body(self.source, "DC_NoiseConfig", "CheckKeyNames"))
+        for statement in ("if (rawText.ToAscii(close) == CHAR_BACKSLASH) close++; close++;",
+                          "int after = DC_JsonScan.SkipSpace(rawText, close + 1);",
+                          "if (after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON && keyLength >= "
+                          "KEY_PROFILE.Length())"):
+            self.assertIn(statement, keys)
+        t0l = ('{"trial_id": "T0L", "duration_s": 600.0, "warmup_s": 20.0, "seed": 1, "route": "arland_t0_loop", '
+               '"images": true, "note": "perturbation deferred"}')
+        self.assertEqual(read_config(self.table, t0l)[0::3], ("none", None))
+        self.assertIsNone(check_key_names(t0l))
+        quoted = t0l.replace('"perturbation deferred"', '"say \\"perturb_x\\": later"')
+        self.assertIsNone(check_key_names(quoted))
+        typo = t0l.replace('"note"', '"perturbs"')
+        self.assertEqual(read_config(self.table, typo)[0::3], ("none", "perturbs"))         # warned, mode E
+        with self.assertRaises(ConfigError):
+            read_config(self.table, typo.replace("}", ', "perturb": "pilot_v1"}'))
+
+    def test_overrides_round_trip_exactly(self):
+        """session.json trial.conf carries every accepted override as the conf wrote it, and an empty
+        perturb_params as an empty object, so the recorded conf reads back to the same parameters."""
+        write = flat(method_body(self.source, "DC_NoiseConfig", "WriteConf"))
+        self.assertIn("if (!m_bParamsGiven) return; json.BeginObject(KEY_PARAMS); for (int i = 0; i < "
+                      "m_aGivenKeys.Count(); i++) { json.AddNumberText(m_aGivenKeys[i], m_aGivenTexts[i]); }", write)
+        self.assertNotIn("AddFloat", write)
+        scan = flat(method_body(self.source, "DC_NoiseConfig", "ScanParams"))
+        self.assertIn("m_aGivenTexts.Insert(text.Substring(numberStart, index - numberStart));", scan)
+        self.assertIn("void AddNumberText(string key, string numberText) { AddLine(KeyText(key) + numberText); }",
+                      flat(class_text(read(SESSION_SOURCE), "DC_JsonWriter")))
+        base = '{"trial_id": "T0P", "duration_s": 600, "warmup_s": 20, "seed": 1, "perturb": "pilot_v1"'
+        zero_weights = ", ".join('"%s": 0' % k for k in self.table.weight_keys if k != "w_k_pulse")
+        for params in ('{"w_k_pulse": 0.0000004, %s}' % zero_weights, '{"gap_mean_s": 3.0000001}', "{}",
+                       '{"kappa_alat_mps2": 4e0}'):
+            conf = base + ', "perturb_params": %s}' % params
+            profile, values, given, _ = read_config(self.table, conf)
+            recorded = json.loads(written_conf(True, profile, given))
+            replay = base + ', "perturb_params": %s}' % json.dumps(recorded["perturb_params"])
+            self.assertEqual(read_config(self.table, replay)[1], values, params)
+            self.assertEqual(recorded["perturb_params"], json.loads(params))
+        # six fixed decimals (the writer before) would record 0.0000004 as 0.000000: every weight 0, refused
+        self.assertEqual("%.6f" % 0.0000004, "0.000000")
 
     def test_deployed(self):
         with open(MANIFEST, "r", encoding="ascii") as f:
             entries = [line.split() for line in f if line.strip() and not line.startswith("#")]
         self.assertIn(["script", "src/enfusion/datacapture/DC_Noise.c"], entries)
         self.assertIn(["config", "addons/DataCapture/Configs/routes/arland_t0_loop_rev.json"], entries)
-        # no duplicate class name across the deployed scripts
         names = []
         for kind, path in entries:
             if kind == "script":

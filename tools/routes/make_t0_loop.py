@@ -5,7 +5,7 @@ Run it with the isolated interpreter (stdlib only, plus the repo's drivedit_nav 
 
     python3 -I -B tools/routes/make_t0_loop.py --splits <splits_v2.json> [--dump DIR]
         [--layer addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer] [--trails <decoder TSV>]
-        [--out addons/DataCapture/Configs/routes/arland_t0_loop.json | --check FILE]
+        [--direction cw | ccw] [--out addons/DataCapture/Configs/routes/arland_t0_loop.json | --check FILE]
 
 INPUTS (read only)
   --dump    the engine's road network as probe E-08a dumped it (DC_RoadDump): arland_roads.csv (road_idx, road_key,
@@ -27,6 +27,12 @@ INPUTS (read only)
             The route never depends on it (--check gives the same bytes with and without it).
 --out writes the route; --check regenerates it and compares it byte for byte with FILE (exit 1 when they differ);
 without either the route is only built, checked and summarised.
+--direction picks the loop's sense (DIRECTIONS): cw (default) is arland_t0_loop below; ccw is arland_t0_loop_rev
+(DD-7-ident pilot), the same engine roads driven the other way round (LOOP_REV) in the right lane of that direction,
+so the turns the clockwise loop takes right are left turns: the two together balance left and right (the clockwise
+loop alone turns right 2.2 times as much as left). Its start is the clockwise loop's start on road 163, in the other
+lane: START_ALONG_M back from the end of road 163's lane line (the junction with 179). Every check below applies to
+both; the clockwise file is unchanged by the option.
 
 THE LOOP (LOOP below; about 2.5 km, clockwise seen from above, north-east of the main airfield): engine road 163
 (8 m asphalt) east, then south-east, from its junction with 161 to the junction with 17; through that junction (165,
@@ -146,6 +152,15 @@ LOOP = (
     (179, "2/1674.15:3380.38/1684.04:3385.20"),
 )
 START_ALONG_M = 100.0           # the start (and end) of the closed route, along the first road's lane line
+# The counter-clockwise loop (DD-7-ident pilot): the same roads in the other driving order, still starting on 163
+LOOP_REV = (LOOP[0],) + tuple(reversed(LOOP[1:]))
+# direction -> route_id, driving order, sense, where the start lies on the first road's lane line (from its start, or
+# START_ALONG_M back from its end: the ccw start is the cw start in the other lane), and the route the file reverses
+DIRECTIONS = {
+    "cw": {"route_id": ROUTE_ID, "loop": LOOP, "sense": "clockwise", "start_from_end": False, "reverse_of": None},
+    "ccw": {"route_id": ROUTE_ID + "_rev", "loop": LOOP_REV, "sense": "counter-clockwise", "start_from_end": True,
+            "reverse_of": ROUTE_ID},
+}
 LANE_WIDTH_FRACTION = 0.25      # right lane centre = a quarter of the engine road width right of the centreline
 CONNECTOR_MAX_W = 1.5           # the engine's junction connectors are 1 m wide pieces of about 11 m
 LANE_CORRIDOR_FRACTION = 0.25   # lane corridor half width w/2: the right lane is half the engine road width
@@ -647,10 +662,10 @@ def find_junction(road_a, road_b):
     return Junction(road_a, road_b, s_other, s_end, point[0], point[2], distance)
 
 
-def loop_roads(roads):
-    """The LOOP roads of the dump, each checked against its road_key."""
+def loop_roads(roads, loop=LOOP):
+    """The loop's roads of the dump (LOOP or LOOP_REV), each checked against its road_key."""
     legs = []
-    for idx, key in LOOP:
+    for idx, key in loop:
         road = roads.get(idx)
         if road is None:
             raise Refusal("engine road %d is not in the dump" % idx)
@@ -721,9 +736,10 @@ def bezier_join(p0, d0, p3, d3):
     return out
 
 
-def build_lane_line(legs):
-    """(closed lane line starting START_ALONG_M along the first road, [Junction] between consecutive loop roads,
-    [corner dict])."""
+def build_lane_line(legs, start_from_end=False):
+    """(closed lane line starting START_ALONG_M along the first road (start_from_end: START_ALONG_M before the end of
+    its lane line), [Junction] between consecutive loop roads, [corner dict], the start's arc length on the first
+    road's lane line)."""
     junctions = [find_junction(legs[i], legs[(i + 1) % len(legs)]) for i in range(len(legs))]
     offsets = lane_offsets(legs)
     lanes = []
@@ -734,11 +750,12 @@ def build_lane_line(legs):
         lanes.append(offset_line(sub_line(road, s_from, s_to), offsets[i]))
     first = lanes[0]
     first_s = arc_lengths(first)
-    if not 0.0 < START_ALONG_M < first_s[-1]:
+    start_along = first_s[-1] - START_ALONG_M if start_from_end else START_ALONG_M
+    if not 0.0 < start_along < first_s[-1]:
         raise Refusal("START_ALONG_M %.1f m is not on the first road's lane line (%.1f m)" % (START_ALONG_M,
                                                                                          first_s[-1]))
-    split = next(k for k, s in enumerate(first_s) if s > START_ALONG_M)
-    start = point_at(first, first_s, START_ALONG_M)
+    split = next(k for k, s in enumerate(first_s) if s > start_along)
+    start = point_at(first, first_s, start_along)
     loop = [start] + first[split:]
     marks = []                                      # lane-line arc length of each junction point
     for i in range(1, len(lanes)):
@@ -798,7 +815,7 @@ def build_lane_line(legs):
                         "turn_deg": round(math.degrees(turn), 1), "apex": apex is not None,
                         "length_m": round(s1 - s0, 2)})
     corners.reverse()
-    return loop, junctions, corners
+    return loop, junctions, corners, start_along
 
 
 def heights_from(points, legs):
@@ -1120,8 +1137,9 @@ def check_trails(points, trails):
     return crossings, touches
 
 
-def build_route(dump_path, splits_path, layer_path):
-    """(route dict, facts) or Refusal."""
+def build_route(dump_path, splits_path, layer_path, direction="cw"):
+    """(route dict, facts) or Refusal; direction is a key of DIRECTIONS."""
+    sense = DIRECTIONS[direction]
     for path in (dump_path, splits_path, layer_path):
         reason = sealed_reason(path)
         if reason:
@@ -1131,8 +1149,8 @@ def build_route(dump_path, splits_path, layer_path):
     roads, provenance = read_dump(dump_path)
     train_rule = read_train_rule(splits_path)
     vehicles = read_parked_vehicles(layer_path)
-    legs = loop_roads(roads)
-    lane, junctions, corners = build_lane_line(legs)
+    legs = loop_roads(roads, sense["loop"])
+    lane, junctions, corners, start_along = build_lane_line(legs, sense["start_from_end"])
     dense = resample_closed(lane, SMOOTH_STEP_M)
     smooth = smooth_closed(dense, dense[:-1])
     points = resample_closed(smooth, STEP_M)
@@ -1152,7 +1170,7 @@ def build_route(dump_path, splits_path, layer_path):
     offsets = lane_offsets(legs)
     route = {
         "schema": drivedit_nav.ROUTE_SCHEMA_ID,
-        "route_id": ROUTE_ID,
+        "route_id": sense["route_id"],
         "map_id": MAP_ID,
         "split": SPLIT,
         "nav_version": drivedit_nav.NAV_VERSION,
@@ -1178,7 +1196,7 @@ def build_route(dump_path, splits_path, layer_path):
             "lane_corridor_half_width_m": corridor_half,
             "lane_corridor_rule": {"half_width_fraction": LANE_CORRIDOR_FRACTION, "narrowest_within_m": CORRIDOR_SPAN_M,
                                    "road": "nearest loop road that is not a connector"},
-            "start_along_m": START_ALONG_M,
+            "start_along_m": round(start_along, 3),
             "smoothing": {"step_m": SMOOTH_STEP_M, "max_shift_m": SMOOTH_MAX_SHIFT_M},
             "maneuver_rule": {"arm_tol_m": ARM_TOL_M, "merge_m": MANEUVER_MERGE_M, "turn_span_m": TURN_SPAN_M,
                               "straight_below_deg": MANEUVER_STRAIGHT_DEG,
@@ -1197,9 +1215,11 @@ def build_route(dump_path, splits_path, layer_path):
                         "width; junctions from the engine graph" % (provenance["launch_id"], LANE_WIDTH_FRACTION),
         },
         "description": "Arland T0 loop (DD-7-min) on the engine road graph: engine roads %s (E-08a %s road_idx), "
-                       "clockwise, right-lane line, inside TRAIN of splits_v2 (PROPOSED, not frozen)."
-                       % (", ".join(str(road.idx) for road in legs), provenance["launch_id"]),
+                       "%s, right-lane line, inside TRAIN of splits_v2 (PROPOSED, not frozen)."
+                       % (", ".join(str(road.idx) for road in legs), provenance["launch_id"], sense["sense"]),
     }
+    if sense["reverse_of"]:
+        route["source"]["reverse_of"] = sense["reverse_of"]
     errors = drivedit_nav.validate_route(route)
     if errors:
         raise Refusal("the route fails drivedit_nav.validate_route: %s" % "; ".join(errors))
@@ -1218,12 +1238,14 @@ def main(argv=None):
     ap.add_argument("--splits", required=True, help="map splits JSON (splits_v2, PROPOSED)")
     ap.add_argument("--layer", default=DEFAULT_LAYER, help="DC_Arland layer with the parked vehicles")
     ap.add_argument("--trails", help="decoder road polylines TSV: check that no decoder trail crosses the loop")
+    ap.add_argument("--direction", choices=sorted(DIRECTIONS), default="cw",
+                    help="cw: arland_t0_loop (default); ccw: arland_t0_loop_rev, the same roads the other way round")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--out", help="write the route file here")
     group.add_argument("--check", help="regenerate and compare with this route file")
     args = ap.parse_args(argv)
     try:
-        route, facts = build_route(args.dump, args.splits, args.layer)
+        route, facts = build_route(args.dump, args.splits, args.layer, args.direction)
         trail_facts = None
         if args.trails:
             reason = sealed_reason(args.trails)

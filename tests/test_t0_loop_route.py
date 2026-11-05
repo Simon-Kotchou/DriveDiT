@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Tests of the Arland T0 loop route (DD-7-min): addons/DataCapture/Configs/routes/arland_t0_loop.json, its generator
-tools/routes/make_t0_loop.py and the engine road dump it is built from (tools/routes/data/e08a_<launch_id>/).
+tools/routes/make_t0_loop.py and the engine road dump it is built from (tools/routes/data/e08a_<launch_id>/); and of
+its counter-clockwise twin arland_t0_loop_rev.json (DD-7-ident pilot, --direction ccw, ReverseLoopRouteTest: the same
+roads the other way round, the clockwise start in the other lane, the turns swapped, left and right balanced with
+the clockwise loop, the same form and rules, rebuilt byte for byte).
 
     TMPDIR=/dev/shm/<x> PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
         tests/test_t0_loop_route.py
@@ -576,6 +579,105 @@ class LoopRouteTest(unittest.TestCase):
         if not (base.startswith("/mnt/e/") or base.startswith("/dev/shm")):
             base = "/dev/shm"
         return base
+
+
+ROUTE_REV_FILE = os.path.join(REPO, "addons", "DataCapture", "Configs", "routes", "arland_t0_loop_rev.json")
+
+
+class ReverseLoopRouteTest(unittest.TestCase):
+    """arland_t0_loop_rev (DD-7-ident pilot, make_t0_loop.py --direction ccw): the T0 loop's engine roads in the
+    other driving order, in the right lane of that direction, starting at the clockwise start in the other lane, so
+    the pilot's left and right turning balance; every rule of the clockwise loop holds for it too."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(ROUTE_REV_FILE, "rb") as f:
+            cls.raw = f.read()
+        cls.obj = json.loads(cls.raw.decode("ascii"))
+        cls.route = drivedit_nav.load_route(ROUTE_REV_FILE)
+        with open(ROUTE_FILE, "rb") as f:
+            cls.cw = json.loads(f.read().decode("ascii"))
+        cls.cw_route = drivedit_nav.load_route(ROUTE_FILE)
+
+    def test_route_schema(self):
+        obj = self.obj
+        self.assertEqual(drivedit_nav.validate_route(obj), [])
+        self.assertEqual((obj["route_id"], obj["map_id"], obj["split"], obj["lane_side"], obj["closed"]),
+                         ("arland_t0_loop_rev", "arland", "train", "right", True))
+        self.assertEqual(obj["route_id"] + ".json", os.path.basename(ROUTE_REV_FILE))
+        self.assertEqual(obj["stops"], [{"s_m": obj["length_m"], "kind": "route_end"}])
+        self.assertEqual(obj["polyline"][0], obj["polyline"][-1])
+        self.assertEqual(obj["source"]["reverse_of"], "arland_t0_loop")
+        self.assertIn("counter-clockwise", obj["description"])
+
+    def test_same_roads_other_way_round(self):
+        generator = load_generator()
+        cw = [leg["road"] for leg in self.cw["source"]["legs"]]
+        ccw = [leg["road"] for leg in self.obj["source"]["legs"]]
+        self.assertEqual(ccw, [cw[0]] + cw[1:][::-1])
+        self.assertEqual(tuple((leg["road"], leg["key"]) for leg in self.obj["source"]["legs"]), generator.LOOP_REV)
+        self.assertEqual(self.obj["source"]["road_graph"], self.cw["source"]["road_graph"])
+        # the same junctions, the turns the other way: every left / right of one loop is the other's right / left
+        cw_turns = {frozenset(m["junction_id"][1:].split("_")): m["type"] for m in self.cw["maneuvers"]}
+        ccw_turns = {frozenset(m["junction_id"][1:].split("_")): m["type"] for m in self.obj["maneuvers"]}
+        swap = {"left": "right", "right": "left"}
+        self.assertEqual(sorted(t for t in cw_turns.values() if t != "straight"), ["right"] * 3)
+        for roads, kind in cw_turns.items():
+            if kind != "straight":
+                self.assertEqual(ccw_turns.get(roads), swap[kind], sorted(roads))
+        # the start: the clockwise start in the other lane (one lane width of the 8 m road 163), facing the other way
+        p, q = self.obj["polyline"][0], self.cw["polyline"][0]
+        self.assertAlmostEqual(math.hypot(p[0] - q[0], p[2] - q[2]), 4.0, delta=0.5)
+        a, b = self.obj["polyline"][0], self.obj["polyline"][1]
+        c, d = self.cw["polyline"][0], self.cw["polyline"][1]
+        turn = wrap(math.atan2(b[0] - a[0], b[2] - a[2]) - math.atan2(d[0] - c[0], d[2] - c[2]))
+        self.assertGreater(abs(turn), math.radians(170.0))
+
+    def test_turning_balances_the_clockwise_loop(self):
+        left, right = turning(self.route)
+        cw_left, cw_right = turning(self.cw_route)
+        self.assertGreaterEqual(min(left, right), C17_MIN_TURN_RAD)
+        self.assertGreater(abs(1.0 - 2.0 * left / (left + right)), C17_LR_DEV_MAX + 0.1)   # C17 tells it from its mirror
+        self.assertAlmostEqual(left - right, 2.0 * math.pi, delta=0.3)                     # one left turn net
+        self.assertGreater(cw_right / cw_left, 1.5)
+        both_left, both_right = left + cw_left, right + cw_right
+        self.assertLessEqual(max(both_left, both_right) / min(both_left, both_right), 1.2)
+
+    def test_inside_train_and_radius(self):
+        x0, x1, z0, z1 = VAL_L_BOX
+        b = VAL_L_BUFFER_M
+        for x, _, z in self.obj["polyline"]:
+            self.assertFalse(x0 - b <= x < x1 + b and z0 - b <= z < z1 + b, (x, z))
+        self.assertTrue(2000.0 <= self.route.length_m <= 2700.0, self.route.length_m)
+        s = 0.0
+        while s <= self.route.length_m:
+            self.assertLessEqual(abs(route_curvature(self.route, s)), 1.0 / 6.5, s)
+            s += 1.0
+
+    def test_canonical_form_and_the_form_dc_route_reads(self):
+        text = self.raw.decode("ascii")
+        self.assertEqual(text, drivedit_nav.canonical_json(self.obj) + "\n")
+        self.assertEqual(hashlib.sha256(self.raw[:-1]).hexdigest(), self.route.sha256)
+        self.assertGreater(len(text), 8191)        # one line longer than string.Substring returns: DD-7's fix applies
+        self.assertEqual(text.count('"polyline"'), 1)
+        self.assertEqual(self.obj["source"]["n_points"], len(self.obj["polyline"]))
+        self.assertIsNone(re.search(r"[0-9]e[-+]?[0-9]", text.split('"polyline":', 1)[1].split("]]", 1)[0]))
+        for key in ("lane_corridor_s_m", "lane_corridor_half_width_m"):
+            self.assertEqual(text.count('"%s"' % key), 1, key)
+            value = text.split('"%s":' % key, 1)[1].split("]", 1)[0]
+            self.assertRegex(value, r"^\[-?[0-9]+(\.[0-9]+)?(,-?[0-9]+(\.[0-9]+)?)*$", key)
+        self.assertEqual(sorted(set(self.obj["source"]["lane_corridor_half_width_m"])),
+                         sorted(set(self.cw["source"]["lane_corridor_half_width_m"])))
+
+    def test_rebuilt_from_the_engine_dump(self):
+        if not os.path.isfile(SPLITS):
+            self.skipTest("splits_v2 not on this machine")
+        generator = load_generator()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = generator.main(["--direction", "ccw", "--splits", SPLITS, "--check", ROUTE_REV_FILE])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("route arland_t0_loop_rev", out.getvalue())
 
 
 if __name__ == "__main__":

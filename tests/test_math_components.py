@@ -17,7 +17,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from layers.rope_v2 import RoPELayer, rope, precompute_rope_freqs
 from layers.mha import MultiHeadAttention
 from layers.mlp import MLP
-from layers.nn_helpers import SiLU, RMSNorm
+from layers.nn_helpers import silu, RMSNorm  # nn_helpers has the silu function, never a SiLU module
 from core.components import RoPE3D, MultiHeadAttention as CoreMHA, FlowMatchingPredictor
 from blocks.dit_block import DiTBlock
 
@@ -238,7 +238,6 @@ class TestMLP:
         hidden_dim = 256
         
         # Test SiLU activation
-        silu = SiLU()
         x = torch.randn(2, 10, input_dim)
         
         output = silu(x)
@@ -388,7 +387,7 @@ class TestNumericalStability:
         for _ in range(10):
             layers.extend([
                 torch.nn.Linear(128, 128),
-                SiLU()
+                torch.nn.SiLU()
             ])
         
         model = torch.nn.Sequential(*layers)

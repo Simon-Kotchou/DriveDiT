@@ -14,10 +14,24 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from training.losses import (
-    ReconstructionLoss, TemporalConsistencyLoss, DepthConsistencyLoss,
-    JEPAContrastiveLoss, FlowMatchingLoss, CompositeLoss
-)
+import training.losses as _losses
+from training.losses import ReconstructionLoss, TemporalConsistencyLoss, FlowMatchingLoss
+
+# These three classes were written into this test (1907923) but never implemented in
+# training.losses; `git log -S` finds no other commit that adds or removes them.
+DepthConsistencyLoss = getattr(_losses, "DepthConsistencyLoss", None)
+JEPAContrastiveLoss = getattr(_losses, "JEPAContrastiveLoss", None)
+CompositeLoss = getattr(_losses, "CompositeLoss", None)
+
+
+def _xfail_unless_implemented(name):
+    return pytest.mark.xfail(
+        getattr(_losses, name, None) is None,
+        reason=f"training.losses.{name} was never implemented (only this test references it)",
+        run=False,
+    )
+
+
 from training.distill import DistillationTrainer
 from models.vae3d import VAE3D
 from models.dit_student import DiTStudent
@@ -75,6 +89,7 @@ class TestLossFunctions:
         assert torch.isfinite(losses['frame_diff'])
         assert losses['frame_diff'] >= 0
     
+    @_xfail_unless_implemented("DepthConsistencyLoss")
     def test_depth_consistency_loss(self, device):
         """Test depth consistency loss."""
         depth_loss = DepthConsistencyLoss()
@@ -89,6 +104,7 @@ class TestLossFunctions:
         assert torch.isfinite(losses['depth'])
         assert losses['depth'] >= 0
     
+    @_xfail_unless_implemented("JEPAContrastiveLoss")
     def test_jepa_contrastive_loss(self, device):
         """Test JEPA contrastive loss."""
         jepa_loss = JEPAContrastiveLoss(temperature=0.1)
@@ -122,6 +138,7 @@ class TestLossFunctions:
         assert torch.isfinite(loss)
         assert loss >= 0
     
+    @_xfail_unless_implemented("CompositeLoss")
     def test_composite_loss(self, device):
         """Test composite loss combination."""
         loss_weights = {
@@ -148,6 +165,7 @@ class TestLossFunctions:
         assert torch.allclose(total_loss, torch.tensor(expected_loss, device=device))
         assert len(weights_used) == len(loss_weights)
     
+    @_xfail_unless_implemented("CompositeLoss")
     def test_composite_loss_with_uncertainty_weighting(self, device):
         """Test composite loss with uncertainty weighting."""
         loss_weights = {

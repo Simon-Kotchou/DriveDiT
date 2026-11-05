@@ -14,10 +14,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader
+
 from drivedit.data.shard import LatentStats, Shard, WindowIndex
 from drivedit.data.spec import AccessError, FeatureSpec
 from drivedit.data.torch import LatentWindowDataset
-from torch.utils.data import DataLoader
 
 from .conftest import write_latents
 

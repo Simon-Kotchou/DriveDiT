@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+
 from drivedit.data.shard import LatentStats, Shard, ShardError, WindowIndex
 
 from .conftest import write_latents

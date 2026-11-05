@@ -1313,13 +1313,26 @@ class DC_CrashWatch : DC_SessionModule
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The prefab of an entity without its {GUID} prefix, safe as a payload value (no ',', '=', ';', '"', blanks)
+	//! The prefab of an entity without its {GUID} prefix, safe as a payload value (no ',', '=', ';', '"', blanks). The
+	//! rest after the prefix is copied in pieces of at most DC_Session.CAPPED_STRING_MAX_CHARS (string.Substring cuts a
+	//! longer result without an error), so a path of any length reaches the payload whole
 	static string PrefabPath(notnull IEntity entity)
 	{
 		string path = DC_VehicleRegistry.PrefabOf(entity);
 		int close = path.IndexOf("}");
 		if (path.StartsWith("{") && close >= 0)
-			path = path.Substring(close + 1, path.Length() - close - 1);
+		{
+			string rest;
+			int at = close + 1;
+			while (at < path.Length())
+			{
+				int take = Math.MinInt(path.Length() - at, DC_Session.CAPPED_STRING_MAX_CHARS);
+				rest += path.Substring(at, take);
+				at += take;
+			}
+
+			path = rest;
+		}
 
 		path.Replace("=", "_");
 		return DC_ProbeCsv.CleanField(path);

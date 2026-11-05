@@ -61,7 +61,9 @@ BOMS = (  # UTF-32 first: its little-endian BOM begins with the UTF-16 one
     (codecs.BOM_UTF16_BE, "utf-16-be"),
     (codecs.BOM_UTF8, "utf-8"),
 )
-PROJECTION_ENCODINGS = ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+# (encoding, code-unit width): the projection decodes at every byte alignment of the unit, so wide text that starts
+# after an odd-length binary header is read too.
+PROJECTION_ENCODINGS = (("utf-8", 1), ("utf-16-le", 2), ("utf-16-be", 2), ("utf-32-le", 4), ("utf-32-be", 4))
 # Printable runs: no C0 controls (tab allowed), no DEL, no U+FFFD from undecodable bytes.
 PRINTABLE_RUN = re.compile(r"[^\x00-\x08\x0a-\x1f\x7f\ufffd]{6,}")
 
@@ -76,27 +78,32 @@ def tracked_files() -> list[str]:
 
 
 def text_projection(data: bytes) -> str:
-    """The printable runs of `data` read as UTF-8, UTF-16 and UTF-32 (both byte orders), one per line."""
+    """The printable runs of `data` read as UTF-8, UTF-16 and UTF-32 (both byte orders, every alignment), one per
+    line."""
     runs = []
-    for enc in PROJECTION_ENCODINGS:
-        runs.extend(PRINTABLE_RUN.findall(data.decode(enc, "replace")))
+    for enc, width in PROJECTION_ENCODINGS:
+        for offset in range(width):
+            runs.extend(PRINTABLE_RUN.findall(data[offset:].decode(enc, "replace")))
     return "\n".join(runs)
 
 
-def read_text(path: str) -> tuple[str, str] | None:
-    """(text, unit) for a scannable file, unit "" for lines or "run" for a projection; None if not a file."""
+def read_texts(path: str) -> list[tuple[str, str]] | None:
+    """The texts to scan for a file as [(text, unit)], unit "" for lines or "run" for projection runs; None if not a
+    file. A file with a BOM is decoded by it and is also projected, because a BOM names the encoding of the start
+    only (a UTF-8 line appended to a UTF-16 log stays contiguous in the bytes). A file without a BOM that holds a NUL
+    byte is projected; any other file is UTF-8."""
     if path == "-":
-        return sys.stdin.read(), ""
+        return [(sys.stdin.read(), "")]
     if os.path.islink(path) or not os.path.isfile(path):
         return None
     with open(path, "rb") as f:
         data = f.read()
     for bom, enc in BOMS:
         if data.startswith(bom):
-            return data[len(bom):].decode(enc, "replace"), ""
+            return [(data[len(bom):].decode(enc, "replace"), ""), (text_projection(data), "run")]
     if b"\0" in data:
-        return text_projection(data), "run"
-    return data.decode("utf-8", "replace"), ""
+        return [(text_projection(data), "run")]
+    return [(data.decode("utf-8", "replace"), "")]
 
 
 def is_placeholder(name: str) -> bool:
@@ -130,14 +137,18 @@ def main(argv: list[str]) -> int:
     paths = argv or tracked_files()
     n_files = n_hits = 0
     for path in paths:
-        read = read_text(path)
-        if read is None:
+        texts = read_texts(path)
+        if texts is None:
             continue
-        text, unit = read
         n_files += 1
-        for lineno, kind, hit in findings(os.path.normpath(path), text):
-            n_hits += 1
-            print("%s:%s%d: %s: %s" % (path, unit, lineno, kind, redact(hit)))
+        seen = set()  # a projection run repeats what the decoded text or another alignment already reported
+        for text, unit in texts:
+            for lineno, kind, hit in findings(os.path.normpath(path), text):
+                if unit == "run" and (kind, hit) in seen:
+                    continue
+                seen.add((kind, hit))
+                n_hits += 1
+                print("%s:%s%d: %s: %s" % (path, unit, lineno, kind, redact(hit)))
     print("secret_scan: %d file(s) scanned, %d finding(s)" % (n_files, n_hits), file=sys.stderr)
     return 1 if n_hits else 0
 

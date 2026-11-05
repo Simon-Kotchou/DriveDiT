@@ -142,6 +142,23 @@ class SecretScanFileTest(unittest.TestCase):
         rc, out = scan_files(self.write("noise.bin", data))
         self.assertEqual((rc, out), (0, ""))
 
+    def test_bom_file_with_an_appended_utf8_line(self):
+        # A BOM names the encoding of the start only: a UTF-8 line appended to a UTF-16 log stays contiguous in the bytes.
+        for enc in ("utf-16", "utf-32"):
+            data = "log start\n".encode(enc) + ("mail " + self.email + "\n").encode()
+            self.assert_found(self.write("mixed_%s.log" % enc, data), "email")
+
+    def test_wide_text_after_an_odd_length_header(self):
+        for enc, width in (("utf-16-le", 2), ("utf-16-be", 2), ("utf-32-le", 4), ("utf-32-be", 4)):
+            for prefix in range(1, width):
+                data = bytes(range(1, prefix + 1)) + ("mail " + self.email + "\n").encode(enc)
+                self.assert_found(self.write("shifted_%s_%d.bin" % (enc, prefix), data), "email")
+
+    def test_a_bom_file_hit_is_reported_once(self):
+        rc, out = scan_files(self.write("once.txt", ("mail " + self.email + "\n").encode("utf-16")))
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(out.count(": email: "), 1, out)
+
 
 if __name__ == "__main__":
     unittest.main()

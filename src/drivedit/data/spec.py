@@ -39,6 +39,23 @@ INPUT_CLASSES = ("student_input", "teacher_input")
 SPEC_RELPATH = Path("docs") / "capture_contract" / "features_v1.json"
 
 
+VAL_C_MODULUS = 10  # dc-2.0 3.2: val_c is 10% of the train sessions
+
+
+def session_split(session_id: str, route_split: str | None) -> str | None:
+    """The effective split of a session (dc-2.0 section 3.2): its route's split tag, except that a ``train`` session
+    with ``int(sha256(session_id)[:8], 16) mod 10 == 0`` is ``val_c``. val_c is not a route tag; it is 10% of the
+    train sessions, for in-distribution debugging only, and never fits a learned part or a normalisation statistic.
+    None when the session has no route split. The rule is marked proposed in the contract (DD-6 owns the manifests);
+    the validator's C02 applies the same rule (tools/validator/checks/files.py) until the package move (DD-17)."""
+    if (
+        route_split == "train"
+        and int(hashlib.sha256(session_id.encode("ascii")).hexdigest()[:8], 16) % VAL_C_MODULUS == 0
+    ):
+        return "val_c"
+    return route_split
+
+
 class SpecError(ValueError):
     """features_v1.json is missing, unreadable, or breaks a registry rule."""
 

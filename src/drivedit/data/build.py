@@ -20,7 +20,9 @@
   obs_valid; NaN = empty), the realised image age per decision step that the features_v1 image rule asks the builder
   to record.
 - ``meta.json``: provenance, episodes, segments, the image source, the sha256 of every array, and ``missing``: the
-  features_v1 tensors this build cannot produce, with the reason.
+  features_v1 tensors this build cannot produce, with the reason. ``split`` is the session's effective split
+  (``spec.session_split``: the route tag, with dc-2.0 3.2's val_c tenth of the train sessions), ``route_split`` the
+  route's raw tag.
 
 Tensor semantics (features_v1 ``tensors[].rule``, dc-2.0 sections 6, 9.5.1, 12 and 13):
 
@@ -76,7 +78,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from drivedit.data.spec import FeatureSpec, load_spec, repo_root
+from drivedit.data.spec import FeatureSpec, load_spec, repo_root, session_split
 
 SHARD_SCHEMA = "drivedit.features_v1-shard/1"
 BUILDER_VERSION = "drivedit.data.build/1"
@@ -477,7 +479,8 @@ def _meta(
         "pin_id": session.meta_get("pin.pin_id"),
         "map_id": str(session.map_id),
         "trial_id": session.trial_id,
-        "split": splits[0] if splits else None,
+        "split": session_split(str(session.session_id), splits[0] if splits else None),
+        "route_split": splits[0] if splits else None,
         "decision_hz": tl.decision_hz,
         "physics_steps_per_decision": tl.n_exec,
         "step_dt_s": float(session.clocks["step_dt_s"]),
@@ -485,7 +488,7 @@ def _meta(
         "future_pose_horizon": tl.horizon,
         "hindsight_anchor_steps": [round(s * tl.decision_hz) for s in ANCHOR_S],
         "episodes": [
-            {k: e[k] for k in ("episode_id", "start", "stop", "mode", "route_id", "split", "termination_reason")}
+            {k: e[k] for k in ("episode_id", "start", "stop", "mode", "route_id", "route_split", "termination_reason")}
             for e in episodes.values()
         ],
         "segments": segments,
@@ -564,7 +567,7 @@ def _episodes(session: Any, episode: npt.NDArray[np.int64]) -> dict[int, dict[st
             "route_id": row["route_id"] or None,
             "route_sha256": row["route_sha256"] or None,
             "termination_reason": row["termination_reason"],
-            "split": None,
+            "route_split": None,
         }
     unknown = sorted({int(e) for e in episode if e >= 0} - set(out))
     if unknown:
@@ -575,7 +578,7 @@ def _episodes(session: Any, episode: npt.NDArray[np.int64]) -> dict[int, dict[st
 def _routes(session: Any, episodes: dict[int, dict[str, Any]], routes_dir: Path) -> dict[str, dict[str, Any]]:
     """{route_id: {route, sha256, split, file, path, logged}} of the route episodes; checks the map and each
     episode's route_sha256 (``_logged_route_hash``; ``logged`` lists the distinct checks), and sets each episode's
-    split from its route."""
+    route_split from its route."""
     nav = nav_module()
     out: dict[str, dict[str, Any]] = {}
     for e in episodes.values():
@@ -609,7 +612,7 @@ def _routes(session: Any, episodes: dict[int, dict[str, Any]], routes_dir: Path)
                 )
             if check not in out[rid]["logged"]:
                 out[rid]["logged"].append(check)
-        e["split"] = out[rid]["split"]
+        e["route_split"] = out[rid]["split"]
     return out
 
 
@@ -950,7 +953,16 @@ def _shard_dir(out_root: Path, protected: Sequence[Path], session_id: str) -> Pa
 def summary(shard_dir: Path) -> dict[str, Any]:
     """The meta.json fields a build report prints."""
     meta = json.loads((shard_dir / META_NAME).read_text("utf-8"))
-    keys = ("session_id", "map_id", "split", "build_key", "decision_hz", "n_steps", "future_pose_horizon")
+    keys = (
+        "session_id",
+        "map_id",
+        "split",
+        "route_split",
+        "build_key",
+        "decision_hz",
+        "n_steps",
+        "future_pose_horizon",
+    )
     out: dict[str, Any] = {k: meta[k] for k in keys}
     out["episodes"] = len(meta["episodes"])
     out["segments"] = len(meta["segments"])

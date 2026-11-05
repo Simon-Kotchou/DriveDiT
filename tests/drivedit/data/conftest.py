@@ -69,7 +69,8 @@ def golden_session() -> Any:
 
 @pytest.fixture(scope="session")
 def golden_shard_dir(golden_session: Any, spec: FeatureSpec, scratch: Path) -> Path:
-    return build.write_shard(golden_session, scratch / "golden_root", spec=spec, routes_dir=ROUTES_DIR)
+    root = scratch / "golden_root"
+    return build.write_shard(golden_session, root, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(root,))
 
 
 @pytest.fixture(scope="session")

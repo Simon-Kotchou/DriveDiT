@@ -142,7 +142,10 @@ def test_nav_invalid_clears_masks_and_splits_segments(
         return nav, valid, progress
 
     monkeypatch.setattr(build, "_nav", nav_off)
-    shard = _shard(build.write_shard(golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR))
+    datasets = tmp / "datasets"
+    shard = _shard(
+        build.write_shard(golden_session, datasets, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(datasets,))
+    )
     names = shard.meta["channels"]["masks"]
     masks = shard.array("masks")
     assert (masks[15:18, names.index("policy_valid")] == 0).all()
@@ -250,7 +253,12 @@ def test_nav_uses_the_rows_between_decisions(golden_session: Any, spec: FeatureS
     shutil.copytree(GOLDEN_DIR, session_dir)
     _rewrite_telemetry_row(session_dir, between[-1], {"pos_x": x, "pos_z": z})
     moved = build.open_dc2_session(session_dir, vehicle_card=CARD)
-    shard = _shard(build.write_shard(moved, tmp / "out", spec=spec, routes_dir=ROUTES_DIR, include_eval_only=True))
+    datasets = tmp / "datasets"
+    shard = _shard(
+        build.write_shard(
+            moved, datasets, spec=spec, routes_dir=ROUTES_DIR, include_eval_only=True, dataset_roots=(datasets,)
+        )
+    )
     per_row = _per_row_nav(moved, route, 0)
     np.testing.assert_allclose(shard.array("nav")[t], nav.nav_vector(per_row[steps[t]]), atol=TOL)
     progress = shard.array("eval_only")[:, list(build.EVAL_ONLY_BUILT).index("route_progress_m")]
@@ -353,7 +361,8 @@ def test_style_per_episode(golden_shard_dir: Path) -> None:
 def test_contact_events_from_a_crash(synth: ModuleType, spec: FeatureSpec, tmp: Path) -> None:
     out = synth.generate(str(tmp / "crash"), variant="crash")
     session = build.open_dc2_session(out["session_dir"], vehicle_card=CARD)
-    shard = _shard(build.write_shard(session, tmp / "root", spec=spec, routes_dir=ROUTES_DIR))
+    datasets = tmp / "datasets"
+    shard = _shard(build.write_shard(session, datasets, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(datasets,)))
     collision = next(c for c in session.crash_events if c["kind"] == "collision")
     steps = shard.array("step")
     contacts = shard.array("contact_events")
@@ -376,7 +385,8 @@ def test_contact_events_from_a_crash(synth: ModuleType, spec: FeatureSpec, tmp: 
 def test_the_10hz_override(synth: ModuleType, spec: FeatureSpec, tmp: Path, golden_shard_dir: Path) -> None:
     out = synth.generate(str(tmp / "s"), kind="golden_10hz")
     session = build.open_dc2_session(out["session_dir"], vehicle_card=CARD)
-    shard = _shard(build.write_shard(session, tmp / "root", spec=spec, routes_dir=ROUTES_DIR))
+    datasets = tmp / "datasets"
+    shard = _shard(build.write_shard(session, datasets, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(datasets,)))
     n = shard.n_steps
     assert shard.decision_hz == 10
     assert shard.array("action_exec").shape == (n, 3, 4)
@@ -387,7 +397,7 @@ def test_the_10hz_override(synth: ModuleType, spec: FeatureSpec, tmp: Path, gold
 
 
 def test_deterministic_bytes(golden_session: Any, spec: FeatureSpec, tmp: Path, golden_shard_dir: Path) -> None:
-    again = build.write_shard(golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR)
+    again = build.write_shard(golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp,))
     files = sorted(p.name for p in golden_shard_dir.iterdir())
     assert files == sorted(p.name for p in again.iterdir())
     for name in files:
@@ -395,64 +405,124 @@ def test_deterministic_bytes(golden_session: Any, spec: FeatureSpec, tmp: Path, 
 
 
 def test_overwrite_and_output_refusals(golden_session: Any, spec: FeatureSpec, tmp: Path) -> None:
-    first = build.write_shard(golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR)
+    datasets = tmp / "datasets"
+    kw: dict[str, Any] = {"spec": spec, "routes_dir": ROUTES_DIR, "dataset_roots": (datasets,)}
+    first = build.write_shard(golden_session, datasets, **kw)
     with pytest.raises(build.BuildError, match="exists"):
-        build.write_shard(golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR)
-    assert build.write_shard(golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR, overwrite=True) == first
+        build.write_shard(golden_session, datasets, **kw)
+    assert build.write_shard(golden_session, datasets, overwrite=True, **kw) == first
     assert sorted(p.name for p in first.parent.iterdir()) == ["features_v1"]  # no temporary left behind
-    with pytest.raises(build.BuildError, match="inside"):
-        build.write_shard(golden_session, GOLDEN_DIR / "out", spec=spec, routes_dir=ROUTES_DIR)
-    with pytest.raises(build.BuildError, match="C: drive"):
-        build.write_shard(golden_session, "/mnt/c/dd11", spec=spec, routes_dir=ROUTES_DIR)
-
-
-def test_a_symlinked_captures_root_stays_protected(spec: FeatureSpec, tmp: Path) -> None:
-    """Review round 2, unmocked: with captures -> storage, the reader resolves captures/<id> to storage/<id>, which
-    has no captures ancestor. The captures root comes from the session path as named, before resolution, so an out
-    root under captures/ is refused and nothing is written. No configured root takes part (protected_roots=())."""
-    storage = tmp / "storage"
-    session_dir = storage / GOLDEN_DIR.name
-    shutil.copytree(GOLDEN_DIR, session_dir)
-    (tmp / "captures").symlink_to(storage)
-    named = tmp / "captures" / GOLDEN_DIR.name
-    before = sorted(p.relative_to(storage) for p in storage.rglob("*"))
-    with pytest.raises(build.BuildError, match="read-only"):
-        build.build_session(
-            named,
-            tmp / "captures" / "new_output",
-            spec=spec,
-            routes_dir=ROUTES_DIR,
-            vehicle_card=CARD,
-            protected_roots=(),
+    with pytest.raises(build.BuildError, match="not under a dataset root"):
+        build.write_shard(golden_session, tmp / "elsewhere", **kw)
+    with pytest.raises(build.BuildError, match="overlaps"):  # a dataset root that holds the session
+        build.write_shard(
+            golden_session, GOLDEN_DIR / "out", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(GOLDEN_DIR,)
         )
-    assert sorted(p.relative_to(storage) for p in storage.rglob("*")) == before
+    with pytest.raises(build.BuildError, match="C: drive"):
+        build.write_shard(golden_session, "/mnt/c/dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=("/mnt/c",))
+    with pytest.raises(build.BuildError, match="no dataset root"):
+        build.write_shard(golden_session, datasets, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=())
+    assert not (tmp / "elsewhere").exists()
+
+
+def _tree(path: Path) -> list[Path]:
+    return sorted(p.relative_to(path) for p in path.rglob("*"))
+
+
+def test_a_normal_build_goes_under_an_allowed_root(
+    spec: FeatureSpec, tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    datasets = tmp / "datasets"
     shard = build.build_session(
-        named, tmp / "datasets", spec=spec, routes_dir=ROUTES_DIR, vehicle_card=CARD, protected_roots=()
+        GOLDEN_DIR, datasets / "a", spec=spec, routes_dir=ROUTES_DIR, vehicle_card=CARD, dataset_roots=(datasets,)
     )
-    assert Shard(shard).n_steps == 68  # the same session builds outside the capture tree
-    assert sorted(p.relative_to(storage) for p in storage.rglob("*")) == before
+    assert shard == (datasets / "a" / GOLDEN_DIR.name / "features_v1").resolve()
+    assert Shard(shard).n_steps == 68
+    monkeypatch.setenv(build.DATASET_ROOTS_ENV, str(datasets))  # the variable replaces the default root
+    shard = build.build_session(GOLDEN_DIR, datasets / "b", spec=spec, routes_dir=ROUTES_DIR, vehicle_card=CARD)
+    assert Shard(shard).n_steps == 68
 
 
-def test_configured_protected_roots(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """PROTECTED_ROOTS (default /mnt/e/DriveDiT/captures) is replaced by protected_roots, else by
-    DRIVEDIT_PROTECTED_ROOTS; each root is compared in its resolved form, also through a symlink to it."""
-    monkeypatch.delenv(build.PROTECTED_ROOTS_ENV, raising=False)
-    assert build.configured_roots() == [Path("/mnt/e/DriveDiT/captures")]
+def test_probe_dotdot_through_a_symlink(spec: FeatureSpec, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 3, probe 1, unmocked: portal -> nested/deeper and nested/captures -> storage, so
+    portal/../captures/<id> opens storage/<id> while abspath() would name <tmp>/captures. An out root under
+    nested/captures/ resolves into storage and lies under no dataset root: refused, nothing written."""
+    storage = tmp / "storage"
+    shutil.copytree(GOLDEN_DIR, storage / GOLDEN_DIR.name)
+    (tmp / "nested" / "deeper").mkdir(parents=True)
+    (tmp / "portal").symlink_to(tmp / "nested" / "deeper")
+    (tmp / "nested" / "captures").symlink_to(storage)
+    monkeypatch.chdir(tmp)
+    named = Path("portal") / ".." / "captures" / GOLDEN_DIR.name
+    assert named.resolve() == (storage / GOLDEN_DIR.name).resolve()
+    before = _tree(storage)
+    kw: dict[str, Any] = {"spec": spec, "routes_dir": ROUTES_DIR, "vehicle_card": CARD}
+    for allowed in ((tmp / "datasets",), (tmp / "nested",), (tmp,)):  # (tmp,) holds the session itself
+        with pytest.raises(build.BuildError, match="refusing"):
+            build.build_session(named, Path("nested") / "captures" / "new-output", dataset_roots=allowed, **kw)
+    assert _tree(storage) == before
+    assert _tree(tmp / "nested") == [Path("captures"), Path("deeper")]
+
+
+def test_probe_write_shard_after_opening_through_a_symlinked_root(spec: FeatureSpec, tmp: Path) -> None:
+    """Review round 3, probe 2, unmocked: with captures -> storage, write_shard(open_dc2_session(captures/<id>),
+    captures/new-output) needs no session path as named: the out root is under no dataset root."""
+    storage = tmp / "storage"
+    shutil.copytree(GOLDEN_DIR, storage / GOLDEN_DIR.name)
+    (tmp / "captures").symlink_to(storage)
+    session = build.open_dc2_session(tmp / "captures" / GOLDEN_DIR.name, vehicle_card=CARD)
+    before = _tree(storage)
+    for allowed in ((tmp / "datasets",), (tmp,)):
+        with pytest.raises(build.BuildError, match="refusing"):
+            build.write_shard(
+                session, tmp / "captures" / "new-output", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=allowed
+            )
+    assert _tree(storage) == before
+    shard = build.write_shard(
+        session, tmp / "datasets", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp / "datasets",)
+    )
+    assert Shard(shard).n_steps == 68
+    assert _tree(storage) == before
+
+
+def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 3, probe 3: an empty or blank variable counts as unset, and capture roots only add, so neither
+    can drop /mnt/e/DriveDiT/captures; an out root there lies under no default dataset root."""
+    default_captures = [Path(p) for p in build.CAPTURE_ROOTS]
+    default_datasets = [Path(p) for p in build.DATASET_ROOTS]
+    assert default_captures == [Path("/mnt/e/DriveDiT/captures")]
+    assert default_datasets == [Path("/mnt/e/DriveDiT/datasets")]
     session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
-    with pytest.raises(build.BuildError, match="read-only"):
-        build.write_shard(session, "/mnt/e/DriveDiT/captures/new_output", spec=None)
-    vault = tmp / "vault"
-    vault.mkdir()
-    (tmp / "vault_link").symlink_to(vault)
-    with pytest.raises(build.BuildError, match="read-only"):
-        build.write_shard(session, tmp / "vault_link" / "x", spec=None, protected_roots=[vault])
-    with pytest.raises(build.BuildError, match="read-only"):
-        build.write_shard(session, vault / "x", spec=None, protected_roots=[tmp / "vault_link"])
-    monkeypatch.setenv(build.PROTECTED_ROOTS_ENV, f"{tmp / 'other'}{os.pathsep}{vault}")
-    assert build.configured_roots() == [tmp / "other", vault]
-    with pytest.raises(build.BuildError, match="read-only"):
-        build.write_shard(session, vault / "y", spec=None)
-    assert list(vault.iterdir()) == []
+    for value in ("", " ", os.pathsep, f" {os.pathsep} "):
+        monkeypatch.setenv(build.CAPTURE_ROOTS_ENV, value)
+        monkeypatch.setenv(build.DATASET_ROOTS_ENV, value)
+        assert build.configured_capture_roots() == default_captures
+        assert build.allowed_dataset_roots() == default_datasets
+        with pytest.raises(build.BuildError, match="not under a dataset root"):
+            build.write_shard(session, "/mnt/e/DriveDiT/captures/new-output", spec=None)
+        # a dataset root that holds the capture store is refused, whatever else is configured
+        for extra in ((), (tmp / "other_store",)):
+            with pytest.raises(build.BuildError, match="overlaps /mnt/e/DriveDiT/captures"):
+                build.write_shard(
+                    session,
+                    "/mnt/e/DriveDiT/captures/new-output",
+                    spec=None,
+                    dataset_roots=("/mnt/e/DriveDiT",),
+                    capture_roots=extra,
+                )
+    monkeypatch.setenv(build.CAPTURE_ROOTS_ENV, str(tmp / "env_store"))
+    assert build.configured_capture_roots([tmp / "kw_store"]) == [
+        *default_captures,
+        tmp / "env_store",
+        tmp / "kw_store",
+    ]
+    store = tmp / "kw_store"
+    store.mkdir()
+    (tmp / "store_link").symlink_to(store)
+    for out_root, allowed in ((store / "x", (store,)), (tmp / "store_link" / "x", (tmp / "store_link",))):
+        with pytest.raises(build.BuildError, match="overlaps"):
+            build.write_shard(session, out_root, spec=None, dataset_roots=allowed, capture_roots=[tmp / "store_link"])
+    assert list(store.iterdir()) == []
 
 
 def _c02_split(session_dir: Path) -> Any:
@@ -493,8 +563,9 @@ def test_effective_split_agrees_with_validator_c02(synth: ModuleType, spec: Feat
     val_c = _renamed(GOLDEN_DIR, "arland_T0b_20261025T091512Z_wb_i00_0004", tmp / "renamed")
     for session_dir, want in ((GOLDEN_DIR, "train"), (crash, "train"), (val_c, "val_c")):
         session = build.open_dc2_session(session_dir, vehicle_card=CARD)
+        out = tmp / "datasets" / want / session_dir.parent.name
         shard = Shard(
-            build.write_shard(session, tmp / "out" / want / session_dir.parent.name, spec=spec, routes_dir=ROUTES_DIR)
+            build.write_shard(session, out, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp / "datasets",))
         )
         assert shard.meta["split"] == _c02_split(session_dir) == want, session_dir
         assert shard.meta["route_split"] == "train"
@@ -509,16 +580,24 @@ def test_image_derivatives(spec: FeatureSpec, tmp: Path) -> None:
     for slot in range(68):
         (deriv / f"f_{slot:08d}.jpg").write_bytes(b"")
     session = build.open_dc2_session(session_dir, vehicle_card=CARD)
-    with pytest.raises(build.BuildError, match="inside"):
-        build.write_shard(session, tmp / "captures" / "datasets", spec=spec, routes_dir=ROUTES_DIR)
-    shard = _shard(build.write_shard(session, tmp / "datasets", spec=spec, routes_dir=ROUTES_DIR))
+    with pytest.raises(build.BuildError, match="not under a dataset root"):
+        build.write_shard(
+            session, tmp / "captures" / "datasets", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp / "datasets",)
+        )
+    shard = _shard(
+        build.write_shard(
+            session, tmp / "datasets", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp / "datasets",)
+        )
+    )
     assert "image" not in shard.meta["missing"]
     assert shard.meta["image"]["pattern"] == "f_{slot:08d}.jpg"
     slot = int(shard.array("slot_id")[20])
     assert shard.image_path(slot) == deriv.resolve() / f"f_{slot:08d}.jpg"
     (deriv / f"f_{slot:08d}.jpg").unlink()
     with pytest.raises(build.BuildError, match="derivative"):
-        build.write_shard(session, tmp / "datasets2", spec=spec, routes_dir=ROUTES_DIR)
+        build.write_shard(
+            session, tmp / "datasets" / "2", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp / "datasets",)
+        )
 
 
 def test_route_provenance(golden_session: Any, spec: FeatureSpec, tmp: Path) -> None:
@@ -528,9 +607,9 @@ def test_route_provenance(golden_session: Any, spec: FeatureSpec, tmp: Path) -> 
     routes.mkdir()
     (routes / "golden_s_curve_v1.json").write_text(json.dumps(obj), "utf-8")
     with pytest.raises(build.BuildError, match="route sha256"):
-        build.write_shard(golden_session, tmp / "a", spec=spec, routes_dir=routes)
+        build.write_shard(golden_session, tmp / "a", spec=spec, routes_dir=routes, dataset_roots=(tmp,))
     with pytest.raises(build.BuildError, match="no route file"):
-        build.write_shard(golden_session, tmp / "b", spec=spec, routes_dir=tmp)
+        build.write_shard(golden_session, tmp / "b", spec=spec, routes_dir=tmp, dataset_roots=(tmp,))
 
 
 def test_logged_route_hash_forms(tmp: Path) -> None:
@@ -583,48 +662,55 @@ def test_logged_route_hash_forms(tmp: Path) -> None:
 
 
 def test_output_paths_are_checked_after_resolving_symlinks(tmp: Path) -> None:
-    """Review round 1: <out_root>/<session_id> (or its features_v1) linked into a session must be refused before
-    anything is written, also without overwrite."""
+    """Review round 1: <out_root>/<session_id> (or its features_v1) linked into a session or the capture tree must be
+    refused before anything is written, also without overwrite, though the out root lies under a dataset root."""
     session_dir = tmp / "captures" / "arland" / GOLDEN_DIR.name
     session_dir.mkdir(parents=True)
     (session_dir / "session.json").write_text("{}", "ascii")
     session = SimpleNamespace(path=str(session_dir), session_id=GOLDEN_DIR.name)
-    linked = tmp / "out_a"
-    linked.mkdir()
+    datasets = tmp / "datasets"
+    linked = datasets / "out_a"
+    linked.mkdir(parents=True)
     (linked / GOLDEN_DIR.name).symlink_to(session_dir)
-    shard_link = tmp / "out_b" / GOLDEN_DIR.name
+    shard_link = datasets / "out_b" / GOLDEN_DIR.name
     shard_link.mkdir(parents=True)
     (shard_link / "features_v1").symlink_to(session_dir)
-    elsewhere = tmp / "out_c"
+    elsewhere = datasets / "out_c"
     elsewhere.mkdir()
     (elsewhere / GOLDEN_DIR.name).symlink_to(tmp / "captures")
-    for out_root in (linked, tmp / "out_b", elsewhere, session_dir, tmp / "captures"):
+    for out_root in (linked, datasets / "out_b", elsewhere, session_dir, tmp / "captures"):
         for overwrite in (False, True):
             with pytest.raises(build.BuildError, match="refusing"):
-                build.write_shard(session, out_root, spec=None, overwrite=overwrite)
+                build.write_shard(session, out_root, spec=None, overwrite=overwrite, dataset_roots=(datasets,))
     assert sorted(p.name for p in session_dir.iterdir()) == ["session.json"]
     assert sorted(p.name for p in (tmp / "captures").iterdir()) == ["arland"]
     # a shard directory that is a symlink, even to a harmless place, is refused: shards are replaced by renames
-    harmless = tmp / "harmless"
+    harmless = datasets / "harmless"
     harmless.mkdir()
-    shard_dir = tmp / "out_d" / GOLDEN_DIR.name
+    shard_dir = datasets / "out_d" / GOLDEN_DIR.name
     shard_dir.mkdir(parents=True)
     (shard_dir / "features_v1").symlink_to(harmless)
     with pytest.raises(build.BuildError, match="symlink"):
-        build.write_shard(session, tmp / "out_d", spec=None, overwrite=True)
+        build.write_shard(session, datasets / "out_d", spec=None, overwrite=True, dataset_roots=(datasets,))
     assert list(harmless.iterdir()) == []
 
 
 def test_a_session_without_a_vehicle_card_is_refused(spec: FeatureSpec, tmp: Path) -> None:
     session = build.open_dc2_session(GOLDEN_DIR)  # no tools/ident/cards/1.8.0.13/S105_synthetic.json
     with pytest.raises(build.BuildError, match="vehicle card"):
-        build.write_shard(session, tmp, spec=spec, routes_dir=ROUTES_DIR)
+        build.write_shard(session, tmp, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(tmp,))
 
 
 def test_eval_only_needs_its_flag(golden_session: Any, spec: FeatureSpec, tmp: Path) -> None:
     shard = _shard(
         build.write_shard(
-            golden_session, tmp, spec=spec, routes_dir=ROUTES_DIR, include_eval_only=True, include_privileged=True
+            golden_session,
+            tmp,
+            spec=spec,
+            routes_dir=ROUTES_DIR,
+            include_eval_only=True,
+            include_privileged=True,
+            dataset_roots=(tmp,),
         )
     )
     assert shard.meta["channels"]["eval_only"] == list(build.EVAL_ONLY_BUILT)
@@ -650,7 +736,13 @@ def test_cli(tmp: Path) -> None:
             str(ROUTES_DIR),
             "--vehicle-card",
             str(CARD),
+            "--dataset-root",
+            str(tmp),
         ]
     )
     assert code == 0
     assert Shard(tmp / GOLDEN_DIR.name / "features_v1").n_steps == 68
+    elsewhere = tmp.parent / (tmp.name + "_elsewhere")
+    with pytest.raises(build.BuildError, match="not under a dataset root"):
+        build.main(["--session", str(GOLDEN_DIR), "--out", str(elsewhere), "--dataset-root", str(tmp)])
+    assert not elsewhere.exists()

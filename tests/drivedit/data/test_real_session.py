@@ -29,7 +29,8 @@ def real_session() -> Any:
 
 @pytest.fixture(scope="module")
 def real_shard(real_session: Any, spec: FeatureSpec, scratch: Path) -> Shard:
-    return Shard(build.write_shard(real_session, scratch / "real_root", spec=spec))
+    root = scratch / "real_root"
+    return Shard(build.write_shard(real_session, root, spec=spec, dataset_roots=(root,)))
 
 
 def _reader_rows(session: Any, key: str, width: int) -> np.ndarray:

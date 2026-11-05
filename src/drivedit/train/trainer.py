@@ -99,10 +99,16 @@ class PowerEMA:
             self.shadow[name].copy_(value)
 
 
+#: Matrix-shaped parameters that are not weights: the learned conditioning nulls ``[G, D]``.
+NO_DECAY: tuple[str, ...] = ("cond.null",)
+
+
 def _param_groups(model: nn.Module, weight_decay: float) -> list[dict[str, Any]]:
-    """Weight decay on matrices and embedding tables only, never on biases, norm gains, AdaLN biases or nulls."""
-    decay = [p for p in model.parameters() if p.ndim >= 2]
-    no_decay = [p for p in model.parameters() if p.ndim < 2]
+    """Weight decay on weight matrices and embedding tables only, never on biases, norm gains, AdaLN biases or the
+    learned nulls (``NO_DECAY``)."""
+    params = list(model.named_parameters())
+    decay = [p for name, p in params if p.ndim >= 2 and name not in NO_DECAY]
+    no_decay = [p for name, p in params if p.ndim < 2 or name in NO_DECAY]
     return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
 
@@ -176,6 +182,7 @@ class Trainer:
         self.model.train()
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.cfg.precision == "bf16"):
             loss, logs = diffusion_forcing_loss(self.net, batch, schedule=self.cfg.schedule, rng=self.rng)
+        self._stop_unless_finite(loss)
         self.optimizer.zero_grad(set_to_none=True)
         torch.autograd.backward(loss)
         grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.optim.grad_clip, error_if_nonfinite=True)
@@ -211,6 +218,18 @@ class Trainer:
                 self.save_checkpoint()
             if self.step >= self.cfg.steps:
                 break
+
+    def _stop_unless_finite(self, loss: Tensor) -> None:
+        """Raise ``FloatingPointError`` on every rank, before any backward or update, if the loss is non-finite on any
+        rank. A squared error can overflow to inf while the gradients stay finite or cancel, so the gradient-norm check
+        alone does not catch it; the decision is all-reduced so no rank is left waiting in backward."""
+        bad = (~torch.isfinite(loss.detach())).float().reshape(1)
+        if dist.is_initialized():
+            dist.all_reduce(bad, op=dist.ReduceOp.MAX)
+        if bad.item() > 0:
+            raise FloatingPointError(
+                f"non-finite loss at step {self.step} (this rank: {loss.item()}); stopping before the update"
+            )
 
     # -------------------------------------------------------------------------------------------------- checkpoints
 

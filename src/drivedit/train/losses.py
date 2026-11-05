@@ -116,7 +116,7 @@ def diffusion_forcing_loss(
     eps = torch.randn(x.shape, generator=rng, device=x.device, dtype=x.dtype)
     level = draw.noise_level[..., None, None, None]
     z = (1.0 - level) * x + level * eps
-    # The bootstrap passes run before the graded pass, so DDP sees one forward with grad per backward.
+    # The bootstrap passes (unwrapped, no grad) run before the graded pass, the one DDP forward of the update.
     x_target = _bootstrapped(model, x, z, draw, action_cmd=action_cmd, state=state)
     out: WorldModelOutput = model(z, draw.t, action_cmd, state, drop_cond=draw.drop_cond, step_size=draw.step_size)
     weight = loss_weight(draw.t, schedule) * (draw.target & valid)
@@ -141,16 +141,22 @@ def _bootstrapped(
     action_cmd: Tensor,
     state: Tensor,
 ) -> Tensor:
-    """``x`` with the shortcut bootstrap target substituted on the bootstrap samples (no-op without shortcut)."""
+    """``x`` with the shortcut bootstrap target substituted on the bootstrap samples (no-op without shortcut).
+
+    The bootstrap predictions run on the unwrapped module, never through DistributedDataParallel: which samples
+    bootstrap differs by rank, and every DDP forward issues collectives (buffer broadcast, bucket rebuild), so a
+    rank-dependent number of DDP forwards would desynchronise them. The graded pass stays the one DDP forward.
+    """
     if draw.bootstrap is None or draw.step_size is None:
         return x
     rows = draw.bootstrap.nonzero().squeeze(1)
     if rows.numel() == 0:
         return x
+    net = unwrap(model)
     a, s, drop = action_cmd[rows], state[rows], draw.drop_cond[rows]
 
     def predict(z_in: Tensor, t_in: Tensor, step: Tensor) -> Tensor:
-        out: WorldModelOutput = model(z_in, t_in, a, s, drop_cond=drop, step_size=step)
+        out: WorldModelOutput = net(z_in, t_in, a, s, drop_cond=drop, step_size=step)
         return out.x0.float()
 
     target = shortcut_target(predict, z[rows], draw.t[rows], draw.step_size[rows], draw.target[rows])

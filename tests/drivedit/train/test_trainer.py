@@ -1,11 +1,11 @@
-"""The trainer: config round trips, warm-up, checkpoint save / load / resume determinism, DDP replicas, the CLI."""
+"""The trainer: config round trips, warm-up, checkpoint save / load / resume determinism, the non-finite stop, weight
+decay groups, latent statistics and the CLI. DDP is in test_ddp.py."""
 
 from __future__ import annotations
 
 import json
-import os
+import math
 import shutil
-import socket
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,9 +13,8 @@ import numpy as np
 import pytest
 import torch
 from torch import Tensor
-from torch import multiprocessing as mp
 
-from drivedit.model import AUX_HEADS, WorldModel
+from drivedit.model import AUX_HEADS, WorldModel, WorldModelConfig
 from drivedit.train import DataConfig, ForcingSchedule, OptimConfig, RunConfig, Trainer, load_world_model
 from drivedit.train.cli import main
 from drivedit.train.config import from_dict
@@ -125,47 +124,48 @@ def test_a_run_dir_belongs_to_one_config(tmp_path: Path) -> None:
         Trainer(_cfg(seed=1), data, tmp_path)
 
 
-class _NaNWindows(ShiftDynamics):
+class _BadWindows(ShiftDynamics):
+    """NaN in the last frame, or finite latents of alternating sign at 1e20, whose squared error overflows to inf
+    while the gradients stay finite (the Codex DD-20 reproduction: loss inf, grad_norm 0, a step taken)."""
+
+    def __init__(self, cfg: WorldModelConfig, size: int, *, value: float) -> None:
+        super().__init__(cfg, size, seed=0)
+        self.value = value
+
     def __getitem__(self, i: int) -> dict[str, Tensor]:
         item = super().__getitem__(i)
-        item["latents"][-1] = float("nan")
+        if math.isnan(self.value):
+            item["latents"][-1] = self.value
+        else:
+            sign = torch.ones_like(item["latents"]).flatten()
+            sign[1::2] = -1.0
+            item["latents"] = self.value * sign.view_as(item["latents"])
         return item
 
 
-def test_a_non_finite_loss_stops_training(tmp_path: Path) -> None:
+@pytest.mark.parametrize("value", [float("nan"), 1e20])
+def test_a_non_finite_loss_stops_before_the_update(tmp_path: Path, value: float) -> None:
     cfg = _cfg(model=tiny_config(), schedule=ForcingSchedule(min_context=3))
-    trainer = Trainer(cfg, _NaNWindows(cfg.model, 8, seed=0), tmp_path, device=CPU)
-    with pytest.raises(RuntimeError, match="non-finite"):
+    trainer = Trainer(cfg, _BadWindows(cfg.model, 8, value=value), tmp_path, device=CPU)
+    before = _params(trainer.model)
+    with pytest.raises(FloatingPointError, match="non-finite loss at step 0"):
         trainer.fit()
+    assert trainer.step == 0
+    assert not trainer.optimizer.state
+    _assert_equal(_params(trainer.model), before)
 
 
-def _ddp_worker(rank: int, port: int, run_dir: str) -> None:
-    os.environ.update(
-        {
-            "RANK": str(rank),
-            "WORLD_SIZE": "2",
-            "LOCAL_RANK": str(rank),
-            "MASTER_ADDR": "127.0.0.1",
-            "MASTER_PORT": str(port),
-        }
-    )
-    torch.set_num_threads(1)
-    cfg = _cfg(steps=3)
-    trainer = Trainer(cfg, ShiftDynamics(cfg.model, 32, seed=3), Path(run_dir), device=CPU)
-    trainer.fit()
-    flat = torch.cat([p.detach().flatten() for p in trainer.model.parameters()])
-    torch.save(flat, Path(run_dir) / f"params_rank{rank}.pt")
-    torch.distributed.destroy_process_group()
-
-
-def test_ddp_replicas_stay_identical(tmp_path: Path) -> None:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    mp.spawn(_ddp_worker, args=(port, str(tmp_path)), nprocs=2, join=True)
-    rank0, rank1 = (torch.load(tmp_path / f"params_rank{r}.pt") for r in (0, 1))
-    assert torch.equal(rank0, rank1)
-    assert (tmp_path / "checkpoints" / "step_00000003.pt").exists()
+def test_weight_decay_spares_biases_gains_and_the_nulls(tmp_path: Path) -> None:
+    trainer = Trainer(_cfg(), ShiftDynamics(tiny_config(), 8, seed=0), tmp_path, device=CPU)
+    decay = {id(p): group["weight_decay"] for group in trainer.optimizer.param_groups for p in group["params"]}
+    model = trainer.model
+    assert len(decay) == len(list(model.parameters()))
+    assert decay[id(model.cond.null)] == 0.0  # [G, D]: matrix-shaped, but not a weight
+    assert decay[id(model.adaln.bias)] == 0.0
+    assert decay[id(model.blocks[0].mod_bias)] == 0.0
+    assert decay[id(model.blocks[0].attn.q_norm.gamma)] == 0.0
+    assert decay[id(model.adaln.weight)] == 0.1
+    assert decay[id(model.cond.dir_cmd.weight)] == 0.1  # an embedding table
 
 
 def test_channel_stats_pool_every_row() -> None:

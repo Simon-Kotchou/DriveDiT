@@ -1,0 +1,8 @@
+# drivedit.data is numpy-only: torch is banned here, except in data/torch.py (the thin Dataset over the shards).
+extend = "../ruff.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+"torch".msg = "drivedit.data is numpy-only; torch belongs in drivedit/data/torch.py"
+
+[lint.per-file-ignores]
+"torch.py" = ["TID251"]

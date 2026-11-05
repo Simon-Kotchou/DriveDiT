@@ -1,0 +1,11 @@
+# Lint for the drivedit package (DD-18). The repo-wide rules in pyproject.toml stay correctness-only until the older
+# trees are cleaned up; code under src/drivedit and tests/drivedit is held to this set from its first commit.
+extend = "../../pyproject.toml"
+line-length = 120
+
+[lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "C4", "N", "PT", "PL", "PERF", "TID", "NPY"]
+ignore = [
+    "PLR0913",  # dataclass-style constructors and pure math functions take many arguments
+    "PLR2004",  # numeric constants are normal in model code; name them where they carry meaning
+]

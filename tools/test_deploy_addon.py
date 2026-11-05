@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
@@ -103,6 +104,9 @@ def listing(root):
 # Off this machine (CI) there is no E: drive at /mnt/e and the checkout lies on the device of /.
 E_MOUNTED = os.path.ismount("/mnt/e")
 REPO_ON_ROOT_DEVICE = os.stat(REPO).st_dev == os.stat("/").st_dev
+# E: targets outside the allowed root, and the allowed root itself. Refused everywhere; for the allowed-root reason
+# only where /mnt/e is mounted (elsewhere the device check of / refuses them first).
+E_OUTSIDE_PROBES = ("/mnt/e/__dd_deploy_selftest_missing__/DataCapture", "/mnt/e/DriveDiT/addons")
 
 
 class DeployAddonTest(unittest.TestCase):
@@ -267,27 +271,43 @@ class DeployAddonTest(unittest.TestCase):
                        "/mnt/d/__dd_deploy_selftest_missing__/DataCapture"):
             self.assertIsNotNone(deploy_addon.target_reason(target, [self.tmp]), target)
 
-    @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
     def test_refuses_targets_outside_the_allowed_roots(self):
-        # A sibling of the allowed root is not inside it, E: outside DriveDiT/addons is not allowed, and an allowed
-        # root itself is not a target.
-        probes = [os.path.join(os.path.dirname(self.tmp), "__dd_deploy_selftest_missing__", "DataCapture"),
-                  "/mnt/e/__dd_deploy_selftest_missing__/DataCapture",
-                  "/mnt/e/DriveDiT/addons",
-                  self.tmp]
-        for target in probes:
+        # Runs everywhere: a sibling of the allowed root is not inside it, and an allowed root itself is not a target.
+        # The E: probes are refused here too and nothing is created; their allowed-root reason is checked in
+        # test_refuses_e_targets_outside_the_allowed_roots.
+        sibling = os.path.join(os.path.dirname(self.tmp), "__dd_deploy_selftest_missing__", "DataCapture")
+        for target in (sibling, self.tmp):
             rc, out = self.run_tool("--dry-run", target=target)
             self.assertEqual(rc, 2, "%s: %s" % (target, out))
-            self.assertIn("not inside an allowed deploy root", out)
+            self.assertIn("not inside an allowed deploy root", out, target)
             self.assertNotIn("DRY RUN", out, target)
-        for target in probes[:2]:
+        for target in E_OUTSIDE_PROBES:
+            rc, out = self.run_tool("--dry-run", target=target)
+            self.assertEqual(rc, 2, "%s: %s" % (target, out))
+            self.assertIn("REFUSED", out, target)
+            self.assertNotIn("DRY RUN", out, target)
+        for target in (sibling, E_OUTSIDE_PROBES[0]):
             self.assertFalse(os.path.exists(os.path.dirname(target)), target)
+
+    @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
+    def test_refuses_e_targets_outside_the_allowed_roots(self):
+        # E: outside DriveDiT/addons is not allowed, and the allowed root itself is not a target
+        for target in E_OUTSIDE_PROBES:
+            rc, out = self.run_tool("--dry-run", target=target)
+            self.assertEqual(rc, 2, "%s: %s" % (target, out))
+            self.assertIn("not inside an allowed deploy root", out, target)
+
+    def test_temp_target_needs_allow_root(self):
+        # Runs everywhere: a scratch target is refused without --allow-root and accepted with it
+        reason = deploy_addon.target_reason(self.target)
+        self.assertIsNotNone(reason)
+        self.assertIn("not inside an allowed deploy root", reason)
+        self.assertIsNone(deploy_addon.target_reason(self.target, [self.tmp]))
 
     @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
     def test_default_root_is_accepted_without_allow_root(self):
         self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/DataCapture"))
         self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/__dd_deploy_selftest__/DataCapture"))
-        self.assertIsNotNone(deploy_addon.target_reason(self.target))  # only with --allow-root
 
     def test_refuses_bad_allow_roots(self):
         for root in ("/tmp", os.path.expanduser("~"), "/mnt/e", "/mnt/d", "/mnt/e/__dd_deploy_selftest_missing__"):
@@ -300,8 +320,25 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("--allow-root /mnt/e resolves to /mnt/e", out)
 
-    @unittest.skipIf(REPO_ON_ROOT_DEVICE, "the repo is on the device of / here, so the device check refuses first")
     def test_refuses_target_inside_repo(self):
+        # Runs everywhere: the overlap rule, in-process against a scratch repo root under the temp dir (a device that
+        # takes deploys), for a target inside the repo and one that contains it. The real repo is refused too, and
+        # nothing is created; its overlap reason is checked in test_refuses_target_inside_the_real_repo.
+        outer = os.path.join(self.tmp, "outer")
+        repo = os.path.join(outer, "repo")
+        os.makedirs(repo)
+        with mock.patch.object(deploy_addon, "REPO_ROOT", repo):
+            for target in (os.path.join(repo, "build_addon_test"), outer):
+                reason = deploy_addon.target_reason(target, [self.tmp])
+                self.assertIsNotNone(reason, target)
+                self.assertIn("overlaps the repo", reason, target)
+        rc, out = self.run_tool("--dry-run", target=os.path.join(REPO, "build_addon_test"))
+        self.assertEqual(rc, 2, out)
+        self.assertNotIn("DRY RUN", out)
+        self.assertFalse(os.path.exists(os.path.join(REPO, "build_addon_test")))
+
+    @unittest.skipIf(REPO_ON_ROOT_DEVICE, "the repo is on the device of / here, so the device check refuses first")
+    def test_refuses_target_inside_the_real_repo(self):
         rc, out = self.run_tool("--dry-run", target=os.path.join(REPO, "build_addon_test"))
         self.assertEqual(rc, 2, out)
         self.assertIn("overlaps the repo", out)

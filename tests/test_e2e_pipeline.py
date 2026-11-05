@@ -52,7 +52,9 @@ def test_data_loading(config=None):
     image = session.load_image(valid[0]["obs_slot_id"])
     print(f"  dc-2.0 golden: {len(session.decisions)} decision steps, {len(valid)} wm-valid, "
           f"{len(session.segments)} segments, image {tuple(image.shape)}")
-    assert len(session.decisions) == 130 and len(valid) == 98 and len(session.segments) == 2
+    # Counts of the golden session as test_dc2_reader.py pins them (68 decision steps since the reader samples
+    # decisions on the world-time grid, 1056332); this test still had the older 130/98.
+    assert len(session.decisions) == 68 and len(valid) == 52 and len(session.segments) == 2
     assert tuple(image.shape) == (3, 240, 128) and 0.0 <= float(image.min()) <= float(image.max()) <= 1.0
     print("  PASS: data loading works")
 

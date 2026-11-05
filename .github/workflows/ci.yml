@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.13.7"
+  PYTHON_VERSION: "3.11"
+  UV_LOCKED: "1"              # every uv sync must match uv.lock exactly
+  PYTHONDONTWRITEBYTECODE: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: lint
+      - name: Install the dev group only
+        run: uv sync --only-group dev
+      - name: ruff check
+        run: uv run --no-sync ruff check --output-format=github .
+
+  capture-tests:
+    name: capture tests (no torch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: capture
+      - name: Install base dependencies and the dev group (no model extra)
+        run: uv sync
+      - name: Check that torch is not installed
+        run: uv run --no-sync python -I -c "import importlib.util as u, sys; sys.exit('torch is installed' if u.find_spec('torch') else 0)"
+      - name: pytest (torch-free tests; torch test modules are not collected, torch-marked tests deselected)
+        run: uv run --no-sync pytest -m "not torch"
+
+  model-tests:
+    name: model tests (CPU torch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: model-cpu
+      - name: Install with the model extra, torch from the PyTorch CPU index
+        run: uv sync --extra model --extra cpu
+      - name: Show torch build
+        run: uv run --no-sync python -I -c "import torch; print(torch.__version__, 'cuda' if torch.cuda.is_available() else 'cpu')"
+      - name: pytest (torch-marked tests)
+        run: uv run --no-sync pytest -m torch
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan tracked files for account ids, e-mail addresses and profile paths
+        run: python3 -I -B tools/ci/secret_scan.py

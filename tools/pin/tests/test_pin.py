@@ -217,6 +217,7 @@ class PathGuardTests(unittest.TestCase):
         self.assertEqual(pinlib.wsl_to_win("/mnt/e"), "E:\\")
         self.assertIsNone(pinlib.wsl_to_win("/dev/shm/x"))
 
+    @unittest.skipUnless(os.path.ismount("/mnt/e"), "/mnt/e is not mounted")
     def test_e_drive_allowed(self):
         self.assertEqual(pinlib.check_write_path("/mnt/e/DriveDiT/pin/pin.json"), "/mnt/e/DriveDiT/pin/pin.json")
         self.assertEqual(pinlib.check_write_path("E:\\DriveDiT\\pin\\pin.json"), "/mnt/e/DriveDiT/pin/pin.json")

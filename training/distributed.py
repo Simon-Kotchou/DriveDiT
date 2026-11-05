@@ -327,24 +327,24 @@ def example_distributed_training(rank: int, world_size: int):
     """Example of how to use distributed training utilities."""
     with distributed_context(rank, world_size) as dist_manager:
         # Setup model
-        model = MyModel()
+        model = MyModel()  # noqa: F821  placeholder in this usage sketch
         model = setup_distributed_model(model, dist_manager.local_rank)
         
         # Setup optimizer
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         
         # Create dataset and dataloader
-        dataset = MyDataset()
+        dataset = MyDataset()  # noqa: F821  placeholder in this usage sketch
         dataloader = create_distributed_dataloader(dataset, batch_size=32)
         
         # Training loop
-        for epoch in range(num_epochs):
+        for epoch in range(num_epochs):  # noqa: F821  placeholder in this usage sketch
             # Set epoch for distributed sampler
             dataloader.sampler.set_epoch(epoch)
             
             for batch in dataloader:
                 # Training step
-                loss = training_step(model, batch)
+                loss = training_step(model, batch)  # noqa: F821  placeholder in this usage sketch
                 
                 # Reduce loss across processes
                 reduced_losses = reduce_dict({'loss': loss}, world_size)

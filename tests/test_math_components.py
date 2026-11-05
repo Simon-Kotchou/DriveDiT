@@ -17,7 +17,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from layers.rope_v2 import RoPELayer, rope, precompute_rope_freqs
 from layers.mha import MultiHeadAttention
 from layers.mlp import MLP
-from layers.nn_helpers import SiLU, RMSNorm
+from layers.nn_helpers import silu, RMSNorm  # nn_helpers has the silu function, never a SiLU module
 from core.components import RoPE3D, MultiHeadAttention as CoreMHA, FlowMatchingPredictor
 from blocks.dit_block import DiTBlock
 
@@ -123,7 +123,7 @@ class TestMultiHeadAttention:
         mha = MultiHeadAttention(dim, num_heads)
         
         x = torch.randn(batch_size, seq_len, dim)
-        output = mha(x)
+        output, _ = mha(x)  # forward returns (output, kv_cache)
         
         assert output.shape == (batch_size, seq_len, dim)
     
@@ -207,7 +207,7 @@ class TestMultiHeadAttention:
         mha = MultiHeadAttention(dim, num_heads)
         
         x = torch.randn(batch_size, seq_len, dim)
-        output = mha(x)
+        output, _ = mha(x)  # forward returns (output, kv_cache)
         
         # Check that output is finite and has reasonable magnitude
         assert torch.isfinite(output).all()
@@ -223,7 +223,7 @@ class TestMLP:
         hidden_dim = 1024
         output_dim = 256
         
-        mlp = MLP(input_dim, hidden_dim, output_dim)
+        mlp = MLP(input_dim, hidden_dim)  # MLP(d_model, d_ff, activation): output width is d_model
         
         batch_size = 4
         seq_len = 16
@@ -238,7 +238,6 @@ class TestMLP:
         hidden_dim = 256
         
         # Test SiLU activation
-        silu = SiLU()
         x = torch.randn(2, 10, input_dim)
         
         output = silu(x)
@@ -250,7 +249,7 @@ class TestMLP:
     
     def test_mlp_gradient_flow(self):
         """Test that gradients flow properly through MLP."""
-        mlp = MLP(64, 128, 64)
+        mlp = MLP(64, 128)  # MLP(d_model, d_ff, activation): output width is d_model
         
         x = torch.randn(2, 8, 64, requires_grad=True)
         target = torch.randn(2, 8, 64)
@@ -292,7 +291,7 @@ class TestNormalizationLayers:
         expected_norm = x / torch.sqrt(x_squared_mean + eps)
         
         # Apply scaling factor
-        expected_output = expected_norm * rms_norm.scale
+        expected_output = expected_norm * rms_norm.weight  # RMSNorm's gain is `weight`
         
         assert torch.allclose(output, expected_output, atol=1e-5)
     
@@ -388,7 +387,7 @@ class TestNumericalStability:
         for _ in range(10):
             layers.extend([
                 torch.nn.Linear(128, 128),
-                SiLU()
+                torch.nn.SiLU()
             ])
         
         model = torch.nn.Sequential(*layers)
@@ -428,17 +427,16 @@ class TestNumericalStability:
     
     def test_rope_numerical_stability(self):
         """Test RoPE numerical stability."""
-        rope = RoPE(64, theta=10000.0)
-        
-        # Test with very long sequences
+        # Test with very long sequences (rope_v2 API; layers.rope never had RoPE/apply_rope)
         long_seq_len = 2048
-        pos_enc = rope.get_position_encodings(long_seq_len)
+        sin, cos = precompute_rope_freqs(64, long_seq_len, base=10000.0)
         
-        assert torch.isfinite(pos_enc).all()
-        assert not torch.isnan(pos_enc).any()
+        for pos_enc in (sin, cos):
+            assert torch.isfinite(pos_enc).all()
+            assert not torch.isnan(pos_enc).any()
         
-        # Check that frequencies don't cause numerical issues
-        freqs = rope.get_frequencies()
+        # Check that frequencies don't cause numerical issues (angle at position 1 = frequency)
+        freqs = torch.atan2(sin[1], cos[1])
         assert torch.isfinite(freqs).all()
         assert (freqs > 0).all()
 
@@ -473,7 +471,7 @@ class TestTensorShapeConsistency:
     ])
     def test_mlp_shape_consistency(self, input_dim, hidden_dim, output_dim):
         """Test MLP shape consistency."""
-        mlp = MLP(input_dim, hidden_dim, output_dim)
+        mlp = MLP(input_dim, hidden_dim)  # MLP(d_model, d_ff, activation): output width is d_model
         
         batch_size = 2
         seq_len = 16
@@ -500,18 +498,18 @@ def test_mathematical_identities():
     """Test important mathematical identities."""
     # Test that RoPE preserves dot products for same positions
     dim = 64
-    rope = RoPE(dim)
-    pos_enc = rope.get_position_encodings(4)
+    sin, cos = precompute_rope_freqs(dim, 4)
+    sin, cos = sin[None, :, None], cos[None, :, None]  # [1, T, 1, D//2]
     
-    q = torch.randn(1, 4, dim)
-    k = torch.randn(1, 4, dim)
+    q = torch.randn(1, 4, 1, dim)  # [B, T, H, D]
+    k = torch.randn(1, 4, 1, dim)
     
-    q_rot, k_rot = apply_rope(q, k, pos_enc)
+    q_rot, k_rot = rope(q, sin, cos), rope(k, sin, cos)
     
     # Dot products at same positions should be preserved
     for i in range(4):
-        original_dot = torch.dot(q[0, i], k[0, i])
-        rotated_dot = torch.dot(q_rot[0, i], k_rot[0, i])
+        original_dot = torch.dot(q[0, i, 0], k[0, i, 0])
+        rotated_dot = torch.dot(q_rot[0, i, 0], k_rot[0, i, 0])
         assert torch.allclose(original_dot, rotated_dot, atol=1e-5)
 
 
@@ -532,8 +530,8 @@ def test_backward_compatibility():
     
     # Test that outputs are identical
     with torch.no_grad():
-        output1 = model(x)
-        output2 = model_loaded(x)
+        output1, _ = model(x)  # forward returns (output, kv_cache)
+        output2, _ = model_loaded(x)
         
         assert torch.allclose(output1, output2, atol=1e-8)
 

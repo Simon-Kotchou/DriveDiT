@@ -284,8 +284,8 @@ class DC_NoiseConfig
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Reads "perturb" (context) and "perturb_params" (rawText, the conf as read whole; empty when it was not, and then
-	//! perturb_params cannot be checked and is refused). false (failure) on an unknown profile, perturb_params without
+	//! Reads "perturb" (context) and "perturb_params" (rawText, the conf as read whole for the key scan; empty when it
+	//! was not, and then a conf that sets either key is refused: its keys cannot be checked). false (failure) on an unknown profile, perturb_params without
 	//! a profile, an unknown or repeated key, a value that is not a number or out of its range, a lo above its hi,
 	//! no positive weight, or stop_dwell_s_hi above stop_max_s
 	bool Read(notnull JsonLoadContext context, string rawText, out string failure)
@@ -298,6 +298,15 @@ class DC_NoiseConfig
 		m_aGivenValues.Clear();
 		m_aGivenTexts.Clear();
 		m_bParamsGiven = false;
+		// fail closed: without the scanned text the key checks below (escaped, repeated, misspelt keys, the top-level
+		// perturb_params) cannot run, so a conf that sets a perturb key is refused; one without stays on the main path
+		if (rawText.IsEmpty() && (context.DoesKeyExist(KEY_PROFILE) || context.DoesKeyExist(KEY_PARAMS)))
+		{
+			int scanMax = DC_Session.TRIAL_CONF_SCAN_MAX_BYTES;
+			failure = "the conf sets \"" + KEY_PROFILE + "\" or \"" + KEY_PARAMS + "\" but its text was not scanned (more than " + scanMax.ToString() + " bytes, unreadable or not printable ASCII): its perturb keys cannot be checked";
+			return false;
+		}
+
 		if (context.DoesKeyExist(KEY_PROFILE))
 		{
 			string profile;

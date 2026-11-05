@@ -271,11 +271,30 @@ def scan_params(text, at, known):
             raise ConfigError("%s is not followed by a comma or the closing brace" % key)
 
 
+TRIAL_CONF_MAX_BYTES = 4096            # DC_Session: recorded as observed.trial_conf_raw up to this size
+TRIAL_CONF_SCAN_MAX_BYTES = 65536      # DC_Session: read whole for DC_NoiseConfig's key scan up to this size
+
+
+def scan_text_of(conf_text):
+    """DC_Session.ReadTrialConfText's m_sTrialConfScan: the text when it has 1 to TRIAL_CONF_SCAN_MAX_BYTES bytes of
+    printable ASCII, TAB, CR or LF, else empty (not scanned)."""
+    if not 0 < len(conf_text.encode("utf-8")) <= TRIAL_CONF_SCAN_MAX_BYTES:
+        return ""
+    if any(not (32 <= ord(c) <= 126 or c in "\t\r\n") for c in conf_text):
+        return ""
+    return conf_text
+
+
 def read_config(table, conf_text):
-    """Mirror of DC_NoiseConfig.Read on a trial conf's text: (profile, {key: value}, given, warning) or ConfigError;
-    given is {key: the number text as written} (what WriteConf records), None without a top-level perturb_params.
-    The profile comes from the parsed JSON, as JsonLoadContext.ReadValue gives it."""
+    """Mirror of DC_Session.ResolveTrial's DC_NoiseConfig.Read on a trial conf's text: (profile, {key: value}, given,
+    warning) or ConfigError; given is {key: the number text as written} (what WriteConf records), None without a
+    top-level perturb_params. The profile comes from the parsed JSON, as JsonLoadContext.ReadValue gives it; the key
+    scan gets the text only when DC_Session read it for the scan (scan_text_of), and a conf whose text was not
+    scanned is refused when the loader sees a perturb key (fail closed)."""
     conf = json.loads(conf_text)
+    raw = scan_text_of(conf_text)
+    if not raw and ("perturb" in conf or "perturb_params" in conf):
+        raise ConfigError("the conf sets a perturb key but its text was not scanned")
     profile = "none"
     if "perturb" in conf:
         if not isinstance(conf["perturb"], str):
@@ -284,7 +303,7 @@ def read_config(table, conf_text):
             raise ConfigError("unknown profile")
         profile = conf["perturb"]
     values = dict(zip(table.keys, table.defaults))
-    params_at, misspelt = scan_top_level_keys(conf_text)
+    params_at, misspelt = scan_top_level_keys(raw)
     has_params = params_at >= 0
     warning = None
     if misspelt:
@@ -295,7 +314,7 @@ def read_config(table, conf_text):
         return profile, values, None, warning
     if profile == "none":
         raise ConfigError("perturb_params without a profile")
-    given = scan_params(conf_text, params_at, set(values))
+    given = scan_params(raw, params_at, set(values))
     for key, text in given.items():
         values[key] = float(text)
     for key, lo, hi in zip(table.keys, table.lo, table.hi):
@@ -996,7 +1015,7 @@ class DC_StoreProbe
     def test_trial_conf(self):
         session = read(SESSION_SOURCE)
         resolve = flat(method_body(session, "DC_Session", "ResolveTrial"))
-        self.assertIn("if (!m_NoiseConfig.Read(context, m_sTrialConfRaw, noiseFailure)) { failure = \"trial conf \" + "
+        self.assertIn("if (!m_NoiseConfig.Read(context, m_sTrialConfScan, noiseFailure)) { failure = \"trial conf \" + "
                       "confPath + \": \" + noiseFailure; return false; }", resolve)
         self.assertLess(resolve.index("ReadTrialConfText(confPath);"), resolve.index("m_NoiseConfig.Read("))
         self.assertIn("m_NoiseConfig.WriteConf(json);", session)
@@ -1083,6 +1102,50 @@ class DC_StoreProbe
         self.assertEqual(read_config(self.table, typo)[0::3], ("none", "perturbs"))         # warned, mode E
         with self.assertRaises(ConfigError):
             read_config(self.table, t0l % ', "perturbs": "pilot_v1", "perturb": "pilot_v1"')
+
+    def test_unscanned_confs_fail_closed(self):
+        """Codex round 4: DC_Session kept the conf text only up to the 4096 bytes it records, so a larger conf
+        skipped the key scan and its escaped or repeated perturb keys were accepted (which profile won depended on
+        the JSON loader). The text is now read whole for the scan up to 65536 bytes (only 4096 recorded), and a conf
+        whose text was not scanned (larger, unreadable or not printable ASCII) is refused when the loader sees a
+        perturb key; one without perturb keys stays on the main path."""
+        session = read(SESSION_SOURCE)
+        self.assertIn("static const int TRIAL_CONF_SCAN_MAX_BYTES = %d;" % TRIAL_CONF_SCAN_MAX_BYTES, session)
+        self.assertIn("static const int TRIAL_CONF_MAX_BYTES = %d;" % TRIAL_CONF_MAX_BYTES, session)
+        text = flat(method_body(session, "DC_Session", "ReadTrialConfText"))
+        for statement in ("if (length > 0 && length <= TRIAL_CONF_SCAN_MAX_BYTES) read = file.Read(text, length);",
+                          "m_sTrialConfScan = text; if (length > TRIAL_CONF_MAX_BYTES) {",
+                          "return; } m_sTrialConfRaw = text;"):
+            self.assertIn(statement, text)
+        self.assertIn("if (!m_NoiseConfig.Read(context, m_sTrialConfScan, noiseFailure))",
+                      flat(method_body(session, "DC_Session", "ResolveTrial")))
+        read_fn = flat(method_body(self.source, "DC_NoiseConfig", "Read"))
+        self.assertIn("if (rawText.IsEmpty() && (context.DoesKeyExist(KEY_PROFILE) || "
+                      "context.DoesKeyExist(KEY_PARAMS))) {", read_fn)
+        self.assertLess(read_fn.index("if (rawText.IsEmpty() && (context.DoesKeyExist(KEY_PROFILE)"),
+                        read_fn.index("if (context.DoesKeyExist(KEY_PROFILE)) { string profile;"))
+        t0l = ('{"trial_id": "T0L", "duration_s": 600.0, "warmup_s": 20.0, "seed": 1, "route": "arland_t0_loop", '
+               '"images": true%s, "note": "%s"}')
+        for size in (4100, TRIAL_CONF_SCAN_MAX_BYTES + 10):
+            note = "n" * size
+            for keys in (', "perturb": "none", "perturb": "pilot_v1"', ', "\\u0070erturb": "pilot_v1"',
+                         ', "perturb": "pilot_v1", "perturb_params": {}, "perturb_param\\u0073": {"gap_mean_s": 400}'):
+                with self.assertRaises(ConfigError, msg=(size, keys)):
+                    read_config(self.table, t0l % (keys, note))
+            plain = t0l % ("", note)
+            self.assertEqual(read_config(self.table, plain)[0], "none")              # no perturb key: main path
+            self.assertEqual(scan_text_of(plain) == "", size > TRIAL_CONF_SCAN_MAX_BYTES)
+        big = "n" * (TRIAL_CONF_SCAN_MAX_BYTES + 10)
+        for keys in (', "perturb": "none"', ', "perturb": "pilot_v1"', ', "perturb": "pilot_v1", "perturb_params": {}'):
+            with self.assertRaises(ConfigError, msg=keys):                       # not scanned: refused
+                read_config(self.table, t0l % (keys, big))
+        self.assertEqual(read_config(self.table, t0l % (', "perturb": "pilot_v1"', "n" * 4100))[0], "pilot_v1")
+        accent = t0l % ("", "caf\u00e9")                                        # a JSON escape: still ASCII text
+        self.assertEqual(read_config(self.table, accent)[0], "none")
+        raw_accent = t0l % (', "perturb": "pilot_v1"', "caf\xe9")               # a raw non-ASCII byte
+        self.assertEqual(scan_text_of(raw_accent), "")
+        with self.assertRaises(ConfigError):
+            read_config(self.table, raw_accent)
 
     def test_number_texts_follow_the_json_grammar(self):
         """IsNumberText accepts exactly one JSON number (RFC 8259) of at most 32 characters, so AddNumberText (which

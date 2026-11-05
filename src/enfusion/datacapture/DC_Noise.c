@@ -367,8 +367,10 @@ class DC_NoiseConfig
 	//! item or a key of a nested object is never one. paramsAt = the index of the top-level "perturb_params" value
 	//! (its first character after the ':' and spaces), -1 without one; misspelt = the first top-level key that starts
 	//! with "perturb" and is neither "perturb" nor "perturb_params" (JsonLoadContext, which cannot list keys on 1.8,
-	//! would ignore it), empty when none. false (failure) when "perturb_params" is a top-level key twice. Without the
-	//! text: true, -1 and empty
+	//! would ignore it), empty when none. false (failure) when "perturb" or "perturb_params" is a top-level key twice
+	//! (which one a JSON loader keeps is not defined), or when a top-level key holds a backslash escape: keys are
+	//! compared as written, and "\u0070erturb_params" is the same JSON key as "perturb_params" (RFC 8259 8.3), so an
+	//! escaped key is refused rather than misread. Without the text: true, -1 and empty
 	static bool ScanTopLevelKeys(string rawText, out int paramsAt, out string misspelt, out string failure)
 	{
 		paramsAt = -1;
@@ -377,6 +379,7 @@ class DC_NoiseConfig
 		int length = rawText.Length();
 		int depth = 0;
 		int index = 0;
+		bool profileSeen = false;
 		while (index < length)
 		{
 			int code = rawText.ToAscii(index);
@@ -391,12 +394,16 @@ class DC_NoiseConfig
 				continue;
 			}
 
-			// a string from index: its closing quote
+			// a string from index: its closing quote (and whether it holds an escape)
 			int close = index + 1;
+			bool escaped = false;
 			while (close < length && rawText.ToAscii(close) != DC_JsonScan.CHAR_QUOTE)
 			{
 				if (rawText.ToAscii(close) == CHAR_BACKSLASH)
+				{
+					escaped = true;
 					close++;
+				}
 
 				close++;
 			}
@@ -407,16 +414,25 @@ class DC_NoiseConfig
 			int after = DC_JsonScan.SkipSpace(rawText, close + 1);
 			int keyLength = close - index - 1;
 			bool isKey = depth == 1 && after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON;
+			if (isKey && escaped)
+			{
+				failure = "the conf has a top-level key with a backslash escape (\"" + rawText.Substring(index + 1, Math.MinInt(keyLength, MAX_KEY_CHARS)) + "\"): write every top-level key without escapes";
+				return false;
+			}
+
 			if (isKey && keyLength >= KEY_PROFILE.Length())
 			{
 				string head = rawText.Substring(index + 1, Math.MinInt(keyLength, MAX_KEY_CHARS));
 				bool isProfile = keyLength == KEY_PROFILE.Length() && head == KEY_PROFILE;
 				bool isParams = keyLength == KEY_PARAMS.Length() && head == KEY_PARAMS;
-				if (isParams && paramsAt >= 0)
+				if ((isParams && paramsAt >= 0) || (isProfile && profileSeen))
 				{
-					failure = "\"" + KEY_PARAMS + "\" is a top-level key twice";
+					failure = "\"" + head + "\" is a top-level key twice";
 					return false;
 				}
+
+				if (isProfile)
+					profileSeen = true;
 
 				if (isParams)
 					paramsAt = DC_JsonScan.SkipSpace(rawText, after + 1);
@@ -1067,13 +1083,20 @@ class DC_Noise
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Decision steps of a duration: floor(seconds / dt + 0.5), at least 0 (Math.Floor, so the result never depends on
-	//! how Math.Round breaks a tie, which the 1.8 API does not document)
+	//! Decision steps of a duration: the quotient seconds / dt rounded to the nearest integer, an exact half up, at least
+	//! 0. The fractional part (exact in binary32 for a positive quotient) is compared with 0.5, so a quotient just below
+	//! a half never rounds up (adding 0.5 first would: 0.4999999702 + 0.5 is 1.0 in binary32), and Math.Round, whose
+	//! tie rule the 1.8 API does not document, is not used
 	protected int Steps(float seconds)
 	{
-		int steps = Math.Floor(seconds / m_fDecisionDtS + 0.5);
-		if (steps < 0)
-			steps = 0;
+		float quotient = seconds / m_fDecisionDtS;
+		if (!(quotient > 0))
+			return 0;
+
+		float whole = Math.Floor(quotient);
+		int steps = whole;
+		if (quotient - whole >= 0.5)
+			steps++;
 
 		return steps;
 	}

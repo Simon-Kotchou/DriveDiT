@@ -28,11 +28,12 @@ Tensor semantics (features_v1 ``tensors[].rule``, dc-2.0 sections 6, 9.5.1, 12 a
   telemetry_export row of C_t; action_cmd_t is ctl.hl_* of the row after C_t (the applied command over
   (P_t, P_t+1]); action_label_t is ctl.exp_*_now of C_t; action_exec_t the llc output and input_post of steps
   P_t + 1 .. P_t + N, NaN past P_t+1.
-- ``nav``: ``drivedit_nav.nav_sequence`` over each route episode's poses (telemetry pos_x, pos_z and
-  telemetry_export.heading_rad) at its decision steps, progress carried from the episode's first decision step, the
-  way the validator's C31 calls it and the bridge will at 5 Hz. The route is ``<routes_dir>/<route_id>.json`` and must
-  hash to the episode's ``route_sha256`` (or to its known 8191-character prefix form, ``_logged_route_hash``). Steps
-  outside route episodes have no nav (NaN).
+- ``nav``: ``drivedit_nav.nav_sequence`` over every telemetry row of each route episode in row order (pos_x, pos_z
+  and telemetry_export.heading_rad), progress carried from row to row, read at the decision steps: the contract's
+  per-telemetry-row nav view (dc-2.0 section 9.8, streams JSON derived.nav). The route is
+  ``<routes_dir>/<route_id>.json`` and must hash to the episode's ``route_sha256`` (or, for the one allow-listed route
+  version of the DD-7 defect, to its 8191-character prefix form: ``PREFIX_HASH_ROUTES``, ``_logged_route_hash``).
+  Steps outside route episodes have no nav (NaN).
 - ``style``: the episode's style_v1 row, on every decision step of the episode.
 - ``masks``: the reader's masks, then nav_valid 0 (more than 30 m off the route, or no pose) clears policy_valid and
   wm_valid (features_v1 nav rule).
@@ -88,6 +89,16 @@ DERIV_DIR = Path("_harvest") / "deriv"
 IMAGE_PATTERN = "f_{slot:08d}.jpg"
 ROUTE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")  # route_schema.json route_id
 SUBSTRING_MAX_CHARS = 8191  # 1.8.0.13 string.Substring bound (DC_TextFile.SUBSTRING_MAX_CHARS, DD-7)
+# The route versions whose sessions logged a truncated route_sha256 (DD-7, fixed for new sessions by PR #17, commit
+# cc31f07): DC_Route.Load hashed a string.Substring copy of the route file, and Substring returns at most 8191
+# characters on 1.8.0.13, so episodes on a longer route logged the sha256 of its first 8191 bytes. route_id -> the
+# full route_sha256 (drivedit_nav Route.sha256, the sha256 of the canonical JSON) of the version that was deployed.
+# Only an unedited file of a listed version is accepted against its prefix hash (_logged_route_hash).
+#   arland_t0_loop: the file of addon commit 78e539b (session.json addon.git_sha of the first T0L session,
+#   2026-11-05, git_dirty false), one 39,692-character canonical line plus LF; its prefix hash is 6370fc78f426...
+PREFIX_HASH_ROUTES = {
+    "arland_t0_loop": "77838c1346f2c7a6b18be78570d9f8cb560ee10a0e69718b28eb0f028cc0f66f",
+}
 FORBIDDEN_ROOTS = ("/mnt/c/",)
 # Written by default, in features_v1 order; image is referenced (slot_id + deriv_dir), never copied.
 DEFAULT_TENSORS = (
@@ -219,7 +230,8 @@ def write_shard(
     routes_dir: str | Path | None = None,
     overwrite: bool = False,
 ) -> Path:
-    """Write the shard of a Session that ``open_dc2_session`` returned (the build without the read)."""
+    """Write the shard of a Session that ``open_dc2_session`` returned (the build without the read). The output
+    paths are resolved and checked (``_shard_dir``) before anything is computed or written."""
     session_real = Path(str(session.path)).resolve()
     out_dir = _shard_dir(Path(out_root), session_real, str(session.session_id))
     if out_dir.exists() and not overwrite:
@@ -383,7 +395,7 @@ def _model_tensors(
         "action_label": _rows(decisions, "action_label", 3),
         "action_exec": _exec(decisions, tl.n_exec),
     }
-    nav, nav_valid, progress = _nav(spec, tl, episodes, routes)
+    nav, nav_valid, progress = _nav(spec, session, tl, episodes, routes)
     arrays["nav"] = nav
     arrays["style"] = _style(spec, session, tl.episode)
     arrays["masks"] = _masks(spec, decisions, nav_valid)
@@ -546,8 +558,9 @@ def _episodes(session: Any, episode: npt.NDArray[np.int64]) -> dict[int, dict[st
 
 
 def _routes(session: Any, episodes: dict[int, dict[str, Any]], routes_dir: Path) -> dict[str, dict[str, Any]]:
-    """{route_id: {route, sha256, split, file, logged}} of the route episodes; checks the map and route_sha256
-    (``_logged_route_hash``), and sets each episode's split from its route."""
+    """{route_id: {route, sha256, split, file, path, logged}} of the route episodes; checks the map and each
+    episode's route_sha256 (``_logged_route_hash``; ``logged`` lists the distinct checks), and sets each episode's
+    split from its route."""
     nav = nav_module()
     out: dict[str, dict[str, Any]] = {}
     for e in episodes.values():
@@ -569,17 +582,18 @@ def _routes(session: Any, episodes: dict[int, dict[str, Any]], routes_dir: Path)
                 "split": str(route.split),
                 "file": _repo_relative(path),
                 "path": path,
-                "logged": {},
+                "logged": [],
             }
         logged = e["route_sha256"]
         if logged is not None:
-            kind = _logged_route_hash(logged, out[rid]["route"], out[rid]["path"])
-            if kind is None:
+            check = _logged_route_hash(logged, out[rid]["route"], out[rid]["path"])
+            if check is None:
                 raise BuildError(
                     f"{session.path}: episode {e['episode_id']} names route sha256 {logged[:12]}, "
                     f"{out[rid]['file']} has {out[rid]['sha256'][:12]}"
                 )
-            out[rid]["logged"][logged] = kind
+            if check not in out[rid]["logged"]:
+                out[rid]["logged"].append(check)
         e["split"] = out[rid]["split"]
     return out
 
@@ -590,22 +604,24 @@ def _repo_relative(path: Path) -> str:
     return str(real.relative_to(repo_root())) if real.is_relative_to(repo_root()) else str(real)
 
 
-def _logged_route_hash(logged: str, route: Any, path: Path) -> str | None:
-    """How an episode's route_sha256 identifies the route file: ``"exact"`` (drivedit_nav Route.sha256, the sha256
-    of the canonical JSON), ``"prefix_8191"`` (the sha256 of its first 8191 characters only), or None (another
-    route).
+def _logged_route_hash(logged: str, route: Any, path: Path) -> dict[str, str] | None:
+    """How an episode's route_sha256 identifies the route file, as ``{"logged", "form", "verified_against"}``, or
+    None when it names another route.
 
-    The prefix form is a known capture defect, not a different route: before commit cc31f07 (DD-7) DC_Route.Load
-    hashed a ``string.Substring`` copy of the file, and Substring returns at most 8191 characters on 1.8.0.13, so
-    every route longer than that logged the hash of its first 8191 bytes (the first T0L session of 2026-11-05: logged
-    6370fc78..., the file 77838c13...). Accepted only when the canonical text is longer than 8191 characters, i.e.
-    exactly when the bug changes the hash. ``meta.json`` source.routes records which form each session logged."""
+    - ``exact``: the logged value is the file's full route_sha256 (drivedit_nav Route.sha256).
+    - ``prefix_8191``: the DD-7 defect (``PREFIX_HASH_ROUTES``). Accepted only when the route is allow-listed, the
+      current file's full route_sha256 equals the listed deployed version (so any edit anywhere in the route, its
+      split included, is refused), and the logged value is the sha256 of that file's first 8191 bytes, the bytes the
+      engine hashed. ``verified_against`` is the full hash the file was checked against.
+    """
     if logged == route.sha256:
-        return "exact"
-    nav = nav_module()
-    text = str(nav.canonical_json(json.loads(path.read_text("utf-8")))).encode("ascii")
-    if len(text) > SUBSTRING_MAX_CHARS and logged == hashlib.sha256(text[:SUBSTRING_MAX_CHARS]).hexdigest():
-        return "prefix_8191"
+        return {"logged": logged, "form": "exact", "verified_against": str(route.sha256)}
+    deployed = PREFIX_HASH_ROUTES.get(str(route.route_id))
+    if deployed is None or route.sha256 != deployed:
+        return None
+    raw = path.read_bytes()
+    if len(raw) > SUBSTRING_MAX_CHARS and logged == hashlib.sha256(raw[:SUBSTRING_MAX_CHARS]).hexdigest():
+        return {"logged": logged, "form": "prefix_8191", "verified_against": deployed}
     return None
 
 
@@ -633,32 +649,55 @@ def _teleport_steps(session: Any) -> list[int]:
     )
 
 
+def episode_nav(route: Any, rows: Sequence[tuple[int, tuple[float, float, float]]]) -> dict[int, dict[str, Any]]:
+    """nav_v1 over one episode's telemetry rows ``(physics_step, (pos_x, pos_z, heading_rad))`` in row order, the
+    progress carried from row to row and starting at 0 m on the first row: ``{physics_step: nav_v1 result}``.
+
+    This is the cadence of the contract's nav view (dc-2.0 section 9.8 and streams JSON ``derived.nav``: one row per
+    telemetry row of an episode with a route, the harvester's nav_fill). Ordered progress never decreases, so a pose
+    between two decision callbacks can move it: evaluating only the decision poses would give other nav values."""
+    nav = nav_module()
+    return {step: r for (step, _), r in zip(rows, nav.nav_sequence(route, [p for _, p in rows]), strict=True)}
+
+
 def _nav(
     spec: FeatureSpec,
+    session: Any,
     tl: _Timeline,
     episodes: dict[int, dict[str, Any]],
     routes: dict[str, dict[str, Any]],
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.int8], FloatArray]:
-    """(nav [T,10], nav_valid [T] (1, 0, or -1 outside route episodes), progress_m [T]) through nav_sequence."""
+    """(nav [T,10], nav_valid [T] (1, 0, or -1 outside route episodes), progress_m [T]): ``episode_nav`` over every
+    telemetry row of each route episode, read at the decision steps (the telemetry row of C_t, P_t). A decision step
+    of a route episode without its telemetry row has no nav (nav_valid 0)."""
     nav = nav_module()
     names = spec.tensor("nav").channel_names
     if tuple(nav.NAV_CHANNELS) != names:
         raise BuildError(f"drivedit_nav NAV_CHANNELS {nav.NAV_CHANNELS} differ from features_v1 nav {names}")
-    poses = tl.poses
+    tel = session.streams["telemetry"]
+    heading = session.telemetry_export["heading_rad"]
     out = np.full((tl.n_steps, len(names)), np.nan, dtype=np.float32)
     valid = np.full(tl.n_steps, -1, dtype=np.int8)
     progress = np.full(tl.n_steps, np.nan, dtype=np.float64)
     for e in episodes.values():
         if e["route_id"] is None:
             continue
-        route = routes[e["route_id"]]["route"]
-        ts = [t for t in range(e["start"], e["stop"]) if np.isfinite(poses[t]).all()]
-        valid[e["start"] : e["stop"]] = 0  # no pose: no nav at this step
-        results = nav.nav_sequence(route, [tuple(float(v) for v in poses[t]) for t in ts])
-        for t, r in zip(ts, results, strict=True):
-            out[t] = nav.nav_vector(r)
-            valid[t] = int(r["nav_valid"])
-            progress[t] = float(r["progress_m"])
+        rows = []
+        for i in range(len(tel)):
+            if tel.data["episode_id"][i] != e["episode_id"]:
+                continue
+            pose = (_float(tel.data["pos_x"][i]), _float(tel.data["pos_z"][i]), float(heading[i]))
+            if not all(math.isfinite(v) for v in pose):
+                raise BuildError(f"{session.path}: telemetry row {tel.data['physics_step'][i]} has no finite pose")
+            rows.append((int(tel.data["physics_step"][i]), pose))
+        results = episode_nav(routes[e["route_id"]]["route"], rows)
+        valid[e["start"] : e["stop"]] = 0
+        for t in range(e["start"], e["stop"]):
+            r = results.get(int(tl.steps[t]))
+            if r is not None:
+                out[t] = nav.nav_vector(r)
+                valid[t] = int(r["nav_valid"])
+                progress[t] = float(r["progress_m"])
     return out, valid, progress
 
 
@@ -832,16 +871,28 @@ def _nonfinite_in_segments(arrays: dict[str, npt.NDArray[Any]], segments: Sequen
 
 
 def _shard_dir(out_root: Path, session_real: Path, session_id: str) -> Path:
-    """``<out_root>/<session_id>/features_v1``; refuses the C: drive, the session directory and its captures tree."""
+    """``<out_root>/<session_id>/features_v1`` under its resolved parent, checked before anything is written.
+
+    Every path the build creates, renames or removes lies in that parent (the staging directories ``.features_v1.*``
+    are siblings of the shard), so the checks run on resolved paths, symlinks followed: the out root, the parent
+    ``<out_root>/<session_id>`` and the destination must each lie outside the C: drive, the session directory and its
+    captures tree. A symlinked destination directory is refused: the shard is replaced by renames inside its parent.
+    """
+    if not session_id or "/" in session_id or session_id in (".", ".."):
+        raise BuildError(f"session id {session_id!r} is not a directory name")
     root = out_root.resolve()
-    probe = str(root) + "/"
-    if any(probe.startswith(r) for r in FORBIDDEN_ROOTS):
-        raise BuildError(f"refusing {out_root}: no writes to the C: drive")
+    parent = (root / session_id).resolve()
+    dest = parent / SHARD_DIRNAME
+    if dest.is_symlink():
+        raise BuildError(f"refusing {dest}: the shard directory is a symlink")
     protected = [session_real] + [p for p in session_real.parents if p.name == "captures"]
-    for p in protected:
-        if root == p or root.is_relative_to(p):
-            raise BuildError(f"refusing {out_root}: it lies inside {p} (sessions and captures are read-only)")
-    return root / session_id / SHARD_DIRNAME
+    for path in (root, parent, dest.resolve()):
+        if any((str(path) + "/").startswith(r) for r in FORBIDDEN_ROOTS):
+            raise BuildError(f"refusing {out_root}: {path} is on the C: drive (no writes to C:)")
+        for p in protected:
+            if path == p or path.is_relative_to(p):
+                raise BuildError(f"refusing {out_root}: {path} lies inside {p} (sessions and captures are read-only)")
+    return dest
 
 
 # ------------------------------------------------------------------------------------------------

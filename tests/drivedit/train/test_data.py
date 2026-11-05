@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,22 +41,47 @@ NAV = importlib.import_module("drivedit_nav.nav_v1")  # the route schema: MAP_SP
 
 
 CODEC = "cadre-1x16x16"
+T, LATENT = 4, (2, 1, 3)  # steps per stand-in session, and the latent shape C, h, w
 #: Codex's DD-20 round-2 probe: a train-route session that dc-2.0 section 3.2 puts in VAL-C (hash mod 10 == 0).
 VAL_C_SESSION = "arland_T0b_20261025T091512Z_wb_i00_0004"
 
 
-def _session(root: Path, session: str, **meta: object) -> str:
-    """A shard folder with only meta.json, and a latents folder with stand-in files (never read here)."""
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _session(root: Path, session: str, *, arrays: dict[str, Any] | None = None, **meta: object) -> str:
+    """A shard folder with meta.json and slot_id.npy, and a latents folder as DD-19's pre-encoder writes it: stand-in
+    arrays (never read by the guard) and a meta.json naming this shard's session_id and slot_id.npy sha256."""
     path = root / session / "features_v1"
     path.mkdir(parents=True)
+    np.save(path / "slot_id.npy", np.arange(T))
+    slots = {"slot_id": {"file": "slot_id.npy", "sha256": _sha256(path / "slot_id.npy")}}
     fields = {"schema": "drivedit.features_v1-shard/1", "session_id": session, "map_id": "arland", "split": "train"}
-    (path / "meta.json").write_text(json.dumps({**fields, "decision_hz": 5.0, **meta}))
+    shard_meta = {**fields, "decision_hz": 5.0, "arrays": {**slots, **(arrays or {})}, **meta}
+    (path / "meta.json").write_text(json.dumps(shard_meta))
     latents = root / session / "latents" / CODEC
     latents.mkdir(parents=True)
     for name in ("latents.npy", "valid.npy"):
         (latents / name).write_bytes(b"not read by the guard")
-    (latents / "meta.json").write_text("{}")
+    latents_meta = {
+        "schema": "drivedit.latents/1",
+        "codec_id": CODEC,
+        "session_id": shard_meta["session_id"],
+        "aligned_to": {"file": "slot_id.npy", "sha256": slots["slot_id"]["sha256"]},
+        "sha256": {"latents.npy": "x", "valid.npy": "y"},
+    }
+    (latents / "meta.json").write_text(json.dumps(latents_meta))
     return session
+
+
+def _latents_meta(session_dir: Path) -> dict[str, Any]:
+    meta: dict[str, Any] = json.loads((session_dir / "latents" / CODEC / "meta.json").read_text())
+    return meta
+
+
+def _write_latents_meta(session_dir: Path, meta: dict[str, Any]) -> None:
+    (session_dir / "latents" / CODEC / "meta.json").write_text(json.dumps(meta))
 
 
 def _data(root: Path, *sessions: str) -> DataConfig:
@@ -199,8 +225,6 @@ def test_a_resource_linked_into_sealed_data_is_refused(
 
 # --------------------------------------------------------------------------------------------- the reader's paths
 
-T, LATENT = 4, (2, 1, 3)
-
 
 @dataclass(frozen=True)
 class _Stats:
@@ -250,15 +274,12 @@ def _pre_hardening_reader(opened: list[Path]) -> dict[str, types.ModuleType]:
 
 def _trainable(root: Path, session: str, *, value: float = 1.0) -> Path:
     """A complete session in the DD-11 / DD-19 layout: a state array named in meta.json, latents with their meta."""
-    _session(root, session, arrays={"state": {"file": "state.npy"}, "slot_id": {"file": "slot_id.npy"}})
+    _session(root, session, arrays={"state": {"file": "state.npy"}})
     np.save(root / session / "features_v1" / "state.npy", np.zeros((T, 4), np.float32))
-    np.save(root / session / "features_v1" / "slot_id.npy", np.arange(T))
     latents = root / session / "latents" / CODEC
     (latents / "latents.npy").unlink()
     np.save(latents / "latents.npy", np.full((T, *LATENT), value, np.float16))
     np.save(latents / "valid.npy", np.ones(T, bool))
-    names = {"latents.npy": "x", "valid.npy": "y"}
-    (latents / "meta.json").write_text(json.dumps({"sha256": names, "aligned_to": {"file": "slot_id.npy"}}))
     return root / session
 
 
@@ -348,11 +369,16 @@ def test_a_plain_name_must_resolve_inside_its_folder(tmp_path: Path, folder: str
         check_training_sessions(_data(root, "arland_ok"), 5.0)
 
 
-@pytest.mark.parametrize("named", [{"sha256": {"../latents.npy": "x"}}, {"aligned_to": {"file": "/data/slot_id.npy"}}])
-def test_the_latents_meta_names_only_plain_files(tmp_path: Path, named: dict[str, Any]) -> None:
+@pytest.mark.parametrize(("key", "name"), [("sha256", "../latents.npy"), ("aligned_to", "/data/slot_id.npy")])
+def test_the_latents_meta_names_only_plain_files(tmp_path: Path, key: str, name: str) -> None:
     root = tmp_path / "datasets"
     session = _trainable(root, "arland_ok")
-    (session / "latents" / CODEC / "meta.json").write_text(json.dumps(named))
+    meta = _latents_meta(session)
+    if key == "sha256":
+        meta["sha256"][name] = "x"
+    else:
+        meta["aligned_to"]["file"] = name
+    _write_latents_meta(session, meta)
     with pytest.raises(TrainingDataError, match="only a plain file name"):
         check_training_sessions(_data(root, "arland_ok"), 5.0)
 
@@ -393,8 +419,9 @@ def test_an_array_symlinked_within_its_folder_is_refused(tmp_path: Path) -> None
 @pytest.mark.parametrize("name", ["latents\x00.npy", "state\x01.npy", "valid\x7f.npy"])
 def test_control_characters_are_not_plain_names(tmp_path: Path, name: str) -> None:
     session = _trainable(tmp_path, "arland_ok")
-    meta_path = session / "latents" / CODEC / "meta.json"
-    meta_path.write_text(json.dumps({"sha256": {name: "x"}}))
+    meta = _latents_meta(session)
+    meta["sha256"] = {name: "x"}
+    _write_latents_meta(session, meta)
     with pytest.raises(TrainingDataError, match="only a plain file name"):
         check_training_sessions(_data(tmp_path, "arland_ok"), 5.0)
 
@@ -406,12 +433,75 @@ def test_latents_meta_names_get_the_full_resource_check(tmp_path: Path) -> None:
     elsewhere = _trainable(root, "arland_elsewhere")
     latents = session / "latents" / CODEC
     (latents / "extra.npy").symlink_to(elsewhere / "latents" / CODEC / "valid.npy")
-    (latents / "meta.json").write_text(json.dumps({"sha256": {"latents.npy": "x", "extra.npy": "y"}}))
-    with pytest.raises(TrainingDataError, match="outside"):
-        check_training_sessions(_data(root, "arland_ok"), 5.0)
-    (latents / "meta.json").write_text(json.dumps({"sha256": {"gone.npy": "y"}}))
-    with pytest.raises(TrainingDataError, match="missing"):
-        check_training_sessions(_data(root, "arland_ok"), 5.0)
-    (latents / "meta.json").write_text(json.dumps({"aligned_to": {"file": "gone.npy"}}))  # a shard-folder file
-    with pytest.raises(TrainingDataError, match="missing"):
-        check_training_sessions(_data(root, "arland_ok"), 5.0)
+    meta = _latents_meta(session)
+    cases = [
+        ({"extra.npy": "y"}, "slot_id.npy", "outside"),
+        ({"gone.npy": "y"}, "slot_id.npy", "missing"),
+        ({}, "gone.npy", "missing"),  # aligned_to.file names a file of the shard folder
+    ]
+    for named, aligned_file, match in cases:
+        meta["sha256"], meta["aligned_to"]["file"] = named, aligned_file
+        _write_latents_meta(session, meta)
+        with pytest.raises(TrainingDataError, match=match):
+            check_training_sessions(_data(root, "arland_ok"), 5.0)
+
+
+# ------------------------------------------------------------------------------------- whose latents these are
+
+
+@pytest.mark.parametrize(
+    ("donor", "error", "match"),
+    [("arland_other", TrainingDataError, "not of this shard"), ("everon_source", SealedDataError, "sealed test map")],
+)
+def test_latents_copied_from_another_session_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, donor: str, error: type[Exception], match: str
+) -> None:
+    """Codex round-5 HIGH: a complete encoder output, meta.json and all, copied into another session's latents
+    folder. Every file is a fresh regular file with one link, and the slot_id.npy hashes match, so only the latents
+    meta's session_id tells; an Everon donor is sealed data."""
+    root = tmp_path / "datasets"
+    session = _trainable(root, "arland_ok")
+    source = _trainable(tmp_path / "encoded", donor, value=99.0)
+    assert _latents_meta(source)["aligned_to"]["sha256"] == _latents_meta(session)["aligned_to"]["sha256"]
+    shutil.rmtree(session / "latents" / CODEC)
+    shutil.copytree(source / "latents" / CODEC, session / "latents" / CODEC)
+    opened: list[Path] = []
+    with pytest.raises(error, match=match):
+        _train(monkeypatch, root, "arland_ok", opened)
+    assert opened == []
+
+
+@pytest.mark.parametrize("aligned", [{"file": "slot_id.npy", "sha256": "0" * 64}, {"file": "slot_id.npy"}])
+def test_latents_of_another_build_of_the_session_are_refused(tmp_path: Path, aligned: dict[str, str]) -> None:
+    """The session id matches, but the latents were encoded from another slot_id.npy (or do not say which)."""
+    session = _trainable(tmp_path, "arland_ok")
+    meta = _latents_meta(session)
+    meta["aligned_to"] = aligned
+    _write_latents_meta(session, meta)
+    with pytest.raises(TrainingDataError, match=r"aligned_to\.sha256"):
+        check_training_sessions(_data(tmp_path, "arland_ok"), 5.0)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "error"),
+    [
+        ("session_id", None, TrainingDataError),
+        ("codec_id", "flux2-vae", TrainingDataError),
+        ("map_id", "kolguyev", TrainingDataError),
+        ("split", "val_l", TrainingDataError),
+        ("map_id", "Everon", SealedDataError),
+        ("split", "everon_test", SealedDataError),
+    ],
+)
+def test_the_latents_meta_must_agree_with_the_shard(
+    tmp_path: Path, key: str, value: str | None, error: type[Exception]
+) -> None:
+    session = _trainable(tmp_path, "arland_ok")
+    meta = _latents_meta(session)
+    meta[key] = value
+    _write_latents_meta(session, meta)
+    with pytest.raises(error):
+        check_training_sessions(_data(tmp_path, "arland_ok"), 5.0)
+    meta[key] = {"session_id": "arland_ok", "codec_id": CODEC, "map_id": "arland", "split": "train"}[key]
+    _write_latents_meta(session, meta)
+    assert check_training_sessions(_data(tmp_path, "arland_ok"), 5.0)  # the agreeing value passes

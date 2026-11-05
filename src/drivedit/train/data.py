@@ -131,8 +131,41 @@ def _read_json(path: Path) -> dict[str, Any]:
     return meta
 
 
-def _check_referenced_files(shard_dir: Path, latents_dir: Path, meta: dict[str, Any]) -> None:
-    """Every file the shard and latents readers open, and every file their meta.json names, as a ``_resource``.
+def _check_latents_identity(latents_meta: dict[str, Any], meta: dict[str, Any], codec_id: str, where: Path) -> None:
+    """The latents folder belongs to the approved shard: an encoder output copied into the wrong session is refused.
+
+    DD-19's pre-encoder writes into the latents meta.json the shard's ``session_id``, and in ``aligned_to.sha256``
+    the sha256 of the shard's ``slot_id.npy``, which it checks against the shard meta's ``arrays.slot_id.sha256``.
+    Both must match this shard. ``codec_id``, ``build_key``, ``map_id`` and ``split``, where the latents meta has
+    them, must agree too. An Everon session, map or split in the latents meta raises ``SealedDataError``.
+    """
+    sid = latents_meta.get("session_id")
+    map_id, split = latents_meta.get("map_id"), latents_meta.get("split")
+    if str(sid).lower().startswith("everon") or str(map_id).lower() in SEALED_MAP_IDS:
+        raise SealedDataError(f"{where}: latents of session {sid!r}, map {map_id!r}: the sealed test map")
+    if str(split).lower().startswith("everon"):
+        raise SealedDataError(f"{where}: latents of split {split!r}: the sealed test map")
+    if sid != meta["session_id"]:
+        raise TrainingDataError(f"{where}: latents of session {sid!r}, not of this shard's {meta['session_id']!r}")
+    slot = meta.get("arrays", {}).get("slot_id")
+    shard_slots = slot.get("sha256") if isinstance(slot, dict) else None
+    aligned = latents_meta.get("aligned_to")
+    latents_slots = aligned.get("sha256") if isinstance(aligned, dict) else None
+    if shard_slots is None or latents_slots != shard_slots:
+        raise TrainingDataError(
+            f"{where}: aligned_to.sha256 {latents_slots!r} is not this shard's arrays.slot_id.sha256 {shard_slots!r}; "
+            "the latents were encoded from another shard or build"
+        )
+    for key, want in (("codec_id", codec_id), ("build_key", meta.get("build_key")), ("map_id", meta.get("map_id"))):
+        if key in latents_meta and want is not None and latents_meta[key] != want:
+            raise TrainingDataError(f"{where}: {key} {latents_meta[key]!r}, but this shard's is {want!r}")
+    if "split" in latents_meta and split != meta.get("split"):
+        raise TrainingDataError(f"{where}: split {split!r}, but this shard's is {meta.get('split')!r}")
+
+
+def _check_referenced_files(shard_dir: Path, latents_dir: Path, meta: dict[str, Any], codec_id: str) -> None:
+    """Every file the shard and latents readers open, and every file their meta.json names, as a ``_resource``; and
+    the latents' identity (``_check_latents_identity``), all before a latent array is read.
 
     The shard reader opens ``meta["arrays"][name]["file"]`` relative to the resolved shard folder (an absolute name
     would win in that path join). The latents reader opens ``LATENTS_FILES`` in the latents folder. The latents
@@ -149,6 +182,7 @@ def _check_referenced_files(shard_dir: Path, latents_dir: Path, meta: dict[str, 
     for name in LATENTS_FILES:
         _resource(latents_real, name, latents_real)
     latents_meta = _read_json(latents_real / META_NAME)
+    _check_latents_identity(latents_meta, meta, codec_id, latents_real / META_NAME)
     sha256, aligned = latents_meta.get("sha256", {}), latents_meta.get("aligned_to", {})
     for name in sha256 if isinstance(sha256, dict) else ():
         _resource(latents_real, name, latents_real / META_NAME)
@@ -196,6 +230,8 @@ def check_training_sessions(data: DataConfig, decision_hz: float) -> list[Path]:
     3. Every file that a reader opens, or that meta.json or the latents meta.json names, is checked as a ``_resource``:
        a plain name, inside its own resolved folder, a regular file with one hard link. Anything else raises
        ``TrainingDataError`` (``_check_referenced_files``).
+    4. The latents meta.json must name this shard: its ``session_id`` and ``aligned_to.sha256`` match the shard's
+       (``_check_latents_identity``), so latents copied from another session, possibly Everon, are refused.
     """
     dirs = []
     for session in data.sessions:
@@ -208,7 +244,7 @@ def check_training_sessions(data: DataConfig, decision_hz: float) -> list[Path]:
         _refuse_sealed_resources(shard_dir, latents_dir)
         meta = _read_json(_resource(shard_dir, META_NAME, shard_dir))
         _check_meta(session, meta, decision_hz)
-        _check_referenced_files(shard_dir, latents_dir, meta)
+        _check_referenced_files(shard_dir, latents_dir, meta, data.codec_id)
         dirs.append(shard_dir)
     return dirs
 
@@ -250,8 +286,9 @@ def open_training_windows(cfg: RunConfig, *, chunk_rows: int = 4096) -> Dataset[
     ``check_training_sessions`` runs first. Training data built any other way skips those rules.
 
     The guard defends against accidental contamination: wrong paths, symlinks, hard links, mislabelled or
-    hash-held-out splits, and sealed maps. It does not defend against a local user deliberately changing files during
-    or between the checks (TOCTOU), which is out of scope for local single-user runs.
+    hash-held-out splits, latents copied from another session, and sealed maps. It does not defend against a local
+    user deliberately changing files during or between the checks (TOCTOU), which is out of scope for local
+    single-user runs.
     """
     if cfg.data is None:
         raise ValueError("RunConfig.data is required to train from shards")

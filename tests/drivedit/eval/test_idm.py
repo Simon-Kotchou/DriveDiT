@@ -17,6 +17,7 @@ from drivedit.eval.idm import (
     InverseDynamicsModel,
     PairSet,
     arr_r2_with_donor_gap,
+    arr_scores,
     evaluate_idm,
     match_donors,
     predict_actions,
@@ -96,6 +97,45 @@ def test_training_is_deterministic_and_leaves_the_global_rng_alone(data: dict[st
     assert torch.equal(before, torch.random.get_rng_state())
 
 
+def test_constructing_an_idm_touches_no_global_rng(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1: torch.manual_seed inside the constructor also seeded CUDA, so building an evaluation IDM
+    changed later rollout randomness on the GPU. Any global seeding now fails the test."""
+
+    def refuse(*_: object) -> None:
+        raise AssertionError("a global RNG was seeded")
+
+    for name in ("manual_seed", "seed"):
+        monkeypatch.setattr(torch, name, refuse)
+    for name in ("manual_seed", "manual_seed_all", "seed", "seed_all"):
+        monkeypatch.setattr(torch.cuda, name, refuse)
+    before = torch.random.get_rng_state()
+    first, again, other = (InverseDynamicsModel(CFG, seed=s) for s in (5, 5, 6))
+    assert torch.equal(before, torch.random.get_rng_state())
+    assert all(torch.equal(a, b) for a, b in zip(first.parameters(), again.parameters(), strict=True))
+    assert not all(torch.equal(a, b) for a, b in zip(first.parameters(), other.parameters(), strict=True))
+    assert all(p.device.type == "cpu" for p in first.parameters())
+
+
+def test_gap_and_control_are_raw_r2_and_only_arr_is_clipped() -> None:
+    """Review round 1: control, gap and real_gap were clipped at -1 like ARR's numerator; CADRE Table 5 uses raw R²."""
+    report = arr_scores(["kappa_target"], [0.9], [-3.0], [0.0], [-8.0])
+    assert report.control == pytest.approx(-8.0)
+    assert report.gap == pytest.approx(8.0)
+    assert report.real_gap == pytest.approx(3.9)
+    clipped = arr_scores(["kappa_target"], [0.8], [0.0], [-5.0], [-8.0])
+    assert clipped.arr == pytest.approx(-1.0 / 0.8)  # max(R², -1) / R²(real)
+
+
+def test_arr_refuses_an_unstable_denominator() -> None:
+    """Review round 1: min_real_r2 = 0 admitted a real ceiling of 0 and gave arr = inf with defined True."""
+    with pytest.raises(ValueError, match="denominator floor"):
+        arr_scores(["kappa_target"], [0.0], [0.0], [0.5], [0.0], min_real_r2=0.0)
+    unreadable = arr_scores(["kappa_target", "a_target"], [0.3, np.nan], [0.0, 0.0], [0.5, 0.5], [0.0, 0.0])
+    assert not unreadable.defined
+    assert np.isnan(unreadable.arr)
+    assert "R²(real) >= 0.5" in unreadable.reason
+
+
 def test_donor_gap_separates_a_following_model_from_an_ignoring_one(
     trained: InverseDynamicsModel, data: dict[str, np.ndarray]
 ) -> None:
@@ -135,3 +175,6 @@ def test_bad_inputs_raise(trained: InverseDynamicsModel, data: dict[str, np.ndar
         trained(torch.zeros(1, C + 1, H, W), torch.zeros(1, C + 1, H, W))
     with pytest.raises(ValueError, match="multiple of 8"):
         IdmConfig(in_channels=3, width=12)
+    for batch_size in (0, -1):  # review round 1: -1 returned an uncomputed np.empty array
+        with pytest.raises(ValueError, match="batch_size"):
+            predict_actions(trained, data["t0"][:4], data["t1"][:4], batch_size=batch_size, device="cpu")

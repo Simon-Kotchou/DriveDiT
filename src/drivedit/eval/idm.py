@@ -17,10 +17,11 @@ M2). The IDM reads actions back from frames, per action dimension d:
 - ``ARR = mean_d max(R²_d, -1) / R²_d(real)``, over the dimensions the IDM can read on real data
   (``R²_d(real) >= min_real_r2``; gap-4 §3.1 scores a ratio only where the ceiling is at least 0.5);
 - **control**: the same recovered actions scored against the commands of a *donor* window, which the rollout never
-  received. A model that ignores its actions scores alike on both, so ``gap = mean_d max(R²_d, -1) - mean_d
-  max(R²_d(donor), -1)`` (raw R², as CADRE Table 5) measures action following: swap the donor's actions in and the
-  score must drop. CADRE uses the clip's own commands shifted by 48 frames; at our near-constant speed that is a weak
-  control, so the donor is another window with a matched initial speed (delta §5.2 M2, ±5 km/h; ``match_donors``).
+  received. A model that ignores its actions scores alike on both, so ``gap = mean_d R²_d - mean_d R²_d(donor)``
+  on raw R² (CADRE Table 5; only ARR's numerator is clipped) measures action following: swap the donor's actions in
+  and the score must drop. CADRE uses the clip's own commands shifted by 48 frames; at our near-constant speed that
+  is a weak control, so the donor is another window with a matched initial speed (delta §5.2 M2, ±5 km/h;
+  ``match_donors``).
   The same gap on the real continuation is reported beside it as the ceiling.
 
 Read the gap together with the counterfactual tests of ``drivedit.eval.control``: under the *logged* commands, a
@@ -84,12 +85,27 @@ def _block(cin: int, cout: int, stride: int) -> nn.Sequential:
     )
 
 
+def _init(module: nn.Module, generator: torch.Generator) -> None:
+    """PyTorch's default initialisation of Conv2d / Linear (``reset_parameters``: Kaiming-uniform with a = √5 for the
+    weight, U(±1/√fan_in) for the bias) and of GroupNorm (ones, zeros), drawn from ``generator``."""
+    if isinstance(module, nn.Conv2d | nn.Linear):
+        nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5.0), generator=generator)
+        if module.bias is not None:
+            fan_in = math.prod(module.weight.shape[1:])
+            bound = 1.0 / math.sqrt(fan_in)
+            nn.init.uniform_(module.bias, -bound, bound, generator=generator)
+    elif isinstance(module, nn.GroupNorm):
+        nn.init.ones_(module.weight)
+        nn.init.zeros_(module.bias)
+
+
 class InverseDynamicsModel(nn.Module):
     """``(x_t, x_next)`` ``[B, C, H, W]`` -> ``action_cmd[t]`` ``[B, out_dim]``.
 
     ``forward`` returns standardised actions (the training target); ``predict`` returns them in action units, through
     the per-channel ``target_mean`` / ``target_std`` buffers that ``train_idm`` sets from the training actions.
-    Parameters are initialised from ``seed`` without touching the global random state.
+    Parameters are initialised on the CPU from ``seed`` through a local generator, without touching any global
+    random state (CPU or accelerator).
     """
 
     target_mean: Tensor
@@ -98,8 +114,10 @@ class InverseDynamicsModel(nn.Module):
     def __init__(self, cfg: IdmConfig, *, seed: int) -> None:
         super().__init__()
         self.cfg = cfg
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(seed)
+        # Built on the meta device (no values, so no random draw from any generator), then materialised on the CPU and
+        # initialised from a local generator: constructing an IDM leaves every global RNG, CPU and accelerator, as it
+        # was (review round 1: torch.manual_seed also seeds CUDA).
+        with torch.device("meta"):
             layers = [_block(3 * cfg.in_channels, cfg.width, 1)]
             for _ in range(cfg.n_down):
                 layers += [_block(cfg.width, cfg.width, 2), _block(cfg.width, cfg.width, 1)]
@@ -110,6 +128,10 @@ class InverseDynamicsModel(nn.Module):
                 nn.SiLU(),
                 nn.Linear(cfg.hidden, cfg.out_dim),
             )
+        self.to_empty(device="cpu")
+        generator = torch.Generator().manual_seed(seed)
+        for module in self.modules():
+            _init(module, generator)
         self.register_buffer("target_mean", torch.zeros(cfg.out_dim))
         self.register_buffer("target_std", torch.ones(cfg.out_dim))
 
@@ -203,6 +225,8 @@ def predict_actions(
     device: torch.device | str,
 ) -> FloatArray:
     """The IDM's actions ``[N, out_dim]`` (action units) for pairs ``[N, C, H, W]``, in eval mode."""
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     n = _check_pairs(x_t, x_next, None)
     dev = torch.device(device)
     model.to(dev).eval()
@@ -268,8 +292,10 @@ class ArrReport:
 
     Per dimension (``names``): ``r2_real`` and ``r2_real_donor`` on the real continuation against its own and the
     donors' commands, ``r2_generated`` and ``r2_generated_donor`` likewise on the rollout. ``scored`` lists the
-    dimensions the IDM reads on real data (``r2_real >= min_real_r2``); ``arr``, ``control``, ``gap`` and
-    ``real_gap`` average over them and are NaN (``defined`` False) when none is.
+    dimensions the IDM reads on real data (``r2_real >= min_real_r2``, the floor of ARR's denominator); ``arr``,
+    ``control``, ``gap`` and ``real_gap`` average over them and are NaN (``defined`` False, with a ``reason``) when
+    none is. Only ARR's numerator is clipped at -1 (CADRE eq. 7); ``control``, ``gap`` and ``real_gap`` are raw R²
+    (CADRE Table 5).
     """
 
     names: tuple[str, ...]
@@ -284,6 +310,53 @@ class ArrReport:
     gap: float
     real_gap: float
     defined: bool
+    reason: str
+
+
+def arr_scores(
+    names: Sequence[str],
+    r2_real: npt.ArrayLike,
+    r2_real_donor: npt.ArrayLike,
+    r2_generated: npt.ArrayLike,
+    r2_generated_donor: npt.ArrayLike,
+    *,
+    min_real_r2: float = 0.5,
+) -> ArrReport:
+    """ARR, the donor control and the gaps from per-dimension R² (the scoring of ``arr_r2_with_donor_gap``).
+
+    ``ARR = mean_d max(R²_d, -1) / R²_d(real)`` over the scored dimensions; ``control = mean_d R²_d(donor)``,
+    ``gap = mean_d R²_d - control`` and ``real_gap = mean_d R²_d(real) - mean_d R²_d(real, donor)``, all raw.
+    ``min_real_r2`` in (0, 1] is the floor of ARR's denominator (default 0.5: gap-4 §3.1 scores a ratio only where the
+    ceiling is at least 0.5).
+    """
+    if not 0.0 < min_real_r2 <= 1.0:
+        raise ValueError(f"min_real_r2 must be in (0, 1] (it is ARR's denominator floor), got {min_real_r2}")
+    vectors = [
+        np.asarray(v, dtype=np.float64).ravel() for v in (r2_real, r2_real_donor, r2_generated, r2_generated_donor)
+    ]
+    channel_names = tuple(names)
+    if any(v.size != len(channel_names) for v in vectors):
+        raise ValueError(f"every R² vector needs {len(channel_names)} values, one per name")
+    real, real_donor, gen, gen_donor = vectors
+    finite = np.isfinite(real) & np.isfinite(real_donor) & np.isfinite(gen) & np.isfinite(gen_donor)
+    keep = finite & (real >= min_real_r2)
+    defined = bool(keep.any())
+    nan = math.nan
+    return ArrReport(
+        names=channel_names,
+        r2_real=tuple(float(v) for v in real),
+        r2_real_donor=tuple(float(v) for v in real_donor),
+        r2_generated=tuple(float(v) for v in gen),
+        r2_generated_donor=tuple(float(v) for v in gen_donor),
+        scored=tuple(name for name, k in zip(channel_names, keep, strict=True) if k),
+        min_real_r2=min_real_r2,
+        arr=float(np.mean(np.maximum(gen[keep], -1.0) / real[keep])) if defined else nan,
+        control=float(np.mean(gen_donor[keep])) if defined else nan,
+        gap=float(np.mean(gen[keep]) - np.mean(gen_donor[keep])) if defined else nan,
+        real_gap=float(np.mean(real[keep]) - np.mean(real_donor[keep])) if defined else nan,
+        defined=defined,
+        reason="" if defined else f"no dimension has a finite R² with R²(real) >= {min_real_r2}",
+    )
 
 
 def arr_r2_with_donor_gap(
@@ -317,33 +390,11 @@ def arr_r2_with_donor_gap(
         raise ValueError(f"action_cmd must be [N, {len(channel_names)}] for both sets")
     p_real = predict_actions(model, real.x_t, real.x_next, batch_size=batch_size, device=device)
     p_gen = predict_actions(model, generated.x_t, generated.x_next, batch_size=batch_size, device=device)
-    r2_real = r2_score(a_real, p_real)
-    r2_real_donor = r2_score(a_real[donor], p_real)
-    r2_gen = r2_score(a_gen, p_gen)
-    r2_gen_donor = r2_score(a_gen[donor], p_gen)
-    keep = np.isfinite(r2_real) & (r2_real >= min_real_r2) & np.isfinite(r2_gen) & np.isfinite(r2_gen_donor)
-    defined = bool(keep.any())
-
-    def clipped(r2: FloatArray) -> FloatArray:
-        out: FloatArray = np.maximum(r2[keep], -1.0)
-        return out
-
-    nan = math.nan
-    arr = float(np.mean(clipped(r2_gen) / r2_real[keep])) if defined else nan
-    control = float(np.mean(clipped(r2_gen_donor))) if defined else nan
-    gap = float(np.mean(clipped(r2_gen))) - control if defined else nan
-    real_gap = float(np.mean(clipped(r2_real)) - np.mean(clipped(r2_real_donor))) if defined else nan
-    return ArrReport(
-        names=channel_names,
-        r2_real=tuple(float(v) for v in r2_real),
-        r2_real_donor=tuple(float(v) for v in r2_real_donor),
-        r2_generated=tuple(float(v) for v in r2_gen),
-        r2_generated_donor=tuple(float(v) for v in r2_gen_donor),
-        scored=tuple(name for name, k in zip(channel_names, keep, strict=True) if k),
+    return arr_scores(
+        channel_names,
+        r2_score(a_real, p_real),
+        r2_score(a_real[donor], p_real),
+        r2_score(a_gen, p_gen),
+        r2_score(a_gen[donor], p_gen),
         min_real_r2=min_real_r2,
-        arr=arr,
-        control=control,
-        gap=gap,
-        real_gap=real_gap,
-        defined=defined,
     )

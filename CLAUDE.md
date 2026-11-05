@@ -56,16 +56,8 @@ drivedit/
 ├── docs/            # Documentation
 │   └─ REFERENCES.md       # Mathematical foundations and paper sources
 │
-├── src/             # Enfusion C scripts
-│   └─ SCR_*.c             # Road extraction/visualization
-│
-└── rust/            # High-performance data pipeline
-    ├─ drivedit-types/     # Shared types (Frame, Telemetry)
-    ├─ drivedit-io/        # I/O (BMP, JPEG, CSV, ENFCAP)
-    ├─ drivedit-batch/     # Batch dataset loading
-    ├─ drivedit-streaming/ # Real-time streaming
-    ├─ drivedit-py/        # Python bindings (PyO3)
-    └─ drivedit-bench/     # Benchmarks
+└── src/             # Enfusion (Enforce) scripts
+    └─ enfusion/datacapture/DC_*.c # dc-2.0 capture addon (see Enfusion Integration)
 ```
 
 ## Development Commands
@@ -513,213 +505,16 @@ Extended 6D control with per-dimension ranges:
 - **Distributed processing**: Multi-GPU/multi-node training with gradient synchronization
 - **Quality filtering**: Automated video quality assessment and filtering
 
-## Rust Data Pipeline (`rust/`)
-
-High-performance Rust workspace for data loading with Python bindings. Provides both batch training and real-time streaming from Enfusion captures.
-
-### Workspace Structure
-```
-rust/
-├── Cargo.toml              # Workspace root
-├── drivedit-types/         # Shared types (Frame, Telemetry, Config)
-├── drivedit-io/            # I/O operations (BMP, JPEG, CSV, ENFCAP)
-├── drivedit-batch/         # Batch dataset loading
-├── drivedit-streaming/     # Real-time frame streaming
-├── drivedit-py/            # Python bindings (PyO3)
-└── drivedit-bench/         # Criterion benchmarks
-```
-
-### Python Installation
-```bash
-cd rust/drivedit-py
-pip install maturin
-maturin develop --release  # Development install
-# or
-maturin build --release    # Build wheel
-pip install target/wheels/drivedit-*.whl
-```
-
-### Python API - Batch Loading
-```python
-import drivedit
-
-# Load Enfusion session
-session = drivedit.EnfusionSession("/path/to/session")
-print(f"Frames: {len(session)}, Telemetry entries: {session.telemetry_count()}")
-
-# Get synchronized frame + telemetry
-frame, telemetry = session.get_synchronized(idx=100)
-# frame: dict with 'data' (numpy array), 'width', 'height', 'timestamp'
-# telemetry: dict with 'position', 'velocity', 'steering', etc.
-
-# Dataset with transforms
-dataset = drivedit.EnfusionDataset(
-    session_paths=["/path/to/session1", "/path/to/session2"],
-    config=drivedit.DatasetConfig(
-        target_width=640,
-        target_height=360,
-        normalize=True,        # [0,1] float32
-        hwc_to_chw=True,       # PyTorch layout
-    )
-)
-
-# Get batch as numpy arrays
-frames, telemetry = dataset.get_batch([0, 1, 2, 3], num_workers=4)
-# frames: [B, C, H, W] float32
-# telemetry: [B, 12] float32
-```
-
-### Python API - Real-Time Streaming
-```python
-import drivedit
-
-# Create streaming pipeline (watches directory for new BMPs)
-stream = drivedit.StreamingPipeline(
-    watch_dir="/path/to/enfusion/output",
-    buffer_size=32,          # Frame ring buffer
-    telemetry_sync=True,     # Synchronize with CSV telemetry
-)
-
-# Start watching (non-blocking)
-stream.start()
-
-# Get latest frame (blocks until available)
-frame = stream.get_frame(timeout_ms=1000)
-if frame is not None:
-    data = frame['data']     # numpy array [H, W, 3] uint8
-    ts = frame['timestamp']
-
-# Get batch of recent frames
-batch = stream.get_batch(count=8)  # List of frame dicts
-
-# Cleanup
-stream.stop()
-```
-
-### Benchmark Results
-| Operation | Time | Throughput |
-|-----------|------|------------|
-| BMP decode 640×360 | 491µs | 1.3 GiB/s |
-| BMP decode 1280×720 | 3.8ms | 687 MiB/s |
-| Full pipeline (single frame) | 620µs | - |
-| Parallel batch (8 frames) | 1.24ms | 6.5K fps |
-| Ring buffer push | 7µs | - |
-| Ring buffer pop | 50µs | - |
-
-### Crate Dependencies
-```toml
-# rust/Cargo.toml workspace dependencies
-[workspace.dependencies]
-pyo3 = { version = "0.23", features = ["abi3-py310"] }
-numpy = "0.23"
-tokio = { version = "1", features = ["full"] }
-rayon = "1.10"
-image = "0.25"
-notify = "7"
-ringbuf = "0.4"
-parking_lot = "0.12"
-ndarray = "0.16"
-tracing = "0.1"
-```
-
-### Development Commands
-```bash
-# Build all crates
-cargo build --workspace --release
-
-# Run tests (excludes Python bindings)
-cargo test --workspace --exclude drivedit-py
-
-# Run benchmarks
-cargo bench --package drivedit-bench
-
-# Check for issues
-cargo clippy --workspace
-
-# Build Python wheel
-cd drivedit-py && maturin build --release
-```
-
 ## Enfusion Integration
 
-The `src/enfusion/` directory contains organized C scripts for the Enfusion engine:
+Capture is contract dc-2.0: see `docs/capture_contract/dc-2.0.md`. The capture addon's Enforce scripts are
+`src/enfusion/datacapture/DC_*.c`; `tools/deploy_addon.py` deploys exactly the files listed in
+`addons/DataCapture/deploy_manifest.txt` (see `addons/DataCapture/README.md`).
 
-### Data Capture Components
-- **Data Capture** (`src/enfusion/datacapture/`):
-  - `SCR_MLDataCollector.c`: ML training data collection (CSV format)
-  - `SCR_AnchorFrameSelector.c`: Anchor frame selection for Self-Forcing++ training
-  - `SCR_BinarySerializer.c`: High-performance binary capture (ENFCAP format)
-  - `SCR_AIDrivingSimulator.c`: AI-controlled vehicle simulation
-  - `SCR_DrivingSimDebugUI.c`: Debug visualization overlay
-
-### Anchor Frame System (Self-Forcing++ Training)
-The `SCR_AnchorFrameSelector` component implements anchor frame selection for extended
-stable generation (5 seconds to 4+ minutes). Anchor frames provide ground-truth
-"reset points" during self-forcing training.
-
-**Trigger Types:**
-- `PERIODIC`: Regular interval anchors (default: every 150 frames = 30 seconds at 5Hz)
-- `ROAD_CHANGE`: Road type transitions (city to highway, etc.)
-- `JUNCTION`: Junction/intersection approach and exit
-- `STOP/START`: Vehicle stop and restart events (inverse dynamics)
-- `STEERING`: Large steering angle changes
-- `SPEED_CHANGE`: Significant acceleration/deceleration
-
-**Driving State Machine:**
-- Tracks context: CITY_DRIVING, HIGHWAY_DRIVING, RURAL_DRIVING, OFFROAD_DRIVING
-- Junction detection: JUNCTION_APPROACH, JUNCTION_TRAVERSAL, JUNCTION_EXIT
-- Vehicle state: STOPPED
-
-**Quality Assessment:**
-- Motion blur penalty (high speed = lower quality)
-- Steering stability (erratic steering = lower quality)
-- Speed stability (variable speed = lower quality)
-- Minimum quality threshold (configurable, default 0.5)
-
-**Output per Anchor:**
-```
-{
-    frame_id: int,
-    trigger_type: enum,
-    context_window: int,      // Frames before anchor (for context)
-    rollout_horizon: int,     // Frames after anchor (for self-forcing)
-    quality_score: float,
-    context_state: enum,
-    position: vector,
-    speed: float,
-    steering: float,
-    description: string
-}
-```
-
-**Integration with SCR_MLDataCollector:**
-- Enable `m_bEnableAnchorSelection` attribute
-- Add `SCR_AnchorFrameSelector` component to same entity
-- Anchor metadata automatically captured alongside telemetry
-
-### Navigation Components
-- **Extractors** (`src/enfusion/navigation/extractors/`):
-  - `SCR_LocalRoadExtractor.c`: Local road topology analysis
-  - `SCR_SimpleRoadExtractor.c`: Basic road utilities
-- **Visualizers** (`src/enfusion/navigation/visualizers/`):
-  - `SCR_EfficientRoadNet.c`: Road network visualization and extraction
-
-### Testing Components
-- **Testing** (`src/enfusion/testing/`):
-  - `SCR_RoadPhysicsTestMission.c`: Physics testing scenarios
-
-### Development Resources
-- **Documentation** (`src/docs/`): Development notes and version files
-- **Utilities** (`src/enfusion/utils/`): Shared utilities and helpers (extensible)
-
-### Binary Capture Format (ENFCAP v1)
-The `SCR_BinarySerializer.c` implements a high-performance binary format optimized for ML training:
-- **Header**: 64 bytes with magic, version, frame count, timestamp, flags
-- **Index Table**: Frame offsets for O(1) random access
-- **Frame Records**: Variable-length binary records with ego transform, vehicle state, scene entities, road topology
-- **Anchor Frames**: Periodic keyframes for efficient seek operations
-
-These provide synthetic data generation capabilities for training.
+The dc-1.0 capture path (the `SCR_*` Enforce scripts, the ENFCAP format, the anchor frame selector, the road
+extractors, the in-repo `DriveDiT_DataCapture/` addon) and the Rust workspace (`rust/`, with its Python wrappers)
+were deleted from main in DD-12. They are kept in tag `archive/dc1-rust`; restore a path with
+`git checkout archive/dc1-rust -- <path>`.
 
 ## Testing and Validation
 

@@ -1,5 +1,10 @@
 # World Model Data Capture Pipeline Architecture
 
+> **Status: historical design (2026-03), not the current capture path.** This document specifies the dc-1.0
+> prototype design: the `SCR_*` Enforce components, the `.enfcap` container and its readers. That code was deleted
+> from main in DD-12 and is kept in tag `archive/dc1-rust`. Capture is contract dc-2.0: see
+> [`capture_contract/dc-2.0.md`](capture_contract/dc-2.0.md).
+
 ## System Overview
 
 This document specifies the architecture for a comprehensive data capture pipeline in the Enfusion game engine, designed to generate high-fidelity synthetic training data for world models. The architecture aligns with state-of-the-art approaches from GAIA-2, comma.ai, Self-Forcing++, and V-JEPA 2.

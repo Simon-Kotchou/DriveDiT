@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 import torch
+from torch.nn import functional
+
 from drivedit.codec.base import CodecInfo, FrozenCodec, WeightSource
 from drivedit.codec.encode import IMAGE_PATTERN, IMAGE_SIZE, SHARD_SCHEMA
-from torch.nn import functional
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

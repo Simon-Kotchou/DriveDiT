@@ -11,10 +11,10 @@ import pytest
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
+
 from drivedit.codec.base import CODECS, Codec, FrozenCodec, images_to_unit, unit_to_images
 from drivedit.codec.flux2 import Flux2Codec, patchify, unpatchify
 from drivedit.codec.wan21 import Wan21Codec
-
 from tests.drivedit.codec.helpers import frames
 
 # vae/config.json of black-forest-labs/FLUX.2-klein-4B@e7b7dc27 and Wan-AI/Wan2.1-T2V-1.3B-Diffusers@0fad780a (the

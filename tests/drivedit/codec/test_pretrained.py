@@ -14,9 +14,9 @@ import os
 
 import pytest
 import torch
+
 from drivedit.codec.base import CODECS, Codec, codec_ids, get_codec, weights_cached
 from drivedit.codec.cadre import CADRE_SOURCE_ENV
-
 from tests.drivedit.codec.helpers import frames
 
 PSNR_FLOOR_DB = 18.0

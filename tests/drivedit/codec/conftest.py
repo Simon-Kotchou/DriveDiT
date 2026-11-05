@@ -10,10 +10,10 @@ import pytest
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
+
 from drivedit.codec.base import CODECS
 from drivedit.codec.flux2 import Flux2Codec
 from drivedit.codec.wan21 import Wan21Codec
-
 from tests.drivedit.codec.helpers import POOL_INFO, PoolCodec
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import torch
+
 from drivedit.codec import cadre
 from drivedit.codec.cadre import CADRE_SOURCE_ENV, CADRE_SOURCE_SHA256, CadreSourceError, import_cadre
 

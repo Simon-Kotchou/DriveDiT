@@ -10,9 +10,9 @@ import cv2
 import numpy as np
 import pytest
 import torch
+
 from drivedit.codec import encode as encode_module
 from drivedit.codec.encode import IMAGE_PATTERN, LATENTS_SCHEMA, encode_session, main
-
 from tests.drivedit.codec.helpers import write_shard
 
 if TYPE_CHECKING:

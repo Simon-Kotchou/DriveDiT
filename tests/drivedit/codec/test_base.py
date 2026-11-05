@@ -7,9 +7,9 @@ import re
 
 import pytest
 import torch
+
 from drivedit.codec import base
 from drivedit.codec.base import CODECS, Codec, codec_ids, get_codec, images_to_unit, unit_to_images
-
 from tests.drivedit.codec.helpers import POOL_INFO, PoolCodec, frames
 
 BAKE_OFF = ("cadre-1x16x16", "cadre-1x48x48", "flux2-vae", "wan21-vae")

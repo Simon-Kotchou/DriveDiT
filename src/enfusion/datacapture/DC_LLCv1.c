@@ -93,7 +93,17 @@ class DC_Sha256
 	//! Hex digest of the text's bytes; empty when a character is not 7-bit ASCII (1..127)
 	static string HashText(string text)
 	{
-		int length = text.Length();
+		return HashPrefix(text, text.Length());
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Hex digest of the first count characters of text (count clamped to [0, text.Length()]), read in place by
+	//! ToAscii. A prefix is never cut with string.Substring, whose result is at most DC_TextFile.SUBSTRING_MAX_CHARS
+	//! (8191) characters long (string.c:92): a route file is one line of tens of kB. Empty when one of the characters
+	//! is not 7-bit ASCII (1..127)
+	static string HashPrefix(string text, int count)
+	{
+		int length = Math.ClampInt(count, 0, text.Length());
 		array<int> bytes = {};
 		bytes.Reserve(length + 72);
 		for (int i = 0; i < length; i++)
@@ -257,6 +267,11 @@ class DC_Sha256
 //! Whole-file reads of the text inputs of llc_v1 and the expert (vehicle card, route, their own sources)
 class DC_TextFile
 {
+	//! The longest string string.Substring, string.Trim and string.Format return (string.c:92, :106, :119 of 1.8.0.13):
+	//! a longer result is cut there without an error. File text is read whole by FileHandle.Read (not limited for a
+	//! string, FileHandle.c) and never passed through these three; a token cut from it is checked against this bound
+	static const int SUBSTRING_MAX_CHARS = 8191;
+
 	//------------------------------------------------------------------------------------------------
 	//! The first of the comma-separated roots (each ending in '/' or ':') under which fileName exists, joined; empty
 	//! when there is none
@@ -276,8 +291,9 @@ class DC_TextFile
 
 	//------------------------------------------------------------------------------------------------
 	//! The file's bytes as one string: FileHandle.Read of GetLength() bytes, else (a short read) line by line with
-	//! ReadLine joined by LF. false (failure) when the file is missing or cannot be opened, when neither read gives
-	//! exactly GetLength() bytes, or when a character is not 7-bit ASCII (the inputs are ASCII with LF line ends)
+	//! ReadLine joined by LF (ReadLines: refused for a line of SUBSTRING_MAX_CHARS or more, the final LF as the file
+	//! has it). false (failure) when the file is missing or cannot be opened, when neither read gives exactly
+	//! GetLength() bytes, or when a character is not 7-bit ASCII (the inputs are ASCII with LF line ends)
 	static bool Read(string path, out string text, out string failure)
 	{
 		text = string.Empty;
@@ -321,7 +337,11 @@ class DC_TextFile
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Fallback: the lines of the file joined by LF, with a final LF when the joined text is one byte short
+	//! Fallback after a short FileHandle.Read: the lines of the file joined by LF, and a final LF only when the file's
+	//! last byte, read at GetLength() - 1, is one (never inferred from the length). Empty, so the read fails, when a
+	//! line has SUBSTRING_MAX_CHARS or more characters: 1.8 documents no line limit for ReadLine, and a line cut or
+	//! split at such a limit could join to GetLength() characters with other bytes. A route (one line of tens of kB)
+	//! can therefore never be read this way; it needs the whole-file read
 	protected static void ReadLines(string path, int length, out string text)
 	{
 		text = string.Empty;
@@ -329,20 +349,37 @@ class DC_TextFile
 		if (!file)
 			return;
 
+		string joined;
 		string line;
 		bool first = true;
+		bool lineAtLimit = false;
 		while (file.ReadLine(line) >= 0)
 		{
-			if (!first)
-				text += "\n";
+			if (line.Length() >= SUBSTRING_MAX_CHARS)
+				lineAtLimit = true;
 
-			text += line;
+			if (!first)
+				joined += "\n";
+
+			joined += line;
 			first = false;
 		}
 
+		string lastByte;
+		if (length > 0)
+		{
+			file.Seek(length - 1);
+			file.Read(lastByte, 1);
+		}
+
 		file.Close();
-		if (text.Length() == length - 1)
-			text += "\n";
+		if (lineAtLimit)
+			return;
+
+		if (lastByte == "\n")
+			joined += "\n";
+
+		text = joined;
 	}
 }
 
@@ -490,6 +527,13 @@ class DC_JsonScan
 			int close = -1;
 			if (Expect(text, index, CHAR_QUOTE, index))
 				close = text.IndexOfFrom(index, "\"");
+
+			// Substring returns at most SUBSTRING_MAX_CHARS characters: a longer item would be cut silently
+			if (close - index > DC_TextFile.SUBSTRING_MAX_CHARS)
+			{
+				failure = string.Format("\"%1\" item %2 is longer than %3 characters", key, values.Count(), DC_TextFile.SUBSTRING_MAX_CHARS);
+				return false;
+			}
 
 			string item;
 			if (close >= 0)

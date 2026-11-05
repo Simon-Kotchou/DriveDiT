@@ -52,10 +52,7 @@ PLACEHOLDER_NAMES = re.compile(
 )
 
 # Reviewed exceptions, as (tracked path, kind, matched name). Keep this list short and specific.
-ALLOWLIST = {
-    ("Dockerfile", "home-path", "drivedit"),          # the image's own account (useradd ... drivedit)
-    ("docker-compose.yml", "home-path", "drivedit"),  # mounts into that account's home
-}
+ALLOWLIST: set[tuple[str, str, str]] = set()
 
 BOMS = (  # UTF-32 first: its little-endian BOM begins with the UTF-16 one
     (codecs.BOM_UTF32_LE, "utf-32-le"),

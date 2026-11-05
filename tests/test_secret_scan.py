@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCAN_PATH = os.path.join(REPO, "tools", "ci", "secret_scan.py")
@@ -79,9 +80,11 @@ class SecretScanTest(unittest.TestCase):
             self.assertEqual(kinds(ok), [], ok)
 
     def test_allowlist_is_path_specific(self):
-        line = "/home/" + "drivedit/app"
-        self.assertEqual(kinds(line, "Dockerfile"), [])
-        self.assertEqual(kinds(line, "docs/x.md"), ["home-path"])
+        line = "/home/" + "svc/app"
+        with mock.patch.object(scan, "ALLOWLIST", {("deploy/Dockerfile", "home-path", "svc")}):
+            self.assertEqual(kinds(line, "deploy/Dockerfile"), [])
+            self.assertEqual(kinds(line, "docs/x.md"), ["home-path"])
+        self.assertEqual(kinds(line, "deploy/Dockerfile"), ["home-path"])
 
     def test_redact_never_prints_the_match(self):
         hit = "jane.doe" + AT + "corp-mail.de"

@@ -12,6 +12,8 @@ STEP_STREAMS = ("ctl", "telemetry")
 STARTS_AT_ZERO = ("img", "events", "episodes")
 WORLD_TIME_STREAMS = ("ctl", "telemetry", "hf", "events")
 HL_COMMAND = ("hl_kappa", "hl_accel", "hl_dir")
+NOISE_MODE = "N"                    # ctl.noise_active 1 only in a mode-N episode (dc-2.0 9.1, r2 3.1)
+PERTURB_KINDS = ("perturb_start", "perturb_end")
 
 
 def check_c05(ctx):
@@ -131,7 +133,13 @@ def check_c07(ctx):
     timing.decision): ctl hl_seq is -1 (the no-command sentinel: hl_* empty) until the first command and advances by
     1 exactly on the row right after every decision callback of an episode that starts or goes on (a kept command is
     numbered again) and on no other row, so a number before the first episode fails; a command (hl_kappa, hl_accel,
-    hl_dir) changes only together with that increment or at an episode boundary. 0 violations."""
+    hl_dir) changes only together with that increment or at an episode boundary. The disturbance of the held command
+    (dc-2.0 9.1 noise_active / noise_id, DD-7-ident) follows the same boundary: noise_active 1 exactly when noise_id
+    >= 0 (-1 when none), only on a row that holds a command of a mode-N episode (ctl.mode N, episodes.mode N); the
+    pair changes only together with an hl_seq increment or at an episode boundary; every disturbance id has one
+    perturb_start and one perturb_end (payload noise_id) in its episode, start before end, and its rows are exactly
+    the rows after the start's decision callback through the end's (R-01: the command decided at C_t applies from
+    P_t + 1). 0 violations."""
     if ctx.load_error:
         return unreadable(ctx, "C07")
     s = ctx.session
@@ -160,6 +168,7 @@ def check_c07(ctx):
         issues.append("%d ctl row(s) whose world_time_ms differs from the hf row of their render frame (keys %s): "
                       "the frame clock" % (len(off_clock), first(off_clock, 3)))
     issues += _decision_boundary(s)
+    issues += _noise_boundary(s)
     hf = s.streams["hf"]
     hw, lps, paused, hframe = hf.col("world_time_ms"), hf.col("last_physics_step"), hf.col("paused"), \
         hf.col("render_frame")
@@ -260,6 +269,88 @@ def _decision_boundary(s):
     if held_bad:
         issues.append("ctl hl_kappa/hl_accel/hl_dir change inside a decision interval at %d row(s): %s"
                       % (len(held_bad), first(held_bad, 4)))
+    return issues
+
+
+def _payload_noise_id(payload):
+    """noise_id of a perturb event payload ('key=value' pairs joined by ';'), None when missing or not an int."""
+    for item in (payload or "").split(";"):
+        key, _, value = item.partition("=")
+        if key == "noise_id":
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
+
+
+def _noise_boundary(s):
+    """The disturbance rules of check_c07 on ctl.noise_active / noise_id and the perturb events."""
+    ctl, ev, eps = s.streams["ctl"], s.streams["events"], s.streams["episodes"]
+    steps, seq, ep = ctl.col("physics_step"), ctl.col("hl_seq"), ctl.col("episode_id")
+    active, nid, mode = ctl.col("noise_active"), ctl.col("noise_id"), ctl.col("mode")
+    episode_mode = dict(zip(eps.col("episode_id"), eps.col("mode")))
+    disagree, outside, unheld, held_bad = [], [], [], []
+    for i in range(len(steps)):
+        on = bool(active[i])
+        if on != (nid[i] is not None and nid[i] >= 0) or (nid[i] is not None and nid[i] < -1):
+            disagree.append(steps[i])
+        if on and (mode[i] != NOISE_MODE or ep[i] is None or ep[i] < 0 or episode_mode.get(ep[i]) != NOISE_MODE):
+            outside.append(steps[i])
+        if on and (seq[i] is None or seq[i] < 0 or any(ctl.col(c)[i] is None for c in HL_COMMAND)):
+            unheld.append(steps[i])
+        if i and (active[i], nid[i]) != (active[i - 1], nid[i - 1]) and seq[i] == seq[i - 1] and ep[i] == ep[i - 1]:
+            held_bad.append(steps[i])
+    issues = []
+    if disagree:
+        issues.append("ctl: noise_active and noise_id disagree on %d row(s) (1 needs an id >= 0, 0 needs -1): %s"
+                      % (len(disagree), first(disagree, 4)))
+    if outside:
+        issues.append("ctl: noise_active 1 outside a mode-N episode on %d row(s): %s" % (len(outside),
+                                                                                           first(outside, 4)))
+    if unheld:
+        issues.append("ctl: noise_active 1 on %d row(s) without a held command: %s" % (len(unheld), first(unheld, 4)))
+    if held_bad:
+        issues.append("ctl noise_active/noise_id change inside a decision interval at %d row(s): %s"
+                      % (len(held_bad), first(held_bad, 4)))
+    # the perturb events: one start and one end per id, in its episode; the id's rows are (start step, end step]
+    marks = {}
+    for kind, step, episode, payload in zip(ev.col("kind"), ev.col("physics_step"), ev.col("episode_id"),
+                                            ev.col("payload")):
+        if kind not in PERTURB_KINDS:
+            continue
+        noise_id = _payload_noise_id(payload)
+        if noise_id is None or noise_id < 0:
+            issues.append("events: %s without a noise_id >= 0 in its payload (%r)" % (kind, payload))
+            continue
+        marks.setdefault(noise_id, {}).setdefault(kind, []).append((step, episode))
+    rows = {}
+    for i in range(len(steps)):
+        if active[i] and nid[i] is not None and nid[i] >= 0:
+            rows.setdefault(nid[i], []).append((steps[i], ep[i]))
+    window_bad = []
+    for noise_id in sorted(set(marks) | set(rows)):
+        m = marks.get(noise_id, {})
+        starts, ends = m.get("perturb_start", []), m.get("perturb_end", [])
+        if len(starts) != 1 or len(ends) != 1:
+            window_bad.append("noise_id %d has %d perturb_start and %d perturb_end" % (noise_id, len(starts),
+                                                                                       len(ends)))
+            continue
+        (start, start_ep), (end, end_ep) = starts[0], ends[0]
+        if not start < end or start_ep != end_ep or start_ep is None or start_ep < 0:
+            window_bad.append("noise_id %d: perturb_start at step %s (episode %s) is not before its perturb_end at "
+                              "step %s in the same episode (%s)" % (noise_id, start, start_ep, end, end_ep))
+            continue
+        want = [k for k, e in zip(steps, ep) if start < k <= end and e == start_ep]
+        have = [k for k, _ in rows.get(noise_id, [])]
+        if have != want:
+            extra = sorted(set(have) - set(want))
+            missing = sorted(set(want) - set(have))
+            window_bad.append("noise_id %d: its rows are not exactly the rows after perturb_start (step %d) through "
+                              "perturb_end (step %d): %d outside %s, %d missing %s" % (
+                                  noise_id, start, end, len(extra), first(extra, 3), len(missing), first(missing, 3)))
+    if window_bad:
+        issues.append("perturbation windows: %s" % first(window_bad, 3))
     return issues
 
 

@@ -1825,6 +1825,49 @@ class NoisePilotTest(unittest.TestCase):
         self.assertTrue(any(d["action_cmd"][2] == 0 and d["action_label"][2] == 1 for d in perturbed))   # the stop
         self.assertTrue(all(d["masks"]["policy_valid"] == 1 for d in perturbed if d["obs_valid"] == 1))
 
+    def test_c07_checks_the_disturbance(self):
+        """C07 owns the held command and its R-01 boundary, the disturbance included: each mutation of the noise
+        metadata fails it (Codex: every noise_id -1 with the rows still active passed every check before)."""
+        def mutated(name, edit):
+            dst = os.path.join(self.tmp, name, os.path.basename(self.session))
+            shutil.copytree(self.session, dst)
+            edit(dst)
+            return run_json("--session", dst, "--routes-dir", self.routes, "--checks", "C07")
+
+        def first_active(dst):
+            s = dc_validate.base.load_reader().open_session(dst, decode_images=False)
+            ctl = s.streams["ctl"]
+            return [k for k, a in zip(ctl.col("physics_step"), ctl.col("noise_active")) if a]
+
+        code, rep = run_json("--session", self.session, "--routes-dir", self.routes, "--checks", "C07")
+        self.assertEqual((code, by_id(rep)["C07"]["status"]), (0, "PASS"))
+        active = first_active(self.session)
+        cases = {
+            "ids_dropped": (lambda d: set_column(d, "ctl", "noise_id", lambda k, v: "-1"), "disagree"),
+            "mode_e": (lambda d: (set_column(d, "ctl", "mode", lambda k, v: "E" if v == "N" else v),
+                                  set_column(d, "episodes", "mode", lambda k, v: "E")), "outside a mode-N episode"),
+            "row_off": (lambda d: (set_column(d, "ctl", "noise_active", lambda k, v: "0" if k == active[3] else v),
+                                   set_column(d, "ctl", "noise_id", lambda k, v: "-1" if k == active[3] else v)),
+                        "inside a decision interval"),
+            "id_swapped": (lambda d: set_column(d, "ctl", "noise_id",
+                                                lambda k, v: "4" if v == "0" else ("0" if v == "4" else v)),
+                           "perturbation windows"),
+        }
+        for name, (edit, detail) in cases.items():
+            code, rep = mutated(name, edit)
+            c07 = by_id(rep)["C07"]
+            self.assertEqual((code, c07["status"]), (1, "FAIL"), (name, c07["detail"]))
+            self.assertIn(detail, c07["detail"], name)
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ev = s.streams["events"]
+        end = [q for q, kind in zip(ev.col("event_seq"), ev.col("kind")) if kind == "perturb_end"][0]
+
+        def drop_end(dst):
+            set_column(dst, "events", "kind", lambda k, v: "nav_command" if k == end else v)
+        code, rep = mutated("end_dropped", drop_end)
+        self.assertEqual(by_id(rep)["C07"]["status"], "FAIL")
+        self.assertIn("0 perturb_end", by_id(rep)["C07"]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

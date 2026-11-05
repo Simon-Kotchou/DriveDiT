@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
 from drivedit.eval.linear import (
     check_segments,
     cross_val_predict,

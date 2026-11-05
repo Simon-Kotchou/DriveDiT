@@ -7,6 +7,7 @@ import math
 
 import numpy as np
 import pytest
+
 from drivedit.eval.control import (
     LlcResponse,
     brake_test,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
 from drivedit.eval.probes import explained_action_information, state_probe_r2
 
 SEGMENTS = [(0, 300), (300, 520), (520, 800)]

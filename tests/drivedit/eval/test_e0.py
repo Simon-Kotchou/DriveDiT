@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from drivedit.eval.e0 import E0Report, SessionTransitions, e0_action_gain, main, session_transitions
 
 REPO = Path(__file__).resolve().parents[3]

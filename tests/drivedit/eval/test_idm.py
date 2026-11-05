@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+
 from drivedit.eval.idm import (
     IdmConfig,
     IdmTrainConfig,

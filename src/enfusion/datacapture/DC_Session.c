@@ -147,6 +147,14 @@ class DC_JsonWriter
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! A number as the JSON number text given (a value copied from a trial conf as written, so it round-trips
+	//! exactly; the caller checks that it is a JSON number)
+	void AddNumberText(string key, string numberText)
+	{
+		AddLine(KeyText(key) + numberText);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	void AddBool(string key, bool value)
 	{
 		if (value)

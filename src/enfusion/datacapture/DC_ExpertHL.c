@@ -1186,6 +1186,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		m_NoiseInput.m_fLateralM = m_Expert.GetLateral();
 		m_NoiseInput.m_fHeadingErrRad = m_Expert.GetHeadingError();
 		m_NoiseInput.m_fProfileAheadMps = m_Expert.ProfileAt(progress + speed * m_fSpeedPreviewS);
+		m_NoiseInput.m_iWorldMs = m_Context.GetWorldMs();
 		m_Noise.Decide(m_Now, m_NoiseInput, m_Decision);
 		m_sDecisionPayload = string.Empty;
 		m_fDecisionPlannedS = 0;

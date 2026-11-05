@@ -48,12 +48,14 @@
 // per decision, the applied command is held over the decision interval)
 //   - Segments run one at a time. After each one (and at the episode start, start_delay_s) a gap of gap_min_s plus
 //     an exponential gap_mean_s; then the next segment starts at the first decision with the lane errors recovered
-//     (|lane_lat_err| < recover_lat_m and |lane_head_err| < recover_head_deg held recover_hold_s: the r2 T3 recovery
-//     rule), the clean command forward, the ego at min_speed_mps or faster and end_margin_m or more before the
-//     route end. So every disturbance starts near the expert's state distribution and ends in clean recovery.
+//     (|lane_lat_err| < recover_lat_m and |lane_head_err| < recover_head_deg held recover_hold_s of world time from
+//     the first decision inside, reset by any decision outside: the r2 T3 recovery rule), the clean command forward,
+//     the ego at min_speed_mps or faster and end_margin_m or more before the route end. So every disturbance starts
+//     near the expert's state distribution and ends in clean recovery.
 //   - Kinds are drawn by the weights w_*; the targets of the pilot (research delta 2026-11 section 3.3): at least
 //     30% of decision steps off-expert, at least 40% of segments longitudinal, at least 10 stops per hour, both turn
-//     directions per lateral kind balanced; tests/test_noise_pilot.py checks them over a simulated hour.
+//     directions per lateral kind balanced; tests/test_noise_pilot.py runs this file (DC_NoiseRng, DC_Noise),
+//     translated statement for statement, over a simulated hour and checks them.
 //   - Recovery is counted per segment: recovered within recover_window_s of its end (reached, then held
 //     recover_hold_s), late, or not by the episode end; logged per episode and per session.
 //
@@ -182,6 +184,8 @@ class DC_NoiseConfig
 	static const int MAX_KEY_CHARS = 64;
 	static const int CHAR_OBJECT_OPEN = 123;	//!< '{'
 	static const int CHAR_OBJECT_CLOSE = 125;	//!< '}'
+	static const int CHAR_BACKSLASH = 92;
+	static const int MAX_NUMBER_CHARS = 32;
 
 	//! The parameters of pilot_v1: key, default, lowest and highest allowed value (index-aligned)
 	protected static ref array<string> s_aKeys = {
@@ -240,6 +244,8 @@ class DC_NoiseConfig
 	protected ref array<float> m_aValues = {};
 	protected ref array<string> m_aGivenKeys = {};
 	protected ref array<float> m_aGivenValues = {};
+	protected ref array<string> m_aGivenTexts = {};	//!< each override's JSON number text as the conf wrote it
+	protected bool m_bParamsGiven;						//!< the conf has "perturb_params" (also an empty one)
 
 	//------------------------------------------------------------------------------------------------
 	//! true with a perturbation profile (not none)
@@ -281,9 +287,8 @@ class DC_NoiseConfig
 		m_aValues.Clear();
 		m_aGivenKeys.Clear();
 		m_aGivenValues.Clear();
-		if (!CheckKeyNames(rawText, failure))
-			return false;
-
+		m_aGivenTexts.Clear();
+		m_bParamsGiven = false;
 		if (context.DoesKeyExist(KEY_PROFILE))
 		{
 			string profile;
@@ -305,6 +310,20 @@ class DC_NoiseConfig
 
 		m_aValues.Copy(s_aPilotV1);
 		bool hasParams = context.DoesKeyExist(KEY_PARAMS) || rawText.Contains("\"" + KEY_PARAMS + "\"");
+		// a misspelt perturb key refuses a conf that asks for perturbation; without "perturb" and "perturb_params"
+		// the conf is read as before DD-7-ident (a WARNING only)
+		string keyFailure;
+		if (!CheckKeyNames(rawText, keyFailure))
+		{
+			if (m_bProfileGiven || hasParams)
+			{
+				failure = keyFailure;
+				return false;
+			}
+
+			Print("[DC_Noise] WARNING: " + keyFailure + " (ignored: no perturbation profile)", LogLevel.WARNING);
+		}
+
 		if (!hasParams)
 			return true;
 
@@ -323,29 +342,55 @@ class DC_NoiseConfig
 		if (!ScanParams(rawText, failure))
 			return false;
 
+		m_bParamsGiven = true;
 		return CheckValues(failure);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Every "perturb... key of the conf text is "perturb" or "perturb_params" (a misspelt key would be ignored by
-	//! JsonLoadContext, which cannot list keys on 1.8). true without the text
+	//! Every key of the conf text that starts with "perturb" is "perturb" or "perturb_params" (a misspelt one would be
+	//! ignored by JsonLoadContext, which cannot list keys on 1.8). A key is a string followed by ':' outside every
+	//! string; string values are never keys (a "note": "perturbation deferred" is not one). true without the text;
+	//! false (failure) names the first other key
 	static bool CheckKeyNames(string rawText, out string failure)
 	{
 		failure = string.Empty;
-		string quoted = "\"" + KEY_PROFILE;
-		int at = rawText.IndexOf(quoted);
-		while (at >= 0)
+		int length = rawText.Length();
+		int index = 0;
+		while (index < length)
 		{
-			int next = at + quoted.Length();
-			bool profileKey = rawText.ContainsAt("\"", next);
-			bool paramsKey = rawText.ContainsAt("_params\"", next);
-			if (!profileKey && !paramsKey)
+			if (rawText.ToAscii(index) != DC_JsonScan.CHAR_QUOTE)
 			{
-				failure = "the conf has a key starting with \"" + KEY_PROFILE + "\" that is neither \"" + KEY_PROFILE + "\" nor \"" + KEY_PARAMS + "\"";
-				return false;
+				index++;
+				continue;
 			}
 
-			at = rawText.IndexOfFrom(next, quoted);
+			// a string from index: its closing quote (a backslash escapes the next character)
+			int close = index + 1;
+			while (close < length && rawText.ToAscii(close) != DC_JsonScan.CHAR_QUOTE)
+			{
+				if (rawText.ToAscii(close) == CHAR_BACKSLASH)
+					close++;
+
+				close++;
+			}
+
+			if (close >= length)
+				return true;
+
+			int after = DC_JsonScan.SkipSpace(rawText, close + 1);
+			int keyLength = close - index - 1;
+			if (after < length && rawText.ToAscii(after) == DC_JsonScan.CHAR_COLON && keyLength >= KEY_PROFILE.Length())
+			{
+				string head = rawText.Substring(index + 1, Math.MinInt(keyLength, MAX_KEY_CHARS));
+				bool known = (keyLength == KEY_PROFILE.Length() && head == KEY_PROFILE) || (keyLength == KEY_PARAMS.Length() && head == KEY_PARAMS);
+				if (head.StartsWith(KEY_PROFILE) && !known)
+				{
+					failure = "the conf has a key starting with \"" + KEY_PROFILE + "\" that is neither \"" + KEY_PROFILE + "\" nor \"" + KEY_PARAMS + "\": \"" + head + "\"";
+					return false;
+				}
+			}
+
+			index = close + 1;
 		}
 
 		return true;
@@ -393,14 +438,19 @@ class DC_NoiseConfig
 
 			float value;
 			index = close + 1;
-			if (!DC_JsonScan.Expect(text, index, DC_JsonScan.CHAR_COLON, index) || !DC_JsonScan.ReadNumber(text, DC_JsonScan.SkipSpace(text, index), value, index))
+			int numberStart = -1;
+			if (DC_JsonScan.Expect(text, index, DC_JsonScan.CHAR_COLON, index))
+				numberStart = DC_JsonScan.SkipSpace(text, index);
+
+			if (numberStart < 0 || !DC_JsonScan.ReadNumber(text, numberStart, value, index) || !IsNumberText(text, numberStart, index))
 			{
-				failure = "\"" + KEY_PARAMS + "\" key '" + key + "' has no number";
+				failure = "\"" + KEY_PARAMS + "\" key '" + key + "' has no number of at most 32 characters";
 				return false;
 			}
 
 			m_aGivenKeys.Insert(key);
 			m_aGivenValues.Insert(value);
+			m_aGivenTexts.Insert(text.Substring(numberStart, index - numberStart));
 			m_aValues[keyIndex] = value;
 			if (DC_JsonScan.Expect(text, index, CHAR_OBJECT_CLOSE, index))
 				break;
@@ -413,6 +463,26 @@ class DC_NoiseConfig
 		}
 
 		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! text[start, end) is a JSON number of 1 to MAX_NUMBER_CHARS characters (digits, '-', '+', '.', 'e', 'E'), so
+	//! session.json can carry it as written
+	protected static bool IsNumberText(string text, int start, int end)
+	{
+		if (end <= start || end - start > MAX_NUMBER_CHARS)
+			return false;
+
+		for (int i = start; i < end; i++)
+		{
+			int code = text.ToAscii(i);
+			bool digit = code >= 48 && code <= 57;
+			bool mark = code == 43 || code == 45 || code == 46 || code == 69 || code == 101;	// + - . E e
+			if (!digit && !mark)
+				return false;
+		}
+
 		return true;
 	}
 
@@ -463,19 +533,20 @@ class DC_NoiseConfig
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! session.json trial.conf: "perturb" and "perturb_params" as the conf gave them
+	//! session.json trial.conf: "perturb" and "perturb_params" as the conf gave them: each override's number text
+	//! as written (so every accepted value round-trips exactly), an empty object as an empty object
 	void WriteConf(notnull DC_JsonWriter json)
 	{
 		if (m_bProfileGiven)
 			json.AddString(KEY_PROFILE, m_sProfile);
 
-		if (m_aGivenKeys.IsEmpty())
+		if (!m_bParamsGiven)
 			return;
 
 		json.BeginObject(KEY_PARAMS);
 		for (int i = 0; i < m_aGivenKeys.Count(); i++)
 		{
-			json.AddFloat(m_aGivenKeys[i], m_aGivenValues[i], 6);
+			json.AddNumberText(m_aGivenKeys[i], m_aGivenTexts[i]);
 		}
 
 		json.EndObject();
@@ -509,6 +580,7 @@ class DC_NoiseInput
 	float m_fLateralM;			//!< lane_lat_err_m
 	float m_fHeadingErrRad;		//!< lane_head_err_rad
 	float m_fProfileAheadMps;	//!< the expert's speed profile at its preview point (DC_ExpertHL.ProfileAt)
+	int m_iWorldMs;				//!< world_time_ms of the decision callback (the recovery hold is world time)
 }
 
 //------------------------------------------------------------------------------------------------
@@ -549,7 +621,8 @@ class DC_Noise
 	protected bool m_bEpisodeN;
 	protected ref array<int> m_aBalance = {};		//!< per kind: + right / accelerate, - left / brake
 	protected int m_iGapSteps;			//!< decisions still to wait before the next segment may start
-	protected int m_iRecoveredSteps;	//!< consecutive decisions with the lane errors inside the recovery bounds
+	protected int m_iInsideSinceMs = -1;	//!< world time of the first decision of the current run inside the
+											//!< recovery bounds; -1 while outside
 	// the drawn next (or running) segment
 	protected int m_iKind = -1;
 	protected float m_fSign = 1;
@@ -565,7 +638,7 @@ class DC_Noise
 	protected float m_fOu;
 	// recovery after a segment
 	protected bool m_bAwaitRecovery;
-	protected int m_iSinceEnd;
+	protected int m_iEndMs;				//!< world time of the decision that ended the last segment
 
 	// counters (session-wide; the noise id is unique in the session)
 	protected int m_iNextNoiseId;
@@ -633,7 +706,7 @@ class DC_Noise
 		m_bActive = false;
 		m_iNoiseId = -1;
 		m_bAwaitRecovery = false;
-		m_iRecoveredSteps = 0;
+		m_iInsideSinceMs = -1;
 		m_iEpisodeDecisions = 0;
 		m_iEpisodePerturbed = 0;
 		m_iEpisodeSegments = 0;
@@ -674,7 +747,7 @@ class DC_Noise
 
 		if (clean.m_iDir != 1 || !ApplySegment(clean, input, applied))
 		{
-			EndSegment();
+			EndSegment(input.m_iWorldMs);
 			applied.CopyFrom(clean);
 			applied.m_bNoise = false;
 			applied.m_iNoiseId = -1;
@@ -777,7 +850,7 @@ class DC_Noise
 		if (input.m_fRemainingM < m_Config.Get("end_margin_m"))
 			return false;
 
-		return m_iRecoveredSteps >= Steps(m_Config.Get("recover_hold_s"));
+		return IsRecovered(input);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -797,12 +870,12 @@ class DC_Noise
 
 	//------------------------------------------------------------------------------------------------
 	//! The running segment ends: recovery is awaited, the next segment and its gap are drawn
-	protected void EndSegment()
+	protected void EndSegment(int worldMs)
 	{
 		m_bActive = false;
 		m_iNoiseId = -1;
 		m_bAwaitRecovery = true;
-		m_iSinceEnd = 0;
+		m_iEndMs = worldMs;
 		DrawSegment();
 	}
 
@@ -952,28 +1025,34 @@ class DC_Noise
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Lane-error recovery (the r2 T3 rule) on the state of this decision, and the statistic of the last segment
+	//! Lane-error recovery (the r2 T3 rule: |lane_lat_err| < recover_lat_m and |lane_head_err| < recover_head_deg
+	//! held recover_hold_s) on the state of this decision: the run inside the bounds starts at its first decision
+	//! (world time) and ends at the first decision outside; the last segment counts as recovered within the window
+	//! when that run began at most recover_window_s after the segment's end (or before it), else late
 	protected void UpdateRecovery(notnull DC_NoiseInput input)
 	{
 		bool inside = Math.AbsFloat(input.m_fLateralM) < m_Config.Get("recover_lat_m") && Math.AbsFloat(input.m_fHeadingErrRad) < m_Config.Get("recover_head_deg") * Math.DEG2RAD;
-		if (inside)
-			m_iRecoveredSteps++;
-		else
-			m_iRecoveredSteps = 0;
+		if (!inside)
+			m_iInsideSinceMs = -1;
+		else if (m_iInsideSinceMs < 0)
+			m_iInsideSinceMs = input.m_iWorldMs;
 
-		if (!m_bAwaitRecovery)
-			return;
-
-		m_iSinceEnd++;
-		int hold = Steps(m_Config.Get("recover_hold_s"));
-		if (m_iRecoveredSteps < hold || m_iRecoveredSteps < 1)
+		if (!m_bAwaitRecovery || !IsRecovered(input))
 			return;
 
 		m_bAwaitRecovery = false;
-		if (m_iSinceEnd - m_iRecoveredSteps <= Steps(m_Config.Get("recover_window_s")))
+		if (m_iInsideSinceMs - m_iEndMs <= m_Config.Get("recover_window_s") * 1000)
 			m_iRecoveredInWindow++;
 		else
 			m_iRecoveredLate++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The lane errors have been inside the recovery bounds for recover_hold_s of world time, counted from the first
+	//! decision of the run (a single decision inside is no time held)
+	protected bool IsRecovered(notnull DC_NoiseInput input)
+	{
+		return m_iInsideSinceMs >= 0 && input.m_iWorldMs - m_iInsideSinceMs >= m_Config.Get("recover_hold_s") * 1000;
 	}
 
 	//------------------------------------------------------------------------------------------------

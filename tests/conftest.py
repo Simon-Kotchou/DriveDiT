@@ -20,6 +20,7 @@ import pytest
 TORCH_TEST_MODULES = [
     "test_torch_smoke.py",
     "drivedit/data/test_torch_dataset.py",
+    "drivedit/eval/test_idm.py",
 ]
 
 # Directories, relative to this one, in which every test needs torch.

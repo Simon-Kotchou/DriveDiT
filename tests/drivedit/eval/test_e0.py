@@ -66,6 +66,7 @@ def test_commands_that_drive_the_next_state_show_a_gain() -> None:
     for result in (yaw, speed):
         assert result.can_show
         assert result.shown, result
+        assert result.reasons == ()
         assert result.r2_state_action > 0.98
         assert all(g > 0.0 for g in result.fold_gains)
     assert report.cv == "blocked"
@@ -78,6 +79,8 @@ def test_commands_the_next_state_ignores_show_none() -> None:
         assert result.can_show  # the commands vary; they just do not matter
         assert not result.shown
         assert abs(result.gain) < 0.02
+        assert any("folds" in r or "pooled" in r for r in result.reasons)  # the reasons say which way it lost
+        assert any("does not disable can_show" in r for r in result.reasons)
 
 
 def test_shuffled_commands_show_no_gain() -> None:

@@ -26,9 +26,13 @@ gain stays 0.59-0.64 throughout.
 
 Out-of-fold R² comes from cross-validation that never crosses a segment (``drivedit.eval.linear``): one fold per
 session when there are several, else purged blocked folds. The **gain** is R²(state + action) - R²(state). It is
-**shown** only when it is positive in every fold. Separately, **can_show** says whether the data could show a gain at
-all: not when the target is constant, when every command channel that drives it is constant (constant speed with a
-constant ``a_target``), or when those channels are numerically a function of the state features. Per-speed-bin results
+**shown** only when it is positive pooled and in every fold: a consistency rule over contiguous blocks of the drive,
+not a significance test. Separately, **can_show** says whether the data could show a gain at all: not when the target
+is constant, when every command channel that drives it is constant (constant speed with a constant ``a_target``), or
+when those channels are numerically a function of the state features (out-of-fold R² >= 0.999999). A command that is
+only partly predictable from the state lowers the gain without disabling ``can_show``. ``reasons`` says why a gain is
+not shown, whichever way. These ridge comparisons measure incremental linear predictive skill, not conditional mutual
+information or causation. Per-speed-bin results
 (``drivedit.eval.strata``) follow delta §6 R0's gate, "positive for κ *and* a in every speed bin"; inside a bin R² is
 relative to that bin's spread, so read it with the bin's ``target_std`` and RMSEs.
 
@@ -115,7 +119,8 @@ class SpeedBinResult:
 
 @dataclass(frozen=True)
 class TargetResult:
-    """E0 for one target. ``gain`` is pooled over all out-of-fold rows; ``fold_gains`` per fold."""
+    """E0 for one target. ``gain`` is pooled over all out-of-fold rows; ``fold_gains`` per fold. ``reasons`` is empty
+    when the gain is shown, else says why not: the data cannot show one (``can_show`` False), or which folds lose."""
 
     target: str
     target_std: float
@@ -224,9 +229,10 @@ def e0_action_gain(
         )
         fold_gains = tuple(float(full[k] - base[k]) for base, full in fold_r2)
         gain = float(r2_full[k] - r2_state[k])
-        reasons = _cannot_show(target, y[:, k], diags)
-        can_show = not reasons
+        cannot = _cannot_show(target, y[:, k], diags)
+        can_show = not cannot
         shown = can_show and math.isfinite(gain) and gain > 0.0 and all(g > 0.0 for g in fold_gains)
+        reasons = cannot if not can_show else () if shown else _not_shown(gain, fold_gains, diags)
         results.append(
             TargetResult(
                 target=target,
@@ -277,6 +283,24 @@ def _cannot_show(target: str, y: FloatArray, diags: tuple[ActionDiagnostic, ...]
         why = f"a function of the state features (R² >= {_DETERMINED_R2}), so its effect cannot be separated"
         return (f"{names}: {why}",)
     return ()
+
+
+def _not_shown(gain: float, fold_gains: tuple[float, ...], diags: tuple[ActionDiagnostic, ...]) -> tuple[str, ...]:
+    """Why a gain the data could show is not shown: the pooled gain or the folds that lose, and how predictable from
+    the state the commands are."""
+    out = []
+    if not (math.isfinite(gain) and gain > 0.0):
+        out.append(f"the pooled gain {gain:.4g} is not positive")
+    losing = [f"fold {i} ({g:+.4g})" for i, g in enumerate(fold_gains) if not g > 0.0]
+    if losing:
+        out.append(f"the gain is not positive in {len(losing)} of {len(fold_gains)} folds: {', '.join(losing)}")
+    out.extend(
+        f"{d.channel} is partly predictable from the state features (out-of-fold R² {d.r2_from_state:.3g}): "
+        f"that lowers the gain but does not disable can_show, which takes R² >= {_DETERMINED_R2}"
+        for d in diags
+        if not d.constant
+    )
+    return tuple(out)
 
 
 def _speed_bins(

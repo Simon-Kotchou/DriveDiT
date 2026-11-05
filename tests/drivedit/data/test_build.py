@@ -5,7 +5,10 @@ override and determinism."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -19,9 +22,9 @@ import pytest
 
 from drivedit.data import build
 from drivedit.data.shard import Shard, WindowIndex
-from drivedit.data.spec import FeatureSpec
+from drivedit.data.spec import FeatureSpec, session_split
 
-from .conftest import CARD, GOLDEN_DIR, ROUTES_DIR
+from .conftest import CARD, GOLDEN_DIR, REPO, ROUTES_DIR
 
 TOL = 1e-4
 
@@ -50,6 +53,7 @@ def test_shapes_and_dtypes_follow_features_v1(golden_shard_dir: Path, spec: Feat
     assert set(shard.meta["excluded"]) == {"eval_only", "privileged_route"}
     assert shard.meta["schema"] == "drivedit.features_v1-shard/1"
     assert shard.meta["split"] == "train"
+    assert shard.meta["route_split"] == "train"
     assert shard.meta["build_key"] == golden_session.build_key()
 
 
@@ -449,6 +453,52 @@ def test_configured_protected_roots(tmp: Path, monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(build.BuildError, match="read-only"):
         build.write_shard(session, vault / "y", spec=None)
     assert list(vault.iterdir()) == []
+
+
+def _c02_split(session_dir: Path) -> Any:
+    """The split validator C02 reports for a session (tools/validator/dc_validate.py, run in process)."""
+    module_spec = importlib.util.spec_from_file_location("dc_validate_dd11", REPO / "tools/validator/dc_validate.py")
+    assert module_spec is not None
+    assert module_spec.loader is not None
+    dc_validate = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(dc_validate)
+    out = io.StringIO()
+    argv = ["--session", str(session_dir), "--routes-dir", str(ROUTES_DIR), "--vehicle-card", str(CARD)]
+    with contextlib.redirect_stdout(out):
+        dc_validate.main([*argv, "--checks", "C02", "--json", "--no-report"])
+    (c02,) = [c for c in json.loads(out.getvalue())["checks"] if c["id"] == "C02"]
+    return c02["value"]["split"]
+
+
+def _renamed(session_dir: Path, session_id: str, parent: Path) -> Path:
+    """A copy of a session under another session id (session.json, session_end.json and harvest.json)."""
+    dst = parent / session_id
+    shutil.copytree(session_dir, dst)
+    for name in ("session.json", "session_end.json", "harvest.json"):
+        obj = json.loads((dst / name).read_text("utf-8"))
+        obj["session_id"] = session_id
+        (dst / name).write_text(json.dumps(obj, indent=2) + "\n", "utf-8")
+    return dst
+
+
+def test_effective_split_agrees_with_validator_c02(synth: ModuleType, spec: FeatureSpec, tmp: Path) -> None:
+    """Review (DD-20 round 2): meta split is the effective split of dc-2.0 3.2 (val_c is the tenth of the train
+    sessions whose sha256(session_id)[:8] is 0 mod 10), route_split the raw tag; session_split and validator C02
+    give the same answer on the golden and crash fixtures and on a session id in the val_c bucket."""
+    assert session_split("arland_T0b_20261025T091512Z_wb_i00_0004", "train") == "val_c"
+    assert session_split("arland_T0b_20261025T091512Z_wb_i00_0004", "val_l") == "val_l"
+    assert session_split("arland_T0b_20261025T091512Z_wb_i00_0004", None) is None
+    assert session_split(GOLDEN_DIR.name, "train") == "train"
+    crash = Path(synth.generate(str(tmp / "crash"), variant="crash")["session_dir"])
+    val_c = _renamed(GOLDEN_DIR, "arland_T0b_20261025T091512Z_wb_i00_0004", tmp / "renamed")
+    for session_dir, want in ((GOLDEN_DIR, "train"), (crash, "train"), (val_c, "val_c")):
+        session = build.open_dc2_session(session_dir, vehicle_card=CARD)
+        shard = Shard(
+            build.write_shard(session, tmp / "out" / want / session_dir.parent.name, spec=spec, routes_dir=ROUTES_DIR)
+        )
+        assert shard.meta["split"] == _c02_split(session_dir) == want, session_dir
+        assert shard.meta["route_split"] == "train"
+        assert {e["route_split"] for e in shard.meta["episodes"]} == {"train"}
 
 
 def test_image_derivatives(spec: FeatureSpec, tmp: Path) -> None:

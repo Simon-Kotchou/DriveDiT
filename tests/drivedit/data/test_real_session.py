@@ -88,6 +88,10 @@ def test_contact_and_route_provenance(real_shard: Shard) -> None:
     steps = real_shard.array("step")
     assert steps[t] < 11918 <= steps[t + 1]  # the src=contact terrain touch, onset_step 11918
     assert real_shard.meta["categories"]["contact_class"][int(contacts[t, 1])] == "terrain"
+    assert (real_shard.meta["split"], real_shard.meta["route_split"]) == (
+        "train",
+        "train",
+    )  # sha256 bucket 8, not val_c
     route = real_shard.meta["source"]["routes"]["arland_t0_loop"]
     full = "77838c1346f2c7a6b18be78570d9f8cb560ee10a0e69718b28eb0f028cc0f66f"  # the deployed version (78e539b)
     assert route["sha256"] == full

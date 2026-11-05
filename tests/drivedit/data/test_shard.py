@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -133,3 +134,56 @@ def test_segments_follow_obs_valid(golden_shard_dir: Path) -> None:
     for seg in shard.segments:
         assert (obs_valid[seg.start : seg.stop] == 1).all()
         assert (shard.array("slot_id")[seg.start : seg.stop] >= 0).all()
+
+
+def test_symlinked_shard_files_are_refused(shard_copy: Path, tmp: Path) -> None:
+    """Review (DD-20 round 2): every file a shard is read from is its own regular file, directly inside the shard.
+    Integrity, not a sealed-data rule."""
+    elsewhere = tmp / "elsewhere"
+    elsewhere.mkdir()
+    (shard_copy / "meta.json").rename(elsewhere / "meta.json")
+    (shard_copy / "meta.json").symlink_to(elsewhere / "meta.json")
+    with pytest.raises(ShardError, match="is a symlink"):
+        Shard(shard_copy)
+    (shard_copy / "meta.json").unlink()
+    (elsewhere / "meta.json").rename(shard_copy / "meta.json")
+    # a symlink that stays inside the shard: only the symlink rule refuses it (same bytes, so the sha256 passes)
+    (shard_copy / "state.npy").rename(shard_copy / "state_bytes.npy")
+    (shard_copy / "state.npy").symlink_to(shard_copy / "state_bytes.npy")
+    with pytest.raises(ShardError, match="is a symlink"):
+        Shard(shard_copy)
+    with pytest.raises(ShardError, match="is a symlink"):
+        Shard(shard_copy, verify=False).array("state")
+    (shard_copy / "state.npy").unlink()
+    (shard_copy / "state_bytes.npy").rename(shard_copy / "state.npy")
+    assert Shard(shard_copy).array("state").shape == (68, 4)
+    meta = json.loads((shard_copy / "meta.json").read_text("utf-8"))
+    shutil.copy(shard_copy / "style.npy", shard_copy.parent / "style.npy")
+    meta["arrays"]["style"]["file"] = "../style.npy"  # a regular file outside the shard
+    (shard_copy / "meta.json").write_text(json.dumps(meta), "utf-8")
+    with pytest.raises(ShardError, match="resolves outside"):
+        Shard(shard_copy)
+
+
+def test_symlinked_latents_are_refused(shard_copy: Path, tmp: Path) -> None:
+    shard = Shard(shard_copy)
+    write_latents(shard, "toy-2x3x4")
+    root = shard.path.parent / "latents"
+    codec = root / "toy-2x3x4"
+    shard.latents("toy-2x3x4")
+    (codec / "latents.npy").rename(codec / "latents_bytes.npy")
+    (codec / "latents.npy").symlink_to(codec / "latents_bytes.npy")  # inside the codec directory
+    with pytest.raises(ShardError, match="is a symlink"):
+        shard.latents("toy-2x3x4")
+    (codec / "latents.npy").unlink()
+    (codec / "latents_bytes.npy").rename(codec / "latents.npy")
+    codec.rename(tmp / "toy_store")
+    codec.symlink_to(tmp / "toy_store")  # the codec directory itself
+    with pytest.raises(ShardError, match="is a symlink"):
+        shard.latents("toy-2x3x4")
+    codec.unlink()
+    root.rename(tmp / "latents_store")
+    (tmp / "latents_store" / "toy-2x3x4").symlink_to(tmp / "toy_store")
+    root.symlink_to(tmp / "latents_store")  # the latents directory
+    with pytest.raises(ShardError, match="is a symlink"):
+        shard.latents("toy-2x3x4")

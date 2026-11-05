@@ -62,6 +62,9 @@ jobs:
       - name: pytest (torch-free tests; torch test modules are not collected, torch-marked tests deselected)
         run: uv run --no-sync pytest -m "not torch"
 
+  # The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03). Until the new model package lands,
+  # -m torch selects tests/test_torch_smoke.py, which keeps this install path (model extra, CPU torch, uv.lock) and
+  # the torch marker exercised. Without any torch-marked test pytest would exit 5 (no tests collected).
   model-tests:
     name: model tests (CPU torch)
     runs-on: ubuntu-24.04

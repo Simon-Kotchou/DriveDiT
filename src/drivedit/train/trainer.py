@@ -122,6 +122,9 @@ def build_model(cfg: RunConfig) -> WorldModel:
 class Trainer:
     """A plain loop over ``dataset`` windows (the DRIVEDIT_INTERFACES section 4 dict) for ``cfg.steps`` steps.
 
+    The trainer trusts its dataset: split, sealed-map and decision-rate rules are enforced by
+    ``drivedit.train.data.open_training_windows``, dd-train's only data entry point, not here.
+
     ``run_dir`` receives ``run_config.json``, ``log.jsonl`` (rank 0) and ``checkpoints/step_<step>.pt``.
     """
 

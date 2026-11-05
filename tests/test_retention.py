@@ -1197,7 +1197,8 @@ class ReReviewFindingsTest(unittest.TestCase):
             h.catalog_append(h.catalog_row(unit))
 
         cases = {"footer flips to failed": ("probe", footer_failed, "run_footer.txt changed after the unit"),
-                 "derivative removed": ("session", derivative_removed, "_harvest/deriv/f_00000001.jpg is gone"),
+                 "derivative removed": ("session", derivative_removed,
+                                        "missing ['_harvest/deriv/f_00000001.jpg']"),
                  "derivative changed": ("session", derivative_changed, "_harvest/deriv/f_00000003.jpg is gone or "
                                         "changed"),
                  "event data changed": ("session", events_changed, "events/chunk_00000.csv is gone or changed"),
@@ -1471,6 +1472,149 @@ class Round3FindingsTest(unittest.TestCase):
         code, out = run(self.root, "--probes", "--apply", "--under", old, quiet=None)   # only the quiet play
         self.assertEqual(code, 0, out)
         self.assertEqual(frame_slots(old), [0, 100, 200, 249])
+
+
+class Round4FindingsTest(unittest.TestCase):
+    """Regression tests for the fourth review (retention/review/CODEX4.md): a file rewritten in place with its mtime
+    restored after planning is held (H1: the plan is bound to the ctime), a session that gains an unlisted file or a
+    symlink after planning is held (M2: its inventory is enumerated again), and a fresh file under a nested path
+    named like retention's record counts for the age gate and the preflight (M3: only the exact retention-owned
+    paths are left out)."""
+
+    def setUp(self):
+        self.root = th.temp_dir("dd6ret_y_")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def sub(self, name):
+        root = os.path.join(self.root, name)
+        os.mkdir(root)
+        return root
+
+    @staticmethod
+    def same_size_png(n):
+        """Another valid 1x1 PNG of exactly the size of tiny_png(n), with other bytes."""
+        want = len(tiny_png(n))
+        other = next(m for m in range(n + 1, n + 4096) if len(tiny_png(m)) == want and tiny_png(m) != tiny_png(n))
+        return tiny_png(other)
+
+    def assert_untouched(self, unit, out):
+        self.assertEqual(len(frame_slots(unit)), 250, out)
+        for sub in ("", "_harvest"):
+            self.assertFalse(os.path.exists(os.path.join(unit, sub, "RETENTION.json")), out)
+
+    # -- H1 ------------------------------------------------------------------------------------------
+    def test_h1_an_in_place_rewrite_with_its_mtime_restored_is_held(self):
+        """Where the filesystem restores the nanosecond mtime (tmpfs, ext4) only the ctime tells the rewrite apart;
+        drvfs (E:) restores whole seconds only, so there the mtime itself differs. Held either way."""
+        restored = []
+        for mode in ("probe", "session"):
+            with self.subTest(mode):
+                root = self.sub(mode)
+                if mode == "session":
+                    _, unit = make_captured(root)
+                    argv = ["--apply"]
+                else:
+                    unit = make_play(root)
+                    argv = ["--probes", "--apply"]
+                target = os.path.join(unit, "frames", "f_00000001.png")
+                replacement = self.same_size_png(1)
+                original = ret.Retention.apply
+
+                def apply(r, plan):
+                    st = os.lstat(target)
+                    with open(target, "r+b") as f:                  # same inode, same size, other bytes
+                        f.write(replacement)
+                    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+                    after = os.lstat(target)
+                    self.assertEqual((after.st_ino, after.st_size), (st.st_ino, st.st_size))
+                    restored.append(after.st_mtime_ns == st.st_mtime_ns)
+                    return original(r, plan)
+                with mock.patch.object(ret.Retention, "apply", apply):
+                    code, out = run(root, *argv)
+                self.assertEqual(code, 2, out)
+                self.assertIn("frames/f_00000001.png changed after it was planned", out)
+                with open(target, "rb") as f:
+                    self.assertEqual(f.read(), replacement)
+                self.assert_untouched(unit, out)
+        self.assertEqual(len(restored), 2)
+
+    # -- M2 ------------------------------------------------------------------------------------------
+    def test_m2_a_session_that_gains_an_unlisted_file_or_a_symlink_after_planning_is_held(self):
+        def csv_added(unit):
+            write(os.path.join(unit, "extra.csv"), b"a,b\n1,2\n")
+
+        def symlink_added(unit):
+            os.symlink("f_00000000.png", os.path.join(unit, "frames", "link.png"))
+
+        cases = {"csv added": (csv_added, "unlisted ['extra.csv']"),
+                 "symlink added": (symlink_added, "frames/link.png is a symlink or not a regular file inside the "
+                                   "session")}
+        for name, (change, text) in sorted(cases.items()):
+            with self.subTest(name):
+                root = self.sub(name.replace(" ", "_"))
+                _, unit = make_captured(root)
+                original = ret.Retention.apply
+
+                def apply(r, plan):
+                    change(unit)
+                    return original(r, plan)
+                with mock.patch.object(ret.Retention, "apply", apply):
+                    code, out = run(root, "--apply")
+                self.assertEqual(code, 2, out)
+                self.assertIn(text, out)
+                self.assert_untouched(unit, out)
+
+    # -- M3 ------------------------------------------------------------------------------------------
+    def test_m3_a_fresh_file_on_a_nested_record_like_path_counts_for_age_and_preflight(self):
+        """Codex's three nested paths, each written before the run. The default one-day age gate skips the play;
+        with the age gate at 0 the real 600 s preflight refuses the run. Nothing is deleted either way."""
+        for n, rel in enumerate(sorted(["nested/RETENTION.json", "nested/RETENTION.json.dd6tmp",
+                                        "nested/RETENTION.json/activity.csv"])):
+            with self.subTest(rel):
+                root = self.sub("case%d" % n)
+                pdir = make_play(root)                                  # frames three days old
+                fresh = os.path.join(pdir, rel)
+                write(fresh, b"written a minute ago\n")
+                t = time.time() - 60                                    # fresh, but never ahead of the clock
+                os.utime(fresh, (t, t))
+                shown = os.path.relpath(pdir, root)
+                before = th.snapshot(root)
+                for argv in (["--probes"], ["--probes", "--apply"]):     # the default age gate
+                    code, out = run(root, *argv, quiet=None)
+                    self.assertEqual(code, 0, out)
+                    self.assertIn("skipped %s: newer than --min-age-days 1" % shown, out)
+                code, out = run(root, "--probes", "--apply", "--min-age-days", "0", quiet=None)
+                self.assertEqual(code, 3, out)                          # the real 600 s preflight
+                self.assertIn("refused: --apply preflight: a file of %s was modified" % shown, out)
+                self.assertEqual(th.snapshot(root), before)
+                self.assertEqual(len(frame_slots(pdir)), 250)
+
+    def test_m3_a_session_preflight_counts_a_nested_record_like_file(self):
+        _, dest = make_captured(self.root)
+        age(dest, 1)
+        write(os.path.join(dest, "_harvest", "deriv", "RETENTION.json"), b"written just now\n")
+        before = th.snapshot(self.root)
+        code, out = run(self.root, "--apply", quiet=None)
+        self.assertEqual(code, 3, out)
+        self.assertIn("refused: --apply preflight: a file of %s was modified" % os.path.relpath(dest, self.root), out)
+        self.assertEqual(th.snapshot(self.root), before)
+
+    def test_m3_the_units_own_record_is_still_left_out_so_done_units_stay_done(self):
+        pdir = make_play(self.root)
+        _, dest = make_captured(self.root)
+        age(dest, 1)
+        self.assertEqual(run(self.root, "--probes", "--apply")[0], 0)
+        self.assertEqual(run(self.root, "--apply")[0], 0)
+        after = th.snapshot(self.root)
+        for argv in (["--probes"], ["--probes", "--apply"], [], ["--apply"]):     # records written just now
+            code, out = run(self.root, *argv, quiet=None)
+            self.assertEqual(code, 0, (argv, out))
+            self.assertIn("done ", out)
+            self.assertIn("1 done earlier", out)
+        self.assertEqual(th.snapshot(self.root), after)
+        self.assertEqual((frame_slots(pdir), frame_slots(dest)), ([0, 100, 200, 249], [0, 100, 200, 249]))
 
 
 class ScopeTest(unittest.TestCase):

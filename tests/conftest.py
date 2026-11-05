@@ -1,362 +1,47 @@
-"""
-Pytest configuration and fixtures for DriveDiT tests.
-Common fixtures and test utilities.
+"""Pytest configuration for the DriveDiT tests.
 
-torch is optional here: the capture tooling tests need only the stdlib, numpy and cv2, and the
-capture-tests CI job runs them with no torch installed. Test modules that need torch (the `model`
-extra) are listed in TORCH_TEST_MODULES; they get the `torch` marker, and without torch they are
-not collected at all. A new test module that imports torch must be added to that list. Single tests
-that need torch inside an otherwise torch-free module are listed in TORCH_TEST_IDS: they get the
-marker too, so the model job (`-m torch`) runs them and the capture job (`-m "not torch"`) does not.
+torch is optional here: the capture tests need only the stdlib, numpy and OpenCV, and the capture-tests CI job runs
+them with no torch installed. Test modules that need torch (the `model` extra) are listed in TORCH_TEST_MODULES; they
+get the `torch` marker, and without torch they are not collected at all. Whole directories of torch tests (the drivedit
+codec, model and train tests) are listed in TORCH_TEST_DIRS and treated the same way. A new test module that imports
+torch must be added to one of the two lists.
 
-Pre-existing failures of the legacy model tests are xfailed (strict) from tests/known_failures.py.
+This file imports neither torch nor any project module.
 """
 
 from __future__ import annotations
 
-import random
-
-import pytest
-import numpy as np
-from typing import Tuple, Dict, Any
-import tempfile
-import shutil
+import importlib.util
 from pathlib import Path
 
-# Import project modules
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
-try:
-    import torch
-except ImportError:  # capture-only environment
-    torch = None
-
-if torch is not None:
-    from config import ModelConfig, get_small_config, get_medium_config
-    from models import VAE3D, DiTStudent, DiTTeacher
-    from utils import set_seed
+import pytest
 
 # Paths relative to this directory.
 TORCH_TEST_MODULES = [
-    "integration/test_inference.py",
-    "integration/test_training.py",
-    "test_e2e_pipeline.py",
-    "test_kernels.py",
-    "test_math_components.py",
-    "test_pipeline_math.py",
-    "test_self_forcing_plus.py",
-    "test_training_pipeline.py",
-    "unit/test_layers.py",
-    "unit/test_models.py",
-    "unit/test_utils.py",
+    "test_torch_smoke.py",
 ]
 
-# Node ids (relative to the repo root) of torch tests in torch-free modules. Without torch they skip themselves.
-TORCH_TEST_IDS = [
-    # data/enfusion_preprocessing.py (dc-1.0) imports torch; the rest of test_dc2_reader.py does not.
-    "tests/test_dc2_reader.py::LegacyGuardTest::test_dc2_session_raises_naming_the_column",
-    "tests/test_dc2_reader.py::LegacyGuardTest::test_legacy_session_raises_naming_the_column",
-    "tests/test_dc2_reader.py::LegacyGuardTest::test_bad_row_never_desynchronises_the_arrays",
+# Directories, relative to this one, in which every test needs torch.
+TORCH_TEST_DIRS = [
+    "drivedit/codec",
+    "drivedit/model",
+    "drivedit/train",
 ]
 
 _HERE = Path(__file__).parent
 _TORCH_PATHS = {(_HERE / p).resolve() for p in TORCH_TEST_MODULES}
-_TORCH_IDS = set(TORCH_TEST_IDS)
+_TORCH_DIRS = [(_HERE / d).resolve() for d in TORCH_TEST_DIRS]
 
-if torch is None:
-    collect_ignore = list(TORCH_TEST_MODULES)
+if importlib.util.find_spec("torch") is None:
+    collect_ignore = [*TORCH_TEST_MODULES, *TORCH_TEST_DIRS]
 
 
-def _load_known_failures():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("dd_known_failures", _HERE / "known_failures.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.marks(torch)
+def _needs_torch(path: Path) -> bool:
+    path = path.resolve()
+    return path in _TORCH_PATHS or any(path.is_relative_to(d) for d in _TORCH_DIRS)
 
 
 def pytest_collection_modifyitems(config, items):
-    known = _load_known_failures()  # pre-existing legacy failures, xfailed with their cause
     for item in items:
-        if item.nodeid in _TORCH_IDS or Path(str(item.fspath)).resolve() in _TORCH_PATHS:
+        if _needs_torch(item.path):
             item.add_marker(pytest.mark.torch)
-        mark = known.get(item.nodeid)
-        if mark is not None:
-            item.add_marker(mark)
-
-
-@pytest.fixture(scope="session")
-def device():
-    """Test device (CPU for CI compatibility)."""
-    return torch.device('cpu')  # Use CPU for stable testing
-
-
-@pytest.fixture(scope="session")
-def seed():
-    """Fixed seed for reproducible tests."""
-    return 42
-
-
-@pytest.fixture(autouse=True)
-def setup_seed(seed):
-    """Automatically set seed for all tests."""
-    if torch is not None:
-        set_seed(seed)
-    else:  # what set_seed does, minus torch
-        random.seed(seed)
-        np.random.seed(seed)
-
-
-@pytest.fixture
-def small_config():
-    """Small model configuration for testing."""
-    return get_small_config()
-
-
-@pytest.fixture
-def medium_config():
-    """Medium model configuration for testing."""
-    return get_medium_config()
-
-
-@pytest.fixture
-def temp_dir():
-    """Temporary directory for test files."""
-    temp_dir = tempfile.mkdtemp()
-    yield Path(temp_dir)
-    shutil.rmtree(temp_dir)
-
-
-@pytest.fixture
-def sample_video_data(device):
-    """Sample video data for testing."""
-    B, T, C, H, W = 2, 8, 3, 64, 64
-    frames = torch.randn(B, T, C, H, W, device=device)
-    return frames
-
-
-@pytest.fixture
-def sample_control_data(device):
-    """Sample control data for testing."""
-    B, T, control_dim = 2, 8, 4
-    controls = torch.randn(B, T, control_dim, device=device)
-    return controls
-
-
-@pytest.fixture
-def sample_latent_data(device):
-    """Sample latent data for testing."""
-    B, T, C, H, W = 2, 8, 8, 8, 8  # Latent dimensions
-    latents = torch.randn(B, T, C, H, W, device=device)
-    return latents
-
-
-@pytest.fixture
-def vae_model(small_config, device):
-    """VAE model for testing."""
-    model = VAE3D(
-        in_channels=small_config.vae.in_channels,
-        latent_dim=small_config.vae.latent_dim,
-        hidden_dims=small_config.vae.hidden_dims,
-        num_res_blocks=small_config.vae.num_res_blocks,
-        use_attention=small_config.vae.use_attention
-    ).to(device)
-    model.eval()
-    return model
-
-
-@pytest.fixture
-def dit_student_model(small_config, device):
-    """DiT student model for testing."""
-    model = DiTStudent(
-        latent_dim=small_config.student.latent_dim,
-        d_model=small_config.student.d_model,
-        n_layers=small_config.student.n_layers,
-        n_heads=small_config.student.n_heads,
-        max_seq_len=small_config.student.max_seq_len,
-        use_rope=small_config.student.use_rope,
-        use_memory=small_config.student.use_memory
-    ).to(device)
-    model.eval()
-    return model
-
-
-@pytest.fixture
-def dit_teacher_model(small_config, device):
-    """DiT teacher model for testing."""
-    model = DiTTeacher(
-        latent_dim=small_config.teacher.latent_dim,
-        d_model=small_config.teacher.d_model,
-        n_layers=small_config.teacher.n_layers,
-        n_heads=small_config.teacher.n_heads,
-        max_seq_len=small_config.teacher.max_seq_len,
-        num_diffusion_steps=100  # Smaller for testing
-    ).to(device)
-    model.eval()
-    return model
-
-
-@pytest.fixture
-def sample_tensor_2d(device):
-    """Sample 2D tensor for testing."""
-    return torch.randn(4, 8, device=device)
-
-
-@pytest.fixture
-def sample_tensor_3d(device):
-    """Sample 3D tensor for testing."""
-    return torch.randn(2, 4, 8, device=device)
-
-
-@pytest.fixture
-def sample_tensor_4d(device):
-    """Sample 4D tensor for testing."""
-    return torch.randn(2, 3, 16, 16, device=device)
-
-
-@pytest.fixture
-def sample_tensor_5d(device):
-    """Sample 5D tensor for testing."""
-    return torch.randn(1, 3, 8, 16, 16, device=device)
-
-
-# Test data generators
-def generate_test_cases(param_sets):
-    """Generate parameterized test cases."""
-    return pytest.mark.parametrize("params", param_sets)
-
-
-# Common test utilities
-class TestUtils:
-    """Utility class for common test operations."""
-    
-    @staticmethod
-    def assert_tensor_shape(tensor: torch.Tensor, expected_shape: Tuple[int, ...]):
-        """Assert tensor has expected shape."""
-        assert tensor.shape == expected_shape, f"Expected shape {expected_shape}, got {tensor.shape}"
-    
-    @staticmethod
-    def assert_tensor_dtype(tensor: torch.Tensor, expected_dtype: torch.dtype):
-        """Assert tensor has expected dtype."""
-        assert tensor.dtype == expected_dtype, f"Expected dtype {expected_dtype}, got {tensor.dtype}"
-    
-    @staticmethod
-    def assert_tensor_device(tensor: torch.Tensor, expected_device: torch.device):
-        """Assert tensor is on expected device."""
-        assert tensor.device == expected_device, f"Expected device {expected_device}, got {tensor.device}"
-    
-    @staticmethod
-    def assert_tensor_finite(tensor: torch.Tensor):
-        """Assert tensor contains only finite values."""
-        assert torch.isfinite(tensor).all(), "Tensor contains non-finite values"
-    
-    @staticmethod
-    def assert_tensor_not_nan(tensor: torch.Tensor):
-        """Assert tensor contains no NaN values."""
-        assert not torch.isnan(tensor).any(), "Tensor contains NaN values"
-    
-    @staticmethod
-    def assert_tensor_not_inf(tensor: torch.Tensor):
-        """Assert tensor contains no infinite values."""
-        assert not torch.isinf(tensor).any(), "Tensor contains infinite values"
-    
-    @staticmethod
-    def assert_model_output_valid(model_output, expected_shape=None):
-        """Assert model output is valid."""
-        if isinstance(model_output, torch.Tensor):
-            TestUtils.assert_tensor_finite(model_output)
-            if expected_shape:
-                TestUtils.assert_tensor_shape(model_output, expected_shape)
-        elif isinstance(model_output, (tuple, list)):
-            for output in model_output:
-                if isinstance(output, torch.Tensor):
-                    TestUtils.assert_tensor_finite(output)
-        elif isinstance(model_output, dict):
-            for key, output in model_output.items():
-                if isinstance(output, torch.Tensor):
-                    TestUtils.assert_tensor_finite(output)
-
-
-@pytest.fixture
-def test_utils():
-    """Test utilities fixture."""
-    return TestUtils
-
-
-# Performance measurement utilities
-@pytest.fixture
-def performance_timer():
-    """Timer for performance tests."""
-    import time
-    
-    class Timer:
-        def __init__(self):
-            self.start_time = None
-            self.end_time = None
-        
-        def start(self):
-            self.start_time = time.time()
-        
-        def stop(self):
-            self.end_time = time.time()
-            return self.elapsed_time()
-        
-        def elapsed_time(self):
-            if self.start_time and self.end_time:
-                return self.end_time - self.start_time
-            return None
-    
-    return Timer()
-
-
-# Memory measurement utilities
-@pytest.fixture
-def memory_profiler():
-    """Memory profiler for performance tests."""
-    
-    class MemoryProfiler:
-        def __init__(self, device):
-            self.device = device
-        
-        def get_memory_usage(self):
-            """Get current memory usage in MB."""
-            if self.device.type == 'cuda':
-                return torch.cuda.memory_allocated(self.device) / 1024 / 1024
-            else:
-                # For CPU, we can't easily measure memory usage
-                return 0.0
-        
-        def reset_peak_memory(self):
-            """Reset peak memory statistics."""
-            if self.device.type == 'cuda':
-                torch.cuda.reset_peak_memory_stats(self.device)
-        
-        def get_peak_memory(self):
-            """Get peak memory usage in MB."""
-            if self.device.type == 'cuda':
-                return torch.cuda.max_memory_allocated(self.device) / 1024 / 1024
-            else:
-                return 0.0
-    
-    return MemoryProfiler
-
-
-# Skip conditions for different test types
-_cuda = torch is not None and torch.cuda.is_available()
-
-skip_if_no_cuda = pytest.mark.skipif(
-    not _cuda,
-    reason="CUDA not available"
-)
-
-skip_if_no_memory = pytest.mark.skipif(
-    _cuda and torch.cuda.get_device_properties(0).total_memory < 8 * 1024**3,
-    reason="Insufficient GPU memory (< 8GB)"
-)
-
-# Test categories
-unit_test = pytest.mark.unit
-integration_test = pytest.mark.integration
-performance_test = pytest.mark.performance
-slow_test = pytest.mark.slow

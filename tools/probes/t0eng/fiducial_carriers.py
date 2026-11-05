@@ -51,7 +51,7 @@ CONTROLS = ("flat", "textured", "text")
 
 
 def load_fiducial():
-    """data/dc2/fiducial.py by file path (importing the data package would load torch)."""
+    """data/dc2/fiducial.py by file path (the probes do not put the repo root on sys.path)."""
     spec = importlib.util.spec_from_file_location("dc2_fiducial", FIDUCIAL_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

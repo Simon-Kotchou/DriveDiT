@@ -1,0 +1,2 @@
+# Tests of the drivedit package follow the package's lint rules.
+extend = "../../src/drivedit/ruff.toml"

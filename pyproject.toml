@@ -1,7 +1,16 @@
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Ruff writes a .ruff_cache next to each nested ruff.toml; keep it out of the sdist and the wheel.
+source-exclude = ["**/.ruff_cache/**"]
+wheel-exclude = ["**/.ruff_cache/**"]
+
 [project]
 name = "drivedit"
 version = "0.1.0"
-description = "DriveDiT: diffusion-transformer world model for driving, plus its Enfusion capture tooling"
+description = "DriveDiT: an action-conditioned world model of Arma Reforger driving, a policy trained inside it, and the Enfusion capture tooling"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -14,7 +23,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The world-model side (layers/ blocks/ core/ models/ training/ inference/ ...).
+# The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras
+# are kept for the model package that replaces it. Until then only tests/test_torch_smoke.py uses them.
 # `uv sync --extra model` takes torch from PyPI (the CUDA build on Linux x86_64).
 model = [
     "torch>=2.2",
@@ -30,13 +40,15 @@ cuda = ["torch>=2.2"]
 
 [dependency-groups]
 dev = [
+    "mypy>=1.13",
     "pytest>=8",
     "ruff>=0.14",
 ]
 
 [tool.uv]
-# Not installable yet: the code still lives in flat top-level folders (src/drivedit move comes later).
-package = false
+# The drivedit package lives in src/drivedit (uv_build). The capture tooling (tools/, data/dc2, drivedit_nav) still
+# runs from the source tree until the package move (DD-17).
+package = true
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
 ]
@@ -56,12 +68,7 @@ minversion = "8.0"
 testpaths = ["tests", "tools/test_deploy_addon.py", "tools/pin/tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
-    "unit: fast unit test",
-    "integration: crosses several components",
-    "performance: timing or memory measurement",
-    "benchmark: micro-benchmark",
-    "slow: takes more than a few seconds",
-    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES, TORCH_TEST_IDS)",
+    "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES)",
 ]
 
 [tool.ruff]
@@ -73,3 +80,11 @@ target-version = "py311"
 # misplaced statements (F7), undefined names (F82) and pylint errors (PLE). Widen in later PRs.
 select = ["E9", "F5", "F6", "F7", "F82", "PLE"]
 ignore = ["F541"]
+
+[tool.mypy]
+# Strict typing for the drivedit package (DD-18); CI runs it in the torch job, where torch's own types are installed.
+python_version = "3.11"
+files = ["src/drivedit"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true

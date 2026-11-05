@@ -39,6 +39,8 @@ jobs:
         run: uv sync --only-group dev
       - name: ruff check
         run: uv run --no-sync ruff check --output-format=github .
+      - name: ruff format --check (the drivedit package and its tests)
+        run: uv run --no-sync ruff format --check src/drivedit tests/drivedit
 
   capture-tests:
     name: capture tests (no torch)
@@ -62,6 +64,9 @@ jobs:
       - name: pytest (torch-free tests; torch test modules are not collected, torch-marked tests deselected)
         run: uv run --no-sync pytest -m "not torch"
 
+  # The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03). Until the new model package lands,
+  # -m torch selects tests/test_torch_smoke.py, which keeps this install path (model extra, CPU torch, uv.lock) and
+  # the torch marker exercised. Without any torch-marked test pytest would exit 5 (no tests collected).
   model-tests:
     name: model tests (CPU torch)
     runs-on: ubuntu-24.04
@@ -83,6 +88,8 @@ jobs:
         run: uv run --no-sync python -I -c "import torch; print(torch.__version__, 'cuda' if torch.cuda.is_available() else 'cpu')"
       - name: pytest (torch-marked tests)
         run: uv run --no-sync pytest -m torch
+      - name: mypy --strict on src/drivedit (torch types available here)
+        run: uv run --no-sync mypy
 
   secret-scan:
     name: secret scan

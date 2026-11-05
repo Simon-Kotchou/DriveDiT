@@ -26,7 +26,8 @@ committed. `--kind client_1408` (DD-6-min) writes the golden drive as a packaged
 instance `i01`, source class `client_1408x720`, 1408x720 images (a 1280x720 core between two 64 px bands) and a
 dd-launch/1 record of exe `client`; `tests/test_harvest.py` generates it, it is not committed. `--kind t0_loop_noise`
 (DD-7-ident pilot) writes the t0_loop lap as a mode-N episode of trial T0P (trial conf `"perturb": "pilot_v1"`) with
-one disturbance of each family DC_Noise draws (k_pulse, a_pulse, k_step, stop, speed): ctl `hl_*` the applied
+one disturbance of each family DC_Noise draws (k_pulse, a_pulse, k_step, stop, speed), with DC_Noise's amplitude
+semantics (k_* a fraction of kappa_max(v), pulses half-sines sampled per decision interval): ctl `hl_*` the applied
 command, `exp_*_now` the clean expert, `noise_active` / `noise_id` on every row that holds a disturbed command, and
 `perturb_start` / `perturb_end` events with payload `noise_id;kind;amplitude;duration_s`; `tests/test_dc2_validate.py`
 generates it (every check passes, C17 N/A: it judges mode-E episodes only), it is not committed.

@@ -32,6 +32,7 @@ import glob
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -1824,6 +1825,20 @@ class NoisePilotTest(unittest.TestCase):
         self.assertGreater(len(perturbed), 40)
         self.assertTrue(any(d["action_cmd"][2] == 0 and d["action_label"][2] == 1 for d in perturbed))   # the stop
         self.assertTrue(all(d["masks"]["policy_valid"] == 1 for d in perturbed if d["obs_valid"] == 1))
+
+    def test_fixture_amplitudes_mean_what_dc_noise_logs(self):
+        """The k_pulse disturbance (amplitude 0.4 in its payload) is DC_Noise's: 0.4 x kappa_max(v) x
+        sin(pi (i + 0.5) / n) on kappa_target at decision i of n = 10, kappa_max(v) = min(0.2, 4 / max(v, 3)^2)."""
+        s = dc_validate.base.load_reader().open_session(self.session, decode_images=False)
+        ctl = s.streams["ctl"]
+        noise_of_seq = dict(zip(ctl.col("hl_seq"), ctl.col("noise_id")))
+        pulse = [d for d in s.decisions if d["hl_seq"] is not None and noise_of_seq.get(d["hl_seq"]) == 0]
+        self.assertEqual(len(pulse), 10)
+        for i, d in enumerate(pulse):
+            v = max(d["state"][0], 3.0)
+            scale = min(0.2, 4.0 / (v * v))
+            got = (d["action_cmd"][0] - d["action_label"][0]) / (0.4 * scale)
+            self.assertAlmostEqual(got, math.sin(math.pi * (i + 0.5) / 10), delta=2e-3)
 
     def test_c07_checks_the_disturbance(self):
         """C07 owns the held command and its R-01 boundary, the disturbance included: each mutation of the noise

@@ -228,11 +228,14 @@ SPECS = {
         "episodes": [{"max_ms": 60000}], "between_ms": 0, "teleport_offset_ms": None,
         "tail_ms": 500, "image_w": 256, "image_h": 240, "band_px": 64, "fill_route_sha": True,
         "episode_mode": "N",
-        # (start, duration) in ms after the episode start; k_* add to kappa_target, a_pulse to a_target, speed
-        # replaces a_target with the gain law towards amplitude x v_ref, stop holds dir 0 and a_target = amplitude
-        "noise": [{"kind": "k_pulse", "start_ms": 6000, "dur_ms": 2000, "amplitude": 0.04},
+        # (start, duration) in ms after the episode start, the amplitudes as DC_Noise logs them (its pilot_v1
+        # semantics): k_pulse / k_step a signed fraction of kappa_max(v) = min(0.2, 4 / max(v, 3)^2) added to
+        # kappa_target (the pulse a half-sine sampled at the middle of each decision interval), a_pulse m/s2 added to
+        # a_target, speed the factor of the speed target (here x v_ref) for the expert's gain law, stop dir 0 with
+        # a_target = amplitude
+        "noise": [{"kind": "k_pulse", "start_ms": 6000, "dur_ms": 2000, "amplitude": 0.4},
                   {"kind": "a_pulse", "start_ms": 13000, "dur_ms": 2000, "amplitude": -1.5},
-                  {"kind": "k_step", "start_ms": 19000, "dur_ms": 1200, "amplitude": -0.03},
+                  {"kind": "k_step", "start_ms": 19000, "dur_ms": 1200, "amplitude": -0.3},
                   {"kind": "stop", "start_ms": 25000, "dur_ms": 5000, "amplitude": -2.5},
                   {"kind": "speed", "start_ms": 36000, "dur_ms": 4000, "amplitude": 0.6}],
     },
@@ -373,23 +376,41 @@ def expert(route, x, z, psi, v, progress, v_ref):
     return (kappa, accel, 1)
 
 
-def perturb(spec, exp, v, t_ms):
+NOISE_KAPPA_MAX = 0.2           # DC_ExpertDriver m_fKappaMax: DC_Noise's kappa_max(v) cap and the clamp of kappa
+NOISE_KAPPA_ALAT_MPS2 = 4.0     # pilot_v1 kappa_alat_mps2
+NOISE_MIN_SPEED_MPS = 3.0       # pilot_v1 min_speed_mps
+
+
+def noise_kappa_scale(v):
+    """DC_Noise.KappaScale: kappa_max(v) = min(kappa_max, kappa_alat / max(v, min_speed)^2)."""
+    v = max(v, NOISE_MIN_SPEED_MPS)
+    return min(NOISE_KAPPA_MAX, NOISE_KAPPA_ALAT_MPS2 / (v * v))
+
+
+def perturb(spec, exp, v, t_ms, applied_counts):
     """(command, noise id, segment) at a decision t_ms after the episode start: the expert's command exp with the
-    spec's disturbance of that time (DC_Noise's kinds, the HL targets only), else (exp, -1, None)."""
+    spec's disturbance of that time, as DC_Noise.ApplySegment computes it (the HL targets only; a pulse is a
+    half-sine over the segment's n decisions, sampled at the middle of decision i = applied_counts[id]), else
+    (exp, -1, None)."""
+    period_ms = 1000 // spec["decision_hz"]
     for noise_id, seg in enumerate(spec.get("noise", ())):
         if seg["start_ms"] <= t_ms < seg["start_ms"] + seg["dur_ms"]:
             kappa, accel, direction = exp
-            phase = (t_ms - seg["start_ms"]) / float(seg["dur_ms"])
+            n = max(1, int(math.floor(seg["dur_ms"] / float(period_ms) + 0.5)))
+            i = applied_counts.get(noise_id, 0)
+            applied_counts[noise_id] = i + 1
+            shape = math.sin(math.pi * (i + 0.5) / n)
             if seg["kind"] == "k_pulse":
-                kappa = kappa + seg["amplitude"] * math.sin(math.pi * phase)
+                kappa = kappa + seg["amplitude"] * noise_kappa_scale(v) * shape
             elif seg["kind"] == "k_step":
-                kappa = kappa + seg["amplitude"]
+                kappa = kappa + seg["amplitude"] * noise_kappa_scale(v)
             elif seg["kind"] == "a_pulse":
-                accel = accel + seg["amplitude"] * math.sin(math.pi * phase)
+                accel = accel + seg["amplitude"] * shape
             elif seg["kind"] == "speed":
                 accel = max(-3.0, min(2.0, seg["amplitude"] * spec["v_ref"] - v))
             elif seg["kind"] == "stop":
                 accel, direction = seg["amplitude"], 0
+            kappa = max(-NOISE_KAPPA_MAX, min(NOISE_KAPPA_MAX, kappa))
             return (kappa, accel, direction), noise_id, seg
     return exp, -1, None
 
@@ -419,7 +440,7 @@ def simulate(spec, route):
     teleport_ms = None
     crash_ms, crash_onset_cb, crash_hit = None, None, False
     llc_gear_due = False
-    applied_noise, applied_since = -1, None
+    applied_noise, applied_since, applied_counts = -1, None, {}
     episode_mode = spec.get("episode_mode", "E")
     det = crash_dv.Detector()
     det.watch(0)
@@ -569,7 +590,7 @@ def simulate(spec, route):
                         if phase == "between" and spec["teleport_offset_ms"] is not None:
                             teleport_ms = world + spec["teleport_offset_ms"]
                     else:
-                        cmd_d, noise_id, seg = perturb(spec, exp, st["v"], world - ep_start_world)
+                        cmd_d, noise_id, seg = perturb(spec, exp, st["v"], world - ep_start_world, applied_counts)
                         if noise_id != applied_noise:   # DC_ExpertDriver.NoteAppliedNoise, in the decision callback
                             if applied_noise >= 0:
                                 _perturb_event(sim, spec, "perturb_end", applied_noise,

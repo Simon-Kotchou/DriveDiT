@@ -568,6 +568,10 @@ class DC_Session : SCR_BaseGameModeComponent
 	static const string STEP_DT_MEASURED = "measured";
 	//! session.json observed.trial_conf_raw: a longer trial conf is not copied
 	static const int TRIAL_CONF_MAX_BYTES = 4096;
+	//! The longest string string.Substring, string.Trim and string.Format return on 1.8.0.13 (Types/string.c:92, :106,
+	//! :119): a longer result is cut without an error, so a value written into session data never passes through
+	//! them when it may be longer (DD-7)
+	static const int CAPPED_STRING_MAX_CHARS = 8191;
 
 	static const string STEP_SIMULATE = "simulate";
 	static const string STEP_FIXEDFRAME = "fixedframe";
@@ -1596,9 +1600,15 @@ class DC_Session : SCR_BaseGameModeComponent
 		if (!m_sCliTrial.IsEmpty())
 			json.AddString("dcTrial", m_sCliTrial);
 
+		// the value as read, trimmed only when Trim can return it whole (a longer one is recorded untrimmed, never cut)
 		string cliInstance;
 		if (System.GetCLIParam(CLI_INSTANCE, cliInstance))
-			json.AddString("dcInstance", cliInstance.Trim());
+		{
+			if (cliInstance.Length() <= CAPPED_STRING_MAX_CHARS)
+				cliInstance = cliInstance.Trim();
+
+			json.AddString("dcInstance", cliInstance);
+		}
 
 		json.EndObject();
 		json.EndObject();

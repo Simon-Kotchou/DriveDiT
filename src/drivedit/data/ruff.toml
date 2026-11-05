@@ -5,7 +5,7 @@ extend = "../ruff.toml"
 "torch".msg = "drivedit.data is numpy-only; torch belongs in drivedit/data/torch.py"
 
 [lint.per-file-ignores]
-"torch.py" = ["TID251"]
+"./torch.py" = ["TID251"]  # only data/torch.py, not a nested torch.py
 
 # isort would take `import torch` inside data/torch.py for a first-party import of that module itself.
 [lint.isort]

@@ -2,6 +2,11 @@
 requires = ["uv_build>=0.13.7,<0.14"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+# Ruff writes a .ruff_cache next to each nested ruff.toml; keep it out of the sdist and the wheel.
+source-exclude = ["**/.ruff_cache/**"]
+wheel-exclude = ["**/.ruff_cache/**"]
+
 [project]
 name = "drivedit"
 version = "0.1.0"

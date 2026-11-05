@@ -399,13 +399,17 @@ class DecisionGridTest(unittest.TestCase):
 
     def test_post_step_takes_the_decision_only_in_a_decision_callback(self):
         post_step = enforce_body(self.expert, "DC_ExpertDriver", "PostStep")
+        # mode E: the decision is the evaluation; mode N (DD-7-ident): DC_Noise's command on it
+        # (tests/test_noise_pilot.py), the label exp_*_now stays m_Now
         self.assertIn("m_Expert.Evaluate(position, headingRad, speed, m_Now); if (m_Context.IsDecisionStep()) { "
-                      "m_Decision.CopyFrom(m_Now); m_iDecisionStep = physicsStep; }", post_step)
+                      "m_Decision.CopyFrom(m_Now); if (m_bEpisodeN) PerturbDecision(speed); "
+                      "m_iDecisionStep = physicsStep; }", post_step)
         for field in ("m_fExpKappa = m_Now.m_fKappa;", "m_fExpAccel = m_Now.m_fAccel;", "m_iExpDir = m_Now.m_iDir;"):
             self.assertIn(field, post_step)                 # exp_*_now: every callback's own evaluation
         decide = enforce_body(self.expert, "DC_ExpertDriver", "Decide")
         self.assertIn("if (!m_bInEpisode || !m_Context.IsDecisionStep() || m_iDecisionStep != physicsStep) return "
-                      "false; command.CopyFrom(m_Decision); return true;", decide)
+                      "false; command.CopyFrom(m_Decision); NoteAppliedNoise(m_Decision.m_iNoiseId, "
+                      "m_sDecisionPayload, m_fDecisionPlannedS); return true;", decide)
         code = code_only(self.expert)
         self.assertIsNone(re.search(r"physicsStep\s*%|%\s*(?:N\b|m_i\w*Steps|\w*GetStepsPerDecision)", code))
 

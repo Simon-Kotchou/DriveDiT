@@ -45,7 +45,6 @@ TORCH_TEST_MODULES = [
     "test_kernels.py",
     "test_math_components.py",
     "test_pipeline_math.py",
-    "test_rust_loader.py",
     "test_self_forcing_plus.py",
     "test_training_pipeline.py",
     "unit/test_layers.py",

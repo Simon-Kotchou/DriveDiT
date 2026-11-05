@@ -3,6 +3,19 @@
 Builds the model-boundary tensors of ``docs/capture_contract/features_v1.json`` from the dc-2.0 reader, writes them as
 memory-mapped shards, and samples episode-aware windows. Offsets and the C24 forbidden inputs are enforced here.
 
+- ``spec``: ``load_spec()`` and ``FeatureSpec.access(role, name)``, the features_v1 registry and its C24 check.
+
 numpy only. torch is confined to ``drivedit.data.torch`` (a thin Dataset over the shards), and ruff bans it elsewhere
 in this package.
 """
+
+from drivedit.data.spec import Access, AccessError, FeatureSpec, SpecError, TensorSpec, load_spec
+
+__all__ = [
+    "Access",
+    "AccessError",
+    "FeatureSpec",
+    "SpecError",
+    "TensorSpec",
+    "load_spec",
+]

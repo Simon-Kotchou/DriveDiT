@@ -83,12 +83,15 @@
 
 //------------------------------------------------------------------------------------------------
 //! One HL command (contract action_cmd): curvature target right-positive [1/m], acceleration target [m/s2],
-//! direction -1 reverse, 0 stop, +1 forward
+//! direction -1 reverse, 0 stop, +1 forward; and whether an N-mode disturbance is applied with it (ctl noise_active,
+//! noise_id of every row that holds it: DD-7-ident's DC_Noise sets them in mode N episodes only)
 class DC_HLCommand
 {
 	float m_fKappa;
 	float m_fAccel;
 	int m_iDir = 1;
+	bool m_bNoise;			//!< ctl noise_active: the command carries an N-mode disturbance
+	int m_iNoiseId = -1;	//!< ctl noise_id: the disturbance (events perturb_start / perturb_end); -1 = none
 
 	//------------------------------------------------------------------------------------------------
 	void Reset()
@@ -96,6 +99,8 @@ class DC_HLCommand
 		m_fKappa = 0;
 		m_fAccel = 0;
 		m_iDir = 1;
+		m_bNoise = false;
+		m_iNoiseId = -1;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -104,6 +109,8 @@ class DC_HLCommand
 		m_fKappa = other.m_fKappa;
 		m_fAccel = other.m_fAccel;
 		m_iDir = other.m_iDir;
+		m_bNoise = other.m_bNoise;
+		m_iNoiseId = other.m_iNoiseId;
 	}
 }
 

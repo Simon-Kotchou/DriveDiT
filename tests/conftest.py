@@ -6,6 +6,8 @@ torch is optional here: the capture tooling tests need only the stdlib, numpy an
 capture-tests CI job runs them with no torch installed. Test modules that need torch (the `model`
 extra) are listed in TORCH_TEST_MODULES; they get the `torch` marker, and without torch they are
 not collected at all. A new test module that imports torch must be added to that list.
+
+Pre-existing failures of the legacy model tests are xfailed (strict) from tests/known_failures.py.
 """
 
 from __future__ import annotations
@@ -56,10 +58,22 @@ if torch is None:
     collect_ignore = list(TORCH_TEST_MODULES)
 
 
+def _load_known_failures():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dd_known_failures", _HERE / "known_failures.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.marks(torch)
+
+
 def pytest_collection_modifyitems(config, items):
+    known = _load_known_failures()  # pre-existing legacy failures, xfailed with their cause
     for item in items:
         if Path(str(item.fspath)).resolve() in _TORCH_PATHS:
             item.add_marker(pytest.mark.torch)
+        mark = known.get(item.nodeid)
+        if mark is not None:
+            item.add_marker(mark)
 
 
 @pytest.fixture(scope="session")

@@ -40,6 +40,10 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     E-04's indices in an identified card; llc_v1 refuses an automatic card on the manual ego (CheckEgoGearbox);
   - every card keeps the format llc_v1 reads: each scanned array key once, numbers without exponent, ASCII + LF, the
     keys DC_VehicleCard.Load requires; a Python mirror of DC_JsonScan.ReadNumbers reads the same arrays as json;
+  - the launch clutch (DD-14c): the placeholder carries gearbox.launch_clutch in mode ramp with DC_LaunchClutchConfig's
+    defaults; a scripted identified card copies E-01's launch_clutch.* run header block (none before DD-14c: mode
+    off); gearbox_violations mirrors DC_VehicleCard's rules (optional, every key, the ranges, ramp only with a scripted
+    gearbox, never null), and the Enforce reader asks for exactly LAUNCH_CLUTCH_KEYS;
   - the Enforce reader (src/enfusion/datacapture/DC_LLCv1.c) asks for exactly the llc_v1 keys and arrays the
     generator writes;
   - DC_Sha256 (the card and source digests llc_v1 stamps): its round constants and initial hash are FIPS 180-4's,
@@ -868,6 +872,13 @@ class FitTests(unittest.TestCase):
         for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):
             self.assertAlmostEqual(engine_rpm(RUN3_GEARBOX["upshift_mps"][slot], gear), 4500.0, delta=25.0)
             self.assertAlmostEqual(engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1), 1800.0, delta=25.0)
+        # the launch clutch (DD-14c): mode ramp with DC_LaunchClutchConfig's defaults, fully coupled below the rpm of
+        # every downshift speed (about 1800 rpm in the higher gear), so the scripted gears never drive slipping
+        self.assertEqual(card["gearbox"]["launch_clutch"], fit.PLACEHOLDER_LAUNCH_CLUTCH)
+        for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):
+            self.assertLess(card["gearbox"]["launch_clutch"]["full_rpm"],
+                            engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1) - 50.0)
+        self.assertIn("launch_clutch (DD-14c): mode ramp", card["gearbox"]["basis"])
         for text in (card["note"], card["gearbox"]["basis"], card["kappa_ss"]["basis"]):
             for word in ("COPIED", "run 3", "provisional", "DD-14a", "not measured for this card's build"):
                 self.assertIn(word, text)
@@ -1147,6 +1158,95 @@ class FitTests(unittest.TestCase):
         self.assertIn("[2, 3, 4]", text)
         self.assertIn("4: 4.100 m/s", text)
 
+    def test_scripted_card_carries_the_e01_launch_clutch(self):
+        # DD-14c: a scripted card stores the launch clutch E-01 drove with (the run header's launch_clutch.* block of
+        # DC_ProbeActuator.AppendGearboxLines), so llc_v1 ramps the clutch the same way; a play before DD-14c has no
+        # block and gives no launch_clutch (mode off, the 1.8 sequence); a block llc_v1 would refuse is refused
+        block = {"launch_clutch.mode": "ramp", "launch_clutch.engage_rpm": "1200.0", "launch_clutch.full_rpm": "1650.0",
+                 "launch_clutch.couple_time_s": "0.500", "launch_clutch.uncouple_time_s": "0.450",
+                 "launch_clutch.stall_guard_rpm": "600.0", "launch_clutch.restart_on_stall": "1",
+                 "launch_clutch.restart_cooldown_s": "1.000", "launch_clutch.source": "DC_ProbeSequences attributes",
+                 "launch_clutch.active": "1"}
+        speeds = ["--upshift-mps", "4.5,8.5", "--downshift-mps", "3.5,7.0"]
+        e01 = self.manual_e01("play_37", dict(KIT_GEARBOX_LINES, **block))
+        card, text = self.fit_card(["--e01", e01, "--e02a", self.e02a] + speeds)
+        self.assertEqual(card["gearbox"]["launch_clutch"],
+                         {"mode": "ramp", "engage_rpm": 1200.0, "full_rpm": 1650.0, "couple_time_s": 0.5,
+                          "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
+                          "restart_cooldown_s": 1.0})
+        self.assertEqual(sorted(card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        self.assertEqual(fit.enforce_load_check(card), [])
+        self.assertIn("launch clutch (DD-14c): mode ramp, engage_rpm 1200.0", text)
+        before = self.manual_e01("play_38", KIT_GEARBOX_LINES)
+        card, text = self.fit_card(["--e01", before, "--e02a", self.e02a] + speeds)
+        self.assertNotIn("launch_clutch", card["gearbox"])
+        self.assertIn("launch clutch (DD-14c): none (mode off, the 1.8 sequence)", text)
+        for name, change, reason in (("play_39", {"launch_clutch.full_rpm": "1100.0"}, "engage_rpm < full_rpm"),
+                                     ("play_40", {"launch_clutch.restart_on_stall": "yes"}, "neither 0 nor 1"),
+                                     ("play_41", {"launch_clutch.mode": "auto"}, "neither off nor ramp")):
+            bad = self.manual_e01(name, dict(KIT_GEARBOX_LINES, **dict(block, **change)))
+            code, text = run_fit(["--e01", bad, "--e02a", self.e02a] + speeds)
+            self.assertEqual(code, 2, text)
+            self.assertIn(reason, text)
+        partial = dict(block)
+        del partial["launch_clutch.uncouple_time_s"]
+        code, text = run_fit(["--e01", self.manual_e01("play_42", dict(KIT_GEARBOX_LINES, **partial)), "--e02a",
+                              self.e02a] + speeds)
+        self.assertEqual(code, 2, text)
+        self.assertIn("misses uncouple_time_s", text)
+
+    def test_launch_clutch_card_rules(self):
+        # DC_VehicleCard's gearbox.launch_clutch rules (DD-14c) as gearbox_violations mirrors them: optional (absent =
+        # mode off), every key required and no other, DC_LaunchClutchConfig.Check's ranges, ramp only with a scripted
+        # gearbox, never null
+        with open(CARD, "r", encoding="ascii") as f:
+            card = json.load(f)
+        self.assertEqual(fit.enforce_load_check(card), [])
+        absent = json.loads(json.dumps(card))
+        del absent["gearbox"]["launch_clutch"]
+        self.assertEqual(fit.enforce_load_check(absent), [])
+        launch = card["gearbox"]["launch_clutch"]
+        for change in ({"mode": "auto"}, {"engage_rpm": 0.0}, {"full_rpm": 1100.0}, {"full_rpm": 10000.5},
+                       {"stall_guard_rpm": 1100.0}, {"stall_guard_rpm": -1.0}, {"couple_time_s": 0.0},
+                       {"uncouple_time_s": 10.5}, {"restart_cooldown_s": -0.1}, {"restart_cooldown_s": 10.5},
+                       {"restart_on_stall": 1}, {"engage_rpm": True}, {"engage_rpm": "1100"}):
+            bad = json.loads(json.dumps(card))
+            bad["gearbox"]["launch_clutch"] = dict(launch, **change)
+            self.assertTrue(fit.enforce_load_check(bad), change)
+        for edge in ({"stall_guard_rpm": 0.0}, {"restart_cooldown_s": 0.0}, {"full_rpm": 10000.0},
+                     {"couple_time_s": 10.0}, {"mode": "off"}, {"restart_on_stall": False}):
+            ok = json.loads(json.dumps(card))
+            ok["gearbox"]["launch_clutch"] = dict(launch, **edge)
+            self.assertEqual(fit.enforce_load_check(ok), [], edge)
+        missing = json.loads(json.dumps(card))
+        del missing["gearbox"]["launch_clutch"]["restart_cooldown_s"]
+        self.assertTrue(fit.enforce_load_check(missing))
+        extra = json.loads(json.dumps(card))
+        extra["gearbox"]["launch_clutch"]["couple_time"] = 0.85            # a misspelt key the engine would ignore
+        self.assertTrue(fit.enforce_load_check(extra))
+        null = json.loads(json.dumps(card))
+        null["gearbox"]["launch_clutch"] = None
+        self.assertIn("null", " ".join(fit.enforce_load_check(null)))
+        automatic = json.loads(json.dumps(absent))
+        automatic["gearbox"].update(mode="automatic", scripted_gears=[], upshift_mps=[], downshift_mps=[])
+        self.assertEqual(fit.enforce_load_check(automatic), [])
+        automatic["gearbox"]["launch_clutch"] = dict(launch)               # ramp: a scripted gearbox only
+        self.assertIn("scripted gearbox only", " ".join(fit.enforce_load_check(automatic)))
+        automatic["gearbox"]["launch_clutch"]["mode"] = "off"
+        self.assertEqual(fit.enforce_load_check(automatic), [])
+        # the Enforce reader refuses the same: ramp in the automatic branch of CheckGearbox, the ranges through
+        # DC_LaunchClutchConfig.Check, a null or repeated key in Load
+        with open(LLC_SOURCE, "r", encoding="ascii") as f:
+            source = f.read()
+        check = enforce_body(source, "DC_VehicleCard", "CheckGearbox")
+        self.assertIn("if (!m_LaunchClutch.Check(launchFailure))", check)
+        self.assertIn("if (m_LaunchClutch.IsRamp()) { failure = \"gearbox.launch_clutch mode ramp applies to a "
+                      "scripted gearbox only", check)
+        self.assertLess(check.index("m_LaunchClutch.IsRamp()"), check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"))
+        load = enforce_body(source, "DC_VehicleCard", "Load")
+        self.assertIn('DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")',
+                      load)
+
     def test_manual_gearbox_earlier_header_style(self):
         # a play before the gearbox fix (probe run 2 style): only vehicle.has_automatic_gearbox=0 and the gear counts,
         # and no gear_observe row: the indices follow by the vanilla rule, the card equals the probe kit style's
@@ -1278,6 +1378,8 @@ class FitTests(unittest.TestCase):
             card = json.loads(text)
             for key in fit.ENGINE_SCANNED_KEYS:
                 self.assertEqual(text.count('"%s"' % key), 1, key)         # DC_JsonScan.FindValue's rule
+            for key in fit.ENGINE_OPTIONAL_SCANNED_KEYS:
+                self.assertLessEqual(text.count('"%s"' % key), 1, key)     # optional: at most once
             self.assertEqual(scan_numbers(text, "speeds_mps"), card["kappa_ss"]["speeds_mps"])
             self.assertEqual(scan_numbers(text, "kappa_per_steer"), card["kappa_ss"]["kappa_per_steer"])
             self.assertEqual(scan_numbers(text, "kappa_offset"), card["kappa_ss"]["kappa_offset"])
@@ -1305,7 +1407,8 @@ class FitTests(unittest.TestCase):
         arrays = re.findall(r'DC_JsonScan\.ReadNumbers\(text, "(\w+)"', source)
         self.assertEqual(sorted(arrays), sorted(fit.ENGINE_ARRAY_KEYS))
         scanned = re.findall(r'DC_JsonScan\.(?:ReadStrings|IsNull|ReadIndexOrNull)\(text, "(\w+)"', source)
-        self.assertEqual(sorted(scanned), sorted(set(fit.ENGINE_SCANNED_KEYS) - set(fit.ENGINE_ARRAY_KEYS)))
+        self.assertEqual(sorted(scanned), sorted((set(fit.ENGINE_SCANNED_KEYS) - set(fit.ENGINE_ARRAY_KEYS))
+                                                 | set(fit.ENGINE_OPTIONAL_SCANNED_KEYS)))
         with open(CARD, "r", encoding="ascii") as f:
             card = json.load(f)
         reader = source.split("class DC_VehicleCard", 1)[1].split("class DC_LLCv1", 1)[0]
@@ -1315,7 +1418,14 @@ class FitTests(unittest.TestCase):
         self.assertIn("input_shaping", keys)
         for key in keys:
             self.assertTrue(key in card or key in card["signs"] or key in card["gearbox"]
-                            or key in card["actuator"]["raw_engine_path"], key)
+                            or key in card["actuator"]["raw_engine_path"] or key in card["gearbox"]["launch_clutch"],
+                            key)
+        # the launch clutch object (DD-14c): ReadLaunchClutch asks for exactly the keys the generator writes
+        launch = reader.split("protected bool ReadLaunchClutch", 1)[1].split("\n\t}\n", 1)[0]
+        launch_keys = re.findall(r'(?:context\.ReadValue|ReadContextNumber)\((?:context, )?"(\w+)"', launch)
+        self.assertEqual(sorted(launch_keys), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        self.assertEqual(sorted(card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        self.assertIn('context.StartObject("launch_clutch")', launch)
         shapings = re.search(r"s_aInputShapings = \{([^}]*)\}", reader).group(1)
         self.assertEqual(tuple(re.findall(r'"(\w+)"', shapings)), fit.INPUT_SHAPINGS)
         self.assertIn("CLUTCH_DIP_MAX_S = %g;" % fit.CLUTCH_DIP_MAX_S, reader)

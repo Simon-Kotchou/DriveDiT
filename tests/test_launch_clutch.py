@@ -20,10 +20,13 @@ has no anti-stall for direct setters (G19_0_STATIC_1.9.0.37.md section 1), so DC
   - With the defaults in mode "ramp" the toy launches from standstill at throttle 0.3, 0.5 and 1.0 without a stall
     and without a sustained limit cycle in c. It also does so in capture callbacks of 1 to 3 steps.
   - In mode "off" it stalls the way the 1.9 Play did.
-  - Braking to a stop in first gear does not stall. A stall is restarted once per cooldown.
-  - The defaults are the same in DC_LaunchClutchConfig, the DC_ProbeSequences attributes, the placeholder card and its
-    generator. The three actuation paths (DC_ProbeActuator, llc_v1, DC_ActuatorModeA.Start) call the helper as
-    described, and the deploy manifest carries the new file.
+  - Braking to a stop does not stall. That includes a full brake from 16 and 40 km/h in first and second gear, in
+    callbacks of 1, 2 and 3 steps and mixes (Codex round 1). A stall is restarted, never twice within the cooldown,
+    whatever the callback sizes.
+  - CheckEngine bounds the band by the engine's idle and max rpm.
+  - The defaults are the same in DC_LaunchClutchConfig, the DC_ProbeSequences attributes, the provisional 1.9.0.37 card
+    and its generator. The three actuation paths (DC_ProbeActuator, llc_v1, DC_ActuatorModeA.Start) call the helper as
+    described, and the deploy manifest carries the new file and the 1.9.0.37 card.
 """
 
 import importlib.util
@@ -41,7 +44,7 @@ LLC_SOURCE = os.path.join(SCRIPTS, "DC_LLCv1.c")
 RECORDER_SOURCE = os.path.join(SCRIPTS, "DC_StreamRecorder.c")
 EXPERT_SOURCE = os.path.join(SCRIPTS, "DC_ExpertHL.c")
 MANIFEST = os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt")
-CARD = os.path.join(REPO, "tools", "ident", "cards", "1.8.0.13", "S105.json")
+CARD = os.path.join(REPO, "tools", "ident", "cards", "1.9.0.37", "S105.json")     # the card with the launch clutch
 STEP_DT = 1.0 / 30.0        # run header clock.step_dt_s of the 1.9 Play (and of 1.8)
 RPM_PER_RADS = 60.0 / (2.0 * math.pi)
 
@@ -136,8 +139,6 @@ class LaunchClutch:
             self.engine_seen = 1
         if cfg["mode"] != "ramp":
             return commanded
-        if self.since_restart_s >= 0:
-            self.since_restart_s += slice_s
         cooled = self.since_restart_s < 0 or self.since_restart_s >= cfg["restart_cooldown_s"]
         if not engine_on and not handbrake and cfg["restart_on_stall"] and cooled:
             self.restart_due = True
@@ -147,13 +148,15 @@ class LaunchClutch:
         driving = in_gear and not handbrake and not dip and engine_on
         if not driving:
             self.coupling = 0.0
+        elif rpm < cfg["stall_guard_rpm"]:
+            if self.coupling > 0:
+                self.guard_drops += 1
+            self.coupling = 0.0
+        elif rpm <= cfg["engage_rpm"]:
+            self.coupling = 0.0
         else:
             target = min(max((rpm - cfg["engage_rpm"]) / (cfg["full_rpm"] - cfg["engage_rpm"]), 0.0), 1.0)
-            if rpm < cfg["stall_guard_rpm"]:
-                if self.coupling > 0:
-                    self.guard_drops += 1
-                self.coupling = 0.0
-            elif target > self.coupling:
+            if target > self.coupling:
                 self.coupling = min(target, self.coupling + slice_s / cfg["couple_time_s"])
             else:
                 self.coupling = max(target, self.coupling - slice_s / cfg["uncouple_time_s"])
@@ -161,6 +164,8 @@ class LaunchClutch:
             self.slip_s += slice_s
         else:
             self.slip_s = 0.0
+        if self.since_restart_s >= 0:
+            self.since_restart_s += slice_s
         self.max_slip_s = max(self.max_slip_s, self.slip_s)
         self.max_slip_total_s = max(self.max_slip_total_s, self.slip_s)
         return min(commanded, self.coupling)
@@ -176,6 +181,16 @@ def ramp(**config):
     return LaunchClutch(mode="ramp", **config)
 
 
+def check_engine(config, rpm_idle, rpm_max):
+    """Mirror of DC_LaunchClutchConfig.CheckEngine: mode ramp needs engage_rpm above the idle and full_rpm below
+    FULL_RPM_MAX_FRACTION (0.5) of a known max rpm."""
+    if config["mode"] != "ramp":
+        return True
+    if config["engage_rpm"] <= rpm_idle:
+        return False
+    return rpm_max > 0 and config["full_rpm"] < 0.5 * rpm_max
+
+
 class ToyPowertrain:
     """A TOY S105 in first gear (see the module docstring). It catches control-loop bugs, and it does not predict
     the 1.9 powertrain."""
@@ -189,6 +204,9 @@ class ToyPowertrain:
     MASS_KG = 1000.0
     WHEEL_RADIUS_M = 0.295
     FIRST_GEAR_RATIO = 19.95    # 3.8 x 5.25 (G19_0_STATIC_1.9.0.37.md 1.1)
+    # second gear (index 3) by T0-ENG run 3's measured speed per 1000 rpm: 1.54871 m/s in first (index 2, which with
+    # the 0.295 m wheel gives the same 19.95) and 2.772066 m/s in second (tools/ident/fit_steer_kappa.py's run-3 fit)
+    SECOND_GEAR_RATIO = FIRST_GEAR_RATIO * 1.54871 / 2.772066
     ROLLING = 0.015
     BRAKE_N = 9000.0            # at brake 1, at the contact patches (about 0.9 g)
     SUBSTEPS = 40               # integration substeps per 1/30 s
@@ -197,13 +215,14 @@ class ToyPowertrain:
     TORQUE_CURVE = ((0.0, 0.0), (500.0, 40.0), (800.0, 52.0), (3000.0, 72.8), (4800.0, 65.9), (5800.0, 55.0),
                     (7500.0, 20.0), (8000.0, 0.0))
 
-    def __init__(self, rpm=RPM_IDLE, speed_mps=0.0, locked=False, j_engine=None):
+    def __init__(self, rpm=RPM_IDLE, speed_mps=0.0, locked=False, j_engine=None, ratio=FIRST_GEAR_RATIO):
         self.j_engine = j_engine or self.J_ENGINE
+        self.ratio = ratio
         self.we = rpm / RPM_PER_RADS
         self.v = speed_mps
         self.on = True
         self.locked = locked
-        self.j_vehicle = self.MASS_KG * self.WHEEL_RADIUS_M ** 2 / self.FIRST_GEAR_RATIO ** 2
+        self.j_vehicle = self.MASS_KG * self.WHEEL_RADIUS_M ** 2 / self.ratio ** 2
 
     @property
     def rpm(self):
@@ -228,7 +247,7 @@ class ToyPowertrain:
 
     def load_torque(self, brake):
         force = self.ROLLING * self.MASS_KG * 9.81 + 0.5 * 1.2 * 0.7 * self.v ** 2 + brake * self.BRAKE_N
-        return force * self.WHEEL_RADIUS_M / self.FIRST_GEAR_RATIO
+        return force * self.WHEEL_RADIUS_M / self.ratio
 
     def force_start(self):
         """ForceStartEngine: the engine runs again at idle or above."""
@@ -240,14 +259,14 @@ class ToyPowertrain:
         h = dt / substeps
         capacity = clutch * self.CLUTCH_MAX_NM
         for _ in range(substeps):
-            wg = self.v / self.WHEEL_RADIUS_M * self.FIRST_GEAR_RATIO
+            wg = self.v / self.WHEEL_RADIUS_M * self.ratio
             te, load = self.engine_torque(throttle), self.load_torque(brake)
             if capacity > 0 and (self.locked or abs(self.we - wg) < 0.5):
                 accel = (te - load) / (self.j_engine + self.j_vehicle)
                 if abs(te - self.j_engine * accel) <= capacity:
                     self.locked = True
                     wg = max(wg + accel * h, 0.0)
-                    self.we, self.v = wg, wg / self.FIRST_GEAR_RATIO * self.WHEEL_RADIUS_M
+                    self.we, self.v = wg, wg / self.ratio * self.WHEEL_RADIUS_M
                     self.stall_check()
                     continue
             self.locked = False
@@ -258,7 +277,7 @@ class ToyPowertrain:
             if capacity > 0 and slip * (we_new - wg_new) < 0:
                 self.locked = True                      # the slip changed sign within the substep: lock
                 we_new = wg_new = 0.5 * (we_new + wg_new)
-            self.we, self.v = we_new, wg_new / self.FIRST_GEAR_RATIO * self.WHEEL_RADIUS_M
+            self.we, self.v = we_new, wg_new / self.ratio * self.WHEEL_RADIUS_M
             self.stall_check()
 
     def stall_check(self):
@@ -325,8 +344,11 @@ class LaunchClutchStepTest(unittest.TestCase):
         ups = [lc.step(STEP_DT, True, False, 3000.0, True, 1.0, False) for _ in range(40)]
         self.assertEqual(1 + ups.index(1.0) + 1, math.ceil(0.85 / STEP_DT))           # 0 -> 1 in ceil(0.85 / dt) steps
         self.assertEqual(ups[-1], 1.0)
-        down = lc.step(STEP_DT, True, False, 1100.0, True, 1.0, False)                 # target 0: falls at most
+        down = lc.step(STEP_DT, True, False, 1650.0, True, 1.0, False)                 # in the band: falls at most
         self.assertAlmostEqual(down, 1.0 - STEP_DT / 0.45)                              # dt / uncouple
+        lc.coupling = 1.0
+        self.assertEqual(lc.step(STEP_DT, True, False, 1100.0, True, 1.0, False), 0.0)  # at engage_rpm: open at once
+        self.assertEqual(lc.guard_drops, 0)                                             # (not a guard drop)
         lc.coupling = 0.2
         self.assertAlmostEqual(lc.step(STEP_DT, True, False, 1400.0, True, 1.0, False), 0.2 + STEP_DT / 0.85)
         lc.coupling = 0.9
@@ -377,6 +399,35 @@ class LaunchClutchStepTest(unittest.TestCase):
         lc.reset()                                             # an episode start clears the cooldown
         lc.step(STEP_DT, True, False, 0.0, False, 1.0, False)
         self.assertTrue(lc.consume_restart())
+
+    def test_cooldown_holds_in_callbacks_of_varying_size(self):
+        # Codex round 1: the cooldown counted the current call's steps before deciding, so a 3-step call after 1-step
+        # ones gave restarts 0.967 s apart. It is the time elapsed at the restart point now, never below the cooldown
+        for pattern in ((1,), (2,), (3,), (1, 3), (3, 1, 1, 2), (1, 1, 2, 1, 3, 1, 2, 3, 1, 1)):
+            lc = ramp()
+            t, times, i = 0.0, [], 0
+            while t < 6.0:
+                covered = pattern[i % len(pattern)]
+                i += 1
+                lc.step(covered * STEP_DT, True, False, 0.0, False, 1.0, False)
+                if lc.consume_restart():
+                    times.append(t)
+                t += covered * STEP_DT
+            gaps = [b - a for a, b in zip(times, times[1:])]
+            self.assertGreaterEqual(len(times), 5, pattern)
+            self.assertTrue(all(g >= 1.0 - 1e-9 for g in gaps), (pattern, gaps))
+            self.assertTrue(all(g <= 1.0 + 3 * STEP_DT + 1e-9 for g in gaps), (pattern, gaps))   # at the first chance
+
+    def test_check_engine(self):
+        # DC_LaunchClutchConfig.CheckEngine on the S105's run header values (vehicle.rpm_idle 800, rpm_max 8000)
+        defaults = dict(LaunchClutch.DEFAULTS, mode="ramp")
+        self.assertTrue(check_engine(defaults, 800.0, 8000.0))
+        for change, idle, rpm_max in (({"engage_rpm": 800.0}, 800.0, 8000.0), ({"full_rpm": 4000.0}, 800.0, 8000.0),
+                                      ({}, 800.0, 0.0), ({}, 1200.0, 8000.0), ({}, 800.0, 3000.0),
+                                      ({"engage_rpm": 9000.0, "full_rpm": 10000.0}, 800.0, 8000.0)):
+            self.assertFalse(check_engine(dict(defaults, **change), idle, rpm_max), (change, idle, rpm_max))
+        self.assertTrue(check_engine(dict(defaults, full_rpm=3999.0), 800.0, 8000.0))
+        self.assertTrue(check_engine(dict(defaults, mode="off", engage_rpm=9000.0, full_rpm=10000.0), 800.0, 0.0))
 
     def test_engine_off_is_never_coupled(self):
         lc = ramp(restart_on_stall=False)
@@ -459,6 +510,38 @@ class ToyPowertrainTest(unittest.TestCase):
         self.assertFalse(rows[-1][3])
         self.assertEqual(off.stalls, 1)
 
+    def full_brake(self, ratio, kmh, pattern):
+        """Brake 1, throttle 0 from kmh coupled in a gear, the clutch as cruising there leaves it."""
+        v = kmh / 3.6
+        rpm = v / ToyPowertrain.WHEEL_RADIUS_M * ratio * RPM_PER_RADS
+        car, lc = ToyPowertrain(rpm=rpm, speed_mps=v, locked=True, ratio=ratio), ramp()
+        lc.engine_seen = 1
+        lc.coupling = 0.0 if rpm <= 1100.0 else min((rpm - 1100.0) / 600.0, 1.0)
+        return drive(lc, car, 6.0, 0.0, brake=1.0, brake_after=0.0, pattern=pattern), lc
+
+    def test_full_brake_to_a_stop_never_stalls(self):
+        # Codex round 1: a full brake stalled the toy (606 -> 504 rpm at c 0.333) while the release below the band was
+        # rate-limited. Now the clutch opens at engage_rpm: from 16 and 40 km/h, in first and second gear, in
+        # callbacks of 1, 2 and 3 steps and mixes, with the defaults: no stall, so no restart
+        patterns = ((1,), (2,), (3,), (1, 1, 2, 1, 3, 1, 2, 3, 1, 1), (3, 1, 2))
+        for ratio, gear in ((ToyPowertrain.FIRST_GEAR_RATIO, "first"), (ToyPowertrain.SECOND_GEAR_RATIO, "second")):
+            for kmh in (16.0, 40.0):
+                for pattern in patterns:
+                    label = (gear, kmh, pattern)
+                    rows, lc = self.full_brake(ratio, kmh, pattern)
+                    self.assertTrue(all(r[3] for r in rows), label)
+                    self.assertEqual((lc.stalls, lc.restarts), (0, 0), label)
+                    self.assertGreater(min(r[2] for r in rows), ToyPowertrain.RPM_STALL, label)
+                    self.assertEqual(rows[-1][4], 0.0, label)                     # stopped, clutch open
+                    self.assertEqual(rows[-1][1], 0.0, label)
+        # Codex's case: 6 s at throttle 0.5 from standstill, then a full brake
+        for pattern in patterns:
+            lc = ramp()
+            rows = drive(lc, ToyPowertrain(), 16.0, 0.5, brake=1.0, brake_after=6.0, pattern=pattern)
+            self.assertTrue(all(r[3] for r in rows), pattern)
+            self.assertEqual((lc.stalls, lc.restarts), (0, 0), pattern)
+            self.assertEqual(rows[-1][4], 0.0, pattern)
+
     def test_a_stall_is_restarted(self):
         car, lc = ToyPowertrain(), ramp()
         drive(lc, car, 6.0, 0.5)
@@ -502,18 +585,20 @@ class LaunchClutchTiesTest(unittest.TestCase):
         for statement in (
                 "float commanded = Math.Clamp(commandedClutch, 0, 1); float slice = Math.Max(dt, 0);",
                 "if (m_iEngineSeen == 1 && !engineOn) m_iStalls++; m_iEngineSeen = 0; if (engineOn) m_iEngineSeen = 1;",
-                "if (!m_Config.IsRamp()) return commanded; if (m_fSinceRestartS >= 0) m_fSinceRestartS += slice;",
-                "bool cooled = m_fSinceRestartS < 0 || m_fSinceRestartS >= m_Config.m_fRestartCooldownS;",
+                # the cooldown is decided on the time before this call and advanced by it afterwards
+                "if (!m_Config.IsRamp()) return commanded; bool cooled = m_fSinceRestartS < 0 || m_fSinceRestartS >= "
+                "m_Config.m_fRestartCooldownS;",
                 "if (!engineOn && !handbrake && m_Config.m_bRestartOnStall && cooled) { m_bRestartDue = true; "
                 "m_iRestarts++; m_fSinceRestartS = 0; m_fCoupling = 0; }",
-                "bool driving = inGear && !handbrake && !dip && engineOn; if (!driving) { m_fCoupling = 0; }",
-                "float target = Math.Clamp((rpm - m_Config.m_fEngageRpm) / (m_Config.m_fFullRpm - "
-                "m_Config.m_fEngageRpm), 0, 1);",
-                "if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; m_fCoupling = 0; }",
-                "else if (target > m_fCoupling) { m_fCoupling = Math.Min(target, m_fCoupling + slice / "
-                "m_Config.m_fCoupleTimeS); }",
-                "else { m_fCoupling = Math.Max(target, m_fCoupling - slice / m_Config.m_fUncoupleTimeS); }",
-                "if (driving && m_fCoupling > 0 && m_fCoupling < 1) m_fSlipS += slice; else m_fSlipS = 0;",
+                "bool driving = inGear && !handbrake && !dip && engineOn; if (!driving) { m_fCoupling = 0; } "
+                "else if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; m_fCoupling = 0; } "
+                "else if (rpm <= m_Config.m_fEngageRpm) { m_fCoupling = 0; } "
+                "else { float target = Math.Clamp((rpm - m_Config.m_fEngageRpm) / (m_Config.m_fFullRpm - "
+                "m_Config.m_fEngageRpm), 0, 1); if (target > m_fCoupling) m_fCoupling = Math.Min(target, m_fCoupling + "
+                "slice / m_Config.m_fCoupleTimeS); else m_fCoupling = Math.Max(target, m_fCoupling - slice / "
+                "m_Config.m_fUncoupleTimeS); }",
+                "if (driving && m_fCoupling > 0 && m_fCoupling < 1) m_fSlipS += slice; else m_fSlipS = 0; "
+                "if (m_fSinceRestartS >= 0) m_fSinceRestartS += slice;",
                 "m_fMaxSlipS = Math.Max(m_fMaxSlipS, m_fSlipS); m_fMaxSlipTotalS = Math.Max(m_fMaxSlipTotalS, "
                 "m_fSlipS); return Math.Min(commanded, m_fCoupling);"):
             self.assertIn(statement, step)
@@ -579,6 +664,18 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertIn('static const string MODE_OFF = "off";', self.helper)
         self.assertIn('static const string MODE_RAMP = "ramp";', self.helper)
 
+    def test_check_engine_follows_the_enforce_source(self):
+        check = class_method(self.helper, "DC_LaunchClutchConfig", "CheckEngine")
+        for statement in ("if (!IsRamp()) { failure = string.Empty; return true; }",
+                          "if (m_fEngageRpm <= rpmIdle) {",
+                          "float limit = FULL_RPM_MAX_FRACTION * rpmMax; if (rpmMax <= 0 || m_fFullRpm >= limit) {"):
+            self.assertIn(statement, check)
+        self.assertEqual(enforce_constants(self.helper, "DC_LaunchClutchConfig")["FULL_RPM_MAX_FRACTION"], 0.5)
+        init = enforce_body(self.llc, "DC_LLCv1", "Init")
+        self.assertIn("if (card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED && !card.m_LaunchClutch.CheckEngine("
+                      "m_Simulation.EngineGetRPMIdle(), m_Simulation.EngineGetRPMMax(), failure))", init)
+        self.assertLess(init.index("CheckEgoGearbox(card, actuator, failure)"), init.index("CheckEngine("))
+
     def test_run_header_block_is_the_cards_fields(self):
         # AppendHeaderLines writes launch_clutch.<card field> (fit_steer_kappa.launch_clutch_of reads them back)
         lines = class_method(self.helper, "DC_LaunchClutchConfig", "AppendHeaderLines")
@@ -615,13 +712,16 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertIn("m_bStateRead = true;", enforce_body(self.probe, "DC_ProbeActuator", "ReadPost"))
         init = enforce_body(self.probe, "DC_ProbeActuator", "Init")
         self.assertIn("DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp(); "
-                      "m_LaunchClutch.Configure(launchClutch);", init)
+                      'return SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");', init)
         start = enforce_body(self.probe, "DC_ProbeActuator", "StartModeA")
         self.assertIn("m_Controller.SetPersistentHandBrake(false); if (!m_Controller.IsEngineOn()) "
                       "m_Controller.ForceStartEngine();", start)
         set_launch = enforce_body(self.probe, "DC_ProbeActuator", "SetLaunchClutch")
         self.assertIn("if (!config.Check(failure))", set_launch)
         self.assertIn("if (config.IsRamp() && m_bShiftPolicy && config.m_fFullRpm >= m_fDownshiftRpm)", set_launch)
+        self.assertIn("if (m_bShiftPolicy && !config.CheckEngine(m_Simulation.EngineGetRPMIdle(), "
+                      "m_Simulation.EngineGetRPMMax(), failure))", set_launch)
+        self.assertIn("m_LaunchClutch.Configure(config);", set_launch)
         start_probe = enforce_body(self.probe, "DC_ProbeSequences", "OnProbeStart")
         self.assertLess(start_probe.index("m_Actuator.SetShiftPolicy("), start_probe.index("SetLaunchClutch("))
         self.assertIn('if (m_Actuator.SetLaunchClutch(launchClutch, "DC_ProbeSequences attributes")) '
@@ -660,6 +760,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
         with open(MANIFEST, "r", encoding="ascii") as f:
             entries = [line.split("#", 1)[0].split() for line in f]
         self.assertIn(["script", "src/enfusion/datacapture/DC_LaunchClutch.c"], entries)
+        self.assertIn(["config", "tools/ident/cards/1.9.0.37/S105.json"], entries)    # the provisional 1.9 card
+        self.assertIn(["config", "tools/ident/cards/1.8.0.13/S105.json"], entries)
 
 
 if __name__ == "__main__":

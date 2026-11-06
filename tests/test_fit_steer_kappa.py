@@ -40,10 +40,13 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     E-04's indices in an identified card; llc_v1 refuses an automatic card on the manual ego (CheckEgoGearbox);
   - every card keeps the format llc_v1 reads: each scanned array key once, numbers without exponent, ASCII + LF, the
     keys DC_VehicleCard.Load requires; a Python mirror of DC_JsonScan.ReadNumbers reads the same arrays as json;
-  - the launch clutch (DD-14c): the placeholder carries gearbox.launch_clutch in mode ramp with DC_LaunchClutchConfig's
-    defaults; a scripted identified card copies E-01's launch_clutch.* run header block (none before DD-14c: mode
-    off); gearbox_violations mirrors DC_VehicleCard's rules (optional, every key, the ranges, ramp only with a scripted
-    gearbox, never null), and the Enforce reader asks for exactly LAUNCH_CLUTCH_KEYS;
+  - the launch clutch (DD-14c): the 1.8.0.13 card keeps its bytes and no launch clutch; the provisional 1.9.0.37
+    card is the generator's placeholder under that pin (--launch-clutch ramp: the 1.8.0.13 values carried over and
+    marked provisional, gearbox.launch_clutch in mode ramp), accepted by AcceptCard's pin rule on 1.9.0.37 only and
+    never at production; a scripted identified card copies E-01's launch_clutch.* run header block (none before
+    DD-14c: mode off); gearbox_violations mirrors DC_VehicleCard's rules (optional, every key, the ranges, ramp only
+    with a scripted gearbox and there full_rpm below 1800 rpm, never null), and the Enforce reader asks for exactly
+    LAUNCH_CLUTCH_KEYS;
   - the Enforce reader (src/enfusion/datacapture/DC_LLCv1.c) asks for exactly the llc_v1 keys and arrays the
     generator writes;
   - DC_Sha256 (the card and source digests llc_v1 stamps): its round constants and initial hash are FIPS 180-4's,
@@ -85,6 +88,10 @@ STEP_COLUMNS = actuation_tests.enforce_step_columns()
 PHASE_COLUMNS = actuation_tests.PHASE_COLUMNS
 CELL_COLUMNS = actuation_tests.CELL_COLUMNS
 CARD = os.path.join(REPO, "tools", "ident", "cards", "1.8.0.13", "S105.json")
+# The provisional 1.9.0.37 card (DD-14c): the 1.8.0.13 placeholder's values carried over, with the launch clutch
+CARD19 = os.path.join(REPO, "tools", "ident", "cards", "1.9.0.37", "S105.json")
+# The 1.8.0.13 card's bytes, which the T0L session of 2026-11-05 (control.vehicle_card_sha) is stamped with
+CARD_18_SHA256 = "84d4689ad37d1d57fff6a1a761ba5861d15b581cac3ce194c36508e80fc665e2"
 ROUTE = os.path.join(REPO, "addons", "DataCapture", "Configs", "routes", "arland_t0_loop.json")
 LLC_SOURCE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_LLCv1.c")
 ACTUATOR_SOURCE = os.path.join(REPO, "src", "enfusion", "datacapture", "DC_StreamRecorder.c")
@@ -408,12 +415,21 @@ def engine_rpm(speed, gear):
     return speed / RUN3_SPEED_PER_KRPM[gear] * 1000.0
 
 
-def accept_card(card, use_class, session_pin_id):
-    """Mirror of the first rules of DC_LLCv1.AcceptCard (asserted in test_placeholder_is_refused_at_production): a
-    placeholder only at a qualification use_class (dev, probe), and only for the session's pin."""
+def accept_card(card, use_class, session_pin_id, session_build_key=""):
+    """Mirror of the first rules of DC_LLCv1.AcceptCard (asserted in test_placeholder_is_refused_at_production and
+    test_provisional_1_9_card): a placeholder only at a qualification use_class (dev, probe), only for the session's
+    pin, and with a session build_key a card without one only when it is a placeholder, a card with one only when it
+    is the session's."""
     if card["status"] == "placeholder" and use_class not in ("dev", "probe"):
         return False
-    return card["pin_id"] == session_pin_id
+    if card["pin_id"] != session_pin_id:
+        return False
+    if session_build_key:
+        if not card.get("build_key") and card["status"] != "placeholder":
+            return False
+        if card.get("build_key") and card["build_key"] != session_build_key:
+            return False
+    return True
 
 
 class LlcGears:
@@ -872,13 +888,12 @@ class FitTests(unittest.TestCase):
         for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):
             self.assertAlmostEqual(engine_rpm(RUN3_GEARBOX["upshift_mps"][slot], gear), 4500.0, delta=25.0)
             self.assertAlmostEqual(engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1), 1800.0, delta=25.0)
-        # the launch clutch (DD-14c): mode ramp with DC_LaunchClutchConfig's defaults, fully coupled below the rpm of
-        # every downshift speed (about 1800 rpm in the higher gear), so the scripted gears never drive slipping
-        self.assertEqual(card["gearbox"]["launch_clutch"], fit.PLACEHOLDER_LAUNCH_CLUTCH)
-        for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):
-            self.assertLess(card["gearbox"]["launch_clutch"]["full_rpm"],
-                            engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1) - 50.0)
-        self.assertIn("launch_clutch (DD-14c): mode ramp", card["gearbox"]["basis"])
+        # DD-14c leaves the 1.8.0.13 card as it was: no launch clutch (mode off, the 1.8 sequence), and the exact
+        # bytes the T0L session of 2026-11-05 is stamped with (control.vehicle_card_sha)
+        self.assertNotIn("launch_clutch", card["gearbox"])
+        self.assertNotIn("provisional", card)
+        with open(CARD, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), CARD_18_SHA256)
         for text in (card["note"], card["gearbox"]["basis"], card["kappa_ss"]["basis"]):
             for word in ("COPIED", "run 3", "provisional", "DD-14a", "not measured for this card's build"):
                 self.assertIn(word, text)
@@ -926,6 +941,61 @@ class FitTests(unittest.TestCase):
             self.assertTrue(accept_card(card, use_class, "1.8.0.13"))
         self.assertFalse(accept_card(card, "dev", "1.9.0.10"))
         self.assertIn("production", card["use"])
+
+    def test_provisional_1_9_card(self):
+        # DD-14c: the card llc_v1 loads on a 1.9.0.37 session is the generator's placeholder under that pin with the
+        # launch clutch: the 1.8.0.13 values carried over and marked provisional, a placeholder (so production refuses
+        # it), and accepted by AcceptCard's pin rule on 1.9.0.37 only
+        code, text = run_fit(["--placeholder", "--pin-id", "1.9.0.37", "--launch-clutch", "ramp", "--check", CARD19])
+        self.assertEqual(code, 0, text)
+        with open(CARD19, "r", encoding="ascii") as f:
+            card = json.load(f)
+        with open(CARD, "r", encoding="ascii") as f:
+            card18 = json.load(f)
+        self.assertEqual((card["status"], card["pin_id"], card["build_key"], card["identification_sessions"],
+                          card["signs"]["measured"]), ("placeholder", "1.9.0.37", None, [], False))
+        # every value is the 1.8.0.13 placeholder's; only the pin, the provenance texts and the launch clutch differ
+        differing = sorted(k for k in set(card) | set(card18) if card.get(k) != card18.get(k))
+        self.assertEqual(differing, ["gearbox", "note", "pin_id", "provisional"])
+        gearbox, gearbox18 = dict(card["gearbox"]), dict(card18["gearbox"])
+        launch = gearbox.pop("launch_clutch")
+        self.assertEqual(sorted(k for k in gearbox if gearbox[k] != gearbox18.get(k)), ["basis"])
+        self.assertTrue(gearbox["basis"].startswith(gearbox18["basis"]))
+        self.assertEqual(launch, fit.PLACEHOLDER_LAUNCH_CLUTCH)
+        self.assertEqual(launch["mode"], "ramp")
+        for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):     # coupled below every downshift rpm
+            self.assertLess(launch["full_rpm"], engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1) - 50.0)
+        provisional = card["provisional"]
+        self.assertEqual((provisional["measured_on_pin_id"], provisional["for_pin_id"]), ("1.8.0.13", "1.9.0.37"))
+        self.assertIn("--e01 --e02a", provisional["refit"])
+        for word in ("CARRIED OVER", "measured on 1.8.0.13", "PROVISIONAL on 1.9.0.37", "re-fit", "E-01 / E-02a"):
+            self.assertIn(word, card["note"])
+        self.assertTrue(card["note"].startswith(card18["note"]))
+        self.assertEqual(fit.enforce_load_check(card), [])
+        # AcceptCard: qualification on 1.9.0.37 (with or without a session build_key), never production, never on
+        # another pin; the 1.8.0.13 card is refused on 1.9.0.37 by the same pin rule
+        for use_class in ("dev", "probe"):
+            self.assertTrue(accept_card(card, use_class, "1.9.0.37"))
+            self.assertTrue(accept_card(card, use_class, "1.9.0.37", session_build_key="bk-19"))
+            self.assertFalse(accept_card(card18, use_class, "1.9.0.37"))
+            self.assertFalse(accept_card(card, use_class, "1.8.0.13"))
+        self.assertFalse(accept_card(card, "production", "1.9.0.37"))
+        self.assertFalse(accept_card(card, "production", "1.9.0.37", session_build_key="bk-19"))
+        with open(LLC_SOURCE, "r", encoding="ascii") as f:
+            accept = enforce_body(f.read(), "DC_LLCv1", "AcceptCard")
+        self.assertIn("if (card.m_sPinId != sessionPinId) { failure =", accept)
+        self.assertIn("if (!sessionBuildKey.IsEmpty()) { if (card.m_sBuildKey.IsEmpty() && !card.IsPlaceholder()) { "
+                      "failure =", accept)
+        self.assertIn("if (!card.m_sBuildKey.IsEmpty() && card.m_sBuildKey != sessionBuildKey) { failure =", accept)
+        # deployed under its pin, where DC_ExpertDriver looks (Configs/ident/cards/<session pin>/S105.json)
+        with open(os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt"), "r", encoding="ascii") as f:
+            entries = [line.split("#", 1)[0].split() for line in f]
+        for path in ("tools/ident/cards/1.8.0.13/S105.json", "tools/ident/cards/1.9.0.37/S105.json"):
+            self.assertIn(["config", path], entries)
+        # --launch-clutch belongs to the placeholder; an identified card takes E-01's
+        code, text = run_fit(["--e01", self.e01, "--e02a", self.e02a, "--launch-clutch", "ramp"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("--launch-clutch is for --placeholder", text)
 
     def test_vanilla_gear_indices(self):
         self.assertEqual(fit.vanilla_gear_indices(7, 4), {"neutral": 2, "reverse": 1, "forward": [3, 4, 5, 6]})
@@ -1198,8 +1268,8 @@ class FitTests(unittest.TestCase):
     def test_launch_clutch_card_rules(self):
         # DC_VehicleCard's gearbox.launch_clutch rules (DD-14c) as gearbox_violations mirrors them: optional (absent =
         # mode off), every key required and no other, DC_LaunchClutchConfig.Check's ranges, ramp only with a scripted
-        # gearbox, never null
-        with open(CARD, "r", encoding="ascii") as f:
+        # gearbox and there full_rpm below LAUNCH_SCRIPTED_FULL_RPM_LIMIT, never null (on the provisional 1.9.0.37 card)
+        with open(CARD19, "r", encoding="ascii") as f:
             card = json.load(f)
         self.assertEqual(fit.enforce_load_check(card), [])
         absent = json.loads(json.dumps(card))
@@ -1209,12 +1279,15 @@ class FitTests(unittest.TestCase):
         for change in ({"mode": "auto"}, {"engage_rpm": 0.0}, {"full_rpm": 1100.0}, {"full_rpm": 10000.5},
                        {"stall_guard_rpm": 1100.0}, {"stall_guard_rpm": -1.0}, {"couple_time_s": 0.0},
                        {"uncouple_time_s": 10.5}, {"restart_cooldown_s": -0.1}, {"restart_cooldown_s": 10.5},
-                       {"restart_on_stall": 1}, {"engage_rpm": True}, {"engage_rpm": "1100"}):
+                       {"restart_on_stall": 1}, {"engage_rpm": True}, {"engage_rpm": "1100"},
+                       # Codex round 1: a band above the downshift rpm, and one beyond the S105's 8000 rpm max
+                       {"full_rpm": 1800.0}, {"full_rpm": 3000.0}, {"engage_rpm": 9000.0, "full_rpm": 10000.0}):
             bad = json.loads(json.dumps(card))
             bad["gearbox"]["launch_clutch"] = dict(launch, **change)
             self.assertTrue(fit.enforce_load_check(bad), change)
-        for edge in ({"stall_guard_rpm": 0.0}, {"restart_cooldown_s": 0.0}, {"full_rpm": 10000.0},
-                     {"couple_time_s": 10.0}, {"mode": "off"}, {"restart_on_stall": False}):
+        for edge in ({"stall_guard_rpm": 0.0}, {"restart_cooldown_s": 0.0}, {"full_rpm": 1799.0},
+                     {"couple_time_s": 10.0}, {"mode": "off"}, {"restart_on_stall": False},
+                     {"mode": "off", "full_rpm": 10000.0}):               # the band of mode off is never used
             ok = json.loads(json.dumps(card))
             ok["gearbox"]["launch_clutch"] = dict(launch, **edge)
             self.assertEqual(fit.enforce_load_check(ok), [], edge)
@@ -1243,6 +1316,16 @@ class FitTests(unittest.TestCase):
         self.assertIn("if (m_LaunchClutch.IsRamp()) { failure = \"gearbox.launch_clutch mode ramp applies to a "
                       "scripted gearbox only", check)
         self.assertLess(check.index("m_LaunchClutch.IsRamp()"), check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"))
+        self.assertIn("if (m_LaunchClutch.IsRamp() && m_LaunchClutch.m_fFullRpm >= "
+                      "DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT)", check)
+        self.assertLess(check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"), check.index("SCRIPTED_FULL_RPM_LIMIT"))
+        with open(os.path.join(REPO, "src", "enfusion", "datacapture", "DC_LaunchClutch.c"), "r", encoding="ascii") as f:
+            helper = f.read()
+        self.assertIn("static const float SCRIPTED_FULL_RPM_LIMIT = %g;" % fit.LAUNCH_SCRIPTED_FULL_RPM_LIMIT, helper)
+        # and at Init the band against the ego's engine (idle and max rpm), scripted gearbox only
+        init = enforce_body(source, "DC_LLCv1", "Init")
+        self.assertIn("if (card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED && !card.m_LaunchClutch.CheckEngine("
+                      "m_Simulation.EngineGetRPMIdle(), m_Simulation.EngineGetRPMMax(), failure))", init)
         load = enforce_body(source, "DC_VehicleCard", "Load")
         self.assertIn('DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")',
                       load)
@@ -1371,7 +1454,9 @@ class FitTests(unittest.TestCase):
     def test_cards_keep_the_llc_v1_format(self):
         with open(CARD, "r", encoding="ascii", newline="") as f:
             committed = f.read()
-        for text in (committed, self.card_text):
+        with open(CARD19, "r", encoding="ascii", newline="") as f:
+            committed19 = f.read()
+        for text in (committed, committed19, self.card_text):
             self.assertNotIn("\r", text)
             self.assertTrue(text.endswith("}\n"))
             text.encode("ascii")
@@ -1416,15 +1501,17 @@ class FitTests(unittest.TestCase):
         keys += re.findall(r'ReadContextNumber\(context, "(\w+)"', reader.split("protected bool ReadLlcNumbers", 1)[0])
         self.assertIn("clutch_dip_s", keys)
         self.assertIn("input_shaping", keys)
+        with open(CARD19, "r", encoding="ascii") as f:
+            launch_card = json.load(f)                                  # the card that carries a launch clutch
         for key in keys:
             self.assertTrue(key in card or key in card["signs"] or key in card["gearbox"]
-                            or key in card["actuator"]["raw_engine_path"] or key in card["gearbox"]["launch_clutch"],
-                            key)
+                            or key in card["actuator"]["raw_engine_path"]
+                            or key in launch_card["gearbox"]["launch_clutch"], key)
         # the launch clutch object (DD-14c): ReadLaunchClutch asks for exactly the keys the generator writes
         launch = reader.split("protected bool ReadLaunchClutch", 1)[1].split("\n\t}\n", 1)[0]
         launch_keys = re.findall(r'(?:context\.ReadValue|ReadContextNumber)\((?:context, )?"(\w+)"', launch)
         self.assertEqual(sorted(launch_keys), sorted(fit.LAUNCH_CLUTCH_KEYS))
-        self.assertEqual(sorted(card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        self.assertEqual(sorted(launch_card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
         self.assertIn('context.StartObject("launch_clutch")', launch)
         shapings = re.search(r"s_aInputShapings = \{([^}]*)\}", reader).group(1)
         self.assertEqual(tuple(re.findall(r'"(\w+)"', shapings)), fit.INPUT_SHAPINGS)

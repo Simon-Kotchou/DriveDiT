@@ -29,7 +29,7 @@
   "gear_index_reverse": 0,
   "gearbox": {
     "mode": "scripted",
-    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, so a manual gearbox driven by SetGear; indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5. Scripted gears 2, 3, 4 and shift speeds COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03), provisional until the DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1)",
+    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, so a manual gearbox driven by SetGear; indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5. Scripted gears 2, 3, 4 and shift speeds COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03), provisional until the DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1). launch_clutch (DD-14c): mode ramp with the DC_LaunchClutchConfig defaults, not identified, because the 1.9.0.37 powertrain stalls at a clutch-1 drive-off (launch 20261106T052424Z-wb-addc) where 1.8.0.13 slipped",
     "has_automatic_gearbox": false,
     "scripted_gears": [
       2,
@@ -44,7 +44,17 @@
       5.0,
       7.5
     ],
-    "clutch_dip_s": 0.0
+    "clutch_dip_s": 0.0,
+    "launch_clutch": {
+      "mode": "ramp",
+      "engage_rpm": 1100.0,
+      "full_rpm": 1700.0,
+      "couple_time_s": 0.85,
+      "uncouple_time_s": 0.45,
+      "stall_guard_rpm": 600.0,
+      "restart_on_stall": true,
+      "restart_cooldown_s": 1.0
+    }
   },
   "kappa_ss": {
     "speeds_mps": [

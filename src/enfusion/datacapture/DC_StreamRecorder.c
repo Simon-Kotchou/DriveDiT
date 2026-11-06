@@ -265,7 +265,8 @@ class DC_Actuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Makes the vehicle drivable (engine on, persistent handbrake off)
+	//! Makes the vehicle drivable (engine on, persistent handbrake off): at the spawn, and from llc_v1 to restart a
+	//! stalled engine (its launch clutch, DD-14c)
 	void Start()
 	{
 	}
@@ -297,15 +298,23 @@ class DC_Actuator
 //! :140); the noise-steer and roughness sensitivities are left at their defaults (r2 X6). A controller that sets the
 //! persistent handbrake again while the command releases it is overridden and counted (1.9 robustness). The gearbox
 //! kind and the vanilla gear indices are read once in Init; Park selects neutral on a manual gearbox; the body is woken
-//! at drive start and whenever it sleeps while driving (see the DC_ACTUATOR note in the header)
+//! at drive start and whenever it sleeps while driving (see the DC_ACTUATOR note in the header).
+//! LAUNCH CLUTCH (DD-14c, DC_LaunchClutch.c): the 1.9.0.37 powertrain stalls at a clutch-1 drive-off. Apply passes the
+//! clutch it is given: llc_v1 ramps it (the card's gearbox.launch_clutch) before Apply, so llc_clutch stays the value
+//! passed to SetClutch. A stalled engine is restarted by Start, the Mode A start below, which llc_v1 calls when its
+//! launch clutch asks for it; every ForceStartEngine after the first (the spawn's) is such a restart, counted and
+//! logged as a WARNING (console only: dc-2.0 is frozen). Park keeps clutch 1 in neutral with the handbrake, as before
 class DC_ActuatorModeA : DC_Actuator
 {
+	static const string LOG = "[DC_ModeA] ";
+
 	protected IEntity m_Vehicle;
 	protected CarControllerComponent m_Controller;
 	protected VehicleWheeledSimulation m_Simulation;
 	protected string m_sFailure = "not initialised";
 	protected bool m_bForceSimulation;
 	protected int m_iPersistentHandbrakeResets;
+	protected int m_iEngineForceStarts;			//!< ForceStartEngine calls of Start: the spawn's, then stall restarts
 
 	// gearbox (read in Init; vanilla rule of SCR_ToggleHandbrakeAction.c:99-108)
 	protected string m_sGearboxKind;
@@ -478,8 +487,17 @@ class DC_ActuatorModeA : DC_Actuator
 			return;
 
 		m_Controller.SetPersistentHandBrake(false);
-		if (!m_Controller.IsEngineOn())
-			m_Controller.ForceStartEngine();
+		if (m_Controller.IsEngineOn())
+			return;
+
+		m_Controller.ForceStartEngine();
+		m_iEngineForceStarts++;
+		if (m_iEngineForceStarts < 2 || !m_Simulation)
+			return;
+
+		float speedKmh = m_Simulation.GetSpeedKmh();
+		float rpm = m_Simulation.EngineGetRPM();
+		Print(string.Format(LOG + "engine restart: ForceStartEngine call %1 since the spawn, after a stall (the launch clutch's restart, DC_LaunchClutch, DD-14c); speed %2 km/h, rpm %3", m_iEngineForceStarts, speedKmh.ToString(-1, 1), rpm.ToString(-1, 0)), LogLevel.WARNING);
 	}
 
 	//------------------------------------------------------------------------------------------------

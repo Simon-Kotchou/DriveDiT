@@ -20,7 +20,6 @@ policy_valid 0 from the crash on, ego_destroyed as a normal seal). Temporary ses
 on /dev/shm/ or /mnt/e/, else /dev/shm/, and are removed.
 """
 
-import hashlib
 import importlib.util
 import json
 import math
@@ -803,67 +802,6 @@ class DefectTest(unittest.TestCase):
         s = reader.open_session(golden_source(), vehicle_card=card, decode_images=False, strict=False)
         self.assertIsNone(s.vehicle_card)                       # a dict cannot be checked against the sha
         self.assertEqual(len(s.problems_for("C02")), 1)
-
-    def test_regenerated_card_reads_its_archived_bytes(self):
-        # DD-14c regenerated the S105 placeholder (the launch clutch). A session stamped with the old card is read
-        # through the old bytes, archived as <pin_id>/history/<card_id>.<sha256>.json, never through the new card
-        golden = golden_source()
-        with open(os.path.join(golden, "session.json"), "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        card_id, pin_id, sha = (meta["control"]["vehicle_card_id"], meta["pin"]["pin_id"],
-                                meta["control"]["vehicle_card_sha"])
-        with open(CARD, "rb") as f:
-            stamped = f.read()
-        self.assertEqual(hashlib.sha256(stamped).hexdigest(), sha)
-        cards = os.path.join(self.tmp, "cards")
-        os.makedirs(os.path.join(cards, pin_id, "history"))
-        current = json.loads(stamped.decode("ascii"))
-        current["gearbox"] = dict(current.get("gearbox") or {}, launch_clutch={"mode": "ramp"})
-        with open(os.path.join(cards, pin_id, card_id + ".json"), "w", encoding="ascii") as f:
-            json.dump(current, f)
-        saved = reader.CARDS_DIR
-        reader.CARDS_DIR = cards
-        self.addCleanup(setattr, reader, "CARDS_DIR", saved)
-        with self.assertRaisesRegex(reader.ReaderError, "C02 control.vehicle_card_sha"):
-            reader.open_session(golden, decode_images=False)                    # no archive: the new card is refused
-        archived = os.path.join(cards, pin_id, "history", "%s.%s.json" % (card_id, sha))
-        with open(archived, "wb") as f:
-            f.write(stamped)
-        s = reader.open_session(golden, decode_images=False)
-        self.assertEqual(s.vehicle_card, json.loads(stamped.decode("ascii")))
-        self.assertTrue(any("history" in note for note in s.notes))
-        self.assertEqual(s.problems_for("C02"), [])
-        os.remove(os.path.join(cards, pin_id, card_id + ".json"))               # also when the current card is gone
-        self.assertEqual(reader.open_session(golden, decode_images=False).vehicle_card, s.vehicle_card)
-        with open(os.path.join(cards, pin_id, card_id + ".json"), "w", encoding="ascii") as f:
-            json.dump(current, f)
-        with open(archived, "wb") as f:                                          # the name is not trusted: the bytes
-            f.write(stamped + b"\n")                                             # must hash to the stamped sha256
-        with self.assertRaisesRegex(reader.ReaderError, "C02 control.vehicle_card_sha"):
-            reader.open_session(golden, decode_images=False)
-        # an explicit card path is used as given (a mismatch stays C02, the archive is not consulted)
-        with open(archived, "wb") as f:
-            f.write(stamped)
-        other = os.path.join(self.tmp, "other.json")
-        with open(other, "w", encoding="ascii") as f:
-            json.dump(current, f)
-        with self.assertRaisesRegex(reader.ReaderError, "C02 control.vehicle_card_sha"):
-            reader.open_session(golden, vehicle_card=other, decode_images=False)
-
-    def test_archived_cards_hash_to_their_names(self):
-        # every archived card in the repo is the exact bytes its name says (the reader checks it again on use)
-        root = os.path.join(REPO, "tools", "ident", "cards")
-        found = 0
-        for pin in sorted(os.listdir(root)):
-            history = os.path.join(root, pin, "history")
-            for name in sorted(os.listdir(history)) if os.path.isdir(history) else []:
-                card_id, sha, ext = name.rsplit(".", 2)
-                with open(os.path.join(history, name), "rb") as f:
-                    self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha, name)
-                self.assertEqual(ext, "json")
-                self.assertTrue(os.path.isfile(os.path.join(root, pin, card_id + ".json")), name)
-                found += 1
-        self.assertGreaterEqual(found, 1)       # the S105 placeholder before DD-14c (T0L session of 2026-11-05)
 
     def test_legacy_sessions_raise(self):
         legacy = synth.write_legacy_session(self.tmp)

@@ -100,6 +100,11 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 STREAMS_JSON = os.path.join(REPO, "docs", "capture_contract", "dc-2.0.streams.json")
 CARDS_DIR = os.path.join(REPO, "tools", "ident", "cards")
+# A card regenerated after sessions were stamped with it (DD-14c: the S105 placeholder gained its launch clutch)
+# keeps the stamped bytes as <pin_id>/history/<card_id>.<sha256>.json: the default lookup reads those bytes for a
+# session whose control.vehicle_card_sha names them, never another card
+CARD_HISTORY_DIR = "history"
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 READER_VERSION = "dc2-reader/1"
 CONTRACT_VERSION = "dc-2.0"
@@ -762,7 +767,9 @@ def open_session(path, sealed_eval=False, strict=True, schema=None, decode_image
                     (builders); False: record problems in Session.problems (validator).
     decode_images   decode every image's fiducial (needs cv2); False leaves img_resolved without codes.
     vehicle_card    dict or path of the vehicle card (gear_indices_forward ...); default
-                    tools/ident/cards/<pin_id>/<control.vehicle_card_id>.json when it exists. Without a card
+                    tools/ident/cards/<pin_id>/<control.vehicle_card_id>.json when it exists, or, when its bytes
+                    are not the ones control.vehicle_card_sha names, <pin_id>/history/<card_id>.<sha256>.json
+                    when that file exists and hashes to it (a card regenerated after the session). Without a card
                     dir_state is None (the gear mapping is read back, never assumed; TBD-7). A card whose sha256
                     differs from control.vehicle_card_sha (or a dict card when the session names a sha) is a C02
                     problem and is not used.
@@ -978,12 +985,7 @@ def _load_card(s, card):
         return card
     path = card
     if path is None:
-        card_id = s.meta_get("control.vehicle_card_id")
-        pin_id = s.meta_get("pin.pin_id")
-        if isinstance(card_id, str) and isinstance(pin_id, str) and "/" not in card_id and "/" not in pin_id \
-                and ".." not in card_id and ".." not in pin_id:
-            candidate = os.path.join(CARDS_DIR, pin_id, card_id + ".json")
-            path = candidate if os.path.isfile(candidate) else None
+        path = _default_card_path(s, sha)
     if path is None:
         s.notes.append("no vehicle card: dir_state is null (TBD-7)")
         return None
@@ -997,6 +999,32 @@ def _load_card(s, card):
     if not sha:
         s.notes.append("vehicle card %s used; the session names no vehicle_card_sha" % path)
     return json.loads(raw.decode("utf-8"))
+
+
+def _default_card_path(s, sha):
+    """The default card of a session: tools/ident/cards/<pin_id>/<control.vehicle_card_id>.json. When its bytes are
+    not the ones session.json control.vehicle_card_sha names (the card was regenerated after the session), the
+    archived bytes <pin_id>/history/<card_id>.<sha256>.json instead, if they hash to that sha256 (a note says so); else
+    the current card (C02 in _load_card) or None."""
+    card_id = s.meta_get("control.vehicle_card_id")
+    pin_id = s.meta_get("pin.pin_id")
+    if not (isinstance(card_id, str) and isinstance(pin_id, str) and "/" not in card_id and "/" not in pin_id
+            and ".." not in card_id and ".." not in pin_id):
+        return None
+    current = os.path.join(CARDS_DIR, pin_id, card_id + ".json")
+    current = current if os.path.isfile(current) else None
+    if isinstance(sha, str) and SHA256_HEX_RE.match(sha) and (current is None or _file_sha256(current) != sha):
+        archived = os.path.join(CARDS_DIR, pin_id, CARD_HISTORY_DIR, "%s.%s.json" % (card_id, sha))
+        if os.path.isfile(archived) and _file_sha256(archived) == sha:
+            s.notes.append("vehicle card %s: the bytes control.vehicle_card_sha names (the current card %s differs)"
+                           % (archived, current or "is missing"))
+            return archived
+    return current
+
+
+def _file_sha256(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 def dir_state_of(card, gear):

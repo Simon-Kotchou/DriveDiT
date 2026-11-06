@@ -27,6 +27,23 @@ has no anti-stall for direct setters (G19_0_STATIC_1.9.0.37.md section 1), so DC
   - The defaults are the same in DC_LaunchClutchConfig, the DC_ProbeSequences attributes, the provisional 1.9.0.37 card
     and its generator. The three actuation paths (DC_ProbeActuator, llc_v1, DC_ActuatorModeA.Start) call the helper as
     described, and the deploy manifest carries the new file and the 1.9.0.37 card.
+
+DD-14d (mode slip). The first 1.9.0.37 Play with the ramp (launch 20261106T194516Z-wb-ab6a, e01 play_01) chattered.
+tools/ident/launch_clutch_model.py holds the S105 powertrain fitted to that Play (tools/ident/fit_launch_clutch.py) and
+the mirror of DC_LaunchClutch in every mode (LaunchClutch here). tests/fixtures/launch_clutch_19/e01_launches.csv is
+that Play's launches and a free decay, trimmed to the step columns the fit reads.
+  - The fit: from DD-14c's toy values it lands on S105_19, rms about 40 rpm / 0.035 m/s over 15-step shooting segments;
+    the free decay gives the drag rate.
+  - Replayed in closed loop with each launch's recorded readback timing, the DD-14c ramp chatters as the Play did, and
+    mode slip does not.
+  - Acceptance on the plant (timing U and A): launches at throttle 0.3 / 0.5 / 0.6 / 1.0, flat and at +-5 % grade, with
+    no opening, no step-to-step oscillation of c, rpm at or above the guard + 100 and c = 1 at throttle 0.5 by 2.0 s;
+    a brake of 0.3 / 0.6 / 1.0 from 15 / 30 / 40 km/h to a stop opens without a stall, above the guard + 100; c stays
+    1 through the probe policy's shifts. The same holds with the engine inertia, the clutch capacity or the torque off by
+    20-30 %, a step more delay, callbacks of 1 to 3 steps and more brake slip (launch openings and stalls; the lock-up
+    time with 20 % less torque is reported, not required).
+  - The slip mirror follows DC_LaunchClutch.StepSlip statement by statement; the defaults (DC_LaunchClutchConfig.Slip(),
+    the attributes, the card, the generator) agree; the probe kit and llc_v1 pass the driveline rpm as described.
 """
 
 import importlib.util
@@ -57,6 +74,9 @@ def load_module(name, path):
 
 
 fit = load_module("fit_steer_kappa", os.path.join(REPO, "tools", "ident", "fit_steer_kappa.py"))
+model = load_module("launch_clutch_model", os.path.join(REPO, "tools", "ident", "launch_clutch_model.py"))
+analysis = load_module("fit_launch_clutch", os.path.join(REPO, "tools", "ident", "fit_launch_clutch.py"))
+FIXTURE = os.path.join(REPO, "tests", "fixtures", "launch_clutch_19", "e01_launches.csv")
 
 
 def read(path):
@@ -107,74 +127,9 @@ def attribute_defaults(source):
         r'\[Attribute\("([^"]*)"[^\n]*\]\n\tprotected \w+ (m_\w+);', source))
 
 
-class LaunchClutch:
-    """Python mirror of DC_LaunchClutch (Configure, Reset, Step, ConsumeRestart, the counters), statement for statement;
-    LaunchClutchTiesTest ties it to the Enforce source."""
-
-    DEFAULTS = {"mode": "off", "engage_rpm": 1100.0, "full_rpm": 1700.0, "couple_time_s": 0.85,
-                "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
-                "restart_cooldown_s": 1.0}
-
-    def __init__(self, **config):
-        self.config = dict(self.DEFAULTS, **config)
-        self.reset()
-        self.engine_seen = -1
-        self.max_slip_s = self.max_slip_total_s = 0.0
-        self.stalls = self.restarts = self.guard_drops = 0
-
-    def reset(self):
-        self.coupling = 0.0
-        self.since_restart_s = -1.0
-        self.restart_due = False
-        self.slip_s = 0.0
-
-    def step(self, dt, in_gear, handbrake, rpm, engine_on, commanded_clutch, dip):
-        cfg = self.config
-        commanded = min(max(commanded_clutch, 0.0), 1.0)
-        slice_s = max(dt, 0.0)
-        if self.engine_seen == 1 and not engine_on:
-            self.stalls += 1
-        self.engine_seen = 0
-        if engine_on:
-            self.engine_seen = 1
-        if cfg["mode"] != "ramp":
-            return commanded
-        cooled = self.since_restart_s < 0 or self.since_restart_s >= cfg["restart_cooldown_s"]
-        if not engine_on and not handbrake and cfg["restart_on_stall"] and cooled:
-            self.restart_due = True
-            self.restarts += 1
-            self.since_restart_s = 0.0
-            self.coupling = 0.0
-        driving = in_gear and not handbrake and not dip and engine_on
-        if not driving:
-            self.coupling = 0.0
-        elif rpm < cfg["stall_guard_rpm"]:
-            if self.coupling > 0:
-                self.guard_drops += 1
-            self.coupling = 0.0
-        elif rpm <= cfg["engage_rpm"]:
-            self.coupling = 0.0
-        else:
-            target = min(max((rpm - cfg["engage_rpm"]) / (cfg["full_rpm"] - cfg["engage_rpm"]), 0.0), 1.0)
-            if target > self.coupling:
-                self.coupling = min(target, self.coupling + slice_s / cfg["couple_time_s"])
-            else:
-                self.coupling = max(target, self.coupling - slice_s / cfg["uncouple_time_s"])
-        if driving and 0 < self.coupling < 1:
-            self.slip_s += slice_s
-        else:
-            self.slip_s = 0.0
-        if self.since_restart_s >= 0:
-            self.since_restart_s += slice_s
-        self.max_slip_s = max(self.max_slip_s, self.slip_s)
-        self.max_slip_total_s = max(self.max_slip_total_s, self.slip_s)
-        return min(commanded, self.coupling)
-
-    def consume_restart(self):
-        if not self.restart_due:
-            return False
-        self.restart_due = False
-        return True
+# The mirror of DC_LaunchClutch (every mode) lives in tools/ident/launch_clutch_model.py, where fit_launch_clutch.py
+# replays it; LaunchClutchTiesTest and SlipTiesTest tie it to the Enforce source
+LaunchClutch = model.LaunchClutch
 
 
 def ramp(**config):
@@ -182,27 +137,37 @@ def ramp(**config):
 
 
 def check_ranges(config):
-    """Mirror of DC_LaunchClutchConfig.Check (the ranges, either mode)."""
-    c = config
-    return (c["mode"] in ("off", "ramp") and 0 < c["engage_rpm"] < c["full_rpm"] <= 10000.0
+    """Mirror of DC_LaunchClutchConfig.Check (the ranges, every mode; the slip fields too)."""
+    c = dict(LaunchClutch.DEFAULTS, **config)
+    return (c["mode"] in ("off", "ramp", "slip") and 0 < c["engage_rpm"] < c["full_rpm"] <= 10000.0
             and 0 <= c["stall_guard_rpm"] < c["engage_rpm"] and 0 < c["couple_time_s"] <= 10.0
-            and 0 < c["uncouple_time_s"] <= 10.0 and 0 <= c["restart_cooldown_s"] <= 10.0)
+            and 0 < c["uncouple_time_s"] <= 10.0 and 0 <= c["restart_cooldown_s"] <= 10.0
+            and 0 <= c["slip_kp"] <= 0.01 and 0 < c["slip_ki"] <= 0.1 and 0 <= c["lock_tolerance_rpm"] <= 1000.0)
 
 
-def probe_set_launch_clutch(config, manual, downshift_rpm, rpm_idle, rpm_max):
-    """Mirror of DC_ProbeActuator.SetLaunchClutch: the ranges, then on a manual gearbox with mode ramp full_rpm below
-    the policy's downshift rpm, then CheckEngine; the one validation of the configuration the actuator drives with."""
+def probe_set_launch_clutch(config, manual, downshift_rpm, rpm_idle, rpm_max, upshift_rpm=4500.0,
+                            mps_per_krpm=(1.54871, 2.772066, 4.169103)):
+    """Mirror of DC_ProbeActuator.SetLaunchClutch: the ranges, then on a manual gearbox with mode ramp or slip full_rpm
+    below the policy's downshift rpm, for slip every m/s per 1000 rpm > 0 and every policy upshift landing at or above
+    2 x engage_rpm (CheckSlipUpshifts), then CheckEngine; the one validation of the configuration the actuator drives
+    with."""
     if not check_ranges(config):
         return False
-    if config["mode"] == "ramp" and manual and config["full_rpm"] >= downshift_rpm:
+    if config["mode"] in ("ramp", "slip") and manual and config["full_rpm"] >= downshift_rpm:
         return False
+    if config["mode"] == "slip" and manual:
+        if any(v <= 0 for v in mps_per_krpm):
+            return False
+        ceiling = 2.0 * config["engage_rpm"]
+        if any(upshift_rpm * a / b < ceiling for a, b in zip(mps_per_krpm, mps_per_krpm[1:])):
+            return False
     return not manual or check_engine(config, rpm_idle, rpm_max)
 
 
 def check_engine(config, rpm_idle, rpm_max):
-    """Mirror of DC_LaunchClutchConfig.CheckEngine: mode ramp needs engage_rpm above the idle and full_rpm below
+    """Mirror of DC_LaunchClutchConfig.CheckEngine: mode ramp or slip needs engage_rpm above the idle and full_rpm below
     FULL_RPM_MAX_FRACTION (0.5) of a known max rpm."""
-    if config["mode"] != "ramp":
+    if config["mode"] not in ("ramp", "slip"):
         return True
     if config["engage_rpm"] <= rpm_idle:
         return False
@@ -604,11 +569,12 @@ class LaunchClutchTiesTest(unittest.TestCase):
                 "float commanded = Math.Clamp(commandedClutch, 0, 1); float slice = Math.Max(dt, 0);",
                 "if (m_iEngineSeen == 1 && !engineOn) m_iStalls++; m_iEngineSeen = 0; if (engineOn) m_iEngineSeen = 1;",
                 # the cooldown is decided on the time before this call and advanced by it afterwards
-                "if (!m_Config.IsRamp()) return commanded; bool cooled = m_fSinceRestartS < 0 || m_fSinceRestartS >= "
+                "if (!m_Config.IsActive()) return commanded; bool cooled = m_fSinceRestartS < 0 || m_fSinceRestartS >= "
                 "m_Config.m_fRestartCooldownS;",
                 "if (!engineOn && !handbrake && m_Config.m_bRestartOnStall && cooled) { m_bRestartDue = true; "
                 "m_iRestarts++; m_fSinceRestartS = 0; m_fCoupling = 0; }",
-                "bool driving = inGear && !handbrake && !dip && engineOn; if (!driving) { m_fCoupling = 0; } "
+                "bool driving = inGear && !handbrake && !dip && engineOn; if (m_Config.IsSlip()) { StepSlip(slice, "
+                "driving, rpm, drivelineRpm); } else if (!driving) { m_fCoupling = 0; } "
                 "else if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; m_fCoupling = 0; } "
                 "else if (rpm <= m_Config.m_fEngageRpm) { m_fCoupling = 0; } "
                 "else { float target = Math.Clamp((rpm - m_Config.m_fEngageRpm) / (m_Config.m_fFullRpm - "
@@ -622,8 +588,10 @@ class LaunchClutchTiesTest(unittest.TestCase):
             self.assertIn(statement, step)
         self.assertIn("if (!m_bRestartDue) return false; m_bRestartDue = false; return true;",
                       class_method(self.helper, "DC_LaunchClutch", "ConsumeRestart"))
-        self.assertIn("m_fCoupling = 0; m_fSinceRestartS = -1; m_bRestartDue = false; m_fSlipS = 0;",
-                      class_method(self.helper, "DC_LaunchClutch", "Reset"))
+        self.assertIn("m_fCoupling = 0; m_fSinceRestartS = -1; m_bRestartDue = false; m_fSlipS = 0; m_bLocked = false; "
+                      "m_fLastRpm = -1; m_fLastMeanRpm = -1;", class_method(self.helper, "DC_LaunchClutch", "Reset"))
+        self.assertIn("float Step(float dt, bool inGear, bool handbrake, float rpm, bool engineOn, float commandedClutch, "
+                      "bool dip, float drivelineRpm = -1)", self.helper)
         self.assertIn("m_fMaxSlipS = m_fSlipS;", class_method(self.helper, "DC_LaunchClutch", "ResetMaxSlip"))
         # the helper calls no engine API and writes no capture stream or event (dc-2.0 is frozen)
         code = code_only(self.helper)
@@ -639,23 +607,35 @@ class LaunchClutchTiesTest(unittest.TestCase):
                             "uncouple_time_s": consts["DEFAULT_UNCOUPLE_TIME_S"],
                             "stall_guard_rpm": consts["DEFAULT_STALL_GUARD_RPM"],
                             "restart_on_stall": consts["DEFAULT_RESTART_ON_STALL"],
-                            "restart_cooldown_s": consts["DEFAULT_RESTART_COOLDOWN_S"]}
+                            "restart_cooldown_s": consts["DEFAULT_RESTART_COOLDOWN_S"],
+                            "slip_kp": consts["DEFAULT_SLIP_KP"], "slip_ki": consts["DEFAULT_SLIP_KI"],
+                            "lock_tolerance_rpm": consts["DEFAULT_LOCK_TOLERANCE_RPM"]}
         mirror = dict(LaunchClutch.DEFAULTS)
         self.assertEqual(mirror.pop("mode"), "off")                 # a DC_LaunchClutchConfig starts off ...
         self.assertIn("string m_sMode = MODE_OFF;", self.helper)
         self.assertEqual(enforce_defaults, mirror)
         self.assertIn("config.m_sMode = MODE_RAMP;", class_method(self.helper, "DC_LaunchClutchConfig", "Ramp"))
-        ramp_defaults = dict(enforce_defaults, mode="ramp")          # ... Ramp() is the probe kit's default
+        base_keys = list(fit.LAUNCH_CLUTCH_KEYS)
+        ramp_defaults = dict(((k, enforce_defaults[k]) for k in base_keys[1:]), mode="ramp")   # Ramp(): DD-14c's
         self.assertEqual(fit.PLACEHOLDER_LAUNCH_CLUTCH, ramp_defaults)
+        # ... Slip() (DD-14d) is the probe kit's default and the 1.9.0.37 card's: full_rpm the held rpm
+        self.assertEqual(class_method(self.helper, "DC_LaunchClutchConfig", "Slip"),
+                         ") { DC_LaunchClutchConfig config = new DC_LaunchClutchConfig(); config.m_sMode = MODE_SLIP; "
+                         "config.m_fFullRpm = DEFAULT_SLIP_FULL_RPM; return config;")
+        slip_defaults = dict(enforce_defaults, mode="slip", full_rpm=consts["DEFAULT_SLIP_FULL_RPM"])
+        self.assertEqual(LaunchClutch.slip().config, slip_defaults)
+        self.assertEqual(LaunchClutch.SLIP_FULL_RPM, consts["DEFAULT_SLIP_FULL_RPM"])
+        self.assertEqual(fit.PLACEHOLDER_SLIP_LAUNCH_CLUTCH, slip_defaults)
         with open(CARD, "r", encoding="ascii") as f:
-            self.assertEqual(json.load(f)["gearbox"]["launch_clutch"], ramp_defaults)
+            self.assertEqual(json.load(f)["gearbox"]["launch_clutch"], slip_defaults)
         attrs = attribute_defaults(self.probe)
         names = {"mode": "m_sLaunchClutchMode", "engage_rpm": "m_fLaunchEngageRpm", "full_rpm": "m_fLaunchFullRpm",
                  "couple_time_s": "m_fLaunchCoupleS", "uncouple_time_s": "m_fLaunchUncoupleS",
                  "stall_guard_rpm": "m_fLaunchStallGuardRpm", "restart_on_stall": "m_bLaunchRestartOnStall",
-                 "restart_cooldown_s": "m_fLaunchRestartCooldownS"}
+                 "restart_cooldown_s": "m_fLaunchRestartCooldownS", "slip_kp": "m_fLaunchSlipKp",
+                 "slip_ki": "m_fLaunchSlipKi", "lock_tolerance_rpm": "m_fLaunchLockTolRpm"}
         for key, name in names.items():
-            value = ramp_defaults[key]
+            value = slip_defaults[key]
             if isinstance(value, bool):
                 self.assertEqual(attrs[name], "1" if value else "0", name)
             elif isinstance(value, str):
@@ -665,26 +645,30 @@ class LaunchClutchTiesTest(unittest.TestCase):
         # full_rpm below the shift policy's downshift rpm (attribute and actuator default): fully coupled wherever
         # the policy drives; the idle (800 rpm, run header vehicle.rpm_idle) below engage_rpm never bites
         self.assertLess(ramp_defaults["full_rpm"], float(attrs["m_fShiftDownRpm"]))
+        self.assertLess(slip_defaults["full_rpm"], float(attrs["m_fShiftDownRpm"]))
         self.assertIn("static const float DEFAULT_DOWNSHIFT_RPM = %g;" % float(attrs["m_fShiftDownRpm"]), self.probe)
         self.assertGreater(ramp_defaults["engage_rpm"], ToyPowertrain.RPM_IDLE)
         self.assertLess(ramp_defaults["stall_guard_rpm"], ToyPowertrain.RPM_IDLE)
         # the ranges of DC_LaunchClutchConfig.Check are the Python validator's
         self.assertEqual((consts["RPM_MAX"], consts["TIME_MAX_S"]), (fit.LAUNCH_RPM_MAX, fit.LAUNCH_TIME_MAX_S))
         check = class_method(self.helper, "DC_LaunchClutchConfig", "Check")
-        for rule in ("if (m_sMode != MODE_OFF && m_sMode != MODE_RAMP)",
-                     "if (m_fEngageRpm <= 0 || m_fFullRpm <= m_fEngageRpm || m_fFullRpm > RPM_MAX)",
+        for rule in ("if (m_fEngageRpm <= 0 || m_fFullRpm <= m_fEngageRpm || m_fFullRpm > RPM_MAX)",
                      "if (m_fStallGuardRpm < 0 || m_fStallGuardRpm >= m_fEngageRpm)",
                      "if (m_fCoupleTimeS <= 0 || m_fCoupleTimeS > TIME_MAX_S || m_fUncoupleTimeS <= 0 || "
                      "m_fUncoupleTimeS > TIME_MAX_S)",
                      "if (m_fRestartCooldownS < 0 || m_fRestartCooldownS > TIME_MAX_S)"):
             self.assertIn(rule, check)
-        self.assertEqual(fit.LAUNCH_CLUTCH_MODES, ("off", "ramp"))
+        self.assertIn("if (m_fSlipKp < 0 || m_fSlipKp > SLIP_KP_MAX || m_fSlipKi <= 0 || m_fSlipKi > SLIP_KI_MAX)", check)
+        self.assertIn("if (m_fLockToleranceRpm < 0 || m_fLockToleranceRpm > LOCK_TOLERANCE_MAX_RPM)", check)
+        self.assertEqual(fit.LAUNCH_CLUTCH_MODES, ("off", "ramp", "slip"))
+        self.assertIn("if (m_sMode != MODE_OFF && m_sMode != MODE_RAMP && m_sMode != MODE_SLIP)", check)
         self.assertIn('static const string MODE_OFF = "off";', self.helper)
         self.assertIn('static const string MODE_RAMP = "ramp";', self.helper)
+        self.assertIn('static const string MODE_SLIP = "slip";', self.helper)
 
     def test_check_engine_follows_the_enforce_source(self):
         check = class_method(self.helper, "DC_LaunchClutchConfig", "CheckEngine")
-        for statement in ("if (!IsRamp()) { failure = string.Empty; return true; }",
+        for statement in ("if (!IsActive()) { failure = string.Empty; return true; }",
                           "if (m_fEngageRpm <= rpmIdle) {",
                           "float limit = FULL_RPM_MAX_FRACTION * rpmMax; if (rpmMax <= 0 || m_fFullRpm >= limit) {"):
             self.assertIn(statement, check)
@@ -705,7 +689,7 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertIn("DetectGearbox(); return true;", init_components)
         init = enforce_body(self.probe, "DC_ProbeActuator", "Init")
         self.assertEqual(init, "notnull IEntity vehicle) { if (!InitComponents(vehicle)) return false; "
-                               "DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp(); return "
+                               "DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Slip(); return "
                                'SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");')
         start = enforce_body(self.probe, "DC_ProbeSequences", "OnProbeStart")
         self.assertIn("if (m_Actuator.InitComponents(ego))", start)
@@ -725,15 +709,26 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertTrue(probe_set_launch_clutch(defaults, True, 1800.0, 800.0, 8000.0))    # the S105
         self.assertTrue(probe_set_launch_clutch(dict(off, full_rpm=5000.0), True, 1800.0, 600.0, 3000.0))
         self.assertTrue(probe_set_launch_clutch(defaults, False, 1800.0, 600.0, 3000.0))   # automatic: not ramped
+        # DD-14d: the slip defaults on the S105 (the policy's upshifts land at about 2514 and 2992 rpm, above 2200);
+        # refused with an upshift landing below 2 x engage_rpm, a non-positive m/s per 1000 rpm, or full_rpm at the
+        # downshift rpm
+        slip = LaunchClutch.slip().config
+        self.assertTrue(probe_set_launch_clutch(slip, True, 1800.0, 800.0, 8000.0))
+        self.assertFalse(probe_set_launch_clutch(slip, True, 1800.0, 800.0, 8000.0, upshift_rpm=3800.0))
+        self.assertFalse(probe_set_launch_clutch(slip, True, 1800.0, 800.0, 8000.0, mps_per_krpm=(1.5, 0.0, 4.1)))
+        self.assertFalse(probe_set_launch_clutch(dict(slip, full_rpm=1800.0), True, 1800.0, 800.0, 8000.0))
+        self.assertTrue(probe_set_launch_clutch(slip, False, 1800.0, 800.0, 8000.0, upshift_rpm=3800.0))
         # the mirror follows SetLaunchClutch
         set_launch = enforce_body(self.probe, "DC_ProbeActuator", "SetLaunchClutch")
-        order = ["if (!config.Check(failure))", "if (config.IsRamp() && m_bShiftPolicy && config.m_fFullRpm >= "
-                 "m_fDownshiftRpm)", "if (m_bShiftPolicy && !config.CheckEngine(", "m_LaunchClutch.Configure(config);"]
+        order = ["if (!config.Check(failure))", "if (config.IsActive() && m_bShiftPolicy && config.m_fFullRpm >= "
+                 "m_fDownshiftRpm)", "if (config.IsSlip() && m_bShiftPolicy && !CheckSlipUpshifts(config)) return "
+                 "false;", "if (m_bShiftPolicy && !config.CheckEngine(", "m_LaunchClutch.Configure(config);"]
         self.assertEqual([set_launch.index(x) for x in order], sorted(set_launch.index(x) for x in order))
 
     def test_card_downshifts_lie_above_the_band(self):
         # the 1.9.0.37 card's downshift speeds, by its scripted_mps_per_krpm, in the gear each shifts down from: about
-        # 1804 and 1799 rpm, at least full_rpm 1700 + DOWNSHIFT_RPM_MARGIN 50, so llc_v1 never drives a gear above the
+        # 1804 and 1799 rpm, at least full_rpm (1400 in DD-14d's mode slip) + DOWNSHIFT_RPM_MARGIN 50, so llc_v1 never
+        # drives a gear above the
         # first with the clutch slipping; Codex round 2's [2, 4] m/s would be about 721 and 959 rpm (refused)
         with open(CARD, "r", encoding="ascii") as f:
             gearbox = json.load(f)["gearbox"]
@@ -748,7 +743,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
     def test_run_header_block_is_the_cards_fields(self):
         # AppendHeaderLines writes launch_clutch.<card field> (fit_steer_kappa.launch_clutch_of reads them back)
         lines = class_method(self.helper, "DC_LaunchClutchConfig", "AppendHeaderLines")
-        self.assertEqual(re.findall(r'lines\.Insert\(prefix \+ "\.(\w+)="', lines), list(fit.LAUNCH_CLUTCH_KEYS))
+        self.assertEqual(re.findall(r'lines\.Insert\(prefix \+ "\.(\w+)="', lines),
+                         list(fit.LAUNCH_CLUTCH_KEYS + fit.LAUNCH_CLUTCH_SLIP_KEYS))
         self.assertEqual(fit.HEADER_LAUNCH_CLUTCH, "launch_clutch")
         gearbox_lines = enforce_body(self.probe, "DC_ProbeActuator", "AppendGearboxLines")
         self.assertIn('m_LaunchClutch.GetConfig().AppendHeaderLines(lines, "launch_clutch");', gearbox_lines)
@@ -757,20 +753,28 @@ class LaunchClutchTiesTest(unittest.TestCase):
         for key in ("stalls", "restarts", "guard_drops", "max_slip_s"):
             self.assertIn('lines.Insert(prefix + ".%s=" +' % key, self.helper)
             self.assertIn('phase.AddNote("%s:" +' % key, self.probe)
+        self.assertIn('lines.Insert(prefix + ".lockups=" + m_iLockups.ToString());', self.helper)
+        self.assertIn('lines.Insert("launch_clutch.mps_per_krpm=" + FloatsText(m_aLaunchMpsPerKrpm));', gearbox_lines)
+        self.assertIn('lines.Insert("launch_clutch.active=" + DC_LaunchGuard.BoolText(m_bShiftPolicy && '
+                      'm_LaunchClutch.IsActive()));', gearbox_lines)
         params = enforce_body(self.probe, "DC_ProbeSequences", "GetProbeParams")
         build = enforce_body(self.probe, "DC_ProbeSequences", "BuildLaunchClutchConfig")
         for name in ("m_sLaunchClutchMode", "m_fLaunchEngageRpm", "m_fLaunchFullRpm", "m_fLaunchCoupleS",
                      "m_fLaunchUncoupleS", "m_fLaunchStallGuardRpm", "m_bLaunchRestartOnStall",
-                     "m_fLaunchRestartCooldownS"):
+                     "m_fLaunchRestartCooldownS", "m_fLaunchSlipKp", "m_fLaunchSlipKi", "m_fLaunchLockTolRpm"):
             self.assertIn('outKeyValues.Insert("%s=" +' % name, params)
             self.assertIn(name, build)
+        self.assertIn('outKeyValues.Insert("m_sLaunchMpsPerKrpm=" + m_sLaunchMpsPerKrpm);', params)
 
     def test_probe_actuator_runs_it(self):
         apply_step = enforce_body(self.probe, "DC_ProbeActuator", "ApplyStep")
         call = ("if (m_bShiftPolicy) { bool inGear = m_iAppliedGear >= 0 && m_iAppliedGear != m_iGearNeutral; "
-                "bool engineOn = m_bEngineOn || !m_bStateRead; bool dip = m_fAppliedClutch <= 0; m_fAppliedClutch = "
-                "m_LaunchClutch.Step(timeSlice, inGear, m_bCmdHandbrake, m_fRpm, engineOn, m_fAppliedClutch, dip); "
-                "if (m_LaunchClutch.ConsumeRestart()) StartModeA(); }")
+                "bool engineOn = m_bEngineOn || !m_bStateRead; bool dip = m_fAppliedClutch <= 0; float drivelineRpm = "
+                "-1; int forwardSlot = m_iAppliedGear - m_iGearFirst; if (forwardSlot >= 0 && forwardSlot < "
+                "m_aLaunchMpsPerKrpm.Count() && m_aLaunchMpsPerKrpm[forwardSlot] > 0) drivelineRpm = m_vVelLocal[2] / "
+                "m_aLaunchMpsPerKrpm[forwardSlot] * 1000; m_fAppliedClutch = m_LaunchClutch.Step(timeSlice, inGear, "
+                "m_bCmdHandbrake, m_fRpm, engineOn, m_fAppliedClutch, dip, drivelineRpm); if "
+                "(m_LaunchClutch.ConsumeRestart()) StartModeA(); }")
         self.assertIn(call, apply_step)
         # after the shift policy and its dip, before the setters; cmd_clutch is the value passed to SetClutch
         self.assertLess(apply_step.index("m_fDipLeftS -= timeSlice;"), apply_step.index(call))
@@ -780,14 +784,14 @@ class LaunchClutchTiesTest(unittest.TestCase):
                                                                           "AddStepValues"))
         self.assertIn("m_bStateRead = true;", enforce_body(self.probe, "DC_ProbeActuator", "ReadPost"))
         init = enforce_body(self.probe, "DC_ProbeActuator", "Init")
-        self.assertIn("DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp(); "
+        self.assertIn("DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Slip(); "
                       'return SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");', init)
         start = enforce_body(self.probe, "DC_ProbeActuator", "StartModeA")
         self.assertIn("m_Controller.SetPersistentHandBrake(false); if (!m_Controller.IsEngineOn()) "
                       "m_Controller.ForceStartEngine();", start)
         set_launch = enforce_body(self.probe, "DC_ProbeActuator", "SetLaunchClutch")
         self.assertIn("if (!config.Check(failure))", set_launch)
-        self.assertIn("if (config.IsRamp() && m_bShiftPolicy && config.m_fFullRpm >= m_fDownshiftRpm)", set_launch)
+        self.assertIn("if (config.IsActive() && m_bShiftPolicy && config.m_fFullRpm >= m_fDownshiftRpm)", set_launch)
         self.assertIn("if (m_bShiftPolicy && !config.CheckEngine(m_Simulation.EngineGetRPMIdle(), "
                       "m_Simulation.EngineGetRPMMax(), failure))", set_launch)
         self.assertIn("m_LaunchClutch.Configure(config);", set_launch)
@@ -798,9 +802,11 @@ class LaunchClutchTiesTest(unittest.TestCase):
 
     def test_llc_and_mode_a_run_it(self):
         step = enforce_body(self.llc, "DC_LLCv1", "Step")
-        call = ("clutch = m_LaunchClutch.Step(sliceS, true, false, m_Simulation.EngineGetRPM(), "
-                "m_Simulation.EngineIsOn(), clutch, clutch <= 0); if (m_LaunchClutch.ConsumeRestart()) "
-                "m_Actuator.Start(); clutchRecorded = clutch; }")
+        call = ("float drivelineRpm = -1; if (m_iGearSlot < m_Card.m_aScriptedMpsPerKrpm.Count() && "
+                "m_Card.m_aScriptedMpsPerKrpm[m_iGearSlot] > 0) drivelineRpm = speed / "
+                "m_Card.m_aScriptedMpsPerKrpm[m_iGearSlot] * 1000; clutch = m_LaunchClutch.Step(sliceS, true, false, "
+                "m_Simulation.EngineGetRPM(), m_Simulation.EngineIsOn(), clutch, clutch <= 0, drivelineRpm); if "
+                "(m_LaunchClutch.ConsumeRestart()) m_Actuator.Start(); clutchRecorded = clutch; }")
         self.assertIn(call, step)
         scripted = step.index("if (m_Card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED) {")
         dip = step.index("if (m_iDipStepsLeft > 0) { clutch = 0;")
@@ -831,6 +837,386 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertIn(["script", "src/enfusion/datacapture/DC_LaunchClutch.c"], entries)
         self.assertIn(["config", "tools/ident/cards/1.9.0.37/S105.json"], entries)    # the provisional 1.9 card
         self.assertIn(["config", "tools/ident/cards/1.8.0.13/S105.json"], entries)
+
+
+
+def slip(**config):
+    return LaunchClutch.slip(**config)
+
+
+def hold(lc, rpm, steps=1, driveline=-1.0, dt=STEP_DT):
+    """steps calls of the slip clutch in gear, no handbrake, commanded 1, engine on at rpm; returns the last c."""
+    c = None
+    for _ in range(steps):
+        c = lc.step(dt, True, False, rpm, True, 1.0, False, driveline)
+    return c
+
+
+class SlipStepTest(unittest.TestCase):
+    """The per-call rules of DC_LaunchClutch.StepSlip (mode slip, DD-14d), on the mirror."""
+
+    def test_open_at_or_below_engage_and_the_pi_while_slipping(self):
+        lc = slip()
+        self.assertEqual(hold(lc, 800.0), 0.0)                       # idle never bites
+        self.assertEqual(hold(lc, 1100.0), 0.0)                      # engage_rpm: open
+        lc = slip()
+        cs = [hold(lc, 2000.0) for _ in range(5)]                    # above the held 1400: the integral couples ...
+        self.assertTrue(all(b > a for a, b in zip(cs, cs[1:])), cs)
+        self.assertAlmostEqual(cs[1] - cs[0], 0.001 * (2000.0 - 1400.0) * STEP_DT)
+        lc.coupling = 0.5
+        lc.last_rpm = lc.last_mean_rpm = 1300.0
+        c = hold(lc, 1300.0)                                         # ... and releases below it
+        self.assertAlmostEqual(c, 0.5 + 0.001 * (1300.0 - 1400.0) * STEP_DT)
+        lc.last_rpm = lc.last_mean_rpm = 1500.0
+        c0 = lc.coupling
+        c = hold(lc, 1700.0)                                         # proportional: on the change of the mean
+        self.assertAlmostEqual(c, c0 + 0.0003 * 100.0 + 0.001 * (1600.0 - 1400.0) * STEP_DT)
+        self.assertFalse(lc.locked)
+
+    def test_rate_limits_and_bounds(self):
+        lc = slip()
+        lc.last_rpm = lc.last_mean_rpm = 800.0
+        self.assertAlmostEqual(hold(lc, 8000.0), STEP_DT / 0.85)    # up by at most dt / couple_time_s
+        lc.coupling = 0.9
+        lc.last_rpm = lc.last_mean_rpm = 8000.0
+        self.assertAlmostEqual(hold(lc, 1101.0), 0.9 - STEP_DT / 0.45)   # down by at most dt / uncouple_time_s
+        lc.coupling = 0.005                                          # want 0.005 - 0.001 x 299 x dt < 0:
+        lc.last_rpm = lc.last_mean_rpm = 1101.0
+        self.assertEqual(hold(lc, 1101.0), 0.0)                      # never below 0
+        lc = slip()
+        self.assertAlmostEqual(hold(lc, 8000.0, dt=3 * STEP_DT), 3 * STEP_DT / 0.85)   # a 3-step call: 3 x as far
+        lc = slip()
+        self.assertEqual(hold(lc, 1400.0), 0.0)                      # first call: no change of the mean, no error
+        self.assertEqual(lc.coupling, 0.0)
+
+    def test_the_mean_follows_no_alternating_readback(self):
+        # DD-14d: the readback alternates between half a step and no step after the setters, so a steady slip reads
+        # 1500, 1600, 1500, ...; the mean of two readbacks is steady, and c moves one way only
+        lc = slip()
+        cs = [hold(lc, 1500.0 + 100.0 * (k % 2)) for k in range(12)]
+        deltas = [b - a for a, b in zip(cs, cs[1:])]
+        self.assertTrue(all(d > 0 for d in deltas[1:]), deltas)
+
+    def test_lockup_by_the_driveline_or_at_full_coupling(self):
+        lc = slip()
+        hold(lc, 1500.0, steps=3)
+        self.assertGreater(lc.coupling, 0)
+        self.assertEqual(hold(lc, 1500.0, driveline=1350.0), lc.coupling)   # 150 rpm apart: still slipping
+        self.assertLess(lc.coupling, 1.0)
+        self.assertEqual(hold(lc, 1500.0, driveline=1401.0), 1.0)           # within 100 rpm: coupled at once
+        self.assertTrue(lc.locked)
+        self.assertEqual(lc.lockups, 1)
+        lc = slip()
+        self.assertEqual(hold(lc, 1300.0, driveline=1300.0), 0.0)           # not while c is 0 (below the hold rpm)
+        self.assertFalse(lc.locked)
+        lc = slip()
+        lc.coupling = 0.99
+        lc.last_rpm = lc.last_mean_rpm = 3000.0
+        self.assertEqual(hold(lc, 3000.0), 1.0)                             # no driveline: when the PI reaches 1
+        self.assertTrue(lc.locked)
+
+    def test_coupled_until_engage_or_the_lookahead(self):
+        lc = slip()
+        lc.locked, lc.coupling = True, 1.0
+        lc.last_rpm = lc.last_mean_rpm = 1200.0
+        self.assertEqual(hold(lc, 1200.0, steps=10), 1.0)            # in the old band, steady: stays coupled
+        self.assertEqual(hold(lc, 1100.0), 0.0)                      # at engage_rpm: open at once
+        self.assertFalse(lc.locked)
+        self.assertEqual(lc.guard_drops, 0)
+        lc = slip()
+        lc.locked, lc.coupling = True, 1.0
+        lc.last_rpm, lc.last_mean_rpm = 1700.0, 1700.0
+        # a full brake: 1700 -> 1500 (mean 1600, change -100) predicts 1350: coupled; -> 1250 (mean 1375, change
+        # -225) predicts 912: open now, a call before engage_rpm
+        self.assertEqual(hold(lc, 1500.0), 1.0)
+        self.assertEqual(hold(lc, 1250.0), 0.0)
+        lc = slip()
+        lc.locked, lc.coupling = True, 1.0
+        lc.last_rpm, lc.last_mean_rpm = 4500.0, 4500.0
+        # an upshift drops the rpm fast but lands above 2 x engage_rpm: no lookahead there
+        self.assertEqual(hold(lc, 2600.0), 1.0)
+        self.assertEqual(hold(lc, 2300.0), 1.0)
+        self.assertEqual(lc.lookahead_ceiling_rpm(), 2200.0)
+
+    def test_zero_cases_guard_and_restart(self):
+        for args in ((False, False, False, True), (True, True, False, True), (True, False, True, True)):
+            lc = slip()
+            lc.locked, lc.coupling = True, 1.0
+            in_gear, handbrake, dip, on = args
+            self.assertEqual(lc.step(STEP_DT, in_gear, handbrake, 2500.0, on, 0.0 if dip else 1.0, dip, 2500.0), 0.0)
+            self.assertFalse(lc.locked, args)
+        lc = slip(restart_on_stall=False)
+        lc.locked, lc.coupling = True, 1.0
+        self.assertEqual(lc.step(STEP_DT, True, False, 2500.0, False, 1.0, False, 2500.0), 0.0)   # engine off
+        self.assertFalse(lc.locked)
+        lc = slip()
+        lc.locked, lc.coupling = True, 1.0
+        self.assertEqual(hold(lc, 599.0), 0.0)                       # below the guard: a guard drop
+        self.assertEqual((lc.guard_drops, lc.locked), (1, False))
+        lc = slip()
+        hold(lc, 2000.0)
+        restarts = []
+        for k in range(75):                                          # the ramp's stall restart, in mode slip too
+            lc.step(STEP_DT, True, False, 0.0, False, 1.0, False, -1.0)
+            if lc.consume_restart():
+                restarts.append(k)
+        self.assertEqual((lc.stalls, len(restarts), restarts[0]), (1, 3, 0))
+        lc.reset()
+        self.assertEqual((lc.locked, lc.last_rpm, lc.last_mean_rpm, lc.coupling), (False, -1.0, -1.0, 0.0))
+
+
+def fixture_rows():
+    rows = model.read_steps(FIXTURE)
+    return rows, model.readback_timing(rows), model.launch_windows(rows)
+
+
+# What the Play recorded with the DD-14c ramp (e01_steps.csv of launch 20261106T194516Z-wb-ab6a): openings while the
+# throttle is on and the first cmd_clutch = 1 after the launch [s]
+RECORDED = {"move_check": (2, 2.00), "throttle_0.30": (4, 3.83), "throttle_0.60": (1, 1.63), "throttle_1.00": (0, 0.93),
+            "gear_scripted": (3, 2.47)}
+
+
+class CalibrationTest(unittest.TestCase):
+    """The fitted plant against the 1.9.0.37 ramp Play (tests/fixtures/launch_clutch_19/e01_launches.csv)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows, cls.rho, cls.windows = fixture_rows()
+
+    def test_the_fixture_is_the_plays_chatter(self):
+        lines, passed = analysis.check_play(self.rows, {"launch_clutch.mode": "ramp",
+                                                        "launch_clutch.stall_guard_rpm": "600.0"})
+        self.assertFalse(passed)
+        self.assertEqual(sorted(self.windows), sorted(RECORDED))
+        for name, (first, last) in model.launch_windows(self.rows, seconds=8.0).items():
+            opens = sum(1 for i in range(first + 1, last + 1) if self.rows[i - 1]["cmd_clutch"] > 0
+                        and self.rows[i]["cmd_clutch"] == 0 and self.rows[i]["cmd_throttle"] > 0)
+            coupled = next(i - first for i in range(first, last + 1) if self.rows[i]["cmd_clutch"] >= 1.0)
+            self.assertEqual(opens, RECORDED[name][0], name)
+            self.assertAlmostEqual(coupled * STEP_DT, RECORDED[name][1], delta=0.02, msg=name)
+        self.assertTrue(any("move_check     throttle 0.50: 2 openings" in line for line in lines), lines)
+
+    def test_fit_quality(self):
+        e_rpm, e_v = model.shooting_residuals(None, self.rows, self.rho, self.windows)
+        self.assertLess(model.rms(e_rpm), 45.0)
+        self.assertLess(model.rms(e_v), 0.040)
+        drag, count = analysis.free_decay_per_s(self.rows)
+        self.assertGreater(count, 50)
+        self.assertAlmostEqual(drag, model.S105_19["drag_per_s"], delta=0.01)
+        # the clutch moves the rpm by about 965 rpm per step at c = 1: the ramp's 600 rpm band is a loop gain of 1.6
+        per_step = model.S105_19["clutch_nm"] / model.S105_19["j_kgm2"] * model.RPM_PER_RADS * STEP_DT
+        self.assertAlmostEqual(per_step, 965.0, delta=5.0)
+        self.assertGreater(per_step / 600.0, 1.5)
+
+    def test_the_fit_lands_on_s105_19_from_the_toy(self):
+        params, e_rpm, e_v = analysis.fit(self.rows, self.rho, self.windows,
+                                          dict(model.S105_19, **analysis.FIT_START), log=lambda *_: None)
+        for key in ("j_kgm2", "clutch_nm", "rolling_n"):
+            self.assertAlmostEqual(params[key] / model.S105_19[key], 1.0, delta=0.03, msg=key)
+        for got, want in zip(params["torque_nm"], model.S105_19["torque_nm"]):
+            self.assertAlmostEqual(got / want, 1.0, delta=0.03)
+        self.assertLess(e_rpm, 45.0)
+
+    def test_the_ramp_replay_chatters_like_the_play(self):
+        # closed loop on the plant, each launch with its recorded readback timing: the DD-14c ramp opens the clutch as
+        # the Play did (throttle 0.3 is the most sensitive: 4 in the Play) and couples fully at the Play's times
+        replay = analysis.replay(self.rows, self.rho, self.windows, None, analysis.DD14C_RAMP)
+        for name, (count, opens, lockup) in replay.items():
+            want_count, want_lockup = RECORDED[name]
+            if name == "throttle_0.30":
+                self.assertTrue(3 <= count <= 6, (name, count, opens))
+            else:
+                self.assertEqual(count, want_count, (name, opens))
+            self.assertAlmostEqual(lockup, want_lockup, delta=0.1, msg=name)
+        self.assertEqual(replay["move_check"][1][:2], [18, 34])        # the Play: steps 17 and 34 after the release
+
+    def test_the_slip_replay_does_not(self):
+        with open(CARD, "r", encoding="ascii") as f:
+            card_launch = json.load(f)["gearbox"]["launch_clutch"]
+        replay = analysis.replay(self.rows, self.rho, self.windows, None, card_launch)
+        for name, (count, opens, lockup) in replay.items():
+            self.assertEqual(count, 0, (name, opens))
+            self.assertLess(lockup, RECORDED[name][1] + 0.15, name)
+        self.assertLessEqual(replay["move_check"][2], 2.0)
+
+
+ACCEPT_THROTTLES = (0.3, 0.5, 0.6, 1.0)
+ACCEPT_GRADES = (0.0, 0.05, -0.05)
+GUARD_MARGIN_RPM = 100.0
+CALLS_1_TO_3 = (1, 1, 2, 1, 3, 1, 2, 3, 1, 1)
+
+
+class SlipAcceptanceTest(unittest.TestCase):
+    """DD-14d's acceptance on the fitted plant (tools/ident/launch_clutch_model.py), for the 1.9.0.37 card's slip."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(CARD, "r", encoding="ascii") as f:
+            cls.config = json.load(f)["gearbox"]["launch_clutch"]
+        cls.floor = cls.config["stall_guard_rpm"] + GUARD_MARGIN_RPM
+
+    def clutch(self):
+        return LaunchClutch(**self.config)
+
+    def test_launches(self):
+        for timing in ("U", "A"):
+            for throttle in ACCEPT_THROTTLES:
+                for grade in ACCEPT_GRADES:
+                    label = (timing, throttle, grade)
+                    m = model.metrics(model.launch(self.clutch(), throttle, grade=grade, timing=timing))
+                    self.assertEqual((m["openings"], m["stalls"]), (0, 0), label)
+                    self.assertLessEqual(m["alternations"], 1, label)          # no step-to-step oscillation of c
+                    self.assertGreaterEqual(m["min_rpm"], self.floor, label)
+                    if grade <= 0:
+                        self.assertIsNotNone(m["lockup_s"], label)
+                    if throttle == 0.5 and grade == 0.0:
+                        self.assertLessEqual(m["lockup_s"], 2.0, label)
+
+    def test_braking_to_a_stop_opens_first(self):
+        for timing in ("U", "A"):
+            for brake in (0.3, 0.6, 1.0):
+                for from_kmh in (15.0, 30.0, 40.0):
+                    label = (timing, brake, from_kmh)
+                    rows, first = model.brake_to_stop(self.clutch(), brake, from_kmh, timing=timing)
+                    m = model.metrics(rows, first)
+                    self.assertEqual(model.openings(rows[:first]), 0, label)
+                    self.assertEqual(m["stalls"], 0, label)
+                    self.assertTrue(m["end_on"] and m["end_c"] == 0.0 and m["end_kmh"] == 0.0, label)
+                    self.assertGreaterEqual(m["min_rpm"], self.floor, label)
+
+    def test_shifts_stay_coupled(self):
+        # the probe policy (up at 4500, down at 1800 rpm) up to fourth gear: after the first lock-up c stays 1
+        for throttle in (0.6, 1.0):
+            rows = model.launch(self.clutch(), throttle, seconds=14.0)
+            gears = [r[7] for r in rows]
+            self.assertGreaterEqual(max(gears), 4, throttle)
+            first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
+            self.assertEqual(min(r[1] for r in rows[first:]), 1.0, throttle)
+        # and a speed hold that coasts down through a downshift (throttle off at 30 km/h, then on again at 15)
+        state = {"coast": False}
+
+        def schedule(t, kmh):
+            if kmh >= 30.0:
+                state["coast"] = True
+            elif kmh <= 15.0:
+                state["coast"] = False
+            return (0.0, 0.1) if state["coast"] else (0.4, 0.0)
+
+        rows = model.drive(self.clutch(), schedule, 30.0)
+        first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
+        self.assertEqual(min(r[1] for r in rows[first:]), 1.0)
+        self.assertGreater(sum(1 for a, b in zip(rows, rows[1:]) if b[7] < a[7]), 0)   # it did shift down
+
+    def test_robust_to_the_fit_the_timing_and_the_callbacks(self):
+        variants = (("J x0.7", {"j_kgm2": model.S105_19["j_kgm2"] * 0.7}, {}),
+                    ("J x1.3", {"j_kgm2": model.S105_19["j_kgm2"] * 1.3}, {}),
+                    ("clutch x0.7", {"clutch_nm": model.S105_19["clutch_nm"] * 0.7}, {}),
+                    ("clutch x1.3", {"clutch_nm": model.S105_19["clutch_nm"] * 1.3}, {}),
+                    ("torque x0.8", {"torque_nm": tuple(t * 0.8 for t in model.S105_19["torque_nm"])}, {}),
+                    ("torque x1.2", {"torque_nm": tuple(t * 1.2 for t in model.S105_19["torque_nm"])}, {}),
+                    ("brake slip 0.5", {"brake_slip_mps": 0.5}, {}),
+                    ("a step more delay", {}, {"clutch_delay_steps": 1.0}),
+                    ("callbacks of 1 to 3 steps", {}, {"calls": CALLS_1_TO_3}),
+                    ("timing A2", {}, {"timing": "A2"}))
+        for label, params, kw in variants:
+            for throttle in ACCEPT_THROTTLES:
+                for grade in ACCEPT_GRADES:
+                    m = model.metrics(model.launch(self.clutch(), throttle, grade=grade, params=params, **kw))
+                    self.assertEqual((m["openings"], m["stalls"]), (0, 0), (label, throttle, grade))
+                    self.assertGreaterEqual(m["min_rpm"], self.floor, (label, throttle, grade))
+                    if throttle == 0.5 and grade == 0.0:
+                        limit = 2.0 if not label.startswith("torque x0.8") else 2.2
+                        self.assertLessEqual(m["lockup_s"], limit, label)
+            for brake in (0.3, 1.0):
+                for from_kmh in (15.0, 40.0):
+                    rows, first = model.brake_to_stop(self.clutch(), brake, from_kmh, params=params, **kw)
+                    m = model.metrics(rows, first)
+                    self.assertEqual(m["stalls"], 0, (label, brake, from_kmh))
+                    self.assertGreaterEqual(m["min_rpm"], self.floor, (label, brake, from_kmh))
+                    self.assertEqual(m["end_c"], 0.0, (label, brake, from_kmh))
+
+    def test_the_dd14c_ramp_fails_it(self):
+        ramp_clutch = LaunchClutch(**analysis.DD14C_RAMP)
+        m = model.metrics(model.launch(ramp_clutch, 0.5))
+        self.assertEqual(m["openings"], 2)
+        self.assertGreaterEqual(m["lockup_s"], 1.95)
+        _, passed = analysis.acceptance(analysis.DD14C_RAMP)
+        self.assertFalse(passed)
+        table, passed = analysis.acceptance(self.config)
+        self.assertTrue(passed, table)
+
+
+class SlipTiesTest(unittest.TestCase):
+    """The slip mirror, its constants and the driveline rpm of both callers against the Enforce sources (DD-14d)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.helper = read(HELPER_SOURCE)
+        cls.probe = read(PROBE_SOURCE)
+        cls.llc = read(LLC_SOURCE)
+
+    def test_mirror_follows_step_slip(self):
+        body = class_method(self.helper, "DC_LaunchClutch", "StepSlip")
+        for statement in (
+                "float last = m_fLastRpm; if (last < 0) last = rpm; float mean = 0.5 * (rpm + last); float meanLast = "
+                "m_fLastMeanRpm; if (meanLast < 0) meanLast = mean; m_fLastRpm = rpm; m_fLastMeanRpm = mean; float "
+                "engage = m_Config.m_fEngageRpm;",
+                "if (!driving) { m_fCoupling = 0; m_bLocked = false; return; }",
+                "if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; m_fCoupling = 0; "
+                "m_bLocked = false; return; }",
+                "if (m_bLocked) { float predicted = rpm; if (rpm < m_Config.GetLookaheadCeilingRpm()) predicted = rpm "
+                "+ DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_CALLS * Math.Min(mean - meanLast, 0); if (predicted <= "
+                "engage) { m_fCoupling = 0; m_bLocked = false; return; } m_fCoupling = 1; return; }",
+                "if (rpm <= engage) { m_fCoupling = 0; return; }",
+                "float want = m_fCoupling + m_Config.m_fSlipKp * (mean - meanLast) + m_Config.m_fSlipKi * (mean - "
+                "m_Config.m_fFullRpm) * slice; float lowest = Math.Max(m_fCoupling - slice / m_Config.m_fUncoupleTimeS, "
+                "0); float highest = Math.Min(m_fCoupling + slice / m_Config.m_fCoupleTimeS, 1); m_fCoupling = "
+                "Math.Clamp(want, lowest, highest);",
+                "if (m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= "
+                "m_Config.m_fLockToleranceRpm) m_bLocked = true; if (m_fCoupling >= 1) m_bLocked = true; if "
+                "(m_bLocked) { m_fCoupling = 1; m_iLockups++; }"):
+            self.assertIn(statement, body)
+        consts = enforce_constants(self.helper, "DC_LaunchClutchConfig")
+        self.assertEqual(consts["RELEASE_LOOKAHEAD_CALLS"], LaunchClutch.RELEASE_LOOKAHEAD_CALLS)
+        self.assertEqual(consts["RELEASE_LOOKAHEAD_ENGAGE_FACTOR"], LaunchClutch.RELEASE_LOOKAHEAD_ENGAGE_FACTOR)
+        self.assertIn("return RELEASE_LOOKAHEAD_ENGAGE_FACTOR * m_fEngageRpm;",
+                      class_method(self.helper, "DC_LaunchClutchConfig", "GetLookaheadCeilingRpm"))
+        self.assertIn("return m_sMode == MODE_RAMP || m_sMode == MODE_SLIP;",
+                      class_method(self.helper, "DC_LaunchClutchConfig", "IsActive"))
+        self.helper.encode("ascii")
+
+    def test_the_mps_per_krpm_agree(self):
+        with open(CARD, "r", encoding="ascii") as f:
+            card = json.load(f)
+        per_krpm = card["gearbox"]["scripted_mps_per_krpm"]
+        self.assertEqual(per_krpm, [model.CARD_MPS_PER_KRPM[g] for g in card["gearbox"]["scripted_gears"]])
+        attr = attribute_defaults(self.probe)["m_sLaunchMpsPerKrpm"]
+        self.assertEqual([float(v) for v in attr.split(",")], per_krpm)
+        self.assertIn("protected ref array<float> m_aLaunchMpsPerKrpm = {%s};" % ", ".join(repr(v) for v in per_krpm),
+                      self.probe)
+        # the card's ratios against the 1.9.0.37 Play's: within 1.3 %, far inside the 100 rpm lock-up tolerance
+        for gear, value in model.CARD_MPS_PER_KRPM.items():
+            self.assertAlmostEqual(value / model.S105_19_MPS_PER_KRPM[gear], 1.0, delta=0.013)
+
+    def test_the_probe_checks_the_upshifts(self):
+        check = enforce_body(self.probe, "DC_ProbeActuator", "CheckSlipUpshifts")
+        self.assertIn("float ceiling = config.GetLookaheadCeilingRpm(); for (int slot = 0; slot + 1 < "
+                      "m_aLaunchMpsPerKrpm.Count(); slot++) { float landing = m_fUpshiftRpm * m_aLaunchMpsPerKrpm[slot] "
+                      "/ m_aLaunchMpsPerKrpm[slot + 1]; if (landing < ceiling) {", check)
+        start = enforce_body(self.probe, "DC_ProbeSequences", "OnProbeStart")
+        self.assertIn("if (!ParseFloatList(m_sLaunchMpsPerKrpm, m_aLaunchMpsPerKrpm, LAUNCH_MPS_PER_KRPM_MIN, "
+                      "LAUNCH_MPS_PER_KRPM_MAX))", start)
+        self.assertLess(start.index("m_Actuator.SetLaunchMpsPerKrpm(m_aLaunchMpsPerKrpm);"),
+                        start.index("SetLaunchClutch("))
+        # the S105 policy's upshifts land at about 2514 and 2992 rpm, above 2 x 1100
+        landings = [4500.0 * a / b for a, b in zip((1.54871, 2.772066, 4.169103), (2.772066, 4.169103))]
+        self.assertTrue(all(x >= 2200.0 for x in landings), landings)
+
+    def test_the_image_probes_drive_with_slip(self):
+        for name in ("DC_ProbeImages.c", "DC_ProbeMarkers.c"):
+            self.assertIn("m_Actuator.Init(m_Ego)", read(os.path.join(SCRIPTS, name)), name)
+        self.assertIn("DC_LaunchClutchConfig.Slip();", enforce_body(self.probe, "DC_ProbeActuator", "Init"))
+        self.assertEqual(attribute_defaults(self.probe)["m_sLaunchClutchMode"], "slip")
 
 
 if __name__ == "__main__":

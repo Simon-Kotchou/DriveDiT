@@ -58,11 +58,10 @@
 //     1.9.0.37, :60 of 1.8.0.13; the probe's vehicle.rpm_max), so the band is attainable.
 // Shift rules are the caller's:
 //   - the probe actuator refuses a full_rpm at or above its policy's downshift rpm;
-//   - a vehicle card (llc_v1 shifts by speed, not rpm) refuses one at or above SCRIPTED_FULL_RPM_LIMIT on a scripted
-//     gearbox.
-// That static card bound is conservative. A bound from the card's downshift speeds would need each gear's rpm per
-// speed, which only an identified card's gearbox.detail.speed_per_krpm holds and llc_v1 does not read. The 1800 rpm
-// is the probe policy's downshift rpm, which the placeholder's shift speeds come from.
+//   - a vehicle card refuses a ramp on a scripted gearbox whose downshifts fall into the band. llc_v1 shifts by speed,
+//     so the card carries each scripted gear's measured m/s per 1000 rpm (gearbox.scripted_mps_per_krpm). Each
+//     downshift speed, in the gear it shifts down from, must be at least full_rpm + DOWNSHIFT_RPM_MARGIN
+//     (DC_VehicleCard.CheckLaunchDownshifts; fit_steer_kappa.py mirrors it).
 //
 // STALL RESTART (mode "ramp", restart_on_stall): when the engine is off, the handbrake is not commanded and
 // restart_cooldown_s has passed since the last restart (the first restart has no cooldown), Step requests a restart.
@@ -128,8 +127,8 @@ class DC_LaunchClutchConfig
 	static const float TIME_MAX_S = 10;
 	//! CheckEngine: full_rpm below this share of the engine's max rpm (S105: 0.5 x 8000 = 4000)
 	static const float FULL_RPM_MAX_FRACTION = 0.5;
-	//! Vehicle card, scripted gearbox, mode ramp: full_rpm below this (see BOUNDS in the header)
-	static const float SCRIPTED_FULL_RPM_LIMIT = 1800;
+	//! Vehicle card, scripted gearbox, mode ramp: each downshift's rpm at least full_rpm + this (BOUNDS in the header)
+	static const float DOWNSHIFT_RPM_MARGIN = 50;
 
 	string m_sMode = MODE_OFF;
 	float m_fEngageRpm = DEFAULT_ENGAGE_RPM;			//!< engage_rpm: the clutch starts to bite here

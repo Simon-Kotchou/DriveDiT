@@ -67,8 +67,10 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
                an automatic card on an ego with a manual gearbox (DC_LLCv1.CheckEgoGearbox). gearbox.launch_clutch
                (DD-14c, optional; DC_LaunchClutch.c) is the launch clutch E-01 drove with, read from its run header's
                launch_clutch.* block (DC_ProbeActuator.AppendGearboxLines) when the play has one and the gearbox is
-               scripted: llc_v1 ramps the clutch the same way. A play before DD-14c has none, and the card then has
-               none (mode off, the 1.8 sequence).
+               scripted: llc_v1 ramps the clutch the same way. With it go the scripted gears' measured m/s per 1000
+               rpm (gearbox.scripted_mps_per_krpm, from speed_per_krpm), which a ramp needs: each downshift speed must
+               be at least full_rpm + 50 rpm in the gear it shifts down from. A play before DD-14c has none, and the
+               card then has none (mode off, the 1.8 sequence).
   llc_v1       the controller parameters of DC_LLCv1 (LLC_DEFAULTS) with the fitted throttle and brake gains; the llc
                steering rate limiter is the identity (CC-08: it never stacks with an engine limit).
 
@@ -128,7 +130,8 @@ ENGINE_ARRAY_KEYS = ("speeds_mps", "kappa_per_steer", "kappa_offset", "scripted_
 ENGINE_SCANNED_KEYS = ENGINE_ARRAY_KEYS + ("identification_sessions", "build_key", "input_echo", "gear_index_neutral",
                                            "gear_index_reverse")
 # Keys llc_v1 scans by name that a card may leave out: then they must not occur at all, else exactly once
-ENGINE_OPTIONAL_SCANNED_KEYS = ("launch_clutch",)
+ENGINE_OPTIONAL_ARRAY_KEYS = ("scripted_mps_per_krpm",)     # DC_JsonScan.ReadNumbers when present
+ENGINE_OPTIONAL_SCANNED_KEYS = ("launch_clutch",) + ENGINE_OPTIONAL_ARRAY_KEYS
 
 # E-02a "usable" criterion and steady window: the probe kit's defaults (e01_actuation.py analyse_e02a)
 MIN_CELLS = 3
@@ -160,20 +163,24 @@ INPUT_SHAPINGS = ("echo", "rate_limit", "lag", "unknown")
 # a card, every key required when it is present, with DC_LaunchClutchConfig.Check's ranges (RPM_MAX, TIME_MAX_S):
 # 0 <= stall_guard_rpm < engage_rpm < full_rpm <= LAUNCH_RPM_MAX, couple_time_s and uncouple_time_s in
 # (0, LAUNCH_TIME_MAX_S], restart_cooldown_s in [0, LAUNCH_TIME_MAX_S], restart_on_stall a bool; mode ramp only with a
-# scripted gearbox, and there full_rpm < LAUNCH_SCRIPTED_FULL_RPM_LIMIT. Absent = mode off (the 1.8 sequence). The
+# scripted gearbox, and there every downshift outside the band (below). Absent = mode off (the 1.8 sequence). The
 # E-01 run header carries the same fields as launch_clutch.*
 LAUNCH_CLUTCH_MODES = ("off", "ramp")
 LAUNCH_CLUTCH_KEYS = ("mode", "engage_rpm", "full_rpm", "couple_time_s", "uncouple_time_s", "stall_guard_rpm",
                       "restart_on_stall", "restart_cooldown_s")
 LAUNCH_RPM_MAX = 10000.0
 LAUNCH_TIME_MAX_S = 10.0
-# Mode ramp on a scripted gearbox: full_rpm below DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT, the static stand-in
-# for the probe kit's full_rpm < downshift rpm. llc_v1 shifts by speed; an rpm bound from the downshift speeds would
-# need each gear's rpm per speed, which llc_v1 does not read (only an identified card's gearbox.detail.speed_per_krpm
-# has it). 1800 rpm is the probe policy's downshift, which the placeholder's shift speeds come from. It is also the
-# generator's sanity bound against the vehicle: far below any S105 max rpm (8000; llc_v1 checks the ego's own
-# EngineGetRPMMax and EngineGetRPMIdle at Init, DC_LaunchClutchConfig.CheckEngine)
-LAUNCH_SCRIPTED_FULL_RPM_LIMIT = 1800.0
+# Mode ramp on a scripted gearbox (DC_VehicleCard.CheckLaunchDownshifts): the card's form of the probe kit's
+# full_rpm < downshift rpm. llc_v1 shifts by speed, so gearbox.scripted_mps_per_krpm holds each scripted gear's measured
+# m/s per 1000 rpm, and each downshift speed, in the gear it shifts down from, must be at least full_rpm +
+# LAUNCH_DOWNSHIFT_RPM_MARGIN (DC_LaunchClutchConfig.DOWNSHIFT_RPM_MARGIN)
+LAUNCH_DOWNSHIFT_RPM_MARGIN = 50.0
+# The engine facts llc_v1 checks the band against at Init (DC_LaunchClutchConfig.CheckEngine: engage_rpm above the
+# idle, full_rpm below LAUNCH_FULL_RPM_MAX_FRACTION of the max rpm), recorded per vehicle from the run headers'
+# vehicle.rpm_idle / vehicle.rpm_max (S105: 800 / 8000 on 1.8.0.13 runs 2-3 and the 1.9.0.37 Play); the card records
+# neither, so the validator checks these. A vehicle not listed is checked by llc_v1 at Init only
+LAUNCH_FULL_RPM_MAX_FRACTION = 0.5
+VEHICLE_ENGINE_RPM = {"S105": {"idle": 800.0, "max": 8000.0}}
 HEADER_LAUNCH_CLUTCH = "launch_clutch"
 # The E-01 run header's gearbox lines (probe kit 699d8e2: DC_ProbeSequences.AppendVehicleLines and
 # DC_ProbeActuator.AppendGearboxLines; plays before the gearbox fix carry only the first three) and the phase note of a
@@ -246,7 +253,14 @@ PLACEHOLDER_LAUNCH_CLUTCH = {"mode": "ramp", "engage_rpm": 1100.0, "full_rpm": 1
 PLACEHOLDER_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14c, --launch-clutch ramp): mode ramp with the "
                                    "DC_LaunchClutchConfig defaults, not identified, because the 1.9.0.37 powertrain "
                                    "stalls at a clutch-1 drive-off (launch 20261106T052424Z-wb-addc) where 1.8.0.13 "
-                                   "slipped")
+                                   "slipped. scripted_mps_per_krpm: E-01 run 3's measured 1.54871 / 2.772066 / "
+                                   "4.169103 m/s per 1000 rpm in gears 2..4 (1.8.0.13, the run-3 fit's "
+                                   "gearbox.detail.speed_per_krpm), carried over with the shift speeds; the downshifts "
+                                   "lie at about 1804 and 1799 rpm, above full_rpm 1700 + 50")
+# The scripted gears' m/s per 1000 rpm a ramp launch clutch is checked against (DC_VehicleCard.CheckLaunchDownshifts):
+# E-01 run 3's measured values (T0-ENG run 3 on 1.8.0.13, the provisional run-3 fit's gearbox.detail.speed_per_krpm),
+# the basis of the placeholder's shift speeds
+PLACEHOLDER_MPS_PER_KRPM = (1.54871, 2.772066, 4.169103)
 # The pin the placeholder's values were measured on (T0-ENG runs 2 and 3). Under any other pin the card says they are
 # carried over and provisional (carried_over); the 1.8.0.13 card itself has no launch clutch (its bytes are those
 # llc_v1 sessions on 1.8.0.13 are stamped with)
@@ -1031,6 +1045,14 @@ def build_identified(args):
         gearbox["clutch_dip_s"] = clutch_dip(e01_play)
         launch_clutch = launch_clutch_of(e01_play)
         if launch_clutch is not None:
+            # the scripted gears' measured m/s per 1000 rpm, which a ramp is checked against (CheckLaunchDownshifts)
+            per_krpm = gear_detail.get("speed_per_krpm") or {}
+            missing = [g for g in gearbox["scripted_gears"] if str(g) not in per_krpm]
+            if missing and launch_clutch["mode"] == "ramp":
+                raise Refusal("E-01's launch clutch is a ramp, but E-01 measured no speed per 1000 rpm in scripted "
+                              "gear(s) %s: a ramp card needs it for every scripted gear" % missing)
+            if not missing:
+                gearbox["scripted_mps_per_krpm"] = [per_krpm[str(g)] for g in gearbox["scripted_gears"]]
             gearbox["launch_clutch"] = launch_clutch
     vehicle = args.vehicle
     sessions = [session_id(p) for p in plays]
@@ -1080,6 +1102,7 @@ def build_placeholder(args):
     if args.launch_clutch == "ramp":
         gearbox = card["gearbox"]
         gearbox["basis"] += PLACEHOLDER_LAUNCH_CLUTCH_BASIS
+        gearbox["scripted_mps_per_krpm"] = list(PLACEHOLDER_MPS_PER_KRPM)
         gearbox["launch_clutch"] = dict(PLACEHOLDER_LAUNCH_CLUTCH)
     return card
 
@@ -1273,10 +1296,40 @@ def launch_clutch_violations(launch, mode):
     if launch["mode"] == "ramp" and mode == "automatic":
         return ["gearbox.launch_clutch mode ramp applies to a scripted gearbox only (an automatic gearbox keeps clutch "
                 "1)"]
-    if launch["mode"] == "ramp" and mode == "scripted" and full >= LAUNCH_SCRIPTED_FULL_RPM_LIMIT:
-        return ["gearbox.launch_clutch full_rpm %s is not below %s rpm (a scripted gearbox: the probe policy's downshift "
-                "rpm its shift speeds come from)" % (full, LAUNCH_SCRIPTED_FULL_RPM_LIMIT)]
     return []
+
+
+def launch_card_violations(card):
+    """The launch clutch rules that need the rest of the card (DD-14c), for mode ramp on a scripted gearbox: every
+    downshift outside the band (DC_VehicleCard.CheckLaunchDownshifts) and the band against the vehicle's recorded
+    engine (DC_LaunchClutchConfig.CheckEngine at llc_v1 Init, VEHICLE_ENGINE_RPM)."""
+    gearbox = card.get("gearbox") or {}
+    launch = gearbox.get("launch_clutch")
+    if not isinstance(launch, dict) or launch.get("mode") != "ramp" or gearbox.get("mode") != "scripted":
+        return []
+    out = []
+    gears, down = gearbox.get("scripted_gears") or [], gearbox.get("downshift_mps") or []
+    per_krpm = gearbox.get("scripted_mps_per_krpm")
+    if not isinstance(per_krpm, list) or len(per_krpm) != len(gears) \
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0 for v in per_krpm):
+        return ["gearbox.launch_clutch mode ramp on a scripted gearbox needs gearbox.scripted_mps_per_krpm: one "
+                "measured m/s per 1000 rpm > 0 per scripted gear (got %r)" % (per_krpm,)]
+    minimum = launch["full_rpm"] + LAUNCH_DOWNSHIFT_RPM_MARGIN
+    for slot, speed in enumerate(down):
+        rpm = speed / per_krpm[slot + 1] * 1000.0
+        if rpm < minimum:
+            out.append("gearbox downshift_mps %s is %.0f rpm in scripted gear %s, below full_rpm %s + %s: the clutch "
+                       "would slip in that gear" % (speed, rpm, gears[slot + 1], launch["full_rpm"],
+                                                     LAUNCH_DOWNSHIFT_RPM_MARGIN))
+    engine = VEHICLE_ENGINE_RPM.get(card.get("vehicle"))
+    if engine:
+        if launch["engage_rpm"] <= engine["idle"]:
+            out.append("gearbox.launch_clutch engage_rpm %s is not above the %s idle %s rpm (llc_v1 CheckEngine)"
+                       % (launch["engage_rpm"], card.get("vehicle"), engine["idle"]))
+        if launch["full_rpm"] >= LAUNCH_FULL_RPM_MAX_FRACTION * engine["max"]:
+            out.append("gearbox.launch_clutch full_rpm %s is not below %s x the %s max %s rpm (llc_v1 CheckEngine)"
+                       % (launch["full_rpm"], LAUNCH_FULL_RPM_MAX_FRACTION, card.get("vehicle"), engine["max"]))
+    return out
 
 
 def gearbox_violations(card):
@@ -1305,6 +1358,9 @@ def gearbox_violations(card):
     if not gears or len(up) != len(gears) - 1 or len(down) != len(gears) - 1 \
             or any(d >= u for d, u in zip(down, up)) or any(b <= a for a, b in zip(up, up[1:])):
         return ["scripted gearbox: n >= 1 gears, n - 1 increasing upshifts, downshift < upshift"]
+    launch = launch_card_violations(card)
+    if launch:
+        return launch
     forward = card.get("gear_indices_forward") or []
     if any(g < 0 or g != round(g) or g not in forward for g in gears):
         return ["scripted gears %s are not all in gear_indices_forward %s" % (gears, forward)]

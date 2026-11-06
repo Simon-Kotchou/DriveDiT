@@ -57,9 +57,10 @@
 //                  at most every restart_cooldown_s;
 //                - llc_clutch records the value passed, as before;
 //                - an automatic gearbox keeps clutch 1, and a card with ramp on one is refused (UNVERIFIED on 1.9);
-//                - bounds: DC_LaunchClutchConfig.Check's ranges, full_rpm below SCRIPTED_FULL_RPM_LIMIT on a scripted
-//                  gearbox (CheckGearbox), and at Init CheckEngine against the ego's EngineGetRPMIdle and
-//                  EngineGetRPMMax (the DC_LaunchClutch.c header, BOUNDS);
+//                - bounds: DC_LaunchClutchConfig.Check's ranges; on a scripted gearbox gearbox.scripted_mps_per_krpm
+//                  (the measured m/s per 1000 rpm of each scripted gear) and every downshift speed at least full_rpm +
+//                  DOWNSHIFT_RPM_MARGIN in the gear it shifts down from (CheckGearbox); and at Init CheckEngine
+//                  against the ego's EngineGetRPMIdle and EngineGetRPMMax (the DC_LaunchClutch.c header, BOUNDS);
 //                - the counters (DescribeLaunchClutch) go to the console only: dc-2.0 is frozen.
 //
 // VEHICLE CARD (tools/ident/cards/<pin_id>/<vehicle>.json in the repo, deployed to Configs/ident/cards/; r3 scope note)
@@ -693,6 +694,7 @@ class DC_VehicleCard
 	ref array<float> m_aScriptedGears = {};
 	ref array<float> m_aUpshiftMps = {};
 	ref array<float> m_aDownshiftMps = {};
+	ref array<float> m_aScriptedMpsPerKrpm = {};	//!< gearbox.scripted_mps_per_krpm (optional; required with a ramp launch clutch)
 
 	// llc_v1 parameters
 	float m_fSteerMax;					//!< |contract steer| limit
@@ -800,6 +802,11 @@ class DC_VehicleCard
 			return false;
 
 		if (!DC_JsonScan.ReadNumbers(text, "downshift_mps", m_aDownshiftMps, failure))
+			return false;
+
+		// optional (DD-14c): the measured m/s per 1000 rpm of each scripted gear, which a ramp launch clutch needs
+		m_aScriptedMpsPerKrpm.Clear();
+		if (text.IndexOf("\"scripted_mps_per_krpm\"") >= 0 && !DC_JsonScan.ReadNumbers(text, "scripted_mps_per_krpm", m_aScriptedMpsPerKrpm, failure))
 			return false;
 
 		if (!DC_JsonScan.ReadIndexOrNull(text, "gear_index_neutral", m_fNeutralGear, failure))
@@ -1067,15 +1074,6 @@ class DC_VehicleCard
 			return false;
 		}
 
-		// the launch clutch on the scripted gearbox (DD-14c): fully coupled below SCRIPTED_FULL_RPM_LIMIT, the static
-		// stand-in for the probe kit's full_rpm < downshift rpm rule. llc_v1 shifts by speed, and an rpm bound from
-		// the downshift speeds would need each gear's rpm per speed, which this card does not give llc_v1
-		if (m_LaunchClutch.IsRamp() && m_LaunchClutch.m_fFullRpm >= DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT)
-		{
-			failure = string.Format("gearbox.launch_clutch full_rpm %1 is not below %2 rpm (a scripted gearbox: the probe policy's downshift rpm its shift speeds come from)", m_LaunchClutch.m_fFullRpm, DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT);
-			return false;
-		}
-
 		int count = m_aScriptedGears.Count();
 		if (count < 1 || m_aUpshiftMps.Count() != count - 1 || m_aDownshiftMps.Count() != count - 1)
 		{
@@ -1091,6 +1089,14 @@ class DC_VehicleCard
 				return false;
 			}
 		}
+
+		// the launch clutch on the scripted gearbox (DD-14c): fully coupled wherever llc_v1 drives in a gear above the
+		// first, the card's form of the probe kit's full_rpm < downshift rpm. llc_v1 shifts by speed, so each downshift
+		// speed is turned into the rpm of the gear it shifts down from by that gear's measured m/s per 1000 rpm
+		// (scripted_mps_per_krpm), which must then be at least full_rpm + DOWNSHIFT_RPM_MARGIN; below it the car would
+		// keep that gear with the clutch slipping. Only the first gear brakes through the band (where the clutch opens)
+		if (m_LaunchClutch.IsRamp() && !CheckLaunchDownshifts(count, failure))
+			return false;
 
 		// forward-only (TBD-7): every scripted gear is a measured forward gear index, never neutral or reverse; the
 		// gears increase, so slot 0 (Reset below the first upshift speed) is the first gear an episode starts in
@@ -1116,6 +1122,42 @@ class DC_VehicleCard
 			}
 
 			previous = gear;
+		}
+
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A ramp launch clutch on a scripted gearbox of count gears (DD-14c): scripted_mps_per_krpm holds one measured
+	//! m/s per 1000 rpm > 0 per scripted gear, and every downshift speed is at least full_rpm + DOWNSHIFT_RPM_MARGIN in
+	//! the gear it shifts down from (see CheckGearbox)
+	protected bool CheckLaunchDownshifts(int count, out string failure)
+	{
+		if (m_aScriptedMpsPerKrpm.Count() != count)
+		{
+			failure = string.Format("gearbox.launch_clutch mode ramp on a scripted gearbox needs gearbox.scripted_mps_per_krpm: %1 measured m/s per 1000 rpm, one per scripted gear (it has %2)", count, m_aScriptedMpsPerKrpm.Count());
+			return false;
+		}
+
+		foreach (float mpsPerKrpm : m_aScriptedMpsPerKrpm)
+		{
+			if (mpsPerKrpm <= 0)
+			{
+				failure = string.Format("gearbox.scripted_mps_per_krpm %1 is not > 0", mpsPerKrpm);
+				return false;
+			}
+		}
+
+		float minimum = m_LaunchClutch.m_fFullRpm + DC_LaunchClutchConfig.DOWNSHIFT_RPM_MARGIN;
+		for (int slot = 0; slot < count - 1; slot++)
+		{
+			float downshiftRpm = m_aDownshiftMps[slot] / m_aScriptedMpsPerKrpm[slot + 1] * 1000;
+			if (downshiftRpm < minimum)
+			{
+				failure = string.Format("gearbox downshift_mps %1 is %2 rpm in scripted gear %3, below full_rpm %4 + %5: the clutch would slip in that gear", m_aDownshiftMps[slot], downshiftRpm, m_aScriptedGears[slot + 1], m_LaunchClutch.m_fFullRpm, DC_LaunchClutchConfig.DOWNSHIFT_RPM_MARGIN);
+				return false;
+			}
 		}
 
 		failure = string.Empty;

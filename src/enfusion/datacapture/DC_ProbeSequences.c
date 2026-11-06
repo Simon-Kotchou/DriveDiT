@@ -37,8 +37,8 @@
 //   - mode "off": the commanded clutch, exactly the 1.8 sequence;
 //   - mode "ramp": a centrifugal clutch by rpm. It is 0 in neutral and with the handbrake, bites from engage_rpm, is
 //     fully coupled from full_rpm (below the policy's downshift rpm), its rate is limited to couple_time_s /
-//     uncouple_time_s, it opens at once below stall_guard_rpm, and an engine that stalls with the handbrake released
-//     is restarted by StartModeA.
+//     uncouple_time_s inside the band, it opens at once at or below engage_rpm, and an engine that stalls with the
+//     handbrake released is restarted by StartModeA.
 // The dips compose with it: the policy dip (m_fGearClutchDipS) and gear_scripted's commanded 0 open it, and it
 // re-ramps from 0 after them. cmd_clutch stays the clutch passed to SetClutch. Every probe that drives gets it:
 //   - DC_ProbeSequences sets it from its Launch clutch attributes (default ramp; params.* and the launch_clutch.*
@@ -97,7 +97,9 @@
 // ForceEnableSimulation. A phase that cannot reach its speed, leaves the area or loses the engine ends with no_speed,
 // aborted_area or engine_off and keeps its data; a failed teleport ends the probe (result error). OnProbeStop parks
 // the car (brake 1 + handbrake), except on world teardown (reason delete: it only closes its files). A launch clutch
-// outside its ranges, or one in mode ramp whose full_rpm is not below m_fShiftDownRpm, refuses the start.
+// outside its ranges, or one in mode ramp whose full_rpm is not below m_fShiftDownRpm or whose band does not fit the
+// engine (DC_LaunchClutchConfig.CheckEngine: engage_rpm above the idle, full_rpm below half the max rpm), refuses the
+// start.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -449,9 +451,7 @@ class DC_ProbeActuator
 		m_sFailure = string.Empty;
 		DetectGearbox();
 		DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp();
-		m_LaunchClutch.Configure(launchClutch);
-		m_sLaunchClutchSource = "DC_LaunchClutchConfig defaults";
-		return true;
+		return SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -484,10 +484,12 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Launch clutch (DD-14c, DC_LaunchClutch.c) instead of Init's DC_LaunchClutchConfig.Ramp(); call after
-	//! SetShiftPolicy. source names it in the run header (launch_clutch.source). false (GetFailure) when the config is
-	//! outside its ranges (DC_LaunchClutchConfig.Check) or, mode ramp on a manual gearbox, when full_rpm is not below
-	//! the policy's downshift rpm: the clutch must be fully coupled at every rpm the policy drives in
+	//! Launch clutch (DD-14c, DC_LaunchClutch.c) instead of Init's DC_LaunchClutchConfig.Ramp() (Init sets that one
+	//! through here, at the default policy); call after SetShiftPolicy. source names it in the run header
+	//! (launch_clutch.source). false (GetFailure) when the config is outside its ranges (DC_LaunchClutchConfig.Check)
+	//! or, mode ramp on a manual gearbox, when full_rpm is not below the policy's downshift rpm (the clutch must be
+	//! fully coupled at every rpm the policy drives in) or the band does not fit the engine (CheckEngine:
+	//! EngineGetRPMIdle, EngineGetRPMMax, the run header's vehicle.rpm_idle / rpm_max)
 	bool SetLaunchClutch(notnull DC_LaunchClutchConfig config, string source)
 	{
 		string failure;
@@ -500,6 +502,12 @@ class DC_ProbeActuator
 		if (config.IsRamp() && m_bShiftPolicy && config.m_fFullRpm >= m_fDownshiftRpm)
 		{
 			m_sFailure = string.Format("launch_clutch full_rpm %1 is not below the shift policy's downshift rpm %2", config.m_fFullRpm, m_fDownshiftRpm);
+			return false;
+		}
+
+		if (m_bShiftPolicy && !config.CheckEngine(m_Simulation.EngineGetRPMIdle(), m_Simulation.EngineGetRPMMax(), failure))
+		{
+			m_sFailure = failure;
 			return false;
 		}
 
@@ -626,7 +634,7 @@ class DC_ProbeActuator
 		m_LaunchClutch.GetConfig().AppendHeaderLines(lines, "launch_clutch");
 		lines.Insert("launch_clutch.source=" + m_sLaunchClutchSource);
 		lines.Insert("launch_clutch.active=" + DC_LaunchGuard.BoolText(m_bShiftPolicy && m_LaunchClutch.IsRamp()));
-		lines.Insert("launch_clutch.rule=DC_LaunchClutch, manual gearbox only (an automatic one keeps the commanded clutch): mode off = the commanded clutch, the 1.8 sequence; mode ramp = c 0 in neutral, with the handbrake commanded, during a dip (policy dip or a commanded 0) and with the engine off, else toward clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1) by at most dt / couple_time_s up and dt / uncouple_time_s down, 0 at once below stall_guard_rpm; cmd_clutch = min(commanded, c); rpm and engine_on of the previous step's readback; with restart_on_stall an engine off with the handbrake released gets StartModeA at most every restart_cooldown_s");
+		lines.Insert("launch_clutch.rule=DC_LaunchClutch, manual gearbox only (an automatic one keeps the commanded clutch): mode off = the commanded clutch, the 1.8 sequence; mode ramp = c 0 in neutral, with the handbrake commanded, during a dip (policy dip or a commanded 0) and with the engine off, 0 at once at or below engage_rpm (a guard drop below stall_guard_rpm), else toward clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1) by at most dt / couple_time_s up and dt / uncouple_time_s down; cmd_clutch = min(commanded, c); rpm and engine_on of the previous step's readback; with restart_on_stall an engine off with the handbrake released gets StartModeA at most every restart_cooldown_s");
 	}
 
 	//------------------------------------------------------------------------------------------------

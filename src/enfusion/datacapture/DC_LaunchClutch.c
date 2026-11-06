@@ -38,20 +38,36 @@
 // "ramp", per Step, with the physics time dt the call covers (covered steps x step dt, the callers' convention):
 //   - c (internal, 0 = open .. 1 = coupled) is 0 when not in a forward or reverse gear, while the handbrake is
 //     commanded, during a dip, or while the engine is off;
-//   - otherwise target = clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1), and:
-//       - below stall_guard_rpm, c = 0 at once (a guard drop when c was > 0);
+//   - below stall_guard_rpm, c = 0 at once (a guard drop when c was > 0);
+//   - at or below engage_rpm, c = 0 at once as well. Opening never stalls an engine; a rate-limited release
+//     below the band kept loading the engine under a full brake (Codex round 1, the toy model);
+//   - inside the band, target = clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1):
 //       - when target > c, c rises toward it by at most dt / couple_time_s;
 //       - otherwise c falls toward it by at most dt / uncouple_time_s;
 //   - the applied clutch is min(commanded clutch, c). A dip (the caller's clutch_dip_s, or any commanded 0) forces 0
 //     and resets c to 0, so the clutch re-ramps after it;
 //   - rpm and engine_on are the caller's last readback (EngineGetRPM, EngineIsOn), the state after the previous step:
 //     the probe's rpm / engine_on columns, llc_v1's simulation read at the start of its callback.
-// One deviation from the DD-14c sketch: the sketch keys the open clutch on rpm alone. Here an engine that is off is
-// never coupled either. Its rpm is the drag of the wheels, not a running engine, and the restart then re-ramps from
-// c = 0.
+// Two deviations from the DD-14c sketch. First, the sketch keys the open clutch on rpm alone; here an engine that is
+// off is never coupled either. Its rpm is the drag of the wheels, not a running engine, and the restart then re-ramps
+// from c = 0. Second, the sketch rate-limits every release; here only releases inside the band are (above).
+//
+// BOUNDS. Check holds the ranges. CheckEngine adds the vehicle, at the caller's start (mode ramp):
+//   - engage_rpm must lie above the engine's idle (EngineGetRPMIdle), so idle never bites;
+//   - full_rpm must lie below FULL_RPM_MAX_FRACTION of its max rpm (EngineGetRPMMax, VehicleWheeledSimulation.c:77 of
+//     1.9.0.37, :60 of 1.8.0.13; the probe's vehicle.rpm_max), so the band is attainable.
+// Shift rules are the caller's:
+//   - the probe actuator refuses a full_rpm at or above its policy's downshift rpm;
+//   - a vehicle card (llc_v1 shifts by speed, not rpm) refuses one at or above SCRIPTED_FULL_RPM_LIMIT on a scripted
+//     gearbox.
+// That static card bound is conservative. A bound from the card's downshift speeds would need each gear's rpm per
+// speed, which only an identified card's gearbox.detail.speed_per_krpm holds and llc_v1 does not read. The 1800 rpm
+// is the probe policy's downshift rpm, which the placeholder's shift speeds come from.
 //
 // STALL RESTART (mode "ramp", restart_on_stall): when the engine is off, the handbrake is not commanded and
-// restart_cooldown_s has passed since the last restart (the first restart has no cooldown), Step requests a restart:
+// restart_cooldown_s has passed since the last restart (the first restart has no cooldown), Step requests a restart.
+// The cooldown is the physics time covered since the last restart's call, measured at this call's start, so calls
+// covering 1 to 3 steps never bring two restarts closer than restart_cooldown_s:
 //   - c resets to 0 and the restart is counted;
 //   - ConsumeRestart then returns true once, and the caller restarts the engine the way Mode A starts it
 //     (ForceStartEngine when IsEngineOn is false, VehicleCinematicTrack.c:138-140): DC_ProbeActuator.StartModeA, or
@@ -110,6 +126,10 @@ class DC_LaunchClutchConfig
 	//! (0, TIME_MAX_S]; restart_cooldown_s in [0, TIME_MAX_S]
 	static const float RPM_MAX = 10000;
 	static const float TIME_MAX_S = 10;
+	//! CheckEngine: full_rpm below this share of the engine's max rpm (S105: 0.5 x 8000 = 4000)
+	static const float FULL_RPM_MAX_FRACTION = 0.5;
+	//! Vehicle card, scripted gearbox, mode ramp: full_rpm below this (see BOUNDS in the header)
+	static const float SCRIPTED_FULL_RPM_LIMIT = 1800;
 
 	string m_sMode = MODE_OFF;
 	float m_fEngageRpm = DEFAULT_ENGAGE_RPM;			//!< engage_rpm: the clutch starts to bite here
@@ -166,6 +186,35 @@ class DC_LaunchClutchConfig
 		if (m_fRestartCooldownS < 0 || m_fRestartCooldownS > TIME_MAX_S)
 		{
 			failure = string.Format("launch_clutch restart_cooldown_s %1 is outside [0, %2] s", m_fRestartCooldownS, TIME_MAX_S);
+			return false;
+		}
+
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The band against the vehicle (mode ramp only; see BOUNDS in the header): rpmIdle and rpmMax are
+	//! VehicleWheeledSimulation.EngineGetRPMIdle and EngineGetRPMMax. false (failure) when engage_rpm is not above the
+	//! idle, or the max rpm is unknown (<= 0), or full_rpm is not below FULL_RPM_MAX_FRACTION of it
+	bool CheckEngine(float rpmIdle, float rpmMax, out string failure)
+	{
+		if (!IsRamp())
+		{
+			failure = string.Empty;
+			return true;
+		}
+
+		if (m_fEngageRpm <= rpmIdle)
+		{
+			failure = string.Format("launch_clutch engage_rpm %1 is not above the engine's idle %2 rpm (the idle would bite)", m_fEngageRpm, rpmIdle);
+			return false;
+		}
+
+		float limit = FULL_RPM_MAX_FRACTION * rpmMax;
+		if (rpmMax <= 0 || m_fFullRpm >= limit)
+		{
+			failure = string.Format("launch_clutch full_rpm %1 is not below %2 x the engine's max %3 rpm (the band must be attainable)", m_fFullRpm, FULL_RPM_MAX_FRACTION, rpmMax);
 			return false;
 		}
 
@@ -285,9 +334,8 @@ class DC_LaunchClutch
 		if (!m_Config.IsRamp())
 			return commanded;
 
-		if (m_fSinceRestartS >= 0)
-			m_fSinceRestartS += slice;
-
+		// the cooldown is the physics time elapsed at this restart point: the steps the previous calls covered, never
+		// this call's (a call covering 3 steps after one covering 1 must not shorten it)
 		bool cooled = m_fSinceRestartS < 0 || m_fSinceRestartS >= m_Config.m_fRestartCooldownS;
 		if (!engineOn && !handbrake && m_Config.m_bRestartOnStall && cooled)
 		{
@@ -302,30 +350,35 @@ class DC_LaunchClutch
 		{
 			m_fCoupling = 0;
 		}
+		else if (rpm < m_Config.m_fStallGuardRpm)
+		{
+			if (m_fCoupling > 0)
+				m_iGuardDrops++;
+
+			m_fCoupling = 0;
+		}
+		else if (rpm <= m_Config.m_fEngageRpm)
+		{
+			// below the band the clutch opens at once: opening never stalls an engine, while a rate-limited release
+			// kept loading it under hard braking (the toy model: 606 -> 504 rpm at c 0.333 under a full brake)
+			m_fCoupling = 0;
+		}
 		else
 		{
 			float target = Math.Clamp((rpm - m_Config.m_fEngageRpm) / (m_Config.m_fFullRpm - m_Config.m_fEngageRpm), 0, 1);
-			if (rpm < m_Config.m_fStallGuardRpm)
-			{
-				if (m_fCoupling > 0)
-					m_iGuardDrops++;
-
-				m_fCoupling = 0;
-			}
-			else if (target > m_fCoupling)
-			{
+			if (target > m_fCoupling)
 				m_fCoupling = Math.Min(target, m_fCoupling + slice / m_Config.m_fCoupleTimeS);
-			}
 			else
-			{
 				m_fCoupling = Math.Max(target, m_fCoupling - slice / m_Config.m_fUncoupleTimeS);
-			}
 		}
 
 		if (driving && m_fCoupling > 0 && m_fCoupling < 1)
 			m_fSlipS += slice;
 		else
 			m_fSlipS = 0;
+
+		if (m_fSinceRestartS >= 0)
+			m_fSinceRestartS += slice;
 
 		m_fMaxSlipS = Math.Max(m_fMaxSlipS, m_fSlipS);
 		m_fMaxSlipTotalS = Math.Max(m_fMaxSlipTotalS, m_fSlipS);

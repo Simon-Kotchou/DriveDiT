@@ -114,41 +114,51 @@
 //   - replayed in closed loop on that model, the ramp gives the Play's openings (2 / 4-5 / 1 / 0 / 3 at throttle 0.5 /
 //     0.3 / 0.6 / 1.0 / 0.4) and its c = 1 times (2.0 / 3.8 / 1.6 / 1.0 / 2.5 s).
 // Mode "slip" is an rpm-hold slip controller with lock-up when the engine and the driveline turn together. The caller
-// passes the throttle and brake it commands this call (drive = throttle > 0 and no brake), the forward gear index and
-// the driveline rpm (speed / the gear's m/s per 1000 rpm, <= 0 unknown). Per Step (driving: in gear, no handbrake, no
-// dip, engine on; otherwise c = 0, not locked):
+// passes the throttle and brake it commands this call, the forward gear index and the driveline rpm (speed / the
+// gear's m/s per 1000 rpm, <= 0 unknown); drive = throttle > 0 and no brake. Per Step (driving: in gear, no handbrake,
+// no dip, engine on; otherwise c = 0, not locked):
 //   - the rpm it uses is the mean of this readback and the last one (the readback timing alternates); its rate [rpm/s]
 //     is the change of the mean over the two calls before, and the predicted rpm is rpm + rate (if falling) x
 //     RELEASE_LOOKAHEAD_CALLS x this call's duration (the clutch holds for this call, then the next one decides);
-//   - an upshift (a higher gear index than the last call's) restarts that history and holds the lookahead and the
-//     drop guard off for SYNC_S: the synchronisation drop is no fall to predict. A downshift raises the rpm and keeps
-//     the history, so a braking downshift keeps the braking lookahead;
+//   - an upshift (a higher gear index than the last call's) holds the lookahead and the drop guard off for SYNC_S
+//     unless a brake is commanded: its synchronisation drop is no fall to predict. The history stays, so a brake during
+//     the synchronisation still predicts;
 //   - below stall_guard_rpm: c = 0 at once (a guard drop when c was > 0), not locked;
-//   - coupled (locked): c = 1 until the rpm reaches its floor (engage_rpm, or under drive the lug rpm
-//     stall_guard_rpm + LUG_MARGIN_RPM, at most engage_rpm: the engine pulls, so it may lug below engage_rpm, as after
-//     gear_scripted's upshift into third at 1075 rpm), or, below RELEASE_LOOKAHEAD_ENGAGE_FACTOR x engage_rpm, the
-//     predicted rpm reaches it, or, without drive, the rpm falls faster than MAX_DROP_RPM_PER_S (a full brake in first
-//     gear falls about 8000 rpm/s; faster is wheels locking). Then c = 0 at once, not locked;
-//   - slipping (a drive-off): c = 0 at once at or below engage_rpm, without drive (a brake or no throttle: a stop
-//     before the lock-up) and when the predicted rpm reaches the lug rpm; otherwise c moves by dt x (slip_kp x rate +
-//     slip_ki x (mean - full_rpm)): a PI that holds the engine at full_rpm, bounded by dt / couple_time_s up and
-//     dt / uncouple_time_s down, within [0, 1]. The gains are per GAIN_STEP_S (the 1/30 s fixed time slice): a call
-//     covering n steps divides slip_kp by n and slip_ki by n x n, n held at the longest recent call and decaying by
-//     CALL_STEPS_DECAY per call, so 2- and 3-step callbacks (llc_v1) keep the loop's margin;
-//   - lock-up: when the driveline rpm is within lock_tolerance_rpm of the rpm on LOCK_AGREE_CALLS calls in a row (under
-//     drive: a brake's wheel slip makes body speed read above the shaft, the unsafe direction) or c reaches 1: c = 1 at
-//     once, counted as a lock-up.
-// DD-14d round 1 (Codex) found a stall while slipping (a brake at 5 km/h with 3-step calls: 219 rpm), a false lock-up
-// under a brake with wheel slip (c 0.25 -> 1, 426 rpm), gear_scripted's upshifts opening the clutch and openings with
-// 3-step calls; the rules above are the fix. On the fitted model (tests/test_launch_clutch.py): launches at throttle
-// 0.3 / 0.5 / 0.6 / 1.0, flat and at +-5 % grade, over engine inertia and clutch capacity +-30 %, torque +-20 %,
-// callbacks of 1, 2, 3 and mixed steps and both readback timings: no opening, no step-to-step oscillation of c, rpm
-// never below the 800 idle; c = 1 at throttle 0.5 by 1.5 s (1-step calls; 2.1 s with 3-step calls); stops by a brake
-// of 0.3 / 0.6 / 1.0 before the lock-up at 3 / 5 / 7 km/h and coupled from 15 / 30 / 40 km/h never below the idle;
-// gear_scripted's 2, 3, 4, 3, 2 without an opening. full_rpm is the held rpm (1400 for the S105), so the shift rules
-// are those of a ramp: below the policy's downshift rpm (probe kit), each card downshift at least full_rpm +
-// DOWNSHIFT_RPM_MARGIN; mode slip adds that each upshift lands at or above the lookahead ceiling (the probe kit with
-// its m/s per 1000 rpm attribute, the card with scripted_mps_per_krpm).
+//   - a brake, in every state (slipping, coupled, synchronising): c = 0 at once when rpm - brake_drop_rpm_per_s x (this
+//     call's duration + BRAKE_LAG_S) <= engage_rpm. brake_drop_rpm_per_s is the worst fall of a coupled engine whose
+//     wheels lock, the clutch capacity over the engine inertia (29000 rpm/s for the S105 on 1.9.0.37: at c = 1 the
+//     clutch can drag the engine about 965 rpm in one step, faster than any readback shows). The brake acts one step
+//     after its call, so the clutch opens first. With 1-step calls the S105 opens under a brake below about 2550 rpm
+//     (14 km/h in first gear, 25 km/h in second); above it engine braking stays coupled;
+//   - coupled (locked): c = 1 until the rpm reaches its floor (engage_rpm under a brake, else the lug rpm
+//     stall_guard_rpm + LUG_MARGIN_RPM, at most engage_rpm: the engine may lug and coast below engage_rpm, as after
+//     gear_scripted's upshift into third at 1075 rpm, while a re-bite needs more than engage_rpm), or, below
+//     RELEASE_LOOKAHEAD_ENGAGE_FACTOR x engage_rpm, the predicted rpm reaches it, or, under a brake, the rpm falls
+//     faster than DROP_GUARD_RPM_PER_S (a second line; a full brake in first gear falls about 8000 rpm/s). Then c = 0
+//     at once;
+//   - slipping (a drive-off): c = 0 at once at or below engage_rpm, under a brake (a stop before the lock-up) and when
+//     the predicted rpm reaches the lug rpm; zero throttle without a brake coasts on the PI. Otherwise c moves by dt x
+//     (slip_kp x rate + slip_ki x (mean - full_rpm)): a PI that holds the engine at full_rpm, bounded by dt /
+//     couple_time_s up and dt / uncouple_time_s down, within [0, 1]. The gains are per GAIN_STEP_S (the 1/30 s fixed
+//     time slice): a call covering n steps divides slip_kp by n and slip_ki by n x n, n held at the longest recent
+//     call and decaying by CALL_STEPS_DECAY per call, so 2- and 3-step callbacks (llc_v1) keep the loop's margin;
+//   - lock-up: under drive, when the driveline rpm is within lock_tolerance_rpm of the rpm on LOCK_AGREE_CALLS calls
+//     in a row (a brake's wheel slip makes body speed read above the shaft, the unsafe direction), or when c reaches
+//     1: c = 1 at once, counted as a lock-up.
+// DD-14d rounds 1 and 2 (Codex) found stalls while slipping and while coupled under a brake (wheel slip, an upshift
+// then
+// a brake), a false lock-up under a brake, gear_scripted's upshifts opening the clutch, openings with 3-step calls and
+// openings under throttle pulses; the rules above are the fix. On the fitted model (tests/test_launch_clutch.py):
+// launches at throttle 0.3 / 0.5 / 0.6 / 1.0, flat and at +-5 % grade, over engine inertia and clutch capacity +-30 %,
+// torque +-20 %, callbacks of 1, 2, 3 and mixed steps and the readback timings: no opening, no step-to-step oscillation
+// of c of 0.01 or more, rpm never below the 800 idle; c = 1 at throttle 0.5 by 1.5 s (1-step calls; 2.1 s with 3-step
+// calls); brakes from 3 to 40 km/h with wheel slip up to 2 m/s, before and after the lock-up and right after an
+// upshift,
+// without a stall; gear_scripted's 2, 3, 4, 3, 2 and throttle pulses without a stall. full_rpm is the held rpm (1400
+// for
+// the S105), so the shift rules are those of a ramp: below the policy's downshift rpm (probe kit), each card downshift
+// at least full_rpm + DOWNSHIFT_RPM_MARGIN; mode slip adds that each upshift lands at or above the lookahead ceiling
+// (the probe kit with its m/s per 1000 rpm attribute, the card with scripted_mps_per_krpm).
 // Mode ramp and mode off are unchanged.
 //
 // BUILD-AGNOSTIC: every engine call of the callers exists with the same declaration in 1.8.0.13 and 1.9.0.37 (official
@@ -181,6 +191,9 @@ class DC_LaunchClutchConfig
 	static const float DEFAULT_SLIP_KP = 0.0003;
 	static const float DEFAULT_SLIP_KI = 0.001;
 	static const float DEFAULT_LOCK_TOLERANCE_RPM = 100;
+	//! Mode slip, brake_drop_rpm_per_s: the worst fall of a coupled engine whose wheels lock, the clutch capacity over
+	//! the engine inertia (S105 on 1.9.0.37: 117.6 Nm / 0.0388 kg m2 x 60 / 2 pi = 28950 rpm/s, fit_launch_clutch.py)
+	static const float DEFAULT_BRAKE_DROP_RPM_PER_S = 29000;
 	//! Mode slip: the predicted rpm looks this many of the call's own durations ahead; coupled, below this factor x
 	//! engage_rpm (the header)
 	static const float RELEASE_LOOKAHEAD_CALLS = 1.5;
@@ -190,8 +203,11 @@ class DC_LaunchClutchConfig
 	static const float SYNC_S = 0.3;
 	//! Mode slip, coupled under drive: the floor is stall_guard_rpm + this, at most engage_rpm (GetLugRpm)
 	static const float LUG_MARGIN_RPM = 300;
-	//! Mode slip, coupled without drive: an rpm falling faster than this [rpm/s] opens (wheels locking)
-	static const float MAX_DROP_RPM_PER_S = 12000;
+	//! Mode slip, coupled under a brake: an rpm falling faster than this [rpm/s] opens (the drop guard: wheels locking)
+	static const float DROP_GUARD_RPM_PER_S = 12000;
+	//! Mode slip, a brake: the worst fall is carried over this call and BRAKE_LAG_S more (half a step: the readback lands
+	//! half a step after the setters in 93 % of the 1.9.0.37 Play's rows; the brake itself acts one step after its call)
+	static const float BRAKE_LAG_S = 0.016667;
 	//! Mode slip: slip_kp / slip_ki are per call of GAIN_STEP_S [s]; the held call length decays by CALL_STEPS_DECAY
 	static const float GAIN_STEP_S = 0.033333;
 	static const float CALL_STEPS_DECAY = 0.05;
@@ -210,6 +226,7 @@ class DC_LaunchClutchConfig
 	static const float SLIP_KP_MAX = 0.01;
 	static const float SLIP_KI_MAX = 0.1;
 	static const float LOCK_TOLERANCE_MAX_RPM = 1000;
+	static const float BRAKE_DROP_MAX_RPM_PER_S = 200000;
 
 	string m_sMode = MODE_OFF;
 	float m_fEngageRpm = DEFAULT_ENGAGE_RPM;			//!< engage_rpm: the clutch starts to bite here
@@ -222,6 +239,7 @@ class DC_LaunchClutchConfig
 	float m_fSlipKp = DEFAULT_SLIP_KP;					//!< slip_kp: coupling per rpm of the mean's change (mode slip, per GAIN_STEP_S)
 	float m_fSlipKi = DEFAULT_SLIP_KI;					//!< slip_ki: coupling per rpm s above full_rpm (mode slip, per GAIN_STEP_S)
 	float m_fLockToleranceRpm = DEFAULT_LOCK_TOLERANCE_RPM;	//!< lock_tolerance_rpm: engine vs driveline rpm (mode slip)
+	float m_fBrakeDropRpmPerS = DEFAULT_BRAKE_DROP_RPM_PER_S;	//!< brake_drop_rpm_per_s: worst coupled fall (mode slip)
 
 	//------------------------------------------------------------------------------------------------
 	//! The defaults with mode "ramp": the DD-14c probe kit default (DD-14d moved it to Slip())
@@ -323,6 +341,12 @@ class DC_LaunchClutchConfig
 			return false;
 		}
 
+		if (m_fBrakeDropRpmPerS <= 0 || m_fBrakeDropRpmPerS > BRAKE_DROP_MAX_RPM_PER_S)
+		{
+			failure = string.Format("launch_clutch brake_drop_rpm_per_s %1 is outside (0, %2]", m_fBrakeDropRpmPerS, BRAKE_DROP_MAX_RPM_PER_S);
+			return false;
+		}
+
 		failure = string.Empty;
 		return true;
 	}
@@ -375,6 +399,7 @@ class DC_LaunchClutchConfig
 		lines.Insert(prefix + ".slip_kp=" + m_fSlipKp.ToString(-1, 6));
 		lines.Insert(prefix + ".slip_ki=" + m_fSlipKi.ToString(-1, 6));
 		lines.Insert(prefix + ".lock_tolerance_rpm=" + m_fLockToleranceRpm.ToString(-1, 1));
+		lines.Insert(prefix + ".brake_drop_rpm_per_s=" + m_fBrakeDropRpmPerS.ToString(-1, 1));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -389,7 +414,7 @@ class DC_LaunchClutchConfig
 			restart = string.Format("restart after a stall, >= %1 s apart", m_fRestartCooldownS.ToString(-1, 2));
 
 		if (IsSlip())
-			return string.Format("slip: open at or below %1 rpm, hold %2 rpm while slipping (kp %3 per rpm, ki %4 per rpm s, couple %5 s, uncouple %6 s), coupled within %7 rpm of the driveline, open below %8 rpm, %9", m_fEngageRpm.ToString(-1, 0), m_fFullRpm.ToString(-1, 0), m_fSlipKp.ToString(-1, 6), m_fSlipKi.ToString(-1, 6), m_fCoupleTimeS.ToString(-1, 2), m_fUncoupleTimeS.ToString(-1, 2), m_fLockToleranceRpm.ToString(-1, 0), m_fStallGuardRpm.ToString(-1, 0), restart);
+			return string.Format("slip: open at or below %1 rpm, hold %2 rpm while slipping (kp %3 per rpm, ki %4 per rpm s, couple %5 s, uncouple %6 s), coupled within %7 rpm of the driveline, a brake opens below %8 rpm/s worst fall, open below %9 rpm, ", m_fEngageRpm.ToString(-1, 0), m_fFullRpm.ToString(-1, 0), m_fSlipKp.ToString(-1, 6), m_fSlipKi.ToString(-1, 6), m_fCoupleTimeS.ToString(-1, 2), m_fUncoupleTimeS.ToString(-1, 2), m_fLockToleranceRpm.ToString(-1, 0), m_fBrakeDropRpmPerS.ToString(-1, 0), m_fStallGuardRpm.ToString(-1, 0)) + restart;
 
 		return string.Format("ramp: bite %1 -> full %2 rpm, couple %3 s, uncouple %4 s, open below %5 rpm, %6", m_fEngageRpm.ToString(-1, 0), m_fFullRpm.ToString(-1, 0), m_fCoupleTimeS.ToString(-1, 2), m_fUncoupleTimeS.ToString(-1, 2), m_fStallGuardRpm.ToString(-1, 0), restart);
 	}
@@ -536,7 +561,7 @@ class DC_LaunchClutch
 		bool driving = inGear && !handbrake && !dip && engineOn;
 		if (m_Config.IsSlip())
 		{
-			StepSlip(slice, driving, rpm, drivelineRpm, throttle > 0 && brake <= 0, gear);
+			StepSlip(slice, driving, rpm, drivelineRpm, throttle, brake, gear);
 		}
 		else if (!driving)
 		{
@@ -579,15 +604,17 @@ class DC_LaunchClutch
 
 	//------------------------------------------------------------------------------------------------
 	//! Mode slip (DD-14d, MODE SLIP in the header): c for this call. slice: the physics time it covers; driving: in gear,
-	//! no handbrake, no dip, engine on; rpm: the last readback; drivelineRpm: <= 0 = unknown; drive: throttle > 0 and no
-	//! brake commanded this call; gear: the applied gear index (-1 = none)
-	protected void StepSlip(float slice, bool driving, float rpm, float drivelineRpm, bool drive, int gear)
+	//! no handbrake, no dip, engine on; rpm: the last readback; drivelineRpm: <= 0 = unknown; throttle, brake: commanded
+	//! this call; gear: the applied gear index (-1 = none)
+	protected void StepSlip(float slice, bool driving, float rpm, float drivelineRpm, float throttle, float brake, int gear)
 	{
 		float engage = m_Config.m_fEngageRpm;
-		// an upshift: its synchronisation drop is no fall to predict (a downshift raises the rpm and keeps the history)
+		bool braking = brake > 0;
+		bool drive = throttle > 0 && !braking;
+		// an upshift: without a brake its synchronisation drop is no fall to predict for SYNC_S; the history stays, so a
+		// brake during the synchronisation still predicts (DD-14d round 2)
 		if (gear >= 0 && m_iLastGear >= 0 && gear > m_iLastGear)
 		{
-			ForgetRpm();
 			m_fSyncLeftS = DC_LaunchClutchConfig.SYNC_S;
 			m_iAgreeCalls = 0;
 		}
@@ -618,7 +645,7 @@ class DC_LaunchClutch
 		m_fPrevSliceS = m_fLastSliceS;
 		m_fLastSliceS = slice;
 		m_fCallSteps = Math.Max(Math.Max(slice / DC_LaunchClutchConfig.GAIN_STEP_S, 1), m_fCallSteps - DC_LaunchClutchConfig.CALL_STEPS_DECAY);
-		bool inSync = m_fSyncLeftS > 0;
+		bool guarded = braking || m_fSyncLeftS <= 0;
 		m_fSyncLeftS = Math.Max(m_fSyncLeftS - slice, 0);
 		float predicted = rpm + DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_CALLS * slice * Math.Min(rate, 0);
 		if (!driving)
@@ -636,13 +663,23 @@ class DC_LaunchClutch
 			return;
 		}
 
+		// a brake, in every state: open now when the worst coupled fall (locked wheels drag the engine at the clutch
+		// capacity over the inertia, brake_drop_rpm_per_s) over this call and BRAKE_LAG_S could reach engage_rpm. The
+		// brake acts one step after its call, so the clutch is open first (DD-14d round 2)
+		if (braking && rpm - m_Config.m_fBrakeDropRpmPerS * (slice + DC_LaunchClutchConfig.BRAKE_LAG_S) <= engage)
+		{
+			Open();
+			return;
+		}
+
 		if (m_bLocked)
 		{
-			// coupled: open at the floor, at the predicted floor below the lookahead ceiling, and without drive at a fall
-			// faster than the plant explains
-			float openRpm = engage;
-			if (drive)
-				openRpm = m_Config.GetLugRpm();
+			// coupled: open at the floor (engage_rpm under a brake, else the lug rpm: coasting lugs too, and a re-bite
+			// needs more than engage_rpm), at the predicted floor below the lookahead ceiling (a brake overrides an
+			// upshift's wait), and under a brake at a fall faster than DROP_GUARD_RPM_PER_S
+			float openRpm = m_Config.GetLugRpm();
+			if (braking)
+				openRpm = engage;
 
 			if (rpm <= openRpm)
 			{
@@ -650,13 +687,13 @@ class DC_LaunchClutch
 				return;
 			}
 
-			if (!inSync && rpm < m_Config.GetLookaheadCeilingRpm() && predicted <= openRpm)
+			if (guarded && rpm < m_Config.GetLookaheadCeilingRpm() && predicted <= openRpm)
 			{
 				Open();
 				return;
 			}
 
-			if (!drive && !inSync && rate < -DC_LaunchClutchConfig.MAX_DROP_RPM_PER_S)
+			if (braking && rate < -DC_LaunchClutchConfig.DROP_GUARD_RPM_PER_S)
 			{
 				Open();
 				return;
@@ -666,26 +703,28 @@ class DC_LaunchClutch
 			return;
 		}
 
-		// slipping (a drive-off): open at engage_rpm, without drive (a stop before the lock-up) and at a predicted lug
-		if (rpm <= engage || !drive || (!inSync && predicted <= m_Config.GetLugRpm()))
+		// slipping (a drive-off): open at engage_rpm, under a brake and at a predicted lug; zero throttle without a brake
+		// coasts on the PI (DD-14d round 2: throttle pulses)
+		if (rpm <= engage || braking || (guarded && predicted <= m_Config.GetLugRpm()))
 		{
 			Open();
 			return;
 		}
 
 		// the PI that holds the mean at full_rpm, per GAIN_STEP_S, rate-limited; lock-up once engine and driveline agree
+		// under drive
 		float kp = m_Config.m_fSlipKp / m_fCallSteps;
 		float ki = m_Config.m_fSlipKi / (m_fCallSteps * m_fCallSteps);
 		float want = m_fCoupling + slice * (kp * rate + ki * (mean - m_Config.m_fFullRpm));
 		float lowest = Math.Max(m_fCoupling - slice / m_Config.m_fUncoupleTimeS, 0);
 		float highest = Math.Min(m_fCoupling + slice / m_Config.m_fCoupleTimeS, 1);
 		m_fCoupling = Math.Clamp(want, lowest, highest);
-		if (m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= m_Config.m_fLockToleranceRpm)
+		if (drive && m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= m_Config.m_fLockToleranceRpm)
 			m_iAgreeCalls++;
 		else
 			m_iAgreeCalls = 0;
 
-		if (m_iAgreeCalls >= DC_LaunchClutchConfig.LOCK_AGREE_CALLS || m_fCoupling >= 1)
+		if (m_iAgreeCalls >= DC_LaunchClutchConfig.LOCK_AGREE_CALLS || (drive && m_fCoupling >= 1))
 		{
 			m_bLocked = true;
 			m_fCoupling = 1;

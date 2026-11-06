@@ -59,7 +59,8 @@
 //                  scripted_mps_per_krpm) on two callbacks under drive and stays coupled until the rpm, looked ahead
 //                  below 2 x engage_rpm, reaches engage_rpm (the DC_LaunchClutch.c header, MODE SLIP). It gets the
 //                  callback's throttle, brake and scripted gear; its gains follow the callback's covered steps. The
-//                  card adds slip_kp, slip_ki and lock_tolerance_rpm, which no other mode may carry;
+//                  card adds slip_kp, slip_ki, lock_tolerance_rpm and brake_drop_rpm_per_s, which no other mode
+//                  may carry;
 //                - stall restart: an engine that stalls gets the actuator's Start (DC_ActuatorModeA: ForceStartEngine)
 //                  at most every restart_cooldown_s;
 //                - llc_clutch records the value passed, as before;
@@ -427,6 +428,8 @@ class DC_JsonScan
 	static const int CHAR_COLON = 58;
 	static const int CHAR_OPEN = 91;		//!< '['
 	static const int CHAR_CLOSE = 93;		//!< ']'
+	static const int CHAR_BRACE_OPEN = 123;	//!< '{'
+	static const int CHAR_BRACE_CLOSE = 125;	//!< '}'
 
 	//------------------------------------------------------------------------------------------------
 	//! Index of the first character after `"key":` (and any spaces); -1 when the key is missing or occurs twice
@@ -442,6 +445,52 @@ class DC_JsonScan
 			return -1;
 
 		return SkipSpace(text, index + 1);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The text of the object that is key's value, from its '{' to the matching '}' (braces counted; the objects it
+	//! serves hold no brace in a string); empty when the key is missing or repeated or its value is no object
+	static string ObjectText(string text, string key)
+	{
+		int start = FindValue(text, key);
+		if (start < 0 || start >= text.Length() || text.ToAscii(start) != CHAR_BRACE_OPEN)
+			return string.Empty;
+
+		int depth = 0;
+		for (int i = start, length = text.Length(); i < length; i++)
+		{
+			int code = text.ToAscii(i);
+			if (code == CHAR_BRACE_OPEN)
+			{
+				depth++;
+			}
+			else if (code == CHAR_BRACE_CLOSE)
+			{
+				depth--;
+				if (depth == 0)
+					return text.Substring(start, i - start + 1);
+			}
+		}
+
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true when key is a member name of objectText: "key" followed by spaces and ':' (a string value "key" is not)
+	static bool HasMember(string objectText, string key)
+	{
+		string quoted = "\"" + key + "\"";
+		int at = objectText.IndexOf(quoted);
+		while (at >= 0)
+		{
+			int index = SkipSpace(objectText, at + quoted.Length());
+			if (index < objectText.Length() && objectText.ToAscii(index) == CHAR_COLON)
+				return true;
+
+			at = objectText.IndexOfFrom(at + 1, quoted);
+		}
+
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -685,7 +734,7 @@ class DC_VehicleCard
 	string m_sGearbox;					//!< automatic or scripted (E-04 / E-01)
 	float m_fClutchDipS;				//!< gearbox.clutch_dip_s: clutch 0 this long after each scripted gear change (E-01)
 	bool m_bLaunchClutchSet;			//!< the card has the optional gearbox.launch_clutch object (DD-14c)
-	bool m_bSlipFieldsSet;				//!< the card has slip_kp, slip_ki or lock_tolerance_rpm (DD-14d: mode slip only)
+	bool m_bSlipFieldsSet;				//!< gearbox.launch_clutch has a slip field (DD-14d: mode slip only)
 	ref DC_LaunchClutchConfig m_LaunchClutch = new DC_LaunchClutchConfig();	//!< gearbox.launch_clutch; absent = mode off
 	float m_fEngineSteerRateLimit;		//!< identified engine steering rate limit [1/s]; <= 0 = none (or unknown on a placeholder)
 	bool m_bInputEchoKnown;				//!< actuator.raw_engine_path.input_echo is true or false (null on a placeholder)
@@ -771,7 +820,10 @@ class DC_VehicleCard
 		// it occurs once and is an object (ReadObjects reads it; a null is refused, as JsonLoadContext's null handling
 		// is not verified)
 		m_bLaunchClutchSet = text.IndexOf("\"launch_clutch\"") >= 0;
-		m_bSlipFieldsSet = text.IndexOf("\"slip_kp\"") >= 0 || text.IndexOf("\"slip_ki\"") >= 0 || text.IndexOf("\"lock_tolerance_rpm\"") >= 0;
+		// the slip fields are member names of the launch_clutch object only (DD-14d round 2: a free-text note may say
+		// "slip_kp" anywhere else)
+		string launchText = DC_JsonScan.ObjectText(text, "launch_clutch");
+		m_bSlipFieldsSet = DC_JsonScan.HasMember(launchText, "slip_kp") || DC_JsonScan.HasMember(launchText, "slip_ki") || DC_JsonScan.HasMember(launchText, "lock_tolerance_rpm") || DC_JsonScan.HasMember(launchText, "brake_drop_rpm_per_s");
 		if (m_bLaunchClutchSet && (DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")))
 		{
 			failure = path + ": gearbox.launch_clutch must occur once and be an object (absent = mode off)";
@@ -864,7 +916,7 @@ class DC_VehicleCard
 
 		if (!launchClutchOk)
 		{
-			failure = "gearbox.launch_clutch needs mode (a string), engage_rpm, full_rpm, couple_time_s, uncouple_time_s, stall_guard_rpm, restart_cooldown_s (numbers) and restart_on_stall (a bool), and in mode slip slip_kp, slip_ki and lock_tolerance_rpm (numbers)";
+			failure = "gearbox.launch_clutch needs mode (a string), engage_rpm, full_rpm, couple_time_s, uncouple_time_s, stall_guard_rpm, restart_cooldown_s (numbers) and restart_on_stall (a bool), and in mode slip slip_kp, slip_ki, lock_tolerance_rpm and brake_drop_rpm_per_s (numbers)";
 			return false;
 		}
 
@@ -912,7 +964,8 @@ class DC_VehicleCard
 
 	//------------------------------------------------------------------------------------------------
 	//! gearbox.launch_clutch (DD-14c, DC_LaunchClutchConfig): called inside the open gearbox object, every field
-	//! required, and in mode slip (DD-14d) slip_kp, slip_ki and lock_tolerance_rpm too (other modes keep the defaults).
+	//! required, and in mode slip (DD-14d) slip_kp, slip_ki, lock_tolerance_rpm and brake_drop_rpm_per_s too (other modes
+	//! keep the defaults).
 	//! false when the object or a field is missing or of another type; the ranges are CheckGearbox's
 	protected bool ReadLaunchClutch(notnull JsonLoadContext context)
 	{
@@ -933,7 +986,8 @@ class DC_VehicleCard
 		float slipKp = DC_LaunchClutchConfig.DEFAULT_SLIP_KP;
 		float slipKi = DC_LaunchClutchConfig.DEFAULT_SLIP_KI;
 		float lockToleranceRpm = DC_LaunchClutchConfig.DEFAULT_LOCK_TOLERANCE_RPM;
-		bool slipOk = mode != DC_LaunchClutchConfig.MODE_SLIP || (DC_JsonScan.ReadContextNumber(context, "slip_kp", slipKp) && DC_JsonScan.ReadContextNumber(context, "slip_ki", slipKi) && DC_JsonScan.ReadContextNumber(context, "lock_tolerance_rpm", lockToleranceRpm));
+		float brakeDropRpmPerS = DC_LaunchClutchConfig.DEFAULT_BRAKE_DROP_RPM_PER_S;
+		bool slipOk = mode != DC_LaunchClutchConfig.MODE_SLIP || (DC_JsonScan.ReadContextNumber(context, "slip_kp", slipKp) && DC_JsonScan.ReadContextNumber(context, "slip_ki", slipKi) && DC_JsonScan.ReadContextNumber(context, "lock_tolerance_rpm", lockToleranceRpm) && DC_JsonScan.ReadContextNumber(context, "brake_drop_rpm_per_s", brakeDropRpmPerS));
 		context.EndObject();
 		if (!rpmOk || !timeOk || !restartOk || !slipOk)
 			return false;
@@ -949,6 +1003,7 @@ class DC_VehicleCard
 		m_LaunchClutch.m_fSlipKp = slipKp;
 		m_LaunchClutch.m_fSlipKi = slipKi;
 		m_LaunchClutch.m_fLockToleranceRpm = lockToleranceRpm;
+		m_LaunchClutch.m_fBrakeDropRpmPerS = brakeDropRpmPerS;
 		return true;
 	}
 
@@ -1064,7 +1119,7 @@ class DC_VehicleCard
 		// card that keeps them in another mode is refused, not read with them ignored
 		if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip())
 		{
-			failure = "gearbox.launch_clutch has slip_kp, slip_ki or lock_tolerance_rpm, which belong to mode slip only (mode " + m_LaunchClutch.m_sMode + ")";
+			failure = "gearbox.launch_clutch has slip_kp, slip_ki, lock_tolerance_rpm or brake_drop_rpm_per_s, which belong to mode slip only (mode " + m_LaunchClutch.m_sMode + ")";
 			return false;
 		}
 

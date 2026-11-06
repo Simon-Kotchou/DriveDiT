@@ -413,6 +413,53 @@ RUN3_CARD = os.environ.get("DD_RUN3_CARD", "")
 RUN3_SPEED_PER_KRPM = {2: 1.54871, 3: 2.772066, 4: 4.169103}
 
 
+def object_text(text, key):
+    """Mirror of DC_JsonScan.ObjectText: the text of key's object value, '{' to its matching '}'; "" otherwise."""
+    quoted = '"%s"' % key
+    at = text.find(quoted)
+    if at < 0 or text.find(quoted, at + 1) >= 0:
+        return ""
+    index = at + len(quoted)
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    if index >= len(text) or text[index] != ":":
+        return ""
+    index += 1
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    if index >= len(text) or text[index] != "{":
+        return ""
+    depth = 0
+    for i in range(index, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[index:i + 1]
+    return ""
+
+
+def has_member(obj, key):
+    """Mirror of DC_JsonScan.HasMember: "key" followed by spaces and ':' in obj."""
+    quoted = '"%s"' % key
+    at = obj.find(quoted)
+    while at >= 0:
+        index = at + len(quoted)
+        while index < len(obj) and obj[index] in " \t\r\n":
+            index += 1
+        if index < len(obj) and obj[index] == ":":
+            return True
+        at = obj.find(quoted, at + 1)
+    return False
+
+
+def slip_fields_set(card_text):
+    """DC_VehicleCard.Load's m_bSlipFieldsSet on a card's text."""
+    launch = object_text(card_text, "launch_clutch")
+    return any(has_member(launch, key) for key in fit.LAUNCH_CLUTCH_SLIP_KEYS)
+
+
 def engine_rpm(speed, gear):
     return speed / RUN3_SPEED_PER_KRPM[gear] * 1000.0
 
@@ -1299,7 +1346,8 @@ class FitTests(unittest.TestCase):
         # DD-14d: a probe kit header always has the slip fields; a ramp card takes the ramp's keys only, a slip card
         # all of them (a slip header without them is refused)
         slip_lines = {"launch_clutch.slip_kp": "0.000300", "launch_clutch.slip_ki": "0.001000",
-                      "launch_clutch.lock_tolerance_rpm": "100.0", "launch_clutch.mps_per_krpm": "1.548710,2.772066"}
+                      "launch_clutch.lock_tolerance_rpm": "100.0", "launch_clutch.brake_drop_rpm_per_s": "29000.0",
+                      "launch_clutch.mps_per_krpm": "1.548710,2.772066"}
         ramp14d = self.manual_e01("play_43", dict(KIT_GEARBOX_LINES, **dict(block, **slip_lines)))
         card, text = self.fit_card(["--e01", ramp14d, "--e02a", self.e02a] + speeds)
         self.assertEqual(sorted(card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
@@ -1311,7 +1359,8 @@ class FitTests(unittest.TestCase):
         self.assertEqual(card["gearbox"]["launch_clutch"],
                          {"mode": "slip", "engage_rpm": 1100.0, "full_rpm": 1400.0, "couple_time_s": 0.5,
                           "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
-                          "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001, "lock_tolerance_rpm": 100.0})
+                          "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001, "lock_tolerance_rpm": 100.0,
+                          "brake_drop_rpm_per_s": 29000.0})
         self.assertEqual(fit.enforce_load_check(card), [])
         self.assertIn("launch clutch (DD-14c): mode slip, engage_rpm 1100.0", text)
         self.assertIn("lock_tolerance_rpm 100.0", text)
@@ -1436,6 +1485,7 @@ class FitTests(unittest.TestCase):
         self.assertEqual(launch, fit.PLACEHOLDER_SLIP_LAUNCH_CLUTCH)
         self.assertEqual(fit.enforce_load_check(card), [])
         for change in ({"slip_kp": -0.0001}, {"slip_kp": 0.0101}, {"slip_ki": 0.0}, {"slip_ki": 0.11},
+                       {"brake_drop_rpm_per_s": 0.0}, {"brake_drop_rpm_per_s": 200000.5},
                        {"lock_tolerance_rpm": -1.0}, {"lock_tolerance_rpm": 1000.5}, {"slip_kp": True},
                        {"slip_ki": "0.001"}, {"full_rpm": 1750.0}, {"engage_rpm": 800.0, "stall_guard_rpm": 600.0},
                        {"engage_rpm": 1300.0}):                         # 2600 rpm: above the 2525 rpm upshift
@@ -1443,6 +1493,7 @@ class FitTests(unittest.TestCase):
             bad["gearbox"]["launch_clutch"] = dict(launch, **change)
             self.assertTrue(fit.enforce_load_check(bad), change)
         for edge in ({"slip_kp": 0.0}, {"slip_kp": 0.01}, {"slip_ki": 0.1}, {"lock_tolerance_rpm": 0.0},
+                     {"brake_drop_rpm_per_s": 200000.0}, {"brake_drop_rpm_per_s": 1.0},
                      {"lock_tolerance_rpm": 1000.0}, {"engage_rpm": 1260.0}, {"full_rpm": 1748.0}):
             ok = json.loads(json.dumps(card))
             ok["gearbox"]["launch_clutch"] = dict(launch, **edge)
@@ -1484,14 +1535,17 @@ class FitTests(unittest.TestCase):
                       helper)
         self.assertIn("return RELEASE_LOOKAHEAD_ENGAGE_FACTOR * m_fEngageRpm;", helper)
         for name, value in (("SLIP_KP_MAX", fit.LAUNCH_SLIP_KP_MAX), ("SLIP_KI_MAX", fit.LAUNCH_SLIP_KI_MAX),
-                            ("LOCK_TOLERANCE_MAX_RPM", fit.LAUNCH_LOCK_TOLERANCE_MAX_RPM)):
+                            ("LOCK_TOLERANCE_MAX_RPM", fit.LAUNCH_LOCK_TOLERANCE_MAX_RPM),
+                            ("BRAKE_DROP_MAX_RPM_PER_S", fit.LAUNCH_BRAKE_DROP_MAX_RPM_PER_S)):
             self.assertIn("static const float %s = %g;" % (name, value), helper)
         # Codex round 1, LOW: the slip fields outside mode slip. Python refused them while Enforce read past them; now
         # DC_VehicleCard.Load notes any of the three keys and CheckGearbox refuses them unless the mode is slip, and
         # ReadLaunchClutch requires all three in mode slip, the same rule both ways as launch_clutch_violations
         load = enforce_body(source, "DC_VehicleCard", "Load")
-        self.assertIn('m_bSlipFieldsSet = text.IndexOf("\\"slip_kp\\"") >= 0 || text.IndexOf("\\"slip_ki\\"") >= 0 || '
-                      'text.IndexOf("\\"lock_tolerance_rpm\\"") >= 0;', load)
+        self.assertIn('string launchText = DC_JsonScan.ObjectText(text, "launch_clutch"); m_bSlipFieldsSet = '
+                      'DC_JsonScan.HasMember(launchText, "slip_kp") || DC_JsonScan.HasMember(launchText, "slip_ki") || '
+                      'DC_JsonScan.HasMember(launchText, "lock_tolerance_rpm") || '
+                      'DC_JsonScan.HasMember(launchText, "brake_drop_rpm_per_s");', load)
         check = enforce_body(source, "DC_VehicleCard", "CheckGearbox")
         self.assertIn("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip()) {", check)
         self.assertLess(check.index("if (!m_LaunchClutch.Check(launchFailure))"),
@@ -1499,7 +1553,31 @@ class FitTests(unittest.TestCase):
         self.assertLess(check.index("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip())"),
                         check.index("if (m_sGearbox == GEARBOX_AUTOMATIC)"))
         for key in fit.LAUNCH_CLUTCH_SLIP_KEYS:
-            self.assertIn('text.IndexOf("\\"%s\\"")' % key, load)
+            self.assertIn('DC_JsonScan.HasMember(launchText, "%s")' % key, load)
+        # Codex round 2, LOW: the member names inside gearbox.launch_clutch only (a mirror of DC_JsonScan.ObjectText and
+        # HasMember): a free-text note "slip_kp" elsewhere is no slip field
+        object_text = enforce_body(source, "DC_JsonScan", "ObjectText")
+        self.assertIn("int start = FindValue(text, key); if (start < 0 || start >= text.Length() || text.ToAscii(start) "
+                      "!= CHAR_BRACE_OPEN) return string.Empty;", object_text)
+        self.assertIn("if (code == CHAR_BRACE_OPEN) { depth++; } else if (code == CHAR_BRACE_CLOSE) { depth--; if "
+                      "(depth == 0) return text.Substring(start, i - start + 1); }", object_text)
+        has_member = enforce_body(source, "DC_JsonScan", "HasMember")
+        self.assertIn("int index = SkipSpace(objectText, at + quoted.Length()); if (index < objectText.Length() && "
+                      "objectText.ToAscii(index) == CHAR_COLON) return true; at = objectText.IndexOfFrom(at + 1, quoted);",
+                      has_member)
+        with open(CARD, "r", encoding="ascii") as f:
+            card18 = json.load(f)
+        noted = json.loads(json.dumps(card18))
+        noted["note"] = "slip_kp"
+        noted_text = fit.card_text(noted)
+        self.assertEqual(fit.enforce_load_check(noted), [])                    # Python: valid
+        self.assertFalse(slip_fields_set(noted_text))                          # Enforce: no slip field, accepted
+        self.assertNotIn('"slip_kp":', noted_text)
+        ramp_card = json.loads(json.dumps(card))
+        ramp_card["gearbox"]["launch_clutch"] = dict(card["gearbox"]["launch_clutch"], mode="ramp", full_rpm=1700.0)
+        self.assertTrue(slip_fields_set(json.dumps(ramp_card, indent=2)))       # a slip field in the object: refused
+        self.assertTrue(fit.enforce_load_check(ramp_card))
+        self.assertTrue(slip_fields_set(fit.card_text(card)))                   # the slip card has them
 
         def enforce_accepts(launch):
             # DC_VehicleCard on a launch_clutch object: ReadLaunchClutch needs the slip keys in mode slip, CheckGearbox

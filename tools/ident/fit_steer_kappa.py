@@ -169,18 +169,20 @@ INPUT_SHAPINGS = ("echo", "rate_limit", "lag", "unknown")
 # scripted gearbox, and there every downshift outside the band (below). Absent = mode off (the 1.8 sequence). The
 # E-01 run header carries the same fields as launch_clutch.*. Mode slip (DD-14d) adds LAUNCH_CLUTCH_SLIP_KEYS, required
 # in mode slip and absent otherwise: slip_kp in [0, LAUNCH_SLIP_KP_MAX], slip_ki in (0, LAUNCH_SLIP_KI_MAX],
-# lock_tolerance_rpm in [0, LAUNCH_LOCK_TOLERANCE_MAX_RPM] (DC_LaunchClutchConfig SLIP_KP_MAX, SLIP_KI_MAX,
-# LOCK_TOLERANCE_MAX_RPM); full_rpm is the rpm a slipping clutch holds
+# lock_tolerance_rpm in [0, LAUNCH_LOCK_TOLERANCE_MAX_RPM], brake_drop_rpm_per_s in (0, LAUNCH_BRAKE_DROP_MAX_RPM_PER_S]
+# (DC_LaunchClutchConfig SLIP_KP_MAX, SLIP_KI_MAX, LOCK_TOLERANCE_MAX_RPM, BRAKE_DROP_MAX_RPM_PER_S); full_rpm is the
+# rpm a slipping clutch holds
 LAUNCH_CLUTCH_MODES = ("off", "ramp", "slip")
 LAUNCH_CLUTCH_ACTIVE_MODES = ("ramp", "slip")
 LAUNCH_CLUTCH_KEYS = ("mode", "engage_rpm", "full_rpm", "couple_time_s", "uncouple_time_s", "stall_guard_rpm",
                       "restart_on_stall", "restart_cooldown_s")
-LAUNCH_CLUTCH_SLIP_KEYS = ("slip_kp", "slip_ki", "lock_tolerance_rpm")
+LAUNCH_CLUTCH_SLIP_KEYS = ("slip_kp", "slip_ki", "lock_tolerance_rpm", "brake_drop_rpm_per_s")
 LAUNCH_RPM_MAX = 10000.0
 LAUNCH_TIME_MAX_S = 10.0
 LAUNCH_SLIP_KP_MAX = 0.01
 LAUNCH_SLIP_KI_MAX = 0.1
 LAUNCH_LOCK_TOLERANCE_MAX_RPM = 1000.0
+LAUNCH_BRAKE_DROP_MAX_RPM_PER_S = 200000.0     # brake_drop_rpm_per_s in (0, this] (DC_LaunchClutchConfig)
 # Mode slip on a scripted gearbox: each upshift speed, in the gear it shifts up into, at least this x engage_rpm (the
 # release lookahead ceiling, DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_ENGAGE_FACTOR), so an upshift's synchronisation
 # never opens the coupled clutch
@@ -270,11 +272,13 @@ PLACEHOLDER_LAUNCH_CLUTCH = {"mode": "ramp", "engage_rpm": 1100.0, "full_rpm": 1
 # the clutch 2 times at throttle 0.5, 4 at 0.3 and 3 at 0.4 before c = 1. Fitted on its launches
 # (tools/ident/fit_launch_clutch.py), the clutch moves the rpm by about 965 rpm per step at c = 1, so the ramp's band is a
 # loop gain of 1.6 per step. Mode slip holds 1400 rpm while slipping (PI kp 0.0003 per rpm, ki 0.001 per rpm s within
-# the couple / uncouple rates 0.85 / 0.45 s), couples fully within 100 rpm of the driveline rpm and opens at 1100 rpm.
+# the couple / uncouple rates 0.85 / 0.45 s), couples fully within 100 rpm of the driveline rpm and opens at 1100 rpm;
+# a brake opens it when 29000 rpm/s (117.6 Nm / 0.0388 kg m2, the worst fall of a coupled engine) over the call could
+# reach 1100 rpm.
 PLACEHOLDER_SLIP_LAUNCH_CLUTCH = {"mode": "slip", "engage_rpm": 1100.0, "full_rpm": 1400.0, "couple_time_s": 0.85,
                                   "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
                                   "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001,
-                                  "lock_tolerance_rpm": 100.0}
+                                  "lock_tolerance_rpm": 100.0, "brake_drop_rpm_per_s": 29000.0}
 PLACEHOLDER_SLIP_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14d, --launch-clutch slip): mode slip with the "
                                         "DC_LaunchClutchConfig.Slip() values, designed on the powertrain model "
                                         "fitted to the first 1.9.0.37 ramp Play (launch 20261106T194516Z-wb-ab6a, "
@@ -282,7 +286,10 @@ PLACEHOLDER_SLIP_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14d, --launch-clutc
                                         "launched without a stall but chattered (2 openings at throttle 0.5, 4 at "
                                         "0.3); not identified. It holds full_rpm 1400 while slipping and couples "
                                         "fully once the engine is within 100 rpm of the driveline rpm (speed / "
-                                        "scripted_mps_per_krpm). scripted_mps_per_krpm: E-01 run 3's measured "
+                                        "scripted_mps_per_krpm) on two callbacks under drive; a brake opens it when "
+                                        "the worst fall of a coupled engine, brake_drop_rpm_per_s 29000 (117.6 Nm / "
+                                        "0.0388 kg m2, the fit), over the callback could reach engage_rpm. "
+                                        "scripted_mps_per_krpm: E-01 run 3's measured "
                                         "1.54871 / 2.772066 / 4.169103 m/s per 1000 rpm in gears 2..4 (1.8.0.13, the "
                                         "run-3 fit's gearbox.detail.speed_per_krpm; 1.9.0.37 measured 1.540 / 2.755 "
                                         "/ 4.13 in that Play), carried over with the shift speeds; the downshifts lie "
@@ -1351,6 +1358,9 @@ def launch_clutch_violations(launch, mode):
         if not 0 <= launch["lock_tolerance_rpm"] <= LAUNCH_LOCK_TOLERANCE_MAX_RPM:
             return ["gearbox.launch_clutch lock_tolerance_rpm %s is outside [0, %s]"
                     % (launch["lock_tolerance_rpm"], LAUNCH_LOCK_TOLERANCE_MAX_RPM)]
+        if not 0 < launch["brake_drop_rpm_per_s"] <= LAUNCH_BRAKE_DROP_MAX_RPM_PER_S:
+            return ["gearbox.launch_clutch brake_drop_rpm_per_s %s is outside (0, %s]"
+                    % (launch["brake_drop_rpm_per_s"], LAUNCH_BRAKE_DROP_MAX_RPM_PER_S)]
     if launch["mode"] in LAUNCH_CLUTCH_ACTIVE_MODES and mode == "automatic":
         return ["gearbox.launch_clutch mode %s applies to a scripted gearbox only (an automatic gearbox keeps clutch "
                 "1)" % launch["mode"]]

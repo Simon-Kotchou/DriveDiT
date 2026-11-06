@@ -80,8 +80,15 @@ class LaunchClutch:
                 "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
                 "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001, "lock_tolerance_rpm": 100.0}
     SLIP_FULL_RPM = 1400.0                  # DC_LaunchClutchConfig.DEFAULT_SLIP_FULL_RPM (Slip())
-    RELEASE_LOOKAHEAD_CALLS = 1.5
-    RELEASE_LOOKAHEAD_ENGAGE_FACTOR = 2.0
+    RELEASE_LOOKAHEAD_CALLS = 1.5           # predicted rpm: this far ahead in units of the call's own duration
+    RELEASE_LOOKAHEAD_ENGAGE_FACTOR = 2.0   # coupled: the lookahead acts below this x engage_rpm
+    LOCK_AGREE_CALLS = 2                    # lock-up: engine and driveline agree on this many calls in a row
+    SYNC_S = 0.3                            # after an upshift: no lookahead or drop guard for this long
+    LUG_MARGIN_RPM = 300.0                  # coupled under drive: open at stall_guard_rpm + this (at most engage_rpm)
+    MAX_DROP_RPM_PER_S = 12000.0            # coupled: an rpm falling faster than this opens (a full brake in first
+                                            # gear is about 8000)
+    GAIN_STEP_S = 0.033333                  # slip_kp / slip_ki are per call of this length (the fixed time slice)
+    CALL_STEPS_DECAY = 0.05                 # the held call length (in GAIN_STEP_S) decays by this per call
 
     def __init__(self, **config):
         self.config = dict(self.DEFAULTS, **config)
@@ -101,13 +108,28 @@ class LaunchClutch:
         self.restart_due = False
         self.slip_s = 0.0
         self.locked = False
+        self.agree_calls = 0
+        self.sync_left_s = 0.0
+        self.last_gear = -1
+        self.call_steps = 1.0
+        self.forget_rpm()
+
+    def forget_rpm(self):
+        """DC_LaunchClutch.ForgetRpm: no readback history (no change of the mean, no rate)."""
         self.last_rpm = -1.0
         self.last_mean_rpm = -1.0
+        self.history = 0
+        self.last_slice_s = 0.0
+        self.prev_slice_s = 0.0
 
     def lookahead_ceiling_rpm(self):
         return self.RELEASE_LOOKAHEAD_ENGAGE_FACTOR * self.config["engage_rpm"]
 
-    def step(self, dt, in_gear, handbrake, rpm, engine_on, commanded_clutch, dip, driveline_rpm=-1.0):
+    def lug_rpm(self):
+        return min(self.config["stall_guard_rpm"] + self.LUG_MARGIN_RPM, self.config["engage_rpm"])
+
+    def step(self, dt, in_gear, handbrake, rpm, engine_on, commanded_clutch, dip, driveline_rpm=-1.0, throttle=1.0,
+             brake=0.0, gear=-1):
         cfg = self.config
         commanded = min(max(commanded_clutch, 0.0), 1.0)
         slice_s = max(dt, 0.0)
@@ -126,7 +148,7 @@ class LaunchClutch:
             self.coupling = 0.0
         driving = in_gear and not handbrake and not dip and engine_on
         if cfg["mode"] == "slip":
-            self.step_slip(slice_s, driving, rpm, driveline_rpm)
+            self.step_slip(slice_s, driving, rpm, driveline_rpm, throttle > 0 and brake <= 0, gear)
         elif not driving:
             self.coupling = 0.0
         elif rpm < cfg["stall_guard_rpm"]:
@@ -151,8 +173,23 @@ class LaunchClutch:
         self.max_slip_total_s = max(self.max_slip_total_s, self.slip_s)
         return min(commanded, self.coupling)
 
-    def step_slip(self, slice_s, driving, rpm, driveline_rpm):
+    def open_clutch(self):
+        """DC_LaunchClutch.Open: c = 0, not locked, no agreement."""
+        self.coupling = 0.0
+        self.locked = False
+        self.agree_calls = 0
+
+    def step_slip(self, slice_s, driving, rpm, driveline_rpm, drive, gear):
         cfg = self.config
+        engage = cfg["engage_rpm"]
+        # an upshift (a higher forward gear index): its synchronisation drop is no fall to predict, so the history
+        # restarts and the lookahead and the drop guard wait SYNC_S. A downshift raises the rpm and keeps the history,
+        # so a braking downshift keeps the braking lookahead
+        if gear >= 0 and self.last_gear >= 0 and gear > self.last_gear:
+            self.forget_rpm()
+            self.sync_left_s = self.SYNC_S
+            self.agree_calls = 0
+        self.last_gear = gear
         last = self.last_rpm
         if last < 0:
             last = rpm
@@ -160,41 +197,58 @@ class LaunchClutch:
         mean_last = self.last_mean_rpm
         if mean_last < 0:
             mean_last = mean
+        span_s = self.last_slice_s + self.prev_slice_s
+        rate = 0.0
+        if self.history >= 2 and span_s > 0:
+            rate = 2.0 * (mean - mean_last) / span_s
         self.last_rpm = rpm
         self.last_mean_rpm = mean
-        engage = cfg["engage_rpm"]
+        if self.history < 3:
+            self.history += 1
+        self.prev_slice_s = self.last_slice_s
+        self.last_slice_s = slice_s
+        self.call_steps = max(slice_s / self.GAIN_STEP_S, 1.0, self.call_steps - self.CALL_STEPS_DECAY)
+        in_sync = self.sync_left_s > 0
+        self.sync_left_s = max(self.sync_left_s - slice_s, 0.0)
+        predicted = rpm + self.RELEASE_LOOKAHEAD_CALLS * slice_s * min(rate, 0.0)
         if not driving:
-            self.coupling = 0.0
-            self.locked = False
+            self.open_clutch()
             return
         if rpm < cfg["stall_guard_rpm"]:
             if self.coupling > 0:
                 self.guard_drops += 1
-            self.coupling = 0.0
-            self.locked = False
+            self.open_clutch()
             return
         if self.locked:
-            predicted = rpm
-            if rpm < self.lookahead_ceiling_rpm():
-                predicted = rpm + self.RELEASE_LOOKAHEAD_CALLS * min(mean - mean_last, 0.0)
-            if predicted <= engage:
-                self.coupling = 0.0
-                self.locked = False
+            open_rpm = engage
+            if drive:
+                open_rpm = self.lug_rpm()
+            if rpm <= open_rpm:
+                self.open_clutch()
+                return
+            if not in_sync and rpm < self.lookahead_ceiling_rpm() and predicted <= open_rpm:
+                self.open_clutch()
+                return
+            if not drive and not in_sync and rate < -self.MAX_DROP_RPM_PER_S:
+                self.open_clutch()
                 return
             self.coupling = 1.0
             return
-        if rpm <= engage:
-            self.coupling = 0.0
+        if rpm <= engage or not drive or (not in_sync and predicted <= self.lug_rpm()):
+            self.open_clutch()
             return
-        want = self.coupling + cfg["slip_kp"] * (mean - mean_last) + cfg["slip_ki"] * (mean - cfg["full_rpm"]) * slice_s
+        kp = cfg["slip_kp"] / self.call_steps
+        ki = cfg["slip_ki"] / (self.call_steps * self.call_steps)
+        want = self.coupling + slice_s * (kp * rate + ki * (mean - cfg["full_rpm"]))
         lowest = max(self.coupling - slice_s / cfg["uncouple_time_s"], 0.0)
         highest = min(self.coupling + slice_s / cfg["couple_time_s"], 1.0)
         self.coupling = min(max(want, lowest), highest)                     # Math.Clamp(want, lowest, highest)
         if self.coupling > 0 and driveline_rpm > 0 and abs(rpm - driveline_rpm) <= cfg["lock_tolerance_rpm"]:
+            self.agree_calls += 1
+        else:
+            self.agree_calls = 0
+        if self.agree_calls >= self.LOCK_AGREE_CALLS or self.coupling >= 1:
             self.locked = True
-        if self.coupling >= 1:
-            self.locked = True
-        if self.locked:
             self.coupling = 1.0
             self.lockups += 1
 
@@ -356,7 +410,8 @@ def drive(clutch, schedule, seconds, timing="U", calls=(1,), plant=None, policy=
         if gear != plant.gear:
             plant.set_gear(gear)
         driveline = v_read / known[gear] * 1000.0 if known.get(gear, 0) > 0 else -1.0
-        c = clutch.step(covered * STEP_DT, True, False, rpm_read, on_read, commanded, commanded <= 0, driveline)
+        c = clutch.step(covered * STEP_DT, True, False, rpm_read, on_read, commanded, commanded <= 0, driveline,
+                        throttle, brake, gear)
         for _ in range(covered):
             inputs.append((throttle, brake, c))
         last = step + covered - 1
@@ -449,14 +504,21 @@ LAUNCH_PHASES = {"move_check": 0.5, "throttle_0.30": 0.3, "throttle_0.60": 0.6, 
                  "gear_scripted": 0.4}
 
 
+OPTIONAL_STEP_COLUMNS = ("rpm_feedback",)     # DD-14d: EngineGetRPMFeedback, recorded only (plays from DD-14d on)
+
+
 def read_steps(path):
-    """The STEP_COLUMNS of an e01_steps.csv (or of the trimmed fixture), numbers as floats."""
+    """The STEP_COLUMNS of an e01_steps.csv (or of the trimmed fixture), numbers as floats, and the
+    OPTIONAL_STEP_COLUMNS a play has. A missing column raises KeyError."""
     out = []
     with open(path, newline="", encoding="ascii") as f:
         for row in csv.DictReader(f):
             d = {"phase": row["phase"], "segment": row["segment"]}
             for key in STEP_COLUMNS[3:]:
                 d[key] = float(row[key])
+            for key in OPTIONAL_STEP_COLUMNS:
+                if row.get(key) not in (None, ""):
+                    d[key] = float(row[key])
             d["physics_step"] = int(row["physics_step"])
             out.append(d)
     return out

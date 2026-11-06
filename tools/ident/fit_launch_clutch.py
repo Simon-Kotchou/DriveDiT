@@ -11,10 +11,16 @@ e01_steps.csv). Nothing is written. Sealed map: a path or run header naming eden
 ALWAYS (the check of a Play): the launch clutch of the run header (launch_clutch.mode and its fields), then per launch
 phase (move_check, throttle_*, gear_scripted; LAUNCH_PHASES) the openings (cmd_clutch > 0 on one step and 0 on the
 next while the throttle is on: the DD-14c chatter's dumps) with their step offset and speed, the first cmd_clutch = 1
-after the throttle starts, the lowest rpm in gear while the throttle is on, and cmd_clutch's reversals over the first
-3 s; per braking stop (the clutch's last opening of each phase) the rpm on the call before and at it; and the run
-footer counters (launch_clutch.stalls, restarts, guard_drops, max_slip_s, lockups). PASS when no launch opens the
-clutch, no stall or guard drop was counted, and every in-gear rpm stays at or above stall_guard_rpm + MARGIN_RPM.
+after the throttle starts, the lowest rpm and the top speed in gear while the throttle is on, and cmd_clutch's
+reversals over the first 3 s; per braking stop (the clutch's last opening of each phase) the rpm on the call before
+and at it; the run header counters (launch_clutch.stalls, restarts, guard_drops, max_slip_s, lockups); and, from
+DD-14d plays on, EngineGetRPMFeedback (column rpm_feedback) against the engine and the speed-implied driveline rpm.
+PASS needs a complete capture (steps, run footer status complete, the launch_clutch block and its counters) with at
+least one launch phase, and in every launch phase found:
+  - a complete window (MIN_WINDOW_S of throttle, or one that couples) and motion above MOTION_KMH;
+  - c = 1 by COUPLE_DEADLINE_S at throttle >= COUPLE_DEADLINE_THROTTLE, else within the window;
+  - no opening, and every in-gear rpm at or above stall_guard_rpm + MARGIN_RPM (also at the braking stops);
+and no stall: engine_on never falls in the steps, and the counters stalls and guard_drops are 0.
 
 --fit: the shooting fit of tools/ident/launch_clutch_model.py's plant on the play's launches (15-step segments from
 the measured state, every 5 steps, first gear): engine inertia, clutch capacity, rolling load and the gross torque at
@@ -81,28 +87,73 @@ def clutch_of(config):
 # ---------------------------------------------------------------------------------------------------------------
 # the check of a play
 
+COUNTER_KEYS = ("stalls", "restarts", "guard_drops", "max_slip_s")    # the probe kit's stop summary (DD-14c)
+MOTION_KMH = 5.0                # a launch moved: above this within its window
+COUPLE_DEADLINE_S = 2.5         # c = 1 within this at throttle >= COUPLE_DEADLINE_THROTTLE (else within the window)
+COUPLE_DEADLINE_THROTTLE = 0.5
+MIN_WINDOW_S = 2.5              # a launch window of at least this, or ending coupled
+
+
 def check_play(rows, header):
-    """Per launch and per braking stop (see the module docstring); returns (lines, passed)."""
+    """The launch clutch of a play (see the module docstring); returns (lines, passed). Refuses (FAIL) an incomplete
+    capture: no rows, a run footer that is not status complete, a missing launch_clutch block or counter, or no launch
+    phase. Every launch phase found must have a complete window (MIN_WINDOW_S, or one that couples), move above
+    MOTION_KMH, couple fully by COUPLE_DEADLINE_S at throttle >= COUPLE_DEADLINE_THROTTLE (else within the window),
+    open the clutch never and stay at or above stall_guard_rpm + MARGIN_RPM in gear; the recorded engine_on must never
+    fall (no stall), and the counters stalls and guard_drops must be 0."""
     lines, passed = [], True
+
+    def fail(text):
+        lines.append("  FAIL: " + text)
+        return False
+
     launch = {k: header.get("launch_clutch." + k) for k in LAUNCH_KEYS if "launch_clutch." + k in header}
     lines.append("launch clutch: %s" % (", ".join("%s %s" % kv for kv in launch.items()) or "no launch_clutch block"))
+    if not rows:
+        return lines + ["  FAIL: no steps (an incomplete capture)"], False
+    if header.get("status") != "complete":
+        passed = fail("the run footer is not status=complete (%r): an incomplete capture" % header.get("status"))
+    if "mode" not in launch:
+        passed = fail("the run header has no launch_clutch block")
     guard = float(launch.get("stall_guard_rpm") or 600.0)
-    for name, (first, last) in model.launch_windows(rows, seconds=8.0).items():
+    windows = model.launch_windows(rows, seconds=8.0)
+    if not windows:
+        passed = fail("no launch phase (%s) in the steps" % ", ".join(model.LAUNCH_PHASES))
+    for name, (first, last) in windows.items():
         seg = rows[first:last + 1]
+        throttle = model.LAUNCH_PHASES[name]
         opens = [(i - first, rows[i]["speed_kmh"]) for i in range(first + 1, last + 1)
                  if rows[i - 1]["cmd_clutch"] > 0 and rows[i]["cmd_clutch"] == 0 and rows[i]["cmd_throttle"] > 0]
         coupled = next((i - first for i in range(first, last + 1) if rows[i]["cmd_clutch"] >= 1.0), None)
+        coupled_s = None if coupled is None else coupled * model.STEP_DT
         low = min(r["rpm"] for r in seg)
+        top = max(r["speed_kmh"] for r in seg)
+        span_s = (last - first + 1) * model.STEP_DT
         cs = [r["cmd_clutch"] for r in seg[:int(3.0 / model.STEP_DT)]]
         nz = [b - a for a, b in zip(cs, cs[1:]) if abs(b - a) > 1e-6]
         rev = sum(1 for a, b in zip(nz, nz[1:]) if a * b < 0)
-        ok = not opens and low >= guard + MARGIN_RPM
-        passed = passed and ok
-        lines.append("  %-14s throttle %.2f: %d openings %s, c = 1 at %s, lowest rpm %.0f, c reversals in 3 s %d%s"
-                     % (name, model.LAUNCH_PHASES[name], len(opens),
-                        "[" + ", ".join("step %d at %.1f km/h" % o for o in opens) + "]",
-                        "-" if coupled is None else "%.2f s" % (coupled * model.STEP_DT), low, rev,
-                        "" if ok else "  <-- FAIL"))
+        problems = []
+        if opens:
+            problems.append("%d openings" % len(opens))
+        if low < guard + MARGIN_RPM:
+            problems.append("rpm %.0f below stall_guard_rpm + %g" % (low, MARGIN_RPM))
+        if top <= MOTION_KMH:
+            problems.append("no motion (max %.1f km/h)" % top)
+        if coupled_s is None:
+            problems.append("never coupled (c = 1)")
+        elif throttle >= COUPLE_DEADLINE_THROTTLE and coupled_s > COUPLE_DEADLINE_S:
+            problems.append("coupled at %.2f s, after %.1f s" % (coupled_s, COUPLE_DEADLINE_S))
+        if span_s < MIN_WINDOW_S and coupled_s is None:
+            problems.append("an incomplete window (%.2f s)" % span_s)
+        passed = passed and not problems
+        lines.append("  %-14s throttle %.2f: %d openings %s, c = 1 at %s, lowest rpm %.0f, max %.1f km/h, c reversals "
+                     "in 3 s %d%s" % (name, throttle, len(opens),
+                                      "[" + ", ".join("step %d at %.1f km/h" % o for o in opens) + "]",
+                                      "-" if coupled_s is None else "%.2f s" % coupled_s, low, top, rev,
+                                      "" if not problems else "  <-- FAIL: " + "; ".join(problems)))
+    stalls = sum(1 for a, b in zip(rows, rows[1:]) if a["engine_on"] and not b["engine_on"])
+    if stalls:
+        passed = fail("%d stalls (engine_on 1 -> 0 in the steps)" % stalls)
     for i in range(1, len(rows)):
         a, b = rows[i - 1], rows[i]
         if (a["cmd_clutch"] > 0 and b["cmd_clutch"] == 0 and b["cmd_brake"] > 0 and b["cmd_throttle"] == 0
@@ -114,14 +165,33 @@ def check_play(rows, header):
                          "(%.1f km/h)%s" % (b["phase"], b["physics_step"], b["cmd_brake"], int(b["cmd_gear"]),
                                             a["rpm"], b["rpm"], min(later), b["speed_kmh"],
                                             "" if ok else "  <-- below stall_guard_rpm + %g" % MARGIN_RPM))
-    counters = {k: header.get("launch_clutch." + k) for k in ("stalls", "restarts", "guard_drops", "max_slip_s",
-                                                               "lockups")}
+    counters = {k: header.get("launch_clutch." + k) for k in COUNTER_KEYS + ("lockups",)}
     lines.append("run header counters: %s" % ", ".join("%s %s" % (k, v if v is not None else "-")
                                                        for k, v in counters.items()))
+    missing = [k for k in COUNTER_KEYS if counters[k] is None]
+    if missing:
+        passed = fail("the run header misses launch_clutch.%s (an incomplete capture)" % ", launch_clutch.".join(missing))
     for key in ("stalls", "guard_drops"):
         if counters[key] not in (None, "0"):
-            passed = False
+            passed = fail("launch_clutch.%s %s" % (key, counters[key]))
+    feedback = rpm_feedback_text(rows)
+    if feedback:
+        lines.append(feedback)
     return lines, passed
+
+
+def rpm_feedback_text(rows):
+    """DD-14d: EngineGetRPMFeedback (column rpm_feedback) against the engine rpm and the first gear's speed-implied
+    driveline rpm while coupled in first gear and moving; None without the column."""
+    pairs = [(r["rpm_feedback"], r["rpm"], r["vel_l_z"] / model.CARD_MPS_PER_KRPM[model.FIRST_GEAR] * 1000.0)
+             for r in rows if "rpm_feedback" in r and r["cmd_clutch"] >= 1.0 and r["cmd_gear"] == model.FIRST_GEAR
+             and r["vel_l_z"] > 1.0 and r["rpm"] > 0]
+    if not pairs:
+        return None if not any("rpm_feedback" in r for r in rows) else "rpm_feedback: no coupled first-gear steps"
+    to_rpm = sorted(f / e for f, e, _ in pairs)
+    to_drive = sorted(f / d for f, _, d in pairs if d > 0)
+    return ("rpm_feedback (EngineGetRPMFeedback) over %d coupled first-gear steps: median %.3f x the engine rpm, %.3f x "
+            "the speed-implied driveline rpm" % (len(pairs), to_rpm[len(to_rpm) // 2], to_drive[len(to_drive) // 2]))
 
 
 def free_decay_per_s(rows, idle=800.0):

@@ -14,8 +14,9 @@
 //   BeginDriver    sha256 self-test; the route as loaded (a refused route refuses readiness); vehicle card for the
 //                  session's pin, accepted by llc_v1's card rules (use_class from the launch record); llc_sha and
 //                  expert_sha = sha256 of DC_LLCv1.c and DC_ExpertHL.c as deployed; stamps and signs to session.json
-//                  control.*; then every vehicle gate of the world is opened (DC_Gates, m_bOpenGatesAtStart) and
-//                  checked GATE_CHECK_AFTER_S later;
+//                  control.*; the sha256 of DC_LaunchClutch.c (llc_v1's launch clutch, DD-14c) is logged only; then
+//                  every vehicle gate of the world is opened (DC_Gates, m_bOpenGatesAtStart) and checked
+//                  GATE_CHECK_AFTER_S later;
 //   CanDecide      the admission handshake before BeginEpisode: true only in a decision callback whose PostStep can
 //                  evaluate the expert (CanEvaluate), so an admitted episode's first Decide never returns false;
 //   BeginEpisode   in a decision callback after the warm-up, when the ego stands at the route start (distance,
@@ -34,7 +35,8 @@
 //                  DC_Noise's: exp_*_now stays the clean expert (action_label), the decision carries the disturbance
 //                  (action_cmd, noise_active / noise_id), and perturb_start / perturb_end are logged here, where a
 //                  disturbance is first applied and where the clean command returns (or in EndEpisode);
-//   EndEpisode / EndDriver   log lines (the core parks the ego).
+//   EndEpisode / EndDriver   log lines, with llc_v1's launch clutch counters (DD-14c: stalls, restarts; console only,
+//                  dc-2.0 is frozen); the core parks the ego.
 //
 // EXPERT (pure pursuit and a speed profile on the route polyline, the driving line of the drivedit_nav route)
 //   progress   ordered projection as nav_v1: inside +-PROGRESS_WINDOW_M around the previous progress, never decreasing
@@ -962,6 +964,12 @@ class DC_ExpertDriver : DC_DriverInterface
 			return false;
 		}
 
+		// llc_v1's launch clutch (DD-14c) lives in DC_LaunchClutch.c, which llc_sha does not cover: its sha256 is logged
+		// (not a contract stamp; addon.content_sha256 covers the deployed file)
+		string launchClutchSha = HashSource(DC_LaunchClutch.SOURCE_FILE, failure);
+		if (launchClutchSha.IsEmpty())
+			ctx.Warn("launch clutch source sha256: " + failure);
+
 		if (!BeginNoise(ctx, failure))
 		{
 			ctx.Error("perturbation: " + failure);
@@ -987,7 +995,7 @@ class DC_ExpertDriver : DC_DriverInterface
 		ctx.Log(m_LLC.Describe());
 		ctx.Log(string.Format("vehicle card %1 sha256 %2 (use_class %3)", m_Card.m_sPath, m_Card.m_sSha256, m_sUseClass));
 		ctx.Log(string.Format("route %1 (%2, split %3, %4 m, %5 points) sha256 %6; speed profile %7..%8 km/h", m_Route.m_sRouteId, m_Route.m_sPath, m_Route.m_sSplit, lengthM.ToString(-1, 1), m_Route.GetPointCount(), m_Route.m_sSha256, lowestKmh.ToString(-1, 1), highestKmh.ToString(-1, 1)));
-		ctx.Log(string.Format("%1 llc_sha %2, %3 expert_sha %4", DC_LLCv1.VERSION, m_sLlcSha, DC_ExpertHL.VERSION, m_sExpertSha));
+		ctx.Log(string.Format("%1 llc_sha %2, %3 expert_sha %4; launch clutch %5 sha256 %6", DC_LLCv1.VERSION, m_sLlcSha, DC_ExpertHL.VERSION, m_sExpertSha, DC_LaunchClutch.SOURCE_FILE, launchClutchSha));
 		ctx.Log(string.Format("terminations: route_complete within %1 m of the goal, route_deviation > %2 m, offroad > %3 + %4 m for > %5 s, stuck < %6 km/h for %7 s, engine_off after %8 s, timeout %9 s; collision and rollover only from the core's crash watch", m_fEndToleranceM, m_fDeviationM, corridorText, m_fOffroadMarginM, m_fOffroadS, m_fStuckKmh, m_fStuckS, m_fEngineOffS, m_fEpisodeTimeoutS));
 		OpenGates(ctx);
 		m_bReady = true;
@@ -1253,6 +1261,8 @@ class DC_ExpertDriver : DC_DriverInterface
 		float progress = m_Expert.GetProgress();
 		float lengthM = m_Route.m_fLengthM;
 		m_Context.Log(string.Format("episode %1 ended at physics step %2: %3, progress %4 of %5 m, |lane_lat_err_m| mean %6 max %7", episodeId, lastPhysicsStep, terminationReason, progress.ToString(-1, 1), lengthM.ToString(-1, 1), meanAbs.ToString(-1, 3), m_fMaxAbsLateral.ToString(-1, 3)));
+		if (m_LLC)
+			m_Context.Log(string.Format("episode %1: %2 (session totals)", episodeId, m_LLC.DescribeLaunchClutch()));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1260,6 +1270,9 @@ class DC_ExpertDriver : DC_DriverInterface
 	{
 		if (m_Context)
 			m_Context.Log(string.Format("driver ends (%1) after %2 episode(s)", endReason, m_iEpisodes));
+
+		if (m_Context && m_LLC)
+			m_Context.Log(m_LLC.DescribeLaunchClutch());
 
 		if (m_Context && m_Noise)
 			m_Context.Log(m_Noise.Summary());

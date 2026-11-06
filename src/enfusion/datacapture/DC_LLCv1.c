@@ -42,6 +42,26 @@
 //              manual one (T0-ENG run 2: reverse 0, neutral 1, forward 2..5), on which an automatic card would never
 //              leave neutral, so it is refused; every scripted gear lies in the ego's forward range and the card's
 //              neutral is the ego's. Between episodes and before the first command the core parks the ego in neutral.
+//   launch     the launch clutch (DD-14c, DC_LaunchClutch.c), scripted gearbox only. The card's optional
+//   clutch     gearbox.launch_clutch sets it; without one it is mode off, exactly the behaviour of every card before
+//              it (the 1.8 sequence).
+//                - why: the 1.9.0.37 powertrain stalls at a clutch-1 drive-off where 1.8.0.13 slipped (launch
+//                  20261106T052424Z-wb-addc: 800 -> 528 -> 18 rpm, engine off, in two steps). No vanilla anti-stall
+//                  reaches direct setters (the DC_LaunchClutch.c header; the clutch semantics are unchanged,
+//                  VehicleWheeledSimulation.c:38-44 of 1.9.0.37);
+//                - ramp: the dip clutch above is the upper bound, and its 0 is the dip. The passed clutch is
+//                  min(dip clutch, c): c bites from engage_rpm, is fully coupled from full_rpm, its rate is limited to
+//                  couple_time_s / uncouple_time_s over sliceS inside the band, and it opens at once at or below
+//                  engage_rpm, using the rpm and engine_on read at the start of the callback;
+//                - stall restart: an engine that stalls gets the actuator's Start (DC_ActuatorModeA: ForceStartEngine)
+//                  at most every restart_cooldown_s;
+//                - llc_clutch records the value passed, as before;
+//                - an automatic gearbox keeps clutch 1, and a card with ramp on one is refused (UNVERIFIED on 1.9);
+//                - bounds: DC_LaunchClutchConfig.Check's ranges; on a scripted gearbox gearbox.scripted_mps_per_krpm
+//                  (the measured m/s per 1000 rpm of each scripted gear) and every downshift speed at least full_rpm +
+//                  DOWNSHIFT_RPM_MARGIN in the gear it shifts down from (CheckGearbox); and at Init CheckEngine
+//                  against the ego's EngineGetRPMIdle and EngineGetRPMMax (the DC_LaunchClutch.c header, BOUNDS);
+//                - the counters (DescribeLaunchClutch) go to the console only: dc-2.0 is frozen.
 //
 // VEHICLE CARD (tools/ident/cards/<pin_id>/<vehicle>.json in the repo, deployed to Configs/ident/cards/; r3 scope note)
 //   - loaded once per session (DC_VehicleCard.Load); its sha256 (over the file bytes, the value the DD-5-min reader
@@ -59,7 +79,9 @@
 //     needs. The first-pass fit writes the identity limiter.
 //
 // PROVENANCE: llc_sha = sha256 of this source file as deployed (DC_Sha256 over its bytes; DC_ExpertDriver reads it),
-// so session.json control.llc_sha names the exact controller; VERSION is "llc_v1".
+// so session.json control.llc_sha names the exact controller; VERSION is "llc_v1". The launch clutch's code is in
+// DC_LaunchClutch.c, which llc_sha does not cover: DC_ExpertDriver logs that file's sha256 next to llc_sha (console;
+// the deploy's addon.content_sha256 covers both files), and the contract field stays as frozen.
 //
 // HELPERS: DC_Sha256 (FIPS 180-4 over ASCII text; Enforce has no hash API with a published algorithm, string.Hash()
 // is an engine hash), DC_TextFile (whole-file reads, 7-bit ASCII only), DC_JsonScan (flat number and plain-string
@@ -653,6 +675,8 @@ class DC_VehicleCard
 	bool m_bSignsMeasured;
 	string m_sGearbox;					//!< automatic or scripted (E-04 / E-01)
 	float m_fClutchDipS;				//!< gearbox.clutch_dip_s: clutch 0 this long after each scripted gear change (E-01)
+	bool m_bLaunchClutchSet;			//!< the card has the optional gearbox.launch_clutch object (DD-14c)
+	ref DC_LaunchClutchConfig m_LaunchClutch = new DC_LaunchClutchConfig();	//!< gearbox.launch_clutch; absent = mode off
 	float m_fEngineSteerRateLimit;		//!< identified engine steering rate limit [1/s]; <= 0 = none (or unknown on a placeholder)
 	bool m_bInputEchoKnown;				//!< actuator.raw_engine_path.input_echo is true or false (null on a placeholder)
 	bool m_bInputEcho;					//!< the engine passes the steering input through unchanged (E-01)
@@ -670,6 +694,7 @@ class DC_VehicleCard
 	ref array<float> m_aScriptedGears = {};
 	ref array<float> m_aUpshiftMps = {};
 	ref array<float> m_aDownshiftMps = {};
+	ref array<float> m_aScriptedMpsPerKrpm = {};	//!< gearbox.scripted_mps_per_krpm (optional; required with a ramp launch clutch)
 
 	// llc_v1 parameters
 	float m_fSteerMax;					//!< |contract steer| limit
@@ -732,6 +757,16 @@ class DC_VehicleCard
 			return false;
 		}
 
+		// gearbox.launch_clutch (DD-14c) is optional: absent = mode off, the behaviour of every card before it. Present,
+		// it occurs once and is an object (ReadObjects reads it; a null is refused, as JsonLoadContext's null handling
+		// is not verified)
+		m_bLaunchClutchSet = text.IndexOf("\"launch_clutch\"") >= 0;
+		if (m_bLaunchClutchSet && (DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")))
+		{
+			failure = path + ": gearbox.launch_clutch must occur once and be an object (absent = mode off)";
+			return false;
+		}
+
 		if (!ReadArrays(text, failure) || !ReadObjects(context, failure))
 		{
 			failure = path + ": " + failure;
@@ -769,6 +804,11 @@ class DC_VehicleCard
 		if (!DC_JsonScan.ReadNumbers(text, "downshift_mps", m_aDownshiftMps, failure))
 			return false;
 
+		// optional (DD-14c): the measured m/s per 1000 rpm of each scripted gear, which a ramp launch clutch needs
+		m_aScriptedMpsPerKrpm.Clear();
+		if (text.IndexOf("\"scripted_mps_per_krpm\"") >= 0 && !DC_JsonScan.ReadNumbers(text, "scripted_mps_per_krpm", m_aScriptedMpsPerKrpm, failure))
+			return false;
+
 		if (!DC_JsonScan.ReadIndexOrNull(text, "gear_index_neutral", m_fNeutralGear, failure))
 			return false;
 
@@ -803,10 +843,17 @@ class DC_VehicleCard
 		}
 
 		bool gearboxOk = context.ReadValue("mode", m_sGearbox) && DC_JsonScan.ReadContextNumber(context, "clutch_dip_s", m_fClutchDipS);
+		bool launchClutchOk = !gearboxOk || !m_bLaunchClutchSet || ReadLaunchClutch(context);
 		context.EndObject();
 		if (!gearboxOk)
 		{
 			failure = "gearbox.mode and gearbox.clutch_dip_s are required";
+			return false;
+		}
+
+		if (!launchClutchOk)
+		{
+			failure = "gearbox.launch_clutch needs mode (a string), engage_rpm, full_rpm, couple_time_s, uncouple_time_s, stall_guard_rpm, restart_cooldown_s (numbers) and restart_on_stall (a bool)";
 			return false;
 		}
 
@@ -849,6 +896,40 @@ class DC_VehicleCard
 		}
 
 		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! gearbox.launch_clutch (DD-14c, DC_LaunchClutchConfig): called inside the open gearbox object, every field
+	//! required. false when the object or a field is missing or of another type; the ranges are CheckGearbox's
+	protected bool ReadLaunchClutch(notnull JsonLoadContext context)
+	{
+		if (!context.StartObject("launch_clutch"))
+			return false;
+
+		string mode;
+		float engageRpm;
+		float fullRpm;
+		float coupleTimeS;
+		float uncoupleTimeS;
+		float stallGuardRpm;
+		bool restartOnStall;
+		float restartCooldownS;
+		bool rpmOk = context.ReadValue("mode", mode) && DC_JsonScan.ReadContextNumber(context, "engage_rpm", engageRpm) && DC_JsonScan.ReadContextNumber(context, "full_rpm", fullRpm) && DC_JsonScan.ReadContextNumber(context, "stall_guard_rpm", stallGuardRpm);
+		bool timeOk = DC_JsonScan.ReadContextNumber(context, "couple_time_s", coupleTimeS) && DC_JsonScan.ReadContextNumber(context, "uncouple_time_s", uncoupleTimeS) && DC_JsonScan.ReadContextNumber(context, "restart_cooldown_s", restartCooldownS);
+		bool restartOk = context.ReadValue("restart_on_stall", restartOnStall);
+		context.EndObject();
+		if (!rpmOk || !timeOk || !restartOk)
+			return false;
+
+		m_LaunchClutch.m_sMode = mode;
+		m_LaunchClutch.m_fEngageRpm = engageRpm;
+		m_LaunchClutch.m_fFullRpm = fullRpm;
+		m_LaunchClutch.m_fCoupleTimeS = coupleTimeS;
+		m_LaunchClutch.m_fUncoupleTimeS = uncoupleTimeS;
+		m_LaunchClutch.m_fStallGuardRpm = stallGuardRpm;
+		m_LaunchClutch.m_bRestartOnStall = restartOnStall;
+		m_LaunchClutch.m_fRestartCooldownS = restartCooldownS;
 		return true;
 	}
 
@@ -952,6 +1033,14 @@ class DC_VehicleCard
 			return false;
 		}
 
+		// gearbox.launch_clutch (DD-14c): the ranges of DC_LaunchClutchConfig.Check, also when absent (the defaults)
+		string launchFailure;
+		if (!m_LaunchClutch.Check(launchFailure))
+		{
+			failure = "gearbox." + launchFailure;
+			return false;
+		}
+
 		// the recorded indices follow the vanilla rule (SCR_VehicleGearCondition.c:32-36): reverse below neutral
 		if (m_fNeutralGear >= 0 && m_fReverseGear >= 0 && m_fReverseGear >= m_fNeutralGear)
 		{
@@ -964,6 +1053,14 @@ class DC_VehicleCard
 			if (m_fClutchDipS > 0)
 			{
 				failure = "gearbox.clutch_dip_s applies to a scripted gearbox only (0 with automatic: no SetGear)";
+				return false;
+			}
+
+			// the launch clutch ramps the scripted gearbox only; an automatic one keeps clutch 1 as before (UNVERIFIED
+			// on 1.9: no 1.9 Play has driven an automatic gearbox in Mode A)
+			if (m_LaunchClutch.IsRamp())
+			{
+				failure = "gearbox.launch_clutch mode ramp applies to a scripted gearbox only (an automatic gearbox keeps clutch 1)";
 				return false;
 			}
 
@@ -993,6 +1090,14 @@ class DC_VehicleCard
 			}
 		}
 
+		// the launch clutch on the scripted gearbox (DD-14c): fully coupled wherever llc_v1 drives in a gear above the
+		// first, the card's form of the probe kit's full_rpm < downshift rpm. llc_v1 shifts by speed, so each downshift
+		// speed is turned into the rpm of the gear it shifts down from by that gear's measured m/s per 1000 rpm
+		// (scripted_mps_per_krpm), which must then be at least full_rpm + DOWNSHIFT_RPM_MARGIN; below it the car would
+		// keep that gear with the clutch slipping. Only the first gear brakes through the band (where the clutch opens)
+		if (m_LaunchClutch.IsRamp() && !CheckLaunchDownshifts(count, failure))
+			return false;
+
 		// forward-only (TBD-7): every scripted gear is a measured forward gear index, never neutral or reverse; the
 		// gears increase, so slot 0 (Reset below the first upshift speed) is the first gear an episode starts in
 		float previous = -1;
@@ -1017,6 +1122,42 @@ class DC_VehicleCard
 			}
 
 			previous = gear;
+		}
+
+		failure = string.Empty;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A ramp launch clutch on a scripted gearbox of count gears (DD-14c): scripted_mps_per_krpm holds one measured
+	//! m/s per 1000 rpm > 0 per scripted gear, and every downshift speed is at least full_rpm + DOWNSHIFT_RPM_MARGIN in
+	//! the gear it shifts down from (see CheckGearbox)
+	protected bool CheckLaunchDownshifts(int count, out string failure)
+	{
+		if (m_aScriptedMpsPerKrpm.Count() != count)
+		{
+			failure = string.Format("gearbox.launch_clutch mode ramp on a scripted gearbox needs gearbox.scripted_mps_per_krpm: %1 measured m/s per 1000 rpm, one per scripted gear (it has %2)", count, m_aScriptedMpsPerKrpm.Count());
+			return false;
+		}
+
+		foreach (float mpsPerKrpm : m_aScriptedMpsPerKrpm)
+		{
+			if (mpsPerKrpm <= 0)
+			{
+				failure = string.Format("gearbox.scripted_mps_per_krpm %1 is not > 0", mpsPerKrpm);
+				return false;
+			}
+		}
+
+		float minimum = m_LaunchClutch.m_fFullRpm + DC_LaunchClutchConfig.DOWNSHIFT_RPM_MARGIN;
+		for (int slot = 0; slot < count - 1; slot++)
+		{
+			float downshiftRpm = m_aDownshiftMps[slot] / m_aScriptedMpsPerKrpm[slot + 1] * 1000;
+			if (downshiftRpm < minimum)
+			{
+				failure = string.Format("gearbox downshift_mps %1 is %2 rpm in scripted gear %3, below full_rpm %4 + %5: the clutch would slip in that gear", m_aDownshiftMps[slot], downshiftRpm, m_aScriptedGears[slot + 1], m_LaunchClutch.m_fFullRpm, DC_LaunchClutchConfig.DOWNSHIFT_RPM_MARGIN);
+				return false;
+			}
 		}
 
 		failure = string.Empty;
@@ -1107,6 +1248,7 @@ class DC_LLCv1
 	protected int m_iLastGear;				//!< the last scripted gear passed to SetGear; -1 = none yet this episode
 	protected int m_iClutchDipSteps;		//!< card clutch_dip_s in physics steps (the probe kit's StepsFor rounding)
 	protected int m_iDipStepsLeft;			//!< covered physics steps the clutch stays dipped
+	protected ref DC_LaunchClutch m_LaunchClutch = new DC_LaunchClutch();	//!< card gearbox.launch_clutch (DD-14c)
 
 	//------------------------------------------------------------------------------------------------
 	//! The r3 card rules (see the header) for this session. false (failure) refuses the card; warning is a line to
@@ -1244,8 +1386,16 @@ class DC_LLCv1
 		if (!CheckEgoGearbox(card, actuator, failure))
 			return false;
 
+		// the launch clutch's band against this engine (DD-14c, scripted gearbox only: an automatic one keeps clutch 1)
+		if (card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED && !card.m_LaunchClutch.CheckEngine(m_Simulation.EngineGetRPMIdle(), m_Simulation.EngineGetRPMMax(), failure))
+		{
+			failure = "card " + card.m_sCardId + " gearbox." + failure;
+			return false;
+		}
+
 		int dipSteps = Math.Round(card.m_fClutchDipS / m_fStepDtS);
 		m_iClutchDipSteps = dipSteps;
+		m_LaunchClutch.Configure(card.m_LaunchClutch);
 		Reset();
 		failure = string.Empty;
 		return true;
@@ -1312,6 +1462,7 @@ class DC_LLCv1
 		m_iGearSlot = 0;
 		m_iLastGear = -1;
 		m_iDipStepsLeft = 0;
+		m_LaunchClutch.Reset();
 		if (!m_Simulation)
 			return;
 
@@ -1400,6 +1551,14 @@ class DC_LLCv1
 				if (m_iDipStepsLeft < 0)
 					m_iDipStepsLeft = 0;
 			}
+
+			// launch clutch (DD-14c; the card's gearbox.launch_clutch, mode off without one): the dip clutch is its
+			// upper bound and its dip; rpm and engine_on as read now, the state after the previous callback; over
+			// sliceS. Always in a forward gear, never a handbrake (llc_v1 passes none). A stall restart is the Mode A
+			// start of the actuator (DC_ActuatorModeA.Start: ForceStartEngine), before this callback's setters
+			clutch = m_LaunchClutch.Step(sliceS, true, false, m_Simulation.EngineGetRPM(), m_Simulation.EngineIsOn(), clutch, clutch <= 0);
+			if (m_LaunchClutch.ConsumeRestart())
+				m_Actuator.Start();
 
 			clutchRecorded = clutch;
 		}
@@ -1532,6 +1691,22 @@ class DC_LLCv1
 			return VERSION + " (no card)";
 
 		string timing = string.Format(", integrated over each callback's covered steps x step dt %1 s (clutch dip %2 steps)", m_fStepDtS.ToString(-1, 6), m_iClutchDipSteps);
+		string launch = ", launch clutch " + m_LaunchClutch.GetConfig().Describe();
+		if (!m_Card.m_bLaunchClutchSet)
+			launch += " (the card has no gearbox.launch_clutch)";
+
+		if (m_Card.m_sGearbox != DC_VehicleCard.GEARBOX_SCRIPTED)
+			launch = ", launch clutch not applied (automatic gearbox: clutch 1)";
+
+		timing += launch;
 		return string.Format("%1: card %2 (%3, pin %4, build_key '%5', sessions %6) steer_sign %7 yaw_axis_sign %8 (measured %9)", VERSION, m_Card.m_sCardId, m_Card.m_sStatus, m_Card.m_sPinId, m_Card.m_sBuildKey, m_Card.GetSessionsText(), m_Card.m_iSteerSign, m_Card.m_iYawAxisSign, m_Card.m_bSignsMeasured) + string.Format(", gearbox %1 (clutch dip %2 s), limiter %3 /s, lag %4 s, engine input %5 (limit %6 /s), kappa_ss bins %7", m_Card.m_sGearbox, m_Card.m_fClutchDipS, m_Card.m_fSteerRatePerS, m_Card.m_fSteerLagTauS, m_Card.m_sInputShaping, m_Card.m_fEngineSteerRateLimit, m_Card.m_aSpeedsMps.Count()) + timing;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One log fragment: the launch clutch's counters this session (stalls, restarts, guard drops, max slip; DD-14c).
+	//! The capture writes them to the console only (dc-2.0 and features_v1 are frozen)
+	string DescribeLaunchClutch()
+	{
+		return m_LaunchClutch.DescribeCounters();
 	}
 }

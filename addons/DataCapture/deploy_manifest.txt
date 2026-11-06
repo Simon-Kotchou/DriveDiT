@@ -38,6 +38,9 @@ script src/enfusion/datacapture/DC_ProbeCsv.c
 script src/enfusion/datacapture/DC_ProbeRunner.c
 script src/enfusion/datacapture/DC_ProbeEngine.c
 script src/enfusion/datacapture/DC_ProbeSequences.c
+# DD-14c: the Mode A launch clutch for the 1.9 powertrain (stalls at a clutch-1 drive-off), shared by the probe actuator
+# (DC_ProbeSequences.c) and llc_v1 (DC_LLCv1.c, below)
+script src/enfusion/datacapture/DC_LaunchClutch.c
 script src/enfusion/datacapture/DC_RigR1.c
 script src/enfusion/datacapture/DC_Fiducial.c
 script src/enfusion/datacapture/DC_FiducialShape.c
@@ -73,3 +76,7 @@ config addons/DataCapture/Configs/routes/arland_t0_loop_rev.json
 # The vehicle card llc_v1 loads for the session's pin (Configs/ident/cards/<pin_id>/S105.json). PLACEHOLDER until the
 # E-01 / E-02a fit (qualification use only); DC_ExpertDriver is attached to GameMode_DataCapture on DC_Arland with it.
 config tools/ident/cards/1.8.0.13/S105.json
+# DD-14c: the provisional 1.9.0.37 S105 card, the one llc_v1 loads on a 1.9.0.37 session. It is a PLACEHOLDER with
+# the 1.8.0.13 values carried over (re-fit from 1.9 E-01 / E-02a) and gearbox.launch_clutch in mode ramp. The 1.8.0.13
+# card above keeps its bytes and no launch clutch.
+config tools/ident/cards/1.9.0.37/S105.json

@@ -685,6 +685,7 @@ class DC_VehicleCard
 	string m_sGearbox;					//!< automatic or scripted (E-04 / E-01)
 	float m_fClutchDipS;				//!< gearbox.clutch_dip_s: clutch 0 this long after each scripted gear change (E-01)
 	bool m_bLaunchClutchSet;			//!< the card has the optional gearbox.launch_clutch object (DD-14c)
+	bool m_bSlipFieldsSet;				//!< the card has slip_kp, slip_ki or lock_tolerance_rpm (DD-14d: mode slip only)
 	ref DC_LaunchClutchConfig m_LaunchClutch = new DC_LaunchClutchConfig();	//!< gearbox.launch_clutch; absent = mode off
 	float m_fEngineSteerRateLimit;		//!< identified engine steering rate limit [1/s]; <= 0 = none (or unknown on a placeholder)
 	bool m_bInputEchoKnown;				//!< actuator.raw_engine_path.input_echo is true or false (null on a placeholder)
@@ -770,6 +771,7 @@ class DC_VehicleCard
 		// it occurs once and is an object (ReadObjects reads it; a null is refused, as JsonLoadContext's null handling
 		// is not verified)
 		m_bLaunchClutchSet = text.IndexOf("\"launch_clutch\"") >= 0;
+		m_bSlipFieldsSet = text.IndexOf("\"slip_kp\"") >= 0 || text.IndexOf("\"slip_ki\"") >= 0 || text.IndexOf("\"lock_tolerance_rpm\"") >= 0;
 		if (m_bLaunchClutchSet && (DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")))
 		{
 			failure = path + ": gearbox.launch_clutch must occur once and be an object (absent = mode off)";
@@ -1055,6 +1057,14 @@ class DC_VehicleCard
 		if (!m_LaunchClutch.Check(launchFailure))
 		{
 			failure = "gearbox." + launchFailure;
+			return false;
+		}
+
+		// the slip fields (DD-14d) belong to mode slip only, as fit_steer_kappa.py's launch_clutch_violations rules: a
+		// card that keeps them in another mode is refused, not read with them ignored
+		if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip())
+		{
+			failure = "gearbox.launch_clutch has slip_kp, slip_ki or lock_tolerance_rpm, which belong to mode slip only (mode " + m_LaunchClutch.m_sMode + ")";
 			return false;
 		}
 

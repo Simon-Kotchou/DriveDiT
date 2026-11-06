@@ -1486,6 +1486,42 @@ class FitTests(unittest.TestCase):
         for name, value in (("SLIP_KP_MAX", fit.LAUNCH_SLIP_KP_MAX), ("SLIP_KI_MAX", fit.LAUNCH_SLIP_KI_MAX),
                             ("LOCK_TOLERANCE_MAX_RPM", fit.LAUNCH_LOCK_TOLERANCE_MAX_RPM)):
             self.assertIn("static const float %s = %g;" % (name, value), helper)
+        # Codex round 1, LOW: the slip fields outside mode slip. Python refused them while Enforce read past them; now
+        # DC_VehicleCard.Load notes any of the three keys and CheckGearbox refuses them unless the mode is slip, and
+        # ReadLaunchClutch requires all three in mode slip, the same rule both ways as launch_clutch_violations
+        load = enforce_body(source, "DC_VehicleCard", "Load")
+        self.assertIn('m_bSlipFieldsSet = text.IndexOf("\\"slip_kp\\"") >= 0 || text.IndexOf("\\"slip_ki\\"") >= 0 || '
+                      'text.IndexOf("\\"lock_tolerance_rpm\\"") >= 0;', load)
+        check = enforce_body(source, "DC_VehicleCard", "CheckGearbox")
+        self.assertIn("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip()) {", check)
+        self.assertLess(check.index("if (!m_LaunchClutch.Check(launchFailure))"),
+                        check.index("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip())"))
+        self.assertLess(check.index("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip())"),
+                        check.index("if (m_sGearbox == GEARBOX_AUTOMATIC)"))
+        for key in fit.LAUNCH_CLUTCH_SLIP_KEYS:
+            self.assertIn('text.IndexOf("\\"%s\\"")' % key, load)
+
+        def enforce_accepts(launch):
+            # DC_VehicleCard on a launch_clutch object: ReadLaunchClutch needs the slip keys in mode slip, CheckGearbox
+            # refuses them in any other mode (the other rules are DC_LaunchClutchConfig.Check's, mirrored above)
+            present = any(k in launch for k in fit.LAUNCH_CLUTCH_SLIP_KEYS)
+            if launch["mode"] == "slip":
+                return all(k in launch for k in fit.LAUNCH_CLUTCH_SLIP_KEYS)
+            return not present
+
+        for mode in ("ramp", "off", "slip"):
+            for keep in (True, False):
+                launch_obj = dict(card["gearbox"]["launch_clutch"], mode=mode)
+                if mode != "slip":
+                    launch_obj["full_rpm"] = 1700.0
+                if not keep:
+                    for key in fit.LAUNCH_CLUTCH_SLIP_KEYS:
+                        del launch_obj[key]
+                other = json.loads(json.dumps(card))
+                other["gearbox"]["launch_clutch"] = launch_obj
+                python_ok = fit.enforce_load_check(other) == []
+                self.assertEqual(python_ok, enforce_accepts(launch_obj), (mode, keep))
+                self.assertEqual(python_ok, (mode == "slip") == keep, (mode, keep))
 
     def test_manual_gearbox_earlier_header_style(self):
         # a play before the gearbox fix (probe run 2 style): only vehicle.has_automatic_gearbox=0 and the gear counts,

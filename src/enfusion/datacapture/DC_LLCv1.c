@@ -51,12 +51,15 @@
 //                  VehicleWheeledSimulation.c:38-44 of 1.9.0.37);
 //                - ramp: the dip clutch above is the upper bound, and its 0 is the dip. The passed clutch is
 //                  min(dip clutch, c): c bites from engage_rpm, is fully coupled from full_rpm, its rate is limited to
-//                  couple_time_s / uncouple_time_s over sliceS, and it opens below stall_guard_rpm, using the rpm and
-//                  engine_on read at the start of the callback;
+//                  couple_time_s / uncouple_time_s over sliceS inside the band, and it opens at once at or below
+//                  engage_rpm, using the rpm and engine_on read at the start of the callback;
 //                - stall restart: an engine that stalls gets the actuator's Start (DC_ActuatorModeA: ForceStartEngine)
 //                  at most every restart_cooldown_s;
 //                - llc_clutch records the value passed, as before;
 //                - an automatic gearbox keeps clutch 1, and a card with ramp on one is refused (UNVERIFIED on 1.9);
+//                - bounds: DC_LaunchClutchConfig.Check's ranges, full_rpm below SCRIPTED_FULL_RPM_LIMIT on a scripted
+//                  gearbox (CheckGearbox), and at Init CheckEngine against the ego's EngineGetRPMIdle and
+//                  EngineGetRPMMax (the DC_LaunchClutch.c header, BOUNDS);
 //                - the counters (DescribeLaunchClutch) go to the console only: dc-2.0 is frozen.
 //
 // VEHICLE CARD (tools/ident/cards/<pin_id>/<vehicle>.json in the repo, deployed to Configs/ident/cards/; r3 scope note)
@@ -1064,6 +1067,15 @@ class DC_VehicleCard
 			return false;
 		}
 
+		// the launch clutch on the scripted gearbox (DD-14c): fully coupled below SCRIPTED_FULL_RPM_LIMIT, the static
+		// stand-in for the probe kit's full_rpm < downshift rpm rule. llc_v1 shifts by speed, and an rpm bound from
+		// the downshift speeds would need each gear's rpm per speed, which this card does not give llc_v1
+		if (m_LaunchClutch.IsRamp() && m_LaunchClutch.m_fFullRpm >= DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT)
+		{
+			failure = string.Format("gearbox.launch_clutch full_rpm %1 is not below %2 rpm (a scripted gearbox: the probe policy's downshift rpm its shift speeds come from)", m_LaunchClutch.m_fFullRpm, DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT);
+			return false;
+		}
+
 		int count = m_aScriptedGears.Count();
 		if (count < 1 || m_aUpshiftMps.Count() != count - 1 || m_aDownshiftMps.Count() != count - 1)
 		{
@@ -1331,6 +1343,13 @@ class DC_LLCv1
 
 		if (!CheckEgoGearbox(card, actuator, failure))
 			return false;
+
+		// the launch clutch's band against this engine (DD-14c, scripted gearbox only: an automatic one keeps clutch 1)
+		if (card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED && !card.m_LaunchClutch.CheckEngine(m_Simulation.EngineGetRPMIdle(), m_Simulation.EngineGetRPMMax(), failure))
+		{
+			failure = "card " + card.m_sCardId + " gearbox." + failure;
+			return false;
+		}
 
 		int dipSteps = Math.Round(card.m_fClutchDipS / m_fStepDtS);
 		m_iClutchDipSteps = dipSteps;

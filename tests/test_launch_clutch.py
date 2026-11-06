@@ -42,7 +42,15 @@ that Play's launches and a free decay, trimmed to the step columns the fit reads
     the probe kit's); the same over every combination of engine inertia and clutch capacity +-30 % and torque +-20 %
     (2592 launches); stops by a brake of 0.3 / 0.6 / 1.0 before the lock-up (3 / 5 / 7 km/h) and coupled (15 / 30 / 40
     km/h, also at the inertia / capacity corners) open without a stall, above the guard + 100; Codex round 1's cases;
-    c stays 1 through the probe policy's shifts and gear_scripted's 2, 3, 4, 3, 2.
+    c stays 1 through the probe policy's shifts and gear_scripted's 2, 3, 4, 3, 2. The oscillation criterion has a
+    stated amplitude deadband (model.ALTERNATION_DEADBAND, 0.01 of c).
+  - Codex round 2's attacks (CodexAttackTest), each also run on DD-14c's ramp for comparison: the 440-case brake sweep
+    (brake point x wheel slip x callbacks) in both timings, an upshift then a full brake (Codex's +5 %, (1, 3, 1)
+    case and its family), throttle pulses (1 / 0 at 0.2 s and at 2 steps, two low-throttle PRBS) with every opening
+    counted and the round-1 controller's motion as the reference, and random callback sequences with Codex's: no
+    stall anywhere in slip, and no more openings than the ramp.
+  - check_play needs the launch's start and times it by physics_step (Codex round 2: a truncated tail and merged
+    3-step callbacks passed).
   - The slip mirror follows DC_LaunchClutch.StepSlip statement by statement; the defaults (DC_LaunchClutchConfig.Slip(),
     the attributes, the card, the generator) agree; the probe kit and llc_v1 pass the driveline rpm as described.
 """
@@ -576,8 +584,7 @@ class LaunchClutchTiesTest(unittest.TestCase):
                 "if (!engineOn && !handbrake && m_Config.m_bRestartOnStall && cooled) { m_bRestartDue = true; "
                 "m_iRestarts++; m_fSinceRestartS = 0; m_fCoupling = 0; }",
                 "bool driving = inGear && !handbrake && !dip && engineOn; if (m_Config.IsSlip()) { StepSlip(slice, "
-                "driving, rpm, drivelineRpm, throttle > 0 && brake <= 0, gear); } else if (!driving) { m_fCoupling = 0; "
-                "} "
+                "driving, rpm, drivelineRpm, throttle, brake, gear); } else if (!driving) { m_fCoupling = 0; } "
                 "else if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; m_fCoupling = 0; } "
                 "else if (rpm <= m_Config.m_fEngageRpm) { m_fCoupling = 0; } "
                 "else { float target = Math.Clamp((rpm - m_Config.m_fEngageRpm) / (m_Config.m_fFullRpm - "
@@ -615,7 +622,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
                             "restart_on_stall": consts["DEFAULT_RESTART_ON_STALL"],
                             "restart_cooldown_s": consts["DEFAULT_RESTART_COOLDOWN_S"],
                             "slip_kp": consts["DEFAULT_SLIP_KP"], "slip_ki": consts["DEFAULT_SLIP_KI"],
-                            "lock_tolerance_rpm": consts["DEFAULT_LOCK_TOLERANCE_RPM"]}
+                            "lock_tolerance_rpm": consts["DEFAULT_LOCK_TOLERANCE_RPM"],
+                            "brake_drop_rpm_per_s": consts["DEFAULT_BRAKE_DROP_RPM_PER_S"]}
         mirror = dict(LaunchClutch.DEFAULTS)
         self.assertEqual(mirror.pop("mode"), "off")                 # a DC_LaunchClutchConfig starts off ...
         self.assertIn("string m_sMode = MODE_OFF;", self.helper)
@@ -639,7 +647,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
                  "couple_time_s": "m_fLaunchCoupleS", "uncouple_time_s": "m_fLaunchUncoupleS",
                  "stall_guard_rpm": "m_fLaunchStallGuardRpm", "restart_on_stall": "m_bLaunchRestartOnStall",
                  "restart_cooldown_s": "m_fLaunchRestartCooldownS", "slip_kp": "m_fLaunchSlipKp",
-                 "slip_ki": "m_fLaunchSlipKi", "lock_tolerance_rpm": "m_fLaunchLockTolRpm"}
+                 "slip_ki": "m_fLaunchSlipKi", "lock_tolerance_rpm": "m_fLaunchLockTolRpm",
+                 "brake_drop_rpm_per_s": "m_fLaunchBrakeDropRpmPerS"}
         for key, name in names.items():
             value = slip_defaults[key]
             if isinstance(value, bool):
@@ -671,6 +680,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
             self.assertIn(rule, check)
         self.assertIn("if (m_fSlipKp < 0 || m_fSlipKp > SLIP_KP_MAX || m_fSlipKi <= 0 || m_fSlipKi > SLIP_KI_MAX)", check)
         self.assertIn("if (m_fLockToleranceRpm < 0 || m_fLockToleranceRpm > LOCK_TOLERANCE_MAX_RPM)", check)
+        self.assertIn("if (m_fBrakeDropRpmPerS <= 0 || m_fBrakeDropRpmPerS > BRAKE_DROP_MAX_RPM_PER_S)", check)
+        self.assertEqual(consts["BRAKE_DROP_MAX_RPM_PER_S"], fit.LAUNCH_BRAKE_DROP_MAX_RPM_PER_S)
         self.assertEqual(fit.LAUNCH_CLUTCH_MODES, ("off", "ramp", "slip"))
         self.assertIn("if (m_sMode != MODE_OFF && m_sMode != MODE_RAMP && m_sMode != MODE_SLIP)", check)
         self.assertIn('static const string MODE_OFF = "off";', self.helper)
@@ -773,7 +784,7 @@ class LaunchClutchTiesTest(unittest.TestCase):
         for name in ("m_sLaunchClutchMode", "m_fLaunchEngageRpm", "m_fLaunchFullRpm", "m_fLaunchCoupleS",
                      "m_fLaunchUncoupleS", "m_fLaunchStallGuardRpm", "m_bLaunchRestartOnStall",
                      "m_fLaunchRestartCooldownS", "m_fLaunchSlipKp", "m_fLaunchSlipKi", "m_fLaunchLockTolRpm",
-                     "m_fLaunchHoldRpm"):
+                     "m_fLaunchHoldRpm", "m_fLaunchBrakeDropRpmPerS"):
             self.assertIn('outKeyValues.Insert("%s=" +' % name, params)
             self.assertIn(name, build)
         self.assertIn('outKeyValues.Insert("m_sLaunchMpsPerKrpm=" + m_sLaunchMpsPerKrpm);', params)
@@ -929,23 +940,58 @@ class SlipStepTest(unittest.TestCase):
         deltas = [b - a for a, b in zip(cs, cs[1:])]
         self.assertTrue(all(d > 0 for d in deltas[2:]), deltas)
 
-    def test_slipping_opens_without_drive_or_at_a_predicted_lug(self):
-        # Codex round 1, HIGH: a brake before the lock-up stalled (219 rpm); a slipping clutch opens at once without
-        # drive (a brake or no throttle), before the brake acts (one step after it is set)
-        for throttle, brake in ((0.5, 0.3), (0.0, 0.0), (0.0, 1.0)):
+    def test_slipping_opens_under_a_brake_and_coasts_without_throttle(self):
+        # Codex round 1, HIGH: a brake before the lock-up stalled (219 rpm): a slipping clutch opens at once under a
+        # brake, before the brake acts (one step after it is set). Codex round 2, MEDIUM: zero throttle without a
+        # brake does not open it (throttle pulses); it coasts on the PI
+        for brake in (0.05, 0.3, 1.0):
             lc = slip()
             hold(lc, 1600.0, steps=8)
             self.assertGreater(lc.coupling, 0)
-            self.assertEqual(hold(lc, 1600.0, throttle=throttle, brake=brake), 0.0, (throttle, brake))
+            self.assertEqual(hold(lc, 1600.0, throttle=0.0, brake=brake), 0.0, brake)
             self.assertFalse(lc.locked)
-        # a fast fall while slipping: predicted 1300 - 1.5 x dt x 9000 rpm/s = 850 <= the lug 900: open
+        lc = slip()
+        hold(lc, 1600.0, steps=8)
+        c0 = lc.coupling
+        c = hold(lc, 1600.0, throttle=0.0)                           # no brake: the PI goes on (rpm above 1400)
+        self.assertGreater(c, c0)
+        lc = slip()
+        lc.coupling = 0.3
+        lc.last_rpm = lc.last_mean_rpm = 1300.0
+        lc.history, lc.last_slice_s, lc.prev_slice_s = 3, STEP_DT, STEP_DT
+        cs = [hold(lc, 1300.0, throttle=0.0) for _ in range(5)]      # below the held rpm: the PI lets go gradually
+        self.assertTrue(all(b < a for a, b in zip(cs, cs[1:])) and cs[-1] > 0.25, cs)
+        self.assertEqual(hold(lc, 1100.0, throttle=0.0), 0.0)        # at engage_rpm: open
+        # a fast fall while slipping: predicted 1150 - 1.5 x dt x 6750 rpm/s = 812 <= the lug 900: open
         lc = slip()
         hold(lc, 1600.0, steps=8)
         lc.last_rpm, lc.last_mean_rpm = 1600.0, 1600.0
-        hold(lc, 1300.0)                                             # mean 1450: rate 2 x -150 / 2 dt = -4500 rpm/s
+        hold(lc, 1300.0)                                             # mean 1450: rate -4500 rpm/s
         self.assertGreater(lc.coupling, 0)
-        self.assertEqual(hold(lc, 1000.0 + 150.0), 0.0)              # mean 1225: rate -6750: 1150 - 337 < 900
+        self.assertEqual(hold(lc, 1150.0), 0.0)                      # mean 1225: rate -6750: open
         self.assertEqual(lc.lug_rpm(), 900.0)
+
+    def test_the_brake_rule(self):
+        # Codex round 2, HIGH: at c = 1 the clutch drags the engine about 965 rpm in one step when the wheels lock,
+        # faster than a readback shows. A brake opens the clutch at once in any state when rpm - brake_drop_rpm_per_s x
+        # (the call's duration + BRAKE_LAG_S) <= engage_rpm: with 1-step calls below 1100 + 29000 x 0.05 = 2550 rpm
+        threshold = 1100.0 + 29000.0 * (STEP_DT + LaunchClutch.BRAKE_LAG_S)
+        self.assertAlmostEqual(threshold, 2550.0, delta=1.0)
+        for rpm, opens in ((threshold - 1.0, True), (threshold + 1.0, False), (1800.0, True), (3200.0, False)):
+            lc = coupled(rpm)
+            self.assertEqual(hold(lc, rpm, throttle=0.0, brake=0.2) == 0.0, opens, rpm)
+        lc = coupled(3200.0)                                         # a 3-step call carries the fall three steps
+        self.assertEqual(hold(lc, 3200.0, throttle=0.0, brake=0.2, dt=3 * STEP_DT), 0.0)
+        lc = coupled(3200.0)
+        lc.sync_left_s = 0.3                                         # inside an upshift's wait too
+        self.assertEqual(hold(lc, 2400.0, throttle=0.0, brake=1.0, gear=2), 0.0)
+        lc = slip()                                                  # and while slipping
+        hold(lc, 3000.0, steps=4)
+        self.assertEqual(hold(lc, 3000.0, throttle=0.0, brake=0.1), 0.0)
+        self.assertEqual(slip().config["brake_drop_rpm_per_s"], 29000.0)
+        # the default is the fit's clutch capacity over its engine inertia
+        self.assertAlmostEqual(model.S105_19["clutch_nm"] / model.S105_19["j_kgm2"] * model.RPM_PER_RADS, 29000.0,
+                               delta=100.0)
 
     def test_lockup_needs_drive_and_two_agreeing_calls(self):
         lc = slip()
@@ -977,49 +1023,53 @@ class SlipStepTest(unittest.TestCase):
 
     def test_coupled_floor_lookahead_and_drop_guard(self):
         lc = coupled(1200.0)
-        self.assertEqual(hold(lc, 1200.0, steps=10, throttle=0.0, brake=0.1), 1.0)   # steady in the old band
-        self.assertEqual(hold(lc, 1100.0, throttle=0.0, brake=0.1), 0.0)             # no drive: open at engage_rpm
+        self.assertEqual(hold(lc, 1200.0, steps=10, throttle=0.0), 1.0)    # coasting below engage_rpm stays coupled
+        self.assertEqual(hold(lc, 900.0, throttle=0.0), 0.0)                # down to the lug rpm 900
         lc = coupled(1050.0)
-        self.assertEqual(hold(lc, 1050.0, steps=10, throttle=0.4), 1.0)  # under drive it lugs below engage_rpm ...
-        self.assertEqual(hold(lc, 900.0, throttle=0.4), 0.0)             # ... down to the lug rpm 900
+        self.assertEqual(hold(lc, 1050.0, steps=10, throttle=0.4), 1.0)    # under drive it lugs below engage_rpm
         lc = coupled(1050.0)
-        self.assertEqual(hold(lc, 1050.0, throttle=0.4, brake=0.2), 0.0)  # a brake there: engage_rpm again, open
-        # a full brake: 1700 -> 1500 (mean 1600) -> 1250 (mean 1375): rate -6750 rpm/s, predicted 912 <= 1100: open
+        self.assertEqual(hold(lc, 1050.0, throttle=0.4, brake=0.2), 0.0)   # a brake there: open
+        # a fast fall without a brake: 1700 -> 1500 (mean 1600) -> 1050 (mean 1275): rate -9750, predicted 562 <= 900
         lc = coupled(1700.0)
-        self.assertEqual(hold(lc, 1500.0, throttle=0.0, brake=1.0), 1.0)
-        self.assertEqual(hold(lc, 1250.0, throttle=0.0, brake=1.0), 0.0)
+        self.assertEqual(hold(lc, 1500.0, throttle=0.0), 1.0)
+        self.assertEqual(hold(lc, 1050.0, throttle=0.0), 0.0)
         # above the ceiling (2 x engage_rpm) no lookahead
         lc = coupled(4500.0)
         self.assertEqual(hold(lc, 2600.0, throttle=0.5), 1.0)
         self.assertEqual(hold(lc, 2300.0, throttle=0.5), 1.0)
         self.assertEqual(lc.lookahead_ceiling_rpm(), 2200.0)
-        # the drop guard: without drive, a fall faster than 12000 rpm/s opens even above the ceiling ...
-        lc = coupled(4000.0)
-        hold(lc, 3400.0, throttle=0.0, brake=1.0)                    # mean 3700: rate -9000
-        self.assertEqual(lc.coupling, 1.0)
-        self.assertEqual(hold(lc, 2600.0, throttle=0.0, brake=1.0), 0.0)   # mean 3000: rate -21000
-        # ... but not under drive (an engine that synchronises down after the PI reached 1 at a high flare)
-        lc = coupled(4000.0)
-        hold(lc, 3400.0, throttle=1.0)
-        self.assertEqual(hold(lc, 2600.0, throttle=1.0), 1.0)
+        # the drop guard: under a brake (above the brake rule's 2550 rpm), a fall faster than 12000 rpm/s opens ...
+        lc = coupled(5000.0)
+        self.assertEqual(hold(lc, 4500.0, throttle=0.0, brake=0.2), 1.0)   # mean 4750: rate -7500 rpm/s
+        self.assertEqual(hold(lc, 3600.0, throttle=0.0, brake=0.2), 0.0)   # mean 4050: rate -21000 rpm/s: open
+        # ... not without one (an engine that synchronises down after the PI reached 1 at a high flare)
+        lc = coupled(5000.0)
+        hold(lc, 4500.0, throttle=1.0)
+        self.assertEqual(hold(lc, 3600.0, throttle=1.0), 1.0)
 
     def test_upshift_synchronisation(self):
-        # Codex round 1, MEDIUM: gear_scripted's upshift into a low-rpm gear fired the braking lookahead on the
-        # synchronisation drop. An upshift restarts the history and waits SYNC_S (0.3 s) before predicting
+        # Codex round 1, MEDIUM: gear_scripted's upshift into a low-rpm gear fired the lookahead on the synchronisation
+        # drop: an upshift holds the lookahead and the drop guard off for SYNC_S (0.3 s). Codex round 2, HIGH: a brake
+        # overrides that wait, and the history stays across the upshift so the brake still predicts
         lc = coupled(2000.0)
         self.assertEqual(hold(lc, 1990.0, throttle=0.4, gear=2), 1.0)
         for rpm in (1700.0, 1400.0, 1150.0, 1110.0):                 # into gear 3: about 300 rpm per step
             self.assertEqual(hold(lc, rpm, throttle=0.4, gear=3), 1.0, rpm)
         self.assertTrue(lc.locked)
         self.assertGreater(lc.sync_left_s, 0.0)
+        self.assertEqual(lc.history, 3)                              # the history stayed
         lc = coupled(2000.0)                                         # the same drop without a gear change opens
         for rpm in (1700.0, 1400.0, 1150.0):
             c = hold(lc, rpm, throttle=0.0, brake=0.0)
         self.assertEqual(c, 0.0)
-        lc = coupled(1900.0)                                         # a downshift keeps the history
+        lc = coupled(2600.0)                                         # an upshift, then a brake: open at once
+        hold(lc, 2600.0, throttle=0.5, gear=2)
+        self.assertEqual(hold(lc, 2600.0, throttle=0.5, gear=3), 1.0)
+        self.assertEqual(hold(lc, 2500.0, throttle=0.0, brake=1.0, gear=3), 0.0)
+        lc = coupled(1900.0)                                         # a downshift starts no wait
         lc.last_gear = 3
-        hold(lc, 1900.0, throttle=0.0, brake=1.0, gear=3)
-        hold(lc, 2600.0, throttle=0.0, brake=1.0, gear=2)
+        hold(lc, 1900.0, throttle=0.0, brake=0.0, gear=3)
+        hold(lc, 2600.0, throttle=0.0, brake=0.0, gear=2)
         self.assertEqual((lc.history, lc.sync_left_s), (3, 0.0))
 
     def test_zero_cases_guard_and_restart(self):
@@ -1057,9 +1107,33 @@ def fixture_rows():
 # throttle is on and the first cmd_clutch = 1 after the launch [s]
 RECORDED = {"move_check": (2, 2.00), "throttle_0.30": (4, 3.83), "throttle_0.60": (1, 1.63), "throttle_1.00": (0, 0.93),
             "gear_scripted": (3, 2.47)}
-COMPLETE_HEADER = {"status": "complete", "launch_clutch.mode": "slip", "launch_clutch.stall_guard_rpm": "600.0",
+COMPLETE_HEADER = {"status": "complete", "clock.step_dt_s": "0.033333", "launch_clutch.mode": "slip",
+                   "launch_clutch.stall_guard_rpm": "600.0",
                    "launch_clutch.stalls": "0", "launch_clutch.restarts": "0", "launch_clutch.guard_drops": "0",
                    "launch_clutch.max_slip_s": "0.500", "launch_clutch.lockups": "5"}
+
+
+def play_rows(clutch_config_source, calls=(1,), params=None, phases=None, seconds=4.0):
+    """A play's step rows from replays on the plant: per launch phase a settle row (handbrake, clutch 0) and the
+    callbacks of a launch, physics_step advancing by the steps each covers (timeslice_s = covered x 1/30 s)."""
+    rows, step = [], 1000
+    for name, throttle in (phases or model.LAUNCH_PHASES).items():
+        config = clutch_config_source.config if isinstance(clutch_config_source, LaunchClutch) else clutch_config_source
+        sim = model.launch(LaunchClutch(**config), throttle, seconds=seconds, calls=calls, params=params)
+        base = {"phase": name, "cmd_brake": 0.0, "cmd_gear": 2.0, "cur_gear": 2.0, "engine_on": 1.0}
+        rows.append(dict(base, physics_step=step, segment="settle", cmd_throttle=0.0, cmd_clutch=0.0,
+                         input_post_clutch=0.0, cmd_handbrake=1.0, cmd_gear=1.0, rpm=800.0, speed_kmh=0.0, vel_l_z=0.0,
+                         timeslice_s=STEP_DT, world_time_ms=step * 1000.0 * STEP_DT))
+        t_last = 0.0
+        for r in sim:
+            covered = max(1, int(round((r[0] - t_last) / STEP_DT)))
+            step += covered
+            t_last = r[0]
+            rows.append(dict(base, physics_step=step, segment="excite", cmd_throttle=throttle, cmd_clutch=r[1],
+                             input_post_clutch=r[1], cmd_handbrake=0.0, rpm=r[2], speed_kmh=r[4], vel_l_z=r[4] / 3.6,
+                             timeslice_s=covered * STEP_DT, world_time_ms=step * 1000.0 * STEP_DT))
+        step += 100
+    return rows
 
 
 class CalibrationTest(unittest.TestCase):
@@ -1095,14 +1169,7 @@ class CalibrationTest(unittest.TestCase):
         self.assertFalse(passed)
         self.assertTrue(any("no launch phase" in line for line in lines), lines)
         # a replay of the card's slip on the plant, written as a play's rows, passes with a complete header ...
-        good = []
-        for name, throttle in model.LAUNCH_PHASES.items():
-            sim = model.launch(LaunchClutch(**analysis.card_launch_clutch()), throttle, seconds=4.0)
-            for k, r in enumerate(sim):
-                good.append({"physics_step": len(good), "phase": name, "segment": "excite", "cmd_throttle": throttle,
-                             "cmd_brake": 0.0, "cmd_clutch": r[1], "input_post_clutch": r[1], "cmd_gear": 2.0,
-                             "cur_gear": 2.0, "rpm": r[2], "engine_on": 1.0, "speed_kmh": r[4],
-                             "vel_l_z": r[4] / 3.6})
+        good = play_rows(LaunchClutch(**analysis.card_launch_clutch()))
         lines, passed = analysis.check_play(good, COMPLETE_HEADER)
         self.assertTrue(passed, lines)
         # ... and fails without the footer's status, a counter, or with a stall in the steps
@@ -1113,6 +1180,38 @@ class CalibrationTest(unittest.TestCase):
         stalled = [dict(r) for r in good]
         stalled[50]["engine_on"] = 0.0
         self.assertFalse(analysis.check_play(stalled, COMPLETE_HEADER)[1])
+
+    def test_check_play_needs_the_start_and_physics_time(self):
+        # Codex round 2, MEDIUM: keeping only each launch's final coupled row passed (coupled "at 0.00 s"), and
+        # three-step callbacks were timed as rows x 1/30 s (a 2.70 s coupling read as 0.87 s). The start must be
+        # evident (a handbrake row, then the release into first gear with the clutch open), every physics step covered,
+        # and times are physics_step deltas x the step length
+        good = play_rows(LaunchClutch(**analysis.card_launch_clutch()))
+        tails = []
+        for name in model.LAUNCH_PHASES:
+            phase = [r for r in good if r["phase"] == name]
+            tails.append(next(r for r in phase if r["cmd_clutch"] >= 1.0))
+        lines, passed = analysis.check_play(tails, COMPLETE_HEADER)
+        self.assertFalse(passed)
+        self.assertTrue(any("no evidence of its start" in line for line in lines), lines)
+        gap = [r for r in good if not (r["phase"] == "move_check" and r["physics_step"] % 7 == 3)]
+        lines, passed = analysis.check_play(gap, COMPLETE_HEADER)
+        self.assertFalse(passed)
+        self.assertTrue(any("a gap in the steps" in line for line in lines), lines)
+        weak = variant_params(clutch=0.7, torque=0.8)
+        merged = play_rows(LaunchClutch(**analysis.card_launch_clutch()), calls=(3,), params=weak,
+                           phases={"move_check": 0.5})
+        coupled = next(r for r in merged if r["cmd_clutch"] >= 1.0)
+        first = next(r for r in merged if r["cmd_throttle"] > 0)
+        coupled_s = (coupled["physics_step"] - first["physics_step"]) * STEP_DT
+        self.assertGreater(coupled_s, 2.5)                            # about 2.7 s in physics time ...
+        self.assertLess(sum(1 for r in merged if first["physics_step"] <= r["physics_step"] < coupled["physics_step"])
+                        * STEP_DT, 1.0)                               # ... and about 0.9 s of rows x 1/30 s
+        lines, passed = analysis.check_play(merged, COMPLETE_HEADER)
+        self.assertFalse(passed)
+        self.assertTrue(any("coupled at 2." in line and "after 2.5 s" in line for line in lines), lines)
+        self.assertEqual(analysis.step_dt_of({"clock.step_dt_s": "0.033333"}, merged), 0.033333)
+        self.assertEqual(analysis.step_dt_of({}, merged), model.STEP_DT)          # never the rows' timeslice_s
 
     def test_fit_quality(self):
         e_rpm, e_v = model.shooting_residuals(None, self.rows, self.rho, self.windows)
@@ -1250,7 +1349,7 @@ class SlipAcceptanceTest(unittest.TestCase):
                             m = model.metrics(rows, first)
                             self.assertEqual(model.openings(rows[:first]), 0, label)
                             self.assertEqual(m["stalls"], 0, label)
-                            self.assertTrue(m["end_on"] and m["end_c"] == 0.0 and m["end_kmh"] == 0.0, label)
+                            self.assertTrue(m["end_on"] and m["end_c"] == 0.0 and m["end_kmh"] < 0.05, label)
                             self.assertGreaterEqual(m["min_rpm"], self.floor, label)
 
     def test_codex_round_1_cases(self):
@@ -1284,20 +1383,30 @@ class SlipAcceptanceTest(unittest.TestCase):
                 self.assertGreaterEqual(max(gears), 4, (calls, throttle))
                 first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
                 self.assertEqual(min(r[1] for r in rows[first:]), 1.0, (calls, throttle))
-        # and a speed hold that coasts down through a downshift (throttle off at 30 km/h, then on again at 15)
-        state = {"coast": False}
+        # a coast without a brake down through a downshift (throttle off at 30 km/h, on again at 15) stays coupled;
+        # the same with a light brake opens once below the brake rule's 2550 rpm and re-couples on the throttle
+        for brake in (0.0, 0.1):
+            state = {"coast": False}
 
-        def schedule(t, kmh):
-            if kmh >= 30.0:
-                state["coast"] = True
-            elif kmh <= 15.0:
-                state["coast"] = False
-            return (0.0, 0.1) if state["coast"] else (0.4, 0.0)
+            def schedule(t, kmh, state=state, brake=brake):
+                if kmh >= 30.0:
+                    state["coast"] = True
+                elif kmh <= 15.0:
+                    state["coast"] = False
+                return (0.0, brake) if state["coast"] else (0.4, 0.0)
 
-        rows = model.drive(self.clutch(), schedule, 30.0)
-        first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
-        self.assertEqual(min(r[1] for r in rows[first:]), 1.0)
-        self.assertGreater(sum(1 for a, b in zip(rows, rows[1:]) if b[7] < a[7]), 0)   # it did shift down
+            rows = model.drive(self.clutch(), schedule, 30.0)
+            m = model.metrics(rows)
+            first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
+            self.assertGreater(sum(1 for a, b in zip(rows, rows[1:]) if b[7] < a[7]), 0, brake)   # it shifted down
+            self.assertEqual(m["stalls"], 0, brake)
+            self.assertGreaterEqual(m["min_rpm"], self.floor, brake)
+            if brake == 0.0:
+                self.assertEqual(min(r[1] for r in rows[first:]), 1.0)
+            else:
+                cycles = sum(1 for a, b in zip(rows[first:], rows[first + 1:]) if a[1] > 0 and b[1] == 0)
+                self.assertGreater(cycles, 0)
+                self.assertEqual(rows[-1][1] if rows[-1][8] > 0 and rows[-1][4] > 20.0 else 1.0, 1.0)
 
     def test_gear_scripted_full_sequence(self):
         # Codex round 1, MEDIUM: E-01's gear_scripted (m_sGearSequence 2,3,4,3,2, m_fGearHoldS 3 s, throttle 0.4, no
@@ -1334,6 +1443,159 @@ class SlipAcceptanceTest(unittest.TestCase):
         self.assertTrue(passed, table)
 
 
+# Codex round 2 attack families (offline, on the fitted plant). SWEEP_CALLS: the callback patterns of the 440-case brake
+# sweep (brake point x wheel slip x callbacks)
+SWEEP_CALLS = ((1,), (2,), (3,), CALLS["mixed"], (1, 3, 1), (3, 1), (2, 1), (1, 2))
+SWEEP_KMH = (3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 15.0, 20.0)
+SWEEP_SLIP_MPS = (0.25, 0.5, 1.0, 1.5, 2.0)
+PULSE_PATTERNS = ("1/0 0.2 s", "1/0 2 steps", "PRBS 0.1", "PRBS 0/0.2")
+PULSE_CALLS = ((1,), (1, 3, 1), (3,), CALLS["mixed"])
+# The round-1 (ddca123) slip controller's end speeds [km/h] on the pulse family, timing U, on this plant (computed
+# with that commit's mirror): the "useful motion" reference. Both stay near standstill on the PRBS patterns: at throttle
+# 0.1-0.2 the S105 makes about the 5.6 Nm its rolling load needs in first gear
+ROUND1_PULSE_KMH = {("1/0 0.2 s", (1,)): 36.6, ("1/0 0.2 s", (1, 3, 1)): 36.4, ("1/0 0.2 s", (3,)): 36.7,
+                    ("1/0 0.2 s", CALLS["mixed"]): 38.9, ("1/0 2 steps", (1,)): 37.4, ("1/0 2 steps", (1, 3, 1)): 37.1,
+                    ("1/0 2 steps", (3,)): 37.0, ("1/0 2 steps", CALLS["mixed"]): 42.3, ("PRBS 0.1", (1,)): 0.0,
+                    ("PRBS 0.1", (1, 3, 1)): 0.0, ("PRBS 0.1", (3,)): 0.1, ("PRBS 0.1", CALLS["mixed"]): 0.0,
+                    ("PRBS 0/0.2", (1,)): 0.8, ("PRBS 0/0.2", (1, 3, 1)): 0.9, ("PRBS 0/0.2", (3,)): 1.4,
+                    ("PRBS 0/0.2", CALLS["mixed"]): 0.4}
+
+
+def stalls_after(rows, start=0):
+    r = rows[start:]
+    return sum(1 for a, b in zip(r, r[1:]) if a[3] and not b[3])
+
+
+def brake_sweep_case(config, at_kmh, slip_mps, calls, timing):
+    rows, first = model.brake_to_stop(LaunchClutch(**config), 1.0, at_kmh, throttle=0.5, timing=timing, calls=calls,
+                                      params={"brake_slip_mps": slip_mps})
+    return stalls_after(rows, first), model.openings(rows), min(r[6] for r in rows[first:])
+
+
+def upshift_brake_case(config, t_shift, grade, calls, timing):
+    rows = model.drive(LaunchClutch(**config), lambda t, kmh: (0.5, 0.0) if t < t_shift else (0.0, 1.0),
+                       t_shift + 4.0, timing=timing, calls=calls, plant=model.Plant(grade=grade),
+                       gear_fn=lambda t, kmh: 2 if t < t_shift else 3)
+    first = next(i for i, r in enumerate(rows) if r[9] > 0)
+    return stalls_after(rows, first), model.openings(rows), min(r[6] for r in rows[first:])
+
+
+def pulse_schedule(pattern):
+    import random
+    rng = random.Random(7)
+    prbs = [rng.choice((0.05, 0.15)) for _ in range(200)]
+
+    def schedule(t, kmh):
+        if pattern == "1/0 0.2 s":
+            return (1.0 if int(t / 0.2) % 2 == 0 else 0.0, 0.0)
+        if pattern == "1/0 2 steps":
+            return (1.0 if int(round(t / STEP_DT)) // 2 % 2 == 0 else 0.0, 0.0)
+        if pattern == "PRBS 0/0.2":
+            return (0.2 if prbs[int(t / 0.2)] > 0.1 else 0.0, 0.0)
+        return (prbs[int(t / 0.2)], 0.0)
+    return schedule
+
+
+def pulse_case(config, pattern, calls, timing):
+    rows = model.drive(LaunchClutch(**config), pulse_schedule(pattern), 12.0, timing=timing, calls=calls,
+                       policy=model.ShiftPolicy(first_only=True))
+    return stalls_after(rows), model.openings(rows), min(r[6] for r in rows), rows[-1][4]
+
+
+class CodexAttackTest(unittest.TestCase):
+    """Codex round 2's attacks on the card's slip, and the same families on DD-14c's ramp for comparison."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(CARD, "r", encoding="ascii") as f:
+            cls.slip = json.load(f)["gearbox"]["launch_clutch"]
+        cls.ramp = dict(analysis.DD14C_RAMP)
+        cls.floor = cls.slip["stall_guard_rpm"] + GUARD_MARGIN_RPM
+        cls.counts = {}
+
+    def family(self, name, config, cases, fn):
+        stalls = openings = 0
+        low = 1e9
+        for case in cases:
+            out = fn(config, *case)
+            stalls += out[0]
+            openings += out[1]
+            low = min(low, out[2])
+        return stalls, openings, low
+
+    def test_brake_sweep(self):
+        # 440 cases (brake 1 at 3 .. 20 km/h after throttle 0.5, wheel slip 0.25 .. 2 m/s, 8 callback patterns) per
+        # timing; Codex's case: 8 km/h, 1.5 m/s, 1-step calls, timing U (was 286 rpm, a stall)
+        for timing in ("U", "A"):
+            cases = list(itertools.product(SWEEP_KMH, SWEEP_SLIP_MPS, SWEEP_CALLS, (timing,)))
+            self.assertEqual(len(cases), 440)
+            s_stalls, s_open, s_low = self.family("brake", self.slip, cases, brake_sweep_case)
+            r_stalls, r_open, _ = self.family("brake", self.ramp, cases, brake_sweep_case)
+            self.assertEqual(s_stalls, 0, timing)
+            self.assertGreaterEqual(s_low, self.floor, timing)
+            self.assertEqual(s_open, len(cases), timing)              # one opening per case: the stop's
+            self.assertLessEqual(s_open, r_open, timing)
+            self.assertGreater(r_stalls, 0, timing)                  # the ramp stalls in this family
+        self.assertGreaterEqual(brake_sweep_case(self.slip, 8.0, 1.5, (1,), "U")[2], self.floor)
+
+    def test_upshift_then_brake(self):
+        # Codex's case: throttle 0.5 at +5 %, timing U, callbacks (1, 3, 1); at 2.5 s gear 2 -> 3 with throttle 0 and
+        # a full brake (was 409.9 rpm, a stall); and its family over the shift time, grade, callbacks and timing
+        stalls, _, low = upshift_brake_case(self.slip, 2.5, 0.05, (1, 3, 1), "U")
+        self.assertEqual(stalls, 0)
+        self.assertGreaterEqual(low, self.floor)
+        cases = list(itertools.product((1.5, 2.0, 2.5, 3.0, 3.5), (0.0, 0.05), ((1,), (1, 3, 1), (3,), CALLS["mixed"]),
+                                       ("U", "A", "A2")))
+        s_stalls, s_open, s_low = self.family("upshift", self.slip, cases, upshift_brake_case)
+        r_stalls, r_open, _ = self.family("upshift", self.ramp, cases, upshift_brake_case)
+        self.assertEqual(s_stalls, 0)
+        self.assertGreaterEqual(s_low, self.floor)
+        self.assertLessEqual(s_open, r_open)
+
+    def test_throttle_pulses(self):
+        # Codex round 2, MEDIUM: throttle 1 / 0 every 0.2 s made 30 openings and never coupled; every 2 steps 89. Zero
+        # throttle without a brake no longer opens: no stall, every opening counted (model.openings counts them all),
+        # and the motion of the round-1 controller (ROUND1_PULSE_KMH) within 20 % wherever it reached 5 km/h
+        s_total = r_total = 0
+        for pattern in PULSE_PATTERNS:
+            for calls in PULSE_CALLS:
+                for timing in ("U", "A", "A2"):
+                    label = (pattern, calls, timing)
+                    stalls, opens, low, end_kmh = pulse_case(self.slip, pattern, calls, timing)
+                    r_stalls, r_opens, _, _ = pulse_case(self.ramp, pattern, calls, timing)
+                    self.assertEqual(stalls, 0, label)
+                    self.assertGreaterEqual(low, self.floor, label)
+                    s_total += opens
+                    r_total += r_opens
+                    reference = ROUND1_PULSE_KMH[(pattern, calls)]
+                    if reference >= 5.0:
+                        self.assertGreaterEqual(end_kmh, 0.8 * reference, label)
+                    if pattern.startswith("1/0"):
+                        self.assertLessEqual(opens, 6, label)
+        self.assertLess(s_total, r_total)
+
+    def test_callback_sequences(self):
+        # Codex round 2, MEDIUM: J x 0.7, throttle 1, timing A2 and the callbacks (3,3,2,2,2,1,3,2,1,2,1,2,1,2)
+        # alternated c by 0.007 twice in a row; with the stated deadband (ALTERNATION_DEADBAND 0.01: a reversal counts
+        # only when both changes are >= 0.01) no case alternates, and 0.0097 was the largest such change in 8127 runs
+        import random
+        sequences = [(3, 3, 2, 2, 2, 1, 3, 2, 1, 2, 1, 2, 1, 2)]
+        rng = random.Random(1)
+        sequences += [tuple(rng.choice((1, 2, 3)) for _ in range(rng.randint(5, 16))) for _ in range(40)]
+        self.assertEqual(model.ALTERNATION_DEADBAND, 0.01)
+        for calls in sequences:
+            for j in (0.7, 1.0):
+                for throttle in (0.3, 1.0):
+                    for timing in ("A", "A2"):
+                        rows = model.launch(LaunchClutch(**self.slip), throttle, timing=timing, calls=calls,
+                                            params=variant_params(j=j))
+                        m = model.metrics(rows)
+                        label = (calls, j, throttle, timing)
+                        self.assertEqual((m["openings"], m["stalls"]), (0, 0), label)
+                        self.assertLessEqual(m["alternations"], 1, label)
+                        self.assertGreaterEqual(m["min_rpm"], self.floor, label)
+
+
 class SlipTiesTest(unittest.TestCase):
     """The slip mirror, its constants and the inputs of both callers against the Enforce sources (DD-14d)."""
 
@@ -1346,39 +1608,44 @@ class SlipTiesTest(unittest.TestCase):
     def test_mirror_follows_step_slip(self):
         body = class_method(self.helper, "DC_LaunchClutch", "StepSlip")
         for statement in (
-                "float engage = m_Config.m_fEngageRpm; if (gear >= 0 && m_iLastGear >= 0 && gear > m_iLastGear) { "
-                "ForgetRpm(); m_fSyncLeftS = DC_LaunchClutchConfig.SYNC_S; m_iAgreeCalls = 0; } m_iLastGear = gear;",
+                "float engage = m_Config.m_fEngageRpm; bool braking = brake > 0; bool drive = throttle > 0 && !braking; "
+                "if (gear >= 0 && m_iLastGear >= 0 && gear > m_iLastGear) { m_fSyncLeftS = DC_LaunchClutchConfig.SYNC_S; "
+                "m_iAgreeCalls = 0; } m_iLastGear = gear;",
                 "float last = m_fLastRpm; if (last < 0) last = rpm; float mean = 0.5 * (rpm + last); float meanLast = "
                 "m_fLastMeanRpm; if (meanLast < 0) meanLast = mean; float spanS = m_fLastSliceS + m_fPrevSliceS; float "
                 "rate = 0; if (m_iHistory >= 2 && spanS > 0) rate = 2 * (mean - meanLast) / spanS;",
                 "m_fLastRpm = rpm; m_fLastMeanRpm = mean; if (m_iHistory < 3) m_iHistory++; m_fPrevSliceS = "
                 "m_fLastSliceS; m_fLastSliceS = slice; m_fCallSteps = Math.Max(Math.Max(slice / "
                 "DC_LaunchClutchConfig.GAIN_STEP_S, 1), m_fCallSteps - DC_LaunchClutchConfig.CALL_STEPS_DECAY); bool "
-                "inSync = m_fSyncLeftS > 0; m_fSyncLeftS = Math.Max(m_fSyncLeftS - slice, 0); float predicted = rpm + "
-                "DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_CALLS * slice * Math.Min(rate, 0);",
+                "guarded = braking || m_fSyncLeftS <= 0; m_fSyncLeftS = Math.Max(m_fSyncLeftS - slice, 0); float "
+                "predicted = rpm + DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_CALLS * slice * Math.Min(rate, 0);",
                 "if (!driving) { Open(); return; }",
                 "if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; Open(); return; }",
-                "if (m_bLocked) { float openRpm = engage; if (drive) openRpm = m_Config.GetLugRpm(); if (rpm <= openRpm) "
-                "{ Open(); return; } if (!inSync && rpm < m_Config.GetLookaheadCeilingRpm() && predicted <= openRpm) { "
-                "Open(); return; } if (!drive && !inSync && rate < -DC_LaunchClutchConfig.MAX_DROP_RPM_PER_S) { Open(); "
-                "return; } m_fCoupling = 1; return; }",
-                "if (rpm <= engage || !drive || (!inSync && predicted <= m_Config.GetLugRpm())) { Open(); return; }",
+                "if (braking && rpm - m_Config.m_fBrakeDropRpmPerS * (slice + DC_LaunchClutchConfig.BRAKE_LAG_S) <= "
+                "engage) { Open(); return; }",
+                "if (m_bLocked) { float openRpm = m_Config.GetLugRpm(); if (braking) openRpm = engage; if (rpm <= "
+                "openRpm) { Open(); return; } if (guarded && rpm < m_Config.GetLookaheadCeilingRpm() && predicted <= "
+                "openRpm) { Open(); return; } if (braking && rate < -DC_LaunchClutchConfig.DROP_GUARD_RPM_PER_S) { "
+                "Open(); return; } m_fCoupling = 1; return; }",
+                "if (rpm <= engage || braking || (guarded && predicted <= m_Config.GetLugRpm())) { Open(); return; }",
                 "float kp = m_Config.m_fSlipKp / m_fCallSteps; float ki = m_Config.m_fSlipKi / (m_fCallSteps * "
                 "m_fCallSteps); float want = m_fCoupling + slice * (kp * rate + ki * (mean - m_Config.m_fFullRpm)); "
                 "float lowest = Math.Max(m_fCoupling - slice / m_Config.m_fUncoupleTimeS, 0); float highest = "
                 "Math.Min(m_fCoupling + slice / m_Config.m_fCoupleTimeS, 1); m_fCoupling = Math.Clamp(want, lowest, "
                 "highest);",
-                "if (m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= "
+                "if (drive && m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= "
                 "m_Config.m_fLockToleranceRpm) m_iAgreeCalls++; else m_iAgreeCalls = 0; if (m_iAgreeCalls >= "
-                "DC_LaunchClutchConfig.LOCK_AGREE_CALLS || m_fCoupling >= 1) { m_bLocked = true; m_fCoupling = 1; "
-                "m_iLockups++; }"):
+                "DC_LaunchClutchConfig.LOCK_AGREE_CALLS || (drive && m_fCoupling >= 1)) { m_bLocked = true; m_fCoupling "
+                "= 1; m_iLockups++; }"):
             self.assertIn(statement, body)
+        self.assertNotIn("ForgetRpm", body)                          # the history stays across an upshift
         self.assertIn("m_fCoupling = 0; m_bLocked = false; m_iAgreeCalls = 0;",
                       class_method(self.helper, "DC_LaunchClutch", "Open"))
         consts = enforce_constants(self.helper, "DC_LaunchClutchConfig")
         for name in ("RELEASE_LOOKAHEAD_CALLS", "RELEASE_LOOKAHEAD_ENGAGE_FACTOR", "SYNC_S", "LUG_MARGIN_RPM",
-                     "MAX_DROP_RPM_PER_S", "GAIN_STEP_S", "CALL_STEPS_DECAY"):
+                     "DROP_GUARD_RPM_PER_S", "BRAKE_LAG_S", "GAIN_STEP_S", "CALL_STEPS_DECAY"):
             self.assertEqual(consts[name], getattr(LaunchClutch, name), name)
+        self.assertEqual(consts["DEFAULT_BRAKE_DROP_RPM_PER_S"], LaunchClutch.DEFAULTS["brake_drop_rpm_per_s"])
         self.assertIn("static const int LOCK_AGREE_CALLS = %d;" % LaunchClutch.LOCK_AGREE_CALLS, self.helper)
         self.assertIn("return RELEASE_LOOKAHEAD_ENGAGE_FACTOR * m_fEngageRpm;",
                       class_method(self.helper, "DC_LaunchClutchConfig", "GetLookaheadCeilingRpm"))

@@ -427,8 +427,24 @@ class DC_ProbeActuator
 	protected int m_iWheelsContact;
 
 	//------------------------------------------------------------------------------------------------
-	//! Finds CarControllerComponent and its VehicleWheeledSimulation (GetSimulation). false (GetFailure) if missing.
+	//! For the callers that drive with the launch clutch defaults (DC_ProbeImages, DC_ProbeMarkers): InitComponents,
+	//! then DC_LaunchClutchConfig.Ramp() through SetLaunchClutch, so the defaults are validated once (at the default
+	//! shift policy). false (GetFailure) on either. A caller that selects its own launch clutch (DC_ProbeSequences)
+	//! calls InitComponents and SetLaunchClutch itself instead, so only the configuration it drives with is validated
 	bool Init(notnull IEntity vehicle)
+	{
+		if (!InitComponents(vehicle))
+			return false;
+
+		DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp();
+		return SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Component discovery only: CarControllerComponent and its VehicleWheeledSimulation (GetSimulation), then the
+	//! gearbox (DetectGearbox). false (GetFailure) if missing. No launch clutch is checked here: until SetLaunchClutch
+	//! the helper holds a DC_LaunchClutchConfig in mode off (the commanded clutch)
+	bool InitComponents(notnull IEntity vehicle)
 	{
 		m_Vehicle = vehicle;
 		m_Controller = CarControllerComponent.Cast(vehicle.FindComponent(CarControllerComponent));
@@ -450,13 +466,12 @@ class DC_ProbeActuator
 
 		m_sFailure = string.Empty;
 		DetectGearbox();
-		DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp();
-		return SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Once per probe start (Init): HasAutomaticGearbox and the gear counts; neutral = gears - forward - 1 and first =
-	//! gears - forward exactly as vanilla SCR_ToggleHandbrakeAction.c:99-108, top = gears - 1 as
+	//! Once per probe start (InitComponents): HasAutomaticGearbox and the gear counts; neutral = gears - forward - 1
+	//! and first = gears - forward exactly as vanilla SCR_ToggleHandbrakeAction.c:99-108, top = gears - 1 as
 	//! SCR_VehicleGearCondition.c (LAST), reverse below neutral. The shift policy is on for a manual gearbox with at
 	//! least one forward gear and a neutral index >= 0.
 	protected void DetectGearbox()
@@ -484,8 +499,9 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Launch clutch (DD-14c, DC_LaunchClutch.c) instead of Init's DC_LaunchClutchConfig.Ramp() (Init sets that one
-	//! through here, at the default policy); call after SetShiftPolicy. source names it in the run header
+	//! Launch clutch (DD-14c, DC_LaunchClutch.c): the one configuration the actuator drives with, validated here once
+	//! (Init passes DC_LaunchClutchConfig.Ramp() at the default policy; DC_ProbeSequences its attributes after
+	//! InitComponents and SetShiftPolicy). source names it in the run header
 	//! (launch_clutch.source). false (GetFailure) when the config is outside its ranges (DC_LaunchClutchConfig.Check)
 	//! or, mode ramp on a manual gearbox, when full_rpm is not below the policy's downshift rpm (the clutch must be
 	//! fully coupled at every rpm the policy drives in) or the band does not fit the engine (CheckEngine:
@@ -1816,11 +1832,12 @@ class DC_ProbeSequences : DC_ProbeComponent
 		m_Area.Set(m_vAreaStart, m_fAreaHeadingDeg, m_fAreaLengthM, m_fAreaHalfWidthM);
 		m_fStartAlongM = 2 * m_fAreaMarginM;
 
-		// The actuator reads the gearbox once here (DetectGearbox); its lines go into the run header extras. A launch
-		// clutch outside its ranges refuses the start (GetFailure)
+		// The actuator reads the gearbox once here (InitComponents: discovery only); its lines go into the run header
+		// extras. The launch clutch of the attributes is the only one validated, once, after the shift policy it is
+		// checked against: a mode off is never refused by the ramp's bounds, a ramp outside them refuses the start
 		m_Actuator = new DC_ProbeActuator();
 		DC_ProbeActuator readyActuator;
-		if (m_Actuator.Init(ego))
+		if (m_Actuator.InitComponents(ego))
 		{
 			m_Actuator.SetSpeedGains(m_fSpeedKp, m_fSpeedKi, m_fBrakeScale);
 			m_Actuator.SetShiftPolicy(m_fShiftUpRpm, m_fShiftDownRpm, m_fShiftMinS, m_fShiftFirstBelowKmh, m_fGearClutchDipS);

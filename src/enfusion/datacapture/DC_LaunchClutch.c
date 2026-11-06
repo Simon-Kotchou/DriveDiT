@@ -1,5 +1,5 @@
 // ============================================================================
-// DC_LaunchClutch - the Mode A launch clutch for the Reforger 1.9 powertrain (DD-14c)
+// DC_LaunchClutch - the Mode A launch clutch for the Reforger 1.9 powertrain (DD-14c, mode slip DD-14d)
 // ============================================================================
 //
 // WHY. Mode A drives a driverless car by calling the VehicleWheeledSimulation setters every physics step (r2 3.2),
@@ -52,7 +52,7 @@
 // off is never coupled either. Its rpm is the drag of the wheels, not a running engine, and the restart then re-ramps
 // from c = 0. Second, the sketch rate-limits every release; here only releases inside the band are (above).
 //
-// BOUNDS. Check holds the ranges. CheckEngine adds the vehicle, at the caller's start (mode ramp):
+// BOUNDS. Check holds the ranges. CheckEngine adds the vehicle, at the caller's start (modes ramp and slip):
 //   - engage_rpm must lie above the engine's idle (EngineGetRPMIdle), so idle never bites;
 //   - full_rpm must lie below FULL_RPM_MAX_FRACTION of its max rpm (EngineGetRPMMax, VehicleWheeledSimulation.c:77 of
 //     1.9.0.37, :60 of 1.8.0.13; the probe's vehicle.rpm_max), so the band is attainable.
@@ -63,7 +63,7 @@
 //     downshift speed, in the gear it shifts down from, must be at least full_rpm + DOWNSHIFT_RPM_MARGIN
 //     (DC_VehicleCard.CheckLaunchDownshifts; fit_steer_kappa.py mirrors it).
 //
-// STALL RESTART (mode "ramp", restart_on_stall): when the engine is off, the handbrake is not commanded and
+// STALL RESTART (modes "ramp" and "slip", restart_on_stall): when the engine is off, the handbrake is not commanded and
 // restart_cooldown_s has passed since the last restart (the first restart has no cooldown), Step requests a restart.
 // The cooldown is the physics time covered since the last restart's call, measured at this call's start, so calls
 // covering 1 to 3 steps never bring two restarts closer than restart_cooldown_s:
@@ -73,7 +73,7 @@
 //     DC_ActuatorModeA.Start for llc_v1;
 //   - restarts counts these requests.
 //
-// COUNTERS (both modes count stalls; the rest only count in "ramp"):
+// COUNTERS (every mode counts stalls; the rest only count in "ramp" and "slip"; lock-ups only in "slip"):
 //   - stalls: EngineIsOn seen true, then false on the next Step;
 //   - restarts;
 //   - guard drops;
@@ -95,7 +95,46 @@
 // UNVERIFIED on 1.9.0.37 (needs a Workbench Play): every in-engine behaviour of a partial clutch value (how
 // SetClutch(c) for 0 < c < 1 maps to transmitted torque); the engine inertia that sets the loop gain (the toy's
 // 0.12 kg m2 is an estimate from the 800 -> 528 rpm step); whether ForceStartEngine restarts a stalled engine in one
-// step; automatic gearboxes (no caller ramps one: the probe kit and llc_v1 leave them as they are).
+// step; automatic gearboxes (no caller ramps one: the probe kit and llc_v1 leave them as they are). DD-14d answered the
+// first two from the first 1.9 run with the ramp (below).
+//
+// MODE SLIP (DD-14d). The first 1.9.0.37 Play with mode ramp (launch 20261106T194516Z-wb-ab6a, e01 play_01) launched
+// without a stall but the clutch chattered: at throttle 0.5 the engine revved to about 1930 rpm, the ramp coupled at
+// dt / couple_time_s while its target stayed above c, the rpm collapsed through engage_rpm, the clutch opened at once
+// and the cycle repeated (2 openings at 3 and 6 km/h before c = 1 at 2.0 s; 4 at throttle 0.3, 3 in gear_scripted's
+// launch at 0.4; none at 1.0). tools/ident/fit_launch_clutch.py fits that Play's launches (engine inertia, torque
+// curve, clutch capacity, rolling load; tools/ident/launch_clutch_model.py):
+//   - J 0.039 kg m2, clutch capacity 118 Nm at c = 1 (Coulomb: the rpm rate falls by a constant 38.5 rpm per step per
+//     0.039 of c whatever the slip speed), gross torque 58 .. 79 Nm at throttle 1 (linear in throttle), drag
+//     1.134 / s x (rpm - 800) above idle, none below it; SetClutch acts from the step it is set, SetThrottle and
+//     SetBreak one step later, and the readback alternates between half a step and no step after the setters;
+//   - the clutch moves the rpm by about 965 rpm per step at c = 1, so the ramp's 600 rpm band is a loop gain of 1.6 per
+//     step: no rate limit or band below the shift policy's 1800 rpm downshift damps it (DD-14c's toy-model caveat:
+//     below about 0.07 kg m2 it rings);
+//   - replayed in closed loop on that model, the ramp gives the Play's openings (2 / 4-5 / 1 / 0 / 3 at throttle 0.5 /
+//     0.3 / 0.6 / 1.0 / 0.4) and its c = 1 times (2.0 / 3.8 / 1.6 / 1.0 / 2.5 s).
+// Mode "slip" is an rpm-hold slip controller with lock-up when the engine and the driveline turn together. Per Step
+// (driving: in gear, no handbrake, no dip, engine on; otherwise c = 0 and not locked):
+//   - the rpm it uses is the mean of this readback and the last one (the readback timing alternates, so a single
+//     difference alternates too);
+//   - below stall_guard_rpm: c = 0 at once (a guard drop when c was > 0), not locked;
+//   - locked: c = 1 until the rpm is at or below engage_rpm, or, below RELEASE_LOOKAHEAD_ENGAGE_FACTOR x engage_rpm,
+//     until the rpm extrapolated RELEASE_LOOKAHEAD_CALLS calls ahead by the mean's last change is (a full brake drops
+//     the rpm by about 300 per step in first gear; upshifts land above that ceiling, which the callers check). Then
+//     c = 0 at once, not locked: the clutch opens before the stall;
+//   - slipping, at or below engage_rpm: c = 0 at once;
+//   - slipping above it: c moves by slip_kp x (change of the mean) + slip_ki x (mean - full_rpm) x dt (a PI that holds
+//     the engine at full_rpm), by at most dt / couple_time_s up and dt / uncouple_time_s down, within [0, 1];
+//   - lock-up: when c > 0 and the driveline rpm the caller passes (speed / the gear's m/s per 1000 rpm, <= 0 when
+//     unknown) is within lock_tolerance_rpm of the rpm, or when c reaches 1: c = 1 at once (counted as a lock-up).
+// On the fitted model, flat and at +-5 % grade, throttle 0.3 / 0.5 / 0.6 / 1.0: no opening, no step-to-step
+// oscillation of c, rpm never below the 800 idle, c = 1 at throttle 0.5 by 1.4 s (1.9 s at 30 % less torque); a brake
+// of 0.3 / 0.6 / 1.0 to a stop opens with the engine at or above idle; also with the engine inertia or the clutch
+// capacity 30 % off, one step more delay, or callbacks of 1 to 3 steps (tests/test_launch_clutch.py). full_rpm is the
+// held rpm (1400 for the S105), so the shift rules are those of a ramp: below the policy's downshift rpm (probe kit),
+// each card downshift at least full_rpm + DOWNSHIFT_RPM_MARGIN; mode slip adds that each upshift lands at or above
+// the lookahead ceiling (the probe kit with its m/s per 1000 rpm attribute, the card with scripted_mps_per_krpm).
+// Mode ramp and mode off are unchanged.
 //
 // BUILD-AGNOSTIC: every engine call of the callers exists with the same declaration in 1.8.0.13 and 1.9.0.37 (official
 // script dump): SetClutch / GetClutch (VehicleWheeledSimulation.c:44 / :41; 1.8 :29 / :26), EngineGetRPM (:81; 1.8
@@ -104,13 +143,14 @@
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
-//! The launch clutch parameters (DD-14c). Sources: the DC_ProbeSequences attributes (probe kit), and the optional
-//! gearbox.launch_clutch object of a vehicle card for llc_v1 (absent = mode off). Check holds the ranges both apply,
-//! mirrored by tools/ident/fit_steer_kappa.py (launch_clutch_violations)
+//! The launch clutch parameters (DD-14c; mode slip DD-14d). Sources: the DC_ProbeSequences attributes (probe kit), and
+//! the optional gearbox.launch_clutch object of a vehicle card for llc_v1 (absent = mode off). Check holds the ranges
+//! both apply, mirrored by tools/ident/fit_steer_kappa.py (launch_clutch_violations)
 class DC_LaunchClutchConfig
 {
 	static const string MODE_OFF = "off";
 	static const string MODE_RAMP = "ramp";
+	static const string MODE_SLIP = "slip";
 
 	//! Defaults: DC_ProbeSequences' attributes, Ramp(), the S105 placeholder card (see the header)
 	static const float DEFAULT_ENGAGE_RPM = 1100;
@@ -121,14 +161,29 @@ class DC_LaunchClutchConfig
 	static const bool DEFAULT_RESTART_ON_STALL = true;
 	static const float DEFAULT_RESTART_COOLDOWN_S = 1;
 
+	//! Mode slip (DD-14d, Slip()): full_rpm is the held rpm; the PI gains and the lock-up tolerance (the header)
+	static const float DEFAULT_SLIP_FULL_RPM = 1400;
+	static const float DEFAULT_SLIP_KP = 0.0003;
+	static const float DEFAULT_SLIP_KI = 0.001;
+	static const float DEFAULT_LOCK_TOLERANCE_RPM = 100;
+	//! Mode slip, coupled: the release looks this many calls ahead below this factor x engage_rpm (the header)
+	static const float RELEASE_LOOKAHEAD_CALLS = 1.5;
+	static const float RELEASE_LOOKAHEAD_ENGAGE_FACTOR = 2;
+
 	//! Ranges (Check): 0 <= stall_guard_rpm < engage_rpm < full_rpm <= RPM_MAX; couple_time_s and uncouple_time_s in
 	//! (0, TIME_MAX_S]; restart_cooldown_s in [0, TIME_MAX_S]
 	static const float RPM_MAX = 10000;
 	static const float TIME_MAX_S = 10;
 	//! CheckEngine: full_rpm below this share of the engine's max rpm (S105: 0.5 x 8000 = 4000)
 	static const float FULL_RPM_MAX_FRACTION = 0.5;
-	//! Vehicle card, scripted gearbox, mode ramp: each downshift's rpm at least full_rpm + this (BOUNDS in the header)
+	//! Vehicle card, scripted gearbox, mode ramp or slip: each downshift's rpm at least full_rpm + this (BOUNDS in the
+	//! header)
 	static const float DOWNSHIFT_RPM_MARGIN = 50;
+	//! Ranges (Check) of the mode slip fields, checked in every mode: slip_kp in [0, SLIP_KP_MAX] per rpm, slip_ki in
+	//! (0, SLIP_KI_MAX] per rpm s, lock_tolerance_rpm in [0, LOCK_TOLERANCE_MAX_RPM]
+	static const float SLIP_KP_MAX = 0.01;
+	static const float SLIP_KI_MAX = 0.1;
+	static const float LOCK_TOLERANCE_MAX_RPM = 1000;
 
 	string m_sMode = MODE_OFF;
 	float m_fEngageRpm = DEFAULT_ENGAGE_RPM;			//!< engage_rpm: the clutch starts to bite here
@@ -138,13 +193,27 @@ class DC_LaunchClutchConfig
 	float m_fStallGuardRpm = DEFAULT_STALL_GUARD_RPM;	//!< stall_guard_rpm: below this the clutch opens at once
 	bool m_bRestartOnStall = DEFAULT_RESTART_ON_STALL;	//!< restart_on_stall
 	float m_fRestartCooldownS = DEFAULT_RESTART_COOLDOWN_S;	//!< restart_cooldown_s: minimum time between restarts
+	float m_fSlipKp = DEFAULT_SLIP_KP;					//!< slip_kp: coupling per rpm of change of the mean rpm (mode slip)
+	float m_fSlipKi = DEFAULT_SLIP_KI;					//!< slip_ki: coupling per rpm s above full_rpm (mode slip)
+	float m_fLockToleranceRpm = DEFAULT_LOCK_TOLERANCE_RPM;	//!< lock_tolerance_rpm: engine vs driveline rpm (mode slip)
 
 	//------------------------------------------------------------------------------------------------
-	//! The defaults with mode "ramp": the probe kit's default (DC_ProbeActuator, DC_ProbeSequences attributes)
+	//! The defaults with mode "ramp": the DD-14c probe kit default (DD-14d moved it to Slip())
 	static DC_LaunchClutchConfig Ramp()
 	{
 		DC_LaunchClutchConfig config = new DC_LaunchClutchConfig();
 		config.m_sMode = MODE_RAMP;
+		return config;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The defaults with mode "slip" and full_rpm DEFAULT_SLIP_FULL_RPM (DD-14d): the probe kit's default
+	//! (DC_ProbeActuator.Init, the DC_ProbeSequences attributes) and the 1.9.0.37 card's launch clutch
+	static DC_LaunchClutchConfig Slip()
+	{
+		DC_LaunchClutchConfig config = new DC_LaunchClutchConfig();
+		config.m_sMode = MODE_SLIP;
+		config.m_fFullRpm = DEFAULT_SLIP_FULL_RPM;
 		return config;
 	}
 
@@ -155,12 +224,33 @@ class DC_LaunchClutchConfig
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The value ranges (see the constants); checked in either mode. false (failure) names the first violation
+	bool IsSlip()
+	{
+		return m_sMode == MODE_SLIP;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The launch clutch acts (mode ramp or slip); mode off passes the commanded clutch
+	bool IsActive()
+	{
+		return m_sMode == MODE_RAMP || m_sMode == MODE_SLIP;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The release lookahead ceiling of mode slip [rpm]: RELEASE_LOOKAHEAD_ENGAGE_FACTOR x engage_rpm. The callers check
+	//! that every upshift lands at or above it, so an upshift's synchronisation never releases a coupled clutch
+	float GetLookaheadCeilingRpm()
+	{
+		return RELEASE_LOOKAHEAD_ENGAGE_FACTOR * m_fEngageRpm;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The value ranges (see the constants); checked in every mode. false (failure) names the first violation
 	bool Check(out string failure)
 	{
-		if (m_sMode != MODE_OFF && m_sMode != MODE_RAMP)
+		if (m_sMode != MODE_OFF && m_sMode != MODE_RAMP && m_sMode != MODE_SLIP)
 		{
-			failure = "launch_clutch mode '" + m_sMode + "' is neither off nor ramp";
+			failure = "launch_clutch mode '" + m_sMode + "' is none of off, ramp and slip";
 			return false;
 		}
 
@@ -188,17 +278,29 @@ class DC_LaunchClutchConfig
 			return false;
 		}
 
+		if (m_fSlipKp < 0 || m_fSlipKp > SLIP_KP_MAX || m_fSlipKi <= 0 || m_fSlipKi > SLIP_KI_MAX)
+		{
+			failure = string.Format("launch_clutch slip_kp %1 and slip_ki %2 must lie in [0, %3] and (0, %4]", m_fSlipKp, m_fSlipKi, SLIP_KP_MAX, SLIP_KI_MAX);
+			return false;
+		}
+
+		if (m_fLockToleranceRpm < 0 || m_fLockToleranceRpm > LOCK_TOLERANCE_MAX_RPM)
+		{
+			failure = string.Format("launch_clutch lock_tolerance_rpm %1 is outside [0, %2]", m_fLockToleranceRpm, LOCK_TOLERANCE_MAX_RPM);
+			return false;
+		}
+
 		failure = string.Empty;
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The band against the vehicle (mode ramp only; see BOUNDS in the header): rpmIdle and rpmMax are
+	//! The band against the vehicle (mode ramp or slip; see BOUNDS in the header): rpmIdle and rpmMax are
 	//! VehicleWheeledSimulation.EngineGetRPMIdle and EngineGetRPMMax. false (failure) when engage_rpm is not above the
 	//! idle, or the max rpm is unknown (<= 0), or full_rpm is not below FULL_RPM_MAX_FRACTION of it
 	bool CheckEngine(float rpmIdle, float rpmMax, out string failure)
 	{
-		if (!IsRamp())
+		if (!IsActive())
 		{
 			failure = string.Empty;
 			return true;
@@ -237,18 +339,24 @@ class DC_LaunchClutchConfig
 		lines.Insert(prefix + ".stall_guard_rpm=" + m_fStallGuardRpm.ToString(-1, 1));
 		lines.Insert(prefix + ".restart_on_stall=" + restart);
 		lines.Insert(prefix + ".restart_cooldown_s=" + m_fRestartCooldownS.ToString(-1, 3));
+		lines.Insert(prefix + ".slip_kp=" + m_fSlipKp.ToString(-1, 6));
+		lines.Insert(prefix + ".slip_ki=" + m_fSlipKi.ToString(-1, 6));
+		lines.Insert(prefix + ".lock_tolerance_rpm=" + m_fLockToleranceRpm.ToString(-1, 1));
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One log fragment: "off (clutch as commanded)" or the ramp parameters
+	//! One log fragment: "off (clutch as commanded)" or the ramp or slip parameters
 	string Describe()
 	{
-		if (!IsRamp())
+		if (!IsActive())
 			return "off (clutch as commanded, the 1.8 sequence)";
 
 		string restart = "no restart";
 		if (m_bRestartOnStall)
 			restart = string.Format("restart after a stall, >= %1 s apart", m_fRestartCooldownS.ToString(-1, 2));
+
+		if (IsSlip())
+			return string.Format("slip: open at or below %1 rpm, hold %2 rpm while slipping (kp %3 per rpm, ki %4 per rpm s, couple %5 s, uncouple %6 s), coupled within %7 rpm of the driveline, open below %8 rpm, %9", m_fEngageRpm.ToString(-1, 0), m_fFullRpm.ToString(-1, 0), m_fSlipKp.ToString(-1, 6), m_fSlipKi.ToString(-1, 6), m_fCoupleTimeS.ToString(-1, 2), m_fUncoupleTimeS.ToString(-1, 2), m_fLockToleranceRpm.ToString(-1, 0), m_fStallGuardRpm.ToString(-1, 0), restart);
 
 		return string.Format("ramp: bite %1 -> full %2 rpm, couple %3 s, uncouple %4 s, open below %5 rpm, %6", m_fEngageRpm.ToString(-1, 0), m_fFullRpm.ToString(-1, 0), m_fCoupleTimeS.ToString(-1, 2), m_fUncoupleTimeS.ToString(-1, 2), m_fStallGuardRpm.ToString(-1, 0), restart);
 	}
@@ -272,6 +380,10 @@ class DC_LaunchClutch
 	protected int m_iStalls;
 	protected int m_iRestarts;
 	protected int m_iGuardDrops;
+	protected bool m_bLocked;					//!< mode slip: coupled (c = 1) until the release
+	protected float m_fLastRpm = -1;			//!< mode slip: the last readback, -1 = none yet
+	protected float m_fLastMeanRpm = -1;		//!< mode slip: the last mean of two readbacks, -1 = none yet
+	protected int m_iLockups;					//!< mode slip: lock-ups since Configure
 
 	//------------------------------------------------------------------------------------------------
 	void DC_LaunchClutch()
@@ -291,6 +403,7 @@ class DC_LaunchClutch
 		m_iStalls = 0;
 		m_iRestarts = 0;
 		m_iGuardDrops = 0;
+		m_iLockups = 0;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -301,6 +414,9 @@ class DC_LaunchClutch
 		m_fSinceRestartS = -1;
 		m_bRestartDue = false;
 		m_fSlipS = 0;
+		m_bLocked = false;
+		m_fLastRpm = -1;
+		m_fLastMeanRpm = -1;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -316,10 +432,19 @@ class DC_LaunchClutch
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Mode ramp or slip (the clutch is the helper's); mode off passes the commanded clutch
+	bool IsActive()
+	{
+		return m_Config.IsActive();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! The applied clutch of this step (see the header). dt: the physics time the step covers [s]; inGear: a forward or
 	//! reverse gear (not neutral); handbrake: commanded; rpm, engineOn: the last readback (EngineGetRPM, EngineIsOn);
-	//! commandedClutch: the caller's clutch, an upper bound (its dip included); dip: the caller's dip is active
-	float Step(float dt, bool inGear, bool handbrake, float rpm, bool engineOn, float commandedClutch, bool dip)
+	//! commandedClutch: the caller's clutch, an upper bound (its dip included); dip: the caller's dip is active;
+	//! drivelineRpm (mode slip): the engine rpm the driveline turns at in this gear, speed / its m/s per 1000 rpm, from
+	//! the same readback; <= 0 = unknown (lock-up then only when c reaches 1). Modes off and ramp ignore it
+	float Step(float dt, bool inGear, bool handbrake, float rpm, bool engineOn, float commandedClutch, bool dip, float drivelineRpm = -1)
 	{
 		float commanded = Math.Clamp(commandedClutch, 0, 1);
 		float slice = Math.Max(dt, 0);
@@ -330,7 +455,7 @@ class DC_LaunchClutch
 		if (engineOn)
 			m_iEngineSeen = 1;
 
-		if (!m_Config.IsRamp())
+		if (!m_Config.IsActive())
 			return commanded;
 
 		// the cooldown is the physics time elapsed at this restart point: the steps the previous calls covered, never
@@ -345,7 +470,11 @@ class DC_LaunchClutch
 		}
 
 		bool driving = inGear && !handbrake && !dip && engineOn;
-		if (!driving)
+		if (m_Config.IsSlip())
+		{
+			StepSlip(slice, driving, rpm, drivelineRpm);
+		}
+		else if (!driving)
 		{
 			m_fCoupling = 0;
 		}
@@ -385,6 +514,86 @@ class DC_LaunchClutch
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Mode slip (DD-14d, MODE SLIP in the header): c for this call. slice: the physics time it covers; driving: in gear,
+	//! no handbrake, no dip, engine on; rpm: the last readback; drivelineRpm: <= 0 = unknown
+	protected void StepSlip(float slice, bool driving, float rpm, float drivelineRpm)
+	{
+		// the mean of this readback and the last one, and the mean's change since the last call: the readback alternates
+		// between half a step and no step after the setters (DD-14d), which a single difference would follow
+		float last = m_fLastRpm;
+		if (last < 0)
+			last = rpm;
+
+		float mean = 0.5 * (rpm + last);
+		float meanLast = m_fLastMeanRpm;
+		if (meanLast < 0)
+			meanLast = mean;
+
+		m_fLastRpm = rpm;
+		m_fLastMeanRpm = mean;
+		float engage = m_Config.m_fEngageRpm;
+		if (!driving)
+		{
+			m_fCoupling = 0;
+			m_bLocked = false;
+			return;
+		}
+
+		if (rpm < m_Config.m_fStallGuardRpm)
+		{
+			if (m_fCoupling > 0)
+				m_iGuardDrops++;
+
+			m_fCoupling = 0;
+			m_bLocked = false;
+			return;
+		}
+
+		if (m_bLocked)
+		{
+			// coupled until the rpm reaches engage_rpm; below the lookahead ceiling until the mean's last change, carried
+			// RELEASE_LOOKAHEAD_CALLS calls ahead, reaches it: a full brake opens the clutch before the engine follows the
+			// wheels below idle
+			float predicted = rpm;
+			if (rpm < m_Config.GetLookaheadCeilingRpm())
+				predicted = rpm + DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_CALLS * Math.Min(mean - meanLast, 0);
+
+			if (predicted <= engage)
+			{
+				m_fCoupling = 0;
+				m_bLocked = false;
+				return;
+			}
+
+			m_fCoupling = 1;
+			return;
+		}
+
+		if (rpm <= engage)
+		{
+			m_fCoupling = 0;
+			return;
+		}
+
+		// slipping: a PI that holds the mean at full_rpm, rate-limited, then lock-up once engine and driveline agree
+		float want = m_fCoupling + m_Config.m_fSlipKp * (mean - meanLast) + m_Config.m_fSlipKi * (mean - m_Config.m_fFullRpm) * slice;
+		float lowest = Math.Max(m_fCoupling - slice / m_Config.m_fUncoupleTimeS, 0);
+		float highest = Math.Min(m_fCoupling + slice / m_Config.m_fCoupleTimeS, 1);
+		m_fCoupling = Math.Clamp(want, lowest, highest);
+		if (m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= m_Config.m_fLockToleranceRpm)
+			m_bLocked = true;
+
+		if (m_fCoupling >= 1)
+			m_bLocked = true;
+
+		if (m_bLocked)
+		{
+			m_fCoupling = 1;
+			m_iLockups++;
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! true once after a Step that requested a restart: the caller then runs its Mode A start
 	bool ConsumeRestart()
 	{
@@ -421,6 +630,20 @@ class DC_LaunchClutch
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Mode slip: lock-ups since Configure (driveline agreement or c reaching 1)
+	int GetLockups()
+	{
+		return m_iLockups;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Mode slip: coupled after a lock-up, until the release
+	bool IsLocked()
+	{
+		return m_bLocked;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Longest slip span since the last ResetMaxSlip (a probe phase) [s]
 	float GetMaxSlipS()
 	{
@@ -449,12 +672,13 @@ class DC_LaunchClutch
 		lines.Insert(prefix + ".restarts=" + m_iRestarts.ToString());
 		lines.Insert(prefix + ".guard_drops=" + m_iGuardDrops.ToString());
 		lines.Insert(prefix + ".max_slip_s=" + m_fMaxSlipTotalS.ToString(-1, 3));
+		lines.Insert(prefix + ".lockups=" + m_iLockups.ToString());
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! One log fragment: the counters since Configure
 	string DescribeCounters()
 	{
-		return string.Format("launch clutch %1: %2 stalls, %3 restarts, %4 guard drops, max slip %5 s", m_Config.m_sMode, m_iStalls, m_iRestarts, m_iGuardDrops, m_fMaxSlipTotalS.ToString(-1, 2));
+		return string.Format("launch clutch %1: %2 stalls, %3 restarts, %4 guard drops, max slip %5 s, %6 lock-ups", m_Config.m_sMode, m_iStalls, m_iRestarts, m_iGuardDrops, m_fMaxSlipTotalS.ToString(-1, 2), m_iLockups);
 	}
 }

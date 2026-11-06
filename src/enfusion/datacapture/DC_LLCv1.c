@@ -448,13 +448,13 @@ class DC_JsonScan
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The text of the object that is key's value, from its '{' to the matching '}' (braces counted; the objects it
-	//! serves hold no brace in a string); empty when the key is missing or repeated or its value is no object
-	static string ObjectText(string text, string key)
+	//! The index of the '}' that closes the object opening at start (braces counted; the objects it serves hold no brace
+	//! in a string); -1 when start is no '{' or the object is not closed. An index range, not a Substring: the text is
+	//! a whole file and Substring is capped at SUBSTRING_MAX_CHARS
+	static int ObjectEnd(string text, int start)
 	{
-		int start = FindValue(text, key);
 		if (start < 0 || start >= text.Length() || text.ToAscii(start) != CHAR_BRACE_OPEN)
-			return string.Empty;
+			return -1;
 
 		int depth = 0;
 		for (int i = start, length = text.Length(); i < length; i++)
@@ -468,26 +468,30 @@ class DC_JsonScan
 			{
 				depth--;
 				if (depth == 0)
-					return text.Substring(start, i - start + 1);
+					return i;
 			}
 		}
 
-		return string.Empty;
+		return -1;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! true when key is a member name of objectText: "key" followed by spaces and ':' (a string value "key" is not)
-	static bool HasMember(string objectText, string key)
+	//! true when key is a member name between start and end: "key" followed by spaces and ':' (a string value "key"
+	//! is not); false when the range is empty or missing (end < 0)
+	static bool HasMemberIn(string text, string key, int start, int end)
 	{
+		if (start < 0 || end <= start)
+			return false;
+
 		string quoted = "\"" + key + "\"";
-		int at = objectText.IndexOf(quoted);
-		while (at >= 0)
+		int at = text.IndexOfFrom(start, quoted);
+		while (at >= 0 && at < end)
 		{
-			int index = SkipSpace(objectText, at + quoted.Length());
-			if (index < objectText.Length() && objectText.ToAscii(index) == CHAR_COLON)
+			int index = SkipSpace(text, at + quoted.Length());
+			if (index < end && text.ToAscii(index) == CHAR_COLON)
 				return true;
 
-			at = objectText.IndexOfFrom(at + 1, quoted);
+			at = text.IndexOfFrom(at + 1, quoted);
 		}
 
 		return false;
@@ -822,8 +826,9 @@ class DC_VehicleCard
 		m_bLaunchClutchSet = text.IndexOf("\"launch_clutch\"") >= 0;
 		// the slip fields are member names of the launch_clutch object only (DD-14d round 2: a free-text note may say
 		// "slip_kp" anywhere else)
-		string launchText = DC_JsonScan.ObjectText(text, "launch_clutch");
-		m_bSlipFieldsSet = DC_JsonScan.HasMember(launchText, "slip_kp") || DC_JsonScan.HasMember(launchText, "slip_ki") || DC_JsonScan.HasMember(launchText, "lock_tolerance_rpm") || DC_JsonScan.HasMember(launchText, "brake_drop_rpm_per_s");
+		int launchStart = DC_JsonScan.FindValue(text, "launch_clutch");
+		int launchEnd = DC_JsonScan.ObjectEnd(text, launchStart);
+		m_bSlipFieldsSet = DC_JsonScan.HasMemberIn(text, "slip_kp", launchStart, launchEnd) || DC_JsonScan.HasMemberIn(text, "slip_ki", launchStart, launchEnd) || DC_JsonScan.HasMemberIn(text, "lock_tolerance_rpm", launchStart, launchEnd) || DC_JsonScan.HasMemberIn(text, "brake_drop_rpm_per_s", launchStart, launchEnd);
 		if (m_bLaunchClutchSet && (DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")))
 		{
 			failure = path + ": gearbox.launch_clutch must occur once and be an object (absent = mode off)";

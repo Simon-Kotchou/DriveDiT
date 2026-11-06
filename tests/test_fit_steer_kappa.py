@@ -413,51 +413,59 @@ RUN3_CARD = os.environ.get("DD_RUN3_CARD", "")
 RUN3_SPEED_PER_KRPM = {2: 1.54871, 3: 2.772066, 4: 4.169103}
 
 
-def object_text(text, key):
-    """Mirror of DC_JsonScan.ObjectText: the text of key's object value, '{' to its matching '}'; "" otherwise."""
+def find_value(text, key):
+    """Mirror of DC_JsonScan.FindValue: the index after `"key":` and spaces; -1 when missing or repeated."""
     quoted = '"%s"' % key
     at = text.find(quoted)
     if at < 0 or text.find(quoted, at + 1) >= 0:
-        return ""
+        return -1
     index = at + len(quoted)
     while index < len(text) and text[index] in " \t\r\n":
         index += 1
     if index >= len(text) or text[index] != ":":
-        return ""
+        return -1
     index += 1
     while index < len(text) and text[index] in " \t\r\n":
         index += 1
-    if index >= len(text) or text[index] != "{":
-        return ""
+    return index
+
+
+def object_end(text, start):
+    """Mirror of DC_JsonScan.ObjectEnd: the index of the '}' closing the object that opens at start; -1 otherwise."""
+    if start < 0 or start >= len(text) or text[start] != "{":
+        return -1
     depth = 0
-    for i in range(index, len(text)):
+    for i in range(start, len(text)):
         if text[i] == "{":
             depth += 1
         elif text[i] == "}":
             depth -= 1
             if depth == 0:
-                return text[index:i + 1]
-    return ""
+                return i
+    return -1
 
 
-def has_member(obj, key):
-    """Mirror of DC_JsonScan.HasMember: "key" followed by spaces and ':' in obj."""
+def has_member_in(text, key, start, end):
+    """Mirror of DC_JsonScan.HasMemberIn: "key" followed by spaces and ':' between start and end."""
+    if start < 0 or end <= start:
+        return False
     quoted = '"%s"' % key
-    at = obj.find(quoted)
-    while at >= 0:
+    at = text.find(quoted, start)
+    while 0 <= at < end:
         index = at + len(quoted)
-        while index < len(obj) and obj[index] in " \t\r\n":
+        while index < len(text) and text[index] in " \t\r\n":
             index += 1
-        if index < len(obj) and obj[index] == ":":
+        if index < end and text[index] == ":":
             return True
-        at = obj.find(quoted, at + 1)
+        at = text.find(quoted, at + 1)
     return False
 
 
 def slip_fields_set(card_text):
     """DC_VehicleCard.Load's m_bSlipFieldsSet on a card's text."""
-    launch = object_text(card_text, "launch_clutch")
-    return any(has_member(launch, key) for key in fit.LAUNCH_CLUTCH_SLIP_KEYS)
+    start = find_value(card_text, "launch_clutch")
+    end = object_end(card_text, start)
+    return any(has_member_in(card_text, key, start, end) for key in fit.LAUNCH_CLUTCH_SLIP_KEYS)
 
 
 def engine_rpm(speed, gear):
@@ -1542,10 +1550,12 @@ class FitTests(unittest.TestCase):
         # DC_VehicleCard.Load notes any of the three keys and CheckGearbox refuses them unless the mode is slip, and
         # ReadLaunchClutch requires all three in mode slip, the same rule both ways as launch_clutch_violations
         load = enforce_body(source, "DC_VehicleCard", "Load")
-        self.assertIn('string launchText = DC_JsonScan.ObjectText(text, "launch_clutch"); m_bSlipFieldsSet = '
-                      'DC_JsonScan.HasMember(launchText, "slip_kp") || DC_JsonScan.HasMember(launchText, "slip_ki") || '
-                      'DC_JsonScan.HasMember(launchText, "lock_tolerance_rpm") || '
-                      'DC_JsonScan.HasMember(launchText, "brake_drop_rpm_per_s");', load)
+        self.assertIn('int launchStart = DC_JsonScan.FindValue(text, "launch_clutch"); int launchEnd = '
+                      'DC_JsonScan.ObjectEnd(text, launchStart); m_bSlipFieldsSet = '
+                      'DC_JsonScan.HasMemberIn(text, "slip_kp", launchStart, launchEnd) || '
+                      'DC_JsonScan.HasMemberIn(text, "slip_ki", launchStart, launchEnd) || '
+                      'DC_JsonScan.HasMemberIn(text, "lock_tolerance_rpm", launchStart, launchEnd) || '
+                      'DC_JsonScan.HasMemberIn(text, "brake_drop_rpm_per_s", launchStart, launchEnd);', load)
         check = enforce_body(source, "DC_VehicleCard", "CheckGearbox")
         self.assertIn("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip()) {", check)
         self.assertLess(check.index("if (!m_LaunchClutch.Check(launchFailure))"),
@@ -1553,18 +1563,22 @@ class FitTests(unittest.TestCase):
         self.assertLess(check.index("if (m_bSlipFieldsSet && !m_LaunchClutch.IsSlip())"),
                         check.index("if (m_sGearbox == GEARBOX_AUTOMATIC)"))
         for key in fit.LAUNCH_CLUTCH_SLIP_KEYS:
-            self.assertIn('DC_JsonScan.HasMember(launchText, "%s")' % key, load)
-        # Codex round 2, LOW: the member names inside gearbox.launch_clutch only (a mirror of DC_JsonScan.ObjectText and
-        # HasMember): a free-text note "slip_kp" elsewhere is no slip field
-        object_text = enforce_body(source, "DC_JsonScan", "ObjectText")
-        self.assertIn("int start = FindValue(text, key); if (start < 0 || start >= text.Length() || text.ToAscii(start) "
-                      "!= CHAR_BRACE_OPEN) return string.Empty;", object_text)
+            self.assertIn('DC_JsonScan.HasMemberIn(text, "%s", launchStart, launchEnd)' % key, load)
+        # Codex round 2, LOW: the member names inside gearbox.launch_clutch only (mirrors of DC_JsonScan.FindValue,
+        # ObjectEnd and HasMemberIn): a free-text note "slip_kp" elsewhere is no slip field. An index range on the
+        # file's text, never a Substring of it (Substring is capped at SUBSTRING_MAX_CHARS; test_route_hash_dc2)
+        object_end_body = enforce_body(source, "DC_JsonScan", "ObjectEnd")
+        self.assertIn("if (start < 0 || start >= text.Length() || text.ToAscii(start) != CHAR_BRACE_OPEN) return -1;",
+                      object_end_body)
         self.assertIn("if (code == CHAR_BRACE_OPEN) { depth++; } else if (code == CHAR_BRACE_CLOSE) { depth--; if "
-                      "(depth == 0) return text.Substring(start, i - start + 1); }", object_text)
-        has_member = enforce_body(source, "DC_JsonScan", "HasMember")
-        self.assertIn("int index = SkipSpace(objectText, at + quoted.Length()); if (index < objectText.Length() && "
-                      "objectText.ToAscii(index) == CHAR_COLON) return true; at = objectText.IndexOfFrom(at + 1, quoted);",
-                      has_member)
+                      "(depth == 0) return i; }", object_end_body)
+        has_member_body = enforce_body(source, "DC_JsonScan", "HasMemberIn")
+        self.assertIn("if (start < 0 || end <= start) return false;", has_member_body)
+        self.assertIn("int at = text.IndexOfFrom(start, quoted); while (at >= 0 && at < end) { int index = "
+                      "SkipSpace(text, at + quoted.Length()); if (index < end && text.ToAscii(index) == CHAR_COLON) "
+                      "return true; at = text.IndexOfFrom(at + 1, quoted);", has_member_body)
+        for name in ("ObjectEnd", "HasMemberIn"):
+            self.assertNotIn("Substring", enforce_body(source, "DC_JsonScan", name))
         with open(CARD, "r", encoding="ascii") as f:
             card18 = json.load(f)
         noted = json.loads(json.dumps(card18))
@@ -1578,6 +1592,9 @@ class FitTests(unittest.TestCase):
         self.assertTrue(slip_fields_set(json.dumps(ramp_card, indent=2)))       # a slip field in the object: refused
         self.assertTrue(fit.enforce_load_check(ramp_card))
         self.assertTrue(slip_fields_set(fit.card_text(card)))                   # the slip card has them
+        padded = json.dumps(dict({"padding": "x" * 9000}, **card), indent=2)     # the object past 8191 characters
+        self.assertGreater(padded.index('"launch_clutch"'), 8191)
+        self.assertTrue(slip_fields_set(padded))
 
         def enforce_accepts(launch):
             # DC_VehicleCard on a launch_clutch object: ReadLaunchClutch needs the slip keys in mode slip, CheckGearbox

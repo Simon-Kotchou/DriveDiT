@@ -40,10 +40,13 @@
 //     uncouple_time_s inside the band, it opens at once at or below engage_rpm, and an engine that stalls with the
 //     handbrake released is restarted by StartModeA;
 //   - mode "slip" (DD-14d, the default since the ramp chattered on 1.9.0.37, launch 20261106T194516Z-wb-ab6a): a PI
-//     holds the engine at full_rpm while the clutch slips, it couples fully once the engine rpm is within
-//     lock_tolerance_rpm of the driveline's (forward speed vel_l_z / the gear's m/s per 1000 rpm of
-//     m_sLaunchMpsPerKrpm, from first gear up) and stays coupled until the rpm, looked ahead below 2 x engage_rpm,
-//     reaches engage_rpm (the DC_LaunchClutch.c header, MODE SLIP). The same stall restart.
+//     holds the engine at full_rpm while the clutch slips; a brake or no throttle opens it before the lock-up; it
+//     couples fully once the engine rpm agrees with the driveline's (forward speed vel_l_z / the gear's m/s per 1000
+//     rpm of m_sLaunchMpsPerKrpm, from first gear up) on two calls under drive, and stays coupled until the rpm,
+//     looked ahead below 2 x engage_rpm, reaches engage_rpm (900 rpm under drive) or falls faster than a brake explains
+//     (the DC_LaunchClutch.c header, MODE SLIP). It gets this step's commanded throttle and brake and the applied gear
+//     (an upshift's synchronisation waits). The same stall restart. full_rpm per mode: ramp m_fLaunchFullRpm (1700,
+//     exactly DD-14c), slip m_fLaunchHoldRpm (1400).
 // The dips compose with it: the policy dip (m_fGearClutchDipS) and gear_scripted's commanded 0 open it, and it
 // re-ramps from 0 after them. cmd_clutch stays the clutch passed to SetClutch. Every probe that drives gets it:
 //   - DC_ProbeSequences sets it from its Launch clutch attributes (default ramp; params.* and the launch_clutch.*
@@ -104,9 +107,9 @@
 // aborted_area or engine_off and keeps its data; a failed teleport ends the probe (result error). OnProbeStop parks
 // the car (brake 1 + handbrake), except on world teardown (reason delete: it only closes its files). A launch clutch
 // outside its ranges, or one in mode ramp or slip whose full_rpm is not below m_fShiftDownRpm or whose band does not
-// fit the engine (DC_LaunchClutchConfig.CheckEngine: engage_rpm above the idle, full_rpm below half the max rpm), or one
-// in mode slip with an m/s per 1000 rpm <= 0 or an upshift of the policy that lands below 2 x engage_rpm, refuses the
-// start; so does an m_sLaunchMpsPerKrpm that is not a list of numbers.
+// fit the engine (DC_LaunchClutchConfig.CheckEngine: engage_rpm above the idle, full_rpm below half the max rpm), or
+// one in mode slip with an m/s per 1000 rpm <= 0 or an upshift of the policy that lands below 2 x engage_rpm, refuses
+// the start; so does an m_sLaunchMpsPerKrpm that is not a list of numbers.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -426,6 +429,10 @@ class DC_ProbeActuator
 	protected int m_iFutGear;
 	protected float m_fRpm;
 	protected bool m_bEngineOn;
+	//! EngineGetRPMFeedback ("RPM that is feeded back from rest of the powertrain", VehicleWheeledSimulation.c:83 of
+	//! 1.9.0.37, :64 of 1.8.0.13): recorded only (column rpm_feedback, DD-14d), to see on the next Play whether it is a
+	//! usable driveline rpm for the launch clutch's lock-up; nothing reads it
+	protected float m_fRpmFeedback;
 	protected float m_fSpeedKmh;
 	protected vector m_vVelLocal;
 	protected vector m_vAngVelLocal;
@@ -724,7 +731,7 @@ class DC_ProbeActuator
 		lines.Insert("launch_clutch.mps_per_krpm=" + FloatsText(m_aLaunchMpsPerKrpm));
 		lines.Insert("launch_clutch.source=" + m_sLaunchClutchSource);
 		lines.Insert("launch_clutch.active=" + DC_LaunchGuard.BoolText(m_bShiftPolicy && m_LaunchClutch.IsActive()));
-		lines.Insert("launch_clutch.rule=DC_LaunchClutch, manual gearbox only (an automatic one keeps the commanded clutch): mode off = the commanded clutch, the 1.8 sequence; mode ramp = c 0 in neutral, with the handbrake commanded, during a dip (policy dip or a commanded 0) and with the engine off, 0 at once at or below engage_rpm (a guard drop below stall_guard_rpm), else toward clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1) by at most dt / couple_time_s up and dt / uncouple_time_s down; mode slip (DD-14d) = the same 0 cases, slipping c moves by slip_kp x (change of the mean of the last two rpm readbacks) + slip_ki x (mean - full_rpm) x dt within the same rate limits, 0 at once at or below engage_rpm, c = 1 once the rpm is within lock_tolerance_rpm of the driveline rpm (vel_l_z / mps_per_krpm of the gear x 1000) or c reaches 1, then 1 until the rpm (below 2 x engage_rpm looked ahead 1.5 calls by the mean's change) reaches engage_rpm; cmd_clutch = min(commanded, c); rpm, engine_on and vel_l_z of the previous step's readback; with restart_on_stall an engine off with the handbrake released gets StartModeA at most every restart_cooldown_s");
+		lines.Insert("launch_clutch.rule=DC_LaunchClutch, manual gearbox only (an automatic one keeps the commanded clutch): mode off = the commanded clutch, the 1.8 sequence; mode ramp = c 0 in neutral, with the handbrake commanded, during a dip (policy dip or a commanded 0) and with the engine off, 0 at once at or below engage_rpm (a guard drop below stall_guard_rpm), else toward clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1) by at most dt / couple_time_s up and dt / uncouple_time_s down; mode slip (DD-14d) = the same 0 cases, slipping c moves by dt x (slip_kp x rate + slip_ki x (mean - full_rpm)) on the mean of the last two rpm readbacks (gains per 1/30 s, divided by the held call length) within the same rate limits, 0 at once at or below engage_rpm, without drive (cmd_brake > 0 or cmd_throttle 0) and at a predicted 900 rpm, c = 1 once the rpm is within lock_tolerance_rpm of the driveline rpm (vel_l_z / mps_per_krpm of the gear x 1000) on 2 calls or c reaches 1, then 1 until the rpm reaches engage_rpm (900 under drive), or below 2 x engage_rpm is predicted to (1.5 x the call's duration ahead), or without drive falls faster than 12000 rpm/s; an upshift waits 0.3 s; cmd_clutch = min(commanded, c); rpm, engine_on and vel_l_z of the previous step's readback; with restart_on_stall an engine off with the handbrake released gets StartModeA at most every restart_cooldown_s");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -937,8 +944,9 @@ class DC_ProbeActuator
 		// a commanded 0 (the policy dip, gear_scripted's m_fGearClutchDipS) is its dip. rpm and engine_on are those of
 		// the last ReadPost (the rpm / engine_on columns), as for the shift policy; before the first ReadPost the engine
 		// counts as on (no restart from a default value). A requested restart is the Mode A start, before the setters.
-		// Mode slip (DD-14d) also gets the driveline rpm of the applied forward gear: the last ReadPost's forward speed
-		// (vel_l_z) / its m/s per 1000 rpm; -1 in reverse, neutral or a gear without a value
+		// Mode slip (DD-14d) also gets the driveline rpm of the applied forward gear (the last ReadPost's forward speed
+		// vel_l_z / its m/s per 1000 rpm; -1 in reverse, neutral or a gear without a value), this step's commanded
+		// throttle and brake (after the speed hold) and the applied gear index
 		if (m_bShiftPolicy)
 		{
 			bool inGear = m_iAppliedGear >= 0 && m_iAppliedGear != m_iGearNeutral;
@@ -949,7 +957,7 @@ class DC_ProbeActuator
 			if (forwardSlot >= 0 && forwardSlot < m_aLaunchMpsPerKrpm.Count() && m_aLaunchMpsPerKrpm[forwardSlot] > 0)
 				drivelineRpm = m_vVelLocal[2] / m_aLaunchMpsPerKrpm[forwardSlot] * 1000;
 
-			m_fAppliedClutch = m_LaunchClutch.Step(timeSlice, inGear, m_bCmdHandbrake, m_fRpm, engineOn, m_fAppliedClutch, dip, drivelineRpm);
+			m_fAppliedClutch = m_LaunchClutch.Step(timeSlice, inGear, m_bCmdHandbrake, m_fRpm, engineOn, m_fAppliedClutch, dip, drivelineRpm, m_fCmdThrottle, m_fCmdBrake, m_iAppliedGear);
 			if (m_LaunchClutch.ConsumeRestart())
 				StartModeA();
 		}
@@ -1165,6 +1173,7 @@ class DC_ProbeActuator
 		}
 
 		m_fRpm = m_Simulation.EngineGetRPM();
+		m_fRpmFeedback = m_Simulation.EngineGetRPMFeedback();
 		m_bEngineOn = m_Simulation.EngineIsOn();
 		m_bStateRead = true;
 		m_fSpeedKmh = m_Simulation.GetSpeedKmh();
@@ -1323,13 +1332,14 @@ class DC_ProbeActuator
 		columns.Insert("heading_deg");
 		columns.Insert("ground_contact");
 		columns.Insert("wheels_contact");
+		columns.Insert("rpm_feedback");
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! The values of the last step, in AddStepColumns order. Decimals: inputs 4, speeds 3, angular velocity 6,
-	//! acceleration 4, positions 3, unit axes 6, heading 5. cmd_clutch and cmd_gear are the applied values: the
-	//! shift policy's gear (-1 only without a gear command) and the clutch passed to SetClutch (0 during the policy
-	//! dip, and on a manual gearbox the launch clutch's min(commanded, c), DD-14c)
+	//! acceleration 4, positions 3, unit axes 6, heading 5, rpm_feedback 1 (DD-14d, recorded only). cmd_clutch and
+	//! cmd_gear are the applied values: the shift policy's gear (-1 only without a gear command) and the clutch passed
+	//! to SetClutch (0 during the policy dip, and on a manual gearbox the launch clutch's min(commanded, c), DD-14c)
 	void AddStepValues(notnull DC_ProbeRow row)
 	{
 		row.AddBool(m_bForced);
@@ -1365,6 +1375,7 @@ class DC_ProbeActuator
 		row.AddFloat(m_fHeadingDeg, 5);
 		row.AddBool(m_bGroundContact);
 		row.AddInt(m_iWheelsContact);
+		row.AddFloat(m_fRpmFeedback, 1);
 	}
 }
 
@@ -1585,16 +1596,20 @@ class DC_ProbeSequences : DC_ProbeComponent
 
 	// === LAUNCH CLUTCH (DD-14c, DC_LaunchClutch.c; DC_ProbeActuator.SetLaunchClutch; e01 and e02a, manual gearbox) ===
 	// The defaults are DC_LaunchClutchConfig.Slip()'s (DD-14d; the image probes drive with them). A world that does not
-	// set these attributes, such as the deployed DC_Probes_Arland, gets mode slip. Run header: params.m_*Launch* and the
-	// launch_clutch.* block
+	// set these attributes, such as the deployed DC_Probes_Arland, gets mode slip. full_rpm comes per mode: ramp takes
+	// m_fLaunchFullRpm (1700, so mode ramp is exactly DD-14c's ramp), slip m_fLaunchHoldRpm (1400). Run header:
+	// params.m_*Launch* and the launch_clutch.* block
 	[Attribute("slip", UIWidgets.EditBox, "Launch clutch mode: off = the clutch as commanded (the 1.8 sequence; the 1.9 powertrain stalls at drive-off, launch 20261106T052424Z-wb-addc); ramp = DC_LaunchClutch's centrifugal clutch by rpm (DD-14c; it chatters on 1.9.0.37, launch 20261106T194516Z-wb-ab6a); slip = DC_LaunchClutch's rpm-hold slip clutch with lock-up at the driveline rpm (DD-14d)", category: "Launch clutch")]
 	protected string m_sLaunchClutchMode;
 
 	[Attribute("1100", UIWidgets.Slider, "Launch clutch: the clutch bites above this rpm and opens at once at or below it [S105 idle 800]", "100 5000 50", category: "Launch clutch")]
 	protected float m_fLaunchEngageRpm;
 
-	[Attribute("1400", UIWidgets.Slider, "Launch clutch: ramp = fully coupled at or above this rpm; slip = the rpm held while the clutch slips. Must stay below the shift policy's downshift rpm (m_fShiftDownRpm)", "200 8000 50", category: "Launch clutch")]
+	[Attribute("1700", UIWidgets.Slider, "Launch clutch (ramp): fully coupled at or above this rpm (DD-14c); must stay below the shift policy's downshift rpm (m_fShiftDownRpm)", "200 8000 50", category: "Launch clutch")]
 	protected float m_fLaunchFullRpm;
+
+	[Attribute("1400", UIWidgets.Slider, "Launch clutch (slip): the rpm held while the clutch slips, the slip config's full_rpm (DD-14d); must stay below the shift policy's downshift rpm (m_fShiftDownRpm)", "200 8000 50", category: "Launch clutch")]
+	protected float m_fLaunchHoldRpm;
 
 	[Attribute("0.85", UIWidgets.Slider, "Launch clutch: fastest 0 -> 1 [s] (S105 controller ClutchCoupleTime 0.85)", "0.05 10 0.05", category: "Launch clutch")]
 	protected float m_fLaunchCoupleS;
@@ -1772,6 +1787,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 		outKeyValues.Insert("m_sLaunchClutchMode=" + m_sLaunchClutchMode);
 		outKeyValues.Insert("m_fLaunchEngageRpm=" + m_fLaunchEngageRpm.ToString(-1, 1));
 		outKeyValues.Insert("m_fLaunchFullRpm=" + m_fLaunchFullRpm.ToString(-1, 1));
+		outKeyValues.Insert("m_fLaunchHoldRpm=" + m_fLaunchHoldRpm.ToString(-1, 1));
 		outKeyValues.Insert("m_fLaunchCoupleS=" + m_fLaunchCoupleS.ToString(-1, 3));
 		outKeyValues.Insert("m_fLaunchUncoupleS=" + m_fLaunchUncoupleS.ToString(-1, 3));
 		outKeyValues.Insert("m_fLaunchStallGuardRpm=" + m_fLaunchStallGuardRpm.ToString(-1, 1));
@@ -2184,13 +2200,17 @@ class DC_ProbeSequences : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The launch clutch of the Launch clutch attributes (DD-14c); DC_ProbeActuator.SetLaunchClutch checks it
+	//! The launch clutch of the Launch clutch attributes (DD-14c; full_rpm per mode, DD-14d: m_fLaunchHoldRpm for slip);
+	//! DC_ProbeActuator.SetLaunchClutch checks it
 	protected DC_LaunchClutchConfig BuildLaunchClutchConfig()
 	{
 		DC_LaunchClutchConfig config = new DC_LaunchClutchConfig();
 		config.m_sMode = m_sLaunchClutchMode.Trim();
 		config.m_fEngageRpm = m_fLaunchEngageRpm;
 		config.m_fFullRpm = m_fLaunchFullRpm;
+		if (config.IsSlip())
+			config.m_fFullRpm = m_fLaunchHoldRpm;
+
 		config.m_fCoupleTimeS = m_fLaunchCoupleS;
 		config.m_fUncoupleTimeS = m_fLaunchUncoupleS;
 		config.m_fStallGuardRpm = m_fLaunchStallGuardRpm;

@@ -54,10 +54,12 @@
 //                  couple_time_s / uncouple_time_s over sliceS inside the band, and it opens at once at or below
 //                  engage_rpm, using the rpm and engine_on read at the start of the callback;
 //                - slip (DD-14d, the 1.9.0.37 card): the same bounds; a PI holds the engine at full_rpm while the
-//                  clutch slips, it couples fully once the rpm is within lock_tolerance_rpm of the driveline rpm
-//                  (the speed read at the start of the callback / the gear slot's scripted_mps_per_krpm) and stays
-//                  coupled until the rpm, looked ahead below 2 x engage_rpm, reaches engage_rpm (the
-//                  DC_LaunchClutch.c header, MODE SLIP). The card adds slip_kp, slip_ki and lock_tolerance_rpm;
+//                  clutch slips (a brake or no throttle opens it), it couples fully once the rpm agrees with the
+//                  driveline rpm (the speed read at the start of the callback / the gear slot's
+//                  scripted_mps_per_krpm) on two callbacks under drive and stays coupled until the rpm, looked ahead
+//                  below 2 x engage_rpm, reaches engage_rpm (the DC_LaunchClutch.c header, MODE SLIP). It gets the
+//                  callback's throttle, brake and scripted gear; its gains follow the callback's covered steps. The
+//                  card adds slip_kp, slip_ki and lock_tolerance_rpm, which no other mode may carry;
 //                - stall restart: an engine that stalls gets the actuator's Start (DC_ActuatorModeA: ForceStartEngine)
 //                  at most every restart_cooldown_s;
 //                - llc_clutch records the value passed, as before;
@@ -1588,13 +1590,14 @@ class DC_LLCv1
 			// upper bound and its dip; rpm and engine_on as read now, the state after the previous callback; over
 			// sliceS. Always in a forward gear, never a handbrake (llc_v1 passes none). A stall restart is the Mode A
 			// start of the actuator (DC_ActuatorModeA.Start: ForceStartEngine), before this callback's setters. Mode
-			// slip (DD-14d) also gets the driveline rpm of the gear slot: the speed read now / the slot's
-			// gearbox.scripted_mps_per_krpm (-1 without one; CheckGearbox requires them for ramp and slip)
+			// slip (DD-14d) also gets the driveline rpm of the gear slot (the speed read now / the slot's
+			// gearbox.scripted_mps_per_krpm; -1 without one, CheckGearbox requires them for ramp and slip), this
+			// callback's throttle and brake and the scripted gear
 			float drivelineRpm = -1;
 			if (m_iGearSlot < m_Card.m_aScriptedMpsPerKrpm.Count() && m_Card.m_aScriptedMpsPerKrpm[m_iGearSlot] > 0)
 				drivelineRpm = speed / m_Card.m_aScriptedMpsPerKrpm[m_iGearSlot] * 1000;
 
-			clutch = m_LaunchClutch.Step(sliceS, true, false, m_Simulation.EngineGetRPM(), m_Simulation.EngineIsOn(), clutch, clutch <= 0, drivelineRpm);
+			clutch = m_LaunchClutch.Step(sliceS, true, false, m_Simulation.EngineGetRPM(), m_Simulation.EngineIsOn(), clutch, clutch <= 0, drivelineRpm, throttle, brake, gear);
 			if (m_LaunchClutch.ConsumeRestart())
 				m_Actuator.Start();
 

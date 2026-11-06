@@ -181,6 +181,24 @@ def ramp(**config):
     return LaunchClutch(mode="ramp", **config)
 
 
+def check_ranges(config):
+    """Mirror of DC_LaunchClutchConfig.Check (the ranges, either mode)."""
+    c = config
+    return (c["mode"] in ("off", "ramp") and 0 < c["engage_rpm"] < c["full_rpm"] <= 10000.0
+            and 0 <= c["stall_guard_rpm"] < c["engage_rpm"] and 0 < c["couple_time_s"] <= 10.0
+            and 0 < c["uncouple_time_s"] <= 10.0 and 0 <= c["restart_cooldown_s"] <= 10.0)
+
+
+def probe_set_launch_clutch(config, manual, downshift_rpm, rpm_idle, rpm_max):
+    """Mirror of DC_ProbeActuator.SetLaunchClutch: the ranges, then on a manual gearbox with mode ramp full_rpm below
+    the policy's downshift rpm, then CheckEngine; the one validation of the configuration the actuator drives with."""
+    if not check_ranges(config):
+        return False
+    if config["mode"] == "ramp" and manual and config["full_rpm"] >= downshift_rpm:
+        return False
+    return not manual or check_engine(config, rpm_idle, rpm_max)
+
+
 def check_engine(config, rpm_idle, rpm_max):
     """Mirror of DC_LaunchClutchConfig.CheckEngine: mode ramp needs engage_rpm above the idle and full_rpm below
     FULL_RPM_MAX_FRACTION (0.5) of a known max rpm."""
@@ -675,6 +693,57 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertIn("if (card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED && !card.m_LaunchClutch.CheckEngine("
                       "m_Simulation.EngineGetRPMIdle(), m_Simulation.EngineGetRPMMax(), failure))", init)
         self.assertLess(init.index("CheckEgoGearbox(card, actuator, failure)"), init.index("CheckEngine("))
+
+    def test_probe_validates_only_the_configuration_it_drives_with(self):
+        # Codex round 2: Init validated the default ramp before OnProbeStart applied the attributes, so an engine the
+        # default does not fit (idle 600, max 3000 rpm: full_rpm 1700 >= 0.5 x 3000) refused the probe even in mode
+        # off. Discovery (InitComponents) is now separate; the selected configuration is validated once, after the
+        # shift policy it is checked against
+        init_components = enforce_body(self.probe, "DC_ProbeActuator", "InitComponents")
+        for absent in ("SetLaunchClutch", "CheckEngine", "Configure", "Ramp()"):
+            self.assertNotIn(absent, init_components)
+        self.assertIn("DetectGearbox(); return true;", init_components)
+        init = enforce_body(self.probe, "DC_ProbeActuator", "Init")
+        self.assertEqual(init, "notnull IEntity vehicle) { if (!InitComponents(vehicle)) return false; "
+                               "DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Ramp(); return "
+                               'SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");')
+        start = enforce_body(self.probe, "DC_ProbeSequences", "OnProbeStart")
+        self.assertIn("if (m_Actuator.InitComponents(ego))", start)
+        self.assertNotIn("m_Actuator.Init(", start)
+        self.assertEqual(start.count("SetLaunchClutch("), 1)
+        self.assertLess(start.index("m_Actuator.SetShiftPolicy("), start.index("SetLaunchClutch("))
+        # the probes that drive with the defaults still get them validated (Init)
+        for name in ("DC_ProbeImages.c", "DC_ProbeMarkers.c"):
+            self.assertIn("m_Actuator.Init(m_Ego)", read(os.path.join(SCRIPTS, name)), name)
+        # on that engine: mode off and a fitting custom ramp start, the default ramp is refused (and only it)
+        defaults = dict(LaunchClutch.DEFAULTS, mode="ramp")
+        off = dict(LaunchClutch.DEFAULTS, mode="off")
+        custom = dict(defaults, engage_rpm=900.0, full_rpm=1400.0)
+        self.assertTrue(probe_set_launch_clutch(off, True, 1800.0, 600.0, 3000.0))
+        self.assertTrue(probe_set_launch_clutch(custom, True, 1800.0, 600.0, 3000.0))
+        self.assertFalse(probe_set_launch_clutch(defaults, True, 1800.0, 600.0, 3000.0))
+        self.assertTrue(probe_set_launch_clutch(defaults, True, 1800.0, 800.0, 8000.0))    # the S105
+        self.assertTrue(probe_set_launch_clutch(dict(off, full_rpm=5000.0), True, 1800.0, 600.0, 3000.0))
+        self.assertTrue(probe_set_launch_clutch(defaults, False, 1800.0, 600.0, 3000.0))   # automatic: not ramped
+        # the mirror follows SetLaunchClutch
+        set_launch = enforce_body(self.probe, "DC_ProbeActuator", "SetLaunchClutch")
+        order = ["if (!config.Check(failure))", "if (config.IsRamp() && m_bShiftPolicy && config.m_fFullRpm >= "
+                 "m_fDownshiftRpm)", "if (m_bShiftPolicy && !config.CheckEngine(", "m_LaunchClutch.Configure(config);"]
+        self.assertEqual([set_launch.index(x) for x in order], sorted(set_launch.index(x) for x in order))
+
+    def test_card_downshifts_lie_above_the_band(self):
+        # the 1.9.0.37 card's downshift speeds, by its scripted_mps_per_krpm, in the gear each shifts down from: about
+        # 1804 and 1799 rpm, at least full_rpm 1700 + DOWNSHIFT_RPM_MARGIN 50, so llc_v1 never drives a gear above the
+        # first with the clutch slipping; Codex round 2's [2, 4] m/s would be about 721 and 959 rpm (refused)
+        with open(CARD, "r", encoding="ascii") as f:
+            gearbox = json.load(f)["gearbox"]
+        per_krpm, down = gearbox["scripted_mps_per_krpm"], gearbox["downshift_mps"]
+        margin = enforce_constants(self.helper, "DC_LaunchClutchConfig")["DOWNSHIFT_RPM_MARGIN"]
+        rpms = [speed / per_krpm[slot + 1] * 1000.0 for slot, speed in enumerate(down)]
+        self.assertTrue(all(r >= gearbox["launch_clutch"]["full_rpm"] + margin for r in rpms), rpms)
+        low = [speed / per_krpm[slot + 1] * 1000.0 for slot, speed in enumerate((2.0, 4.0))]
+        self.assertEqual([round(r) for r in low], [721, 959])
+        self.assertTrue(all(r < gearbox["launch_clutch"]["full_rpm"] + margin for r in low))
 
     def test_run_header_block_is_the_cards_fields(self):
         # AppendHeaderLines writes launch_clutch.<card field> (fit_steer_kappa.launch_clutch_of reads them back)

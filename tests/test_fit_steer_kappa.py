@@ -959,6 +959,16 @@ class FitTests(unittest.TestCase):
         self.assertEqual(differing, ["gearbox", "note", "pin_id", "provisional"])
         gearbox, gearbox18 = dict(card["gearbox"]), dict(card18["gearbox"])
         launch = gearbox.pop("launch_clutch")
+        # the scripted gears' m/s per 1000 rpm a ramp is checked against: E-01 run 3's measured values (carried over)
+        per_krpm = gearbox.pop("scripted_mps_per_krpm")
+        self.assertEqual(per_krpm, [RUN3_SPEED_PER_KRPM[g] for g in RUN3_GEARBOX["scripted_gears"]])
+        self.assertEqual(per_krpm, list(fit.PLACEHOLDER_MPS_PER_KRPM))
+        if RUN3_CARD:
+            with open(RUN3_CARD, "r", encoding="ascii") as f:
+                run3 = json.load(f)["gearbox"]["detail"]["speed_per_krpm"]
+            self.assertEqual(per_krpm, [run3[str(g)] for g in RUN3_GEARBOX["scripted_gears"]])
+        for slot, speed in enumerate(card["gearbox"]["downshift_mps"]):           # about 1804 and 1799 rpm
+            self.assertGreaterEqual(speed / per_krpm[slot + 1] * 1000.0, launch["full_rpm"] + 50.0)
         self.assertEqual(sorted(k for k in gearbox if gearbox[k] != gearbox18.get(k)), ["basis"])
         self.assertTrue(gearbox["basis"].startswith(gearbox18["basis"]))
         self.assertEqual(launch, fit.PLACEHOLDER_LAUNCH_CLUTCH)
@@ -1237,7 +1247,9 @@ class FitTests(unittest.TestCase):
                  "launch_clutch.stall_guard_rpm": "600.0", "launch_clutch.restart_on_stall": "1",
                  "launch_clutch.restart_cooldown_s": "1.000", "launch_clutch.source": "DC_ProbeSequences attributes",
                  "launch_clutch.active": "1"}
-        speeds = ["--upshift-mps", "4.5,8.5", "--downshift-mps", "3.5,7.0"]
+        # shift speeds whose downshifts lie above full_rpm 1650 + 50 by the play's speed per 1000 rpm (about 1850 rpm
+        # in gear 3, 1830 rpm in gear 4)
+        speeds = ["--upshift-mps", "8.5,14.0", "--downshift-mps", "5.0,7.5"]
         e01 = self.manual_e01("play_37", dict(KIT_GEARBOX_LINES, **block))
         card, text = self.fit_card(["--e01", e01, "--e02a", self.e02a] + speeds)
         self.assertEqual(card["gearbox"]["launch_clutch"],
@@ -1245,11 +1257,23 @@ class FitTests(unittest.TestCase):
                           "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
                           "restart_cooldown_s": 1.0})
         self.assertEqual(sorted(card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        # the scripted gears' measured m/s per 1000 rpm go with it (gearbox.detail.speed_per_krpm of the play)
+        self.assertEqual(card["gearbox"]["scripted_mps_per_krpm"],
+                         [card["gearbox"]["detail"]["speed_per_krpm"][str(g)] for g in card["gearbox"]["scripted_gears"]])
+        for got, gear in zip(card["gearbox"]["scripted_mps_per_krpm"], card["gearbox"]["scripted_gears"]):
+            self.assertAlmostEqual(got, MANUAL_SPEED_PER_KRPM[gear], delta=0.01)
         self.assertEqual(fit.enforce_load_check(card), [])
         self.assertIn("launch clutch (DD-14c): mode ramp, engage_rpm 1200.0", text)
+        # downshift speeds inside the band are refused for a ramp card (3.5 m/s is about 1300 rpm in gear 3)
+        code, text = run_fit(["--e01", e01, "--e02a", self.e02a, "--upshift-mps", "4.5,8.5", "--downshift-mps",
+                              "3.5,7.0"])
+        self.assertEqual(code, 2, text)
+        self.assertIn("rpm in scripted gear 3, below full_rpm 1650.0 + 50.0", text)
         before = self.manual_e01("play_38", KIT_GEARBOX_LINES)
-        card, text = self.fit_card(["--e01", before, "--e02a", self.e02a] + speeds)
+        card, text = self.fit_card(["--e01", before, "--e02a", self.e02a, "--upshift-mps", "4.5,8.5",
+                                    "--downshift-mps", "3.5,7.0"])                # mode off: any shift speeds
         self.assertNotIn("launch_clutch", card["gearbox"])
+        self.assertNotIn("scripted_mps_per_krpm", card["gearbox"])
         self.assertIn("launch clutch (DD-14c): none (mode off, the 1.8 sequence)", text)
         for name, change, reason in (("play_39", {"launch_clutch.full_rpm": "1100.0"}, "engage_rpm < full_rpm"),
                                      ("play_40", {"launch_clutch.restart_on_stall": "yes"}, "neither 0 nor 1"),
@@ -1268,7 +1292,8 @@ class FitTests(unittest.TestCase):
     def test_launch_clutch_card_rules(self):
         # DC_VehicleCard's gearbox.launch_clutch rules (DD-14c) as gearbox_violations mirrors them: optional (absent =
         # mode off), every key required and no other, DC_LaunchClutchConfig.Check's ranges, ramp only with a scripted
-        # gearbox and there full_rpm below LAUNCH_SCRIPTED_FULL_RPM_LIMIT, never null (on the provisional 1.9.0.37 card)
+        # gearbox and there every downshift at least full_rpm + 50 rpm in its gear (scripted_mps_per_krpm), the band
+        # against the vehicle's recorded engine (CheckEngine), never null (on the provisional 1.9.0.37 card)
         with open(CARD19, "r", encoding="ascii") as f:
             card = json.load(f)
         self.assertEqual(fit.enforce_load_check(card), [])
@@ -1280,12 +1305,15 @@ class FitTests(unittest.TestCase):
                        {"stall_guard_rpm": 1100.0}, {"stall_guard_rpm": -1.0}, {"couple_time_s": 0.0},
                        {"uncouple_time_s": 10.5}, {"restart_cooldown_s": -0.1}, {"restart_cooldown_s": 10.5},
                        {"restart_on_stall": 1}, {"engage_rpm": True}, {"engage_rpm": "1100"},
-                       # Codex round 1: a band above the downshift rpm, and one beyond the S105's 8000 rpm max
-                       {"full_rpm": 1800.0}, {"full_rpm": 3000.0}, {"engage_rpm": 9000.0, "full_rpm": 10000.0}):
+                       # Codex round 1: a band above the downshift rpm, and one beyond the S105's 8000 rpm max;
+                       # round 2: full_rpm + 50 above the lower downshift (1799 rpm), engage at or below the 800 idle
+                       {"full_rpm": 1800.0}, {"full_rpm": 3000.0}, {"engage_rpm": 9000.0, "full_rpm": 10000.0},
+                       {"full_rpm": 1750.0}, {"engage_rpm": 700.0}, {"engage_rpm": 800.0, "stall_guard_rpm": 600.0}):
             bad = json.loads(json.dumps(card))
             bad["gearbox"]["launch_clutch"] = dict(launch, **change)
             self.assertTrue(fit.enforce_load_check(bad), change)
-        for edge in ({"stall_guard_rpm": 0.0}, {"restart_cooldown_s": 0.0}, {"full_rpm": 1799.0},
+        for edge in ({"stall_guard_rpm": 0.0}, {"restart_cooldown_s": 0.0}, {"full_rpm": 1748.0},
+                     {"engage_rpm": 801.0},
                      {"couple_time_s": 10.0}, {"mode": "off"}, {"restart_on_stall": False},
                      {"mode": "off", "full_rpm": 10000.0}):               # the band of mode off is never used
             ok = json.loads(json.dumps(card))
@@ -1294,6 +1322,30 @@ class FitTests(unittest.TestCase):
         missing = json.loads(json.dumps(card))
         del missing["gearbox"]["launch_clutch"]["restart_cooldown_s"]
         self.assertTrue(fit.enforce_load_check(missing))
+        # Codex round 2: downshift speeds that put a gear's downshift inside or below the band (about 721 and 959 rpm
+        # by the carried-over m/s per 1000 rpm: the car would hold second gear at about 1443 rpm, slipping)
+        low = json.loads(json.dumps(card))
+        low["gearbox"]["downshift_mps"] = [2.0, 4.0]
+        problems = fit.enforce_load_check(low)
+        self.assertTrue(any("721 rpm in scripted gear 3" in p for p in problems), problems)
+        low["gearbox"]["launch_clutch"]["mode"] = "off"                  # mode off never slips: the speeds stand
+        self.assertEqual(fit.enforce_load_check(low), [])
+        for per_krpm in (None, [1.54871, 2.772066], [1.54871, 0.0, 4.169103], [1.5, True, 4.1], "1.5,2.7,4.1"):
+            bad = json.loads(json.dumps(card))
+            if per_krpm is None:
+                del bad["gearbox"]["scripted_mps_per_krpm"]
+            else:
+                bad["gearbox"]["scripted_mps_per_krpm"] = per_krpm
+            self.assertIn("scripted_mps_per_krpm", " ".join(fit.enforce_load_check(bad)), per_krpm)
+        no_ramp = json.loads(json.dumps(card))                              # without a ramp the array is not needed
+        del no_ramp["gearbox"]["scripted_mps_per_krpm"]
+        no_ramp["gearbox"]["launch_clutch"]["mode"] = "off"
+        self.assertEqual(fit.enforce_load_check(no_ramp), [])
+        other = json.loads(json.dumps(card))                                # no recorded engine: llc_v1 Init checks it
+        other["vehicle"] = "UAZ469"
+        other["gearbox"]["launch_clutch"]["engage_rpm"] = 700.0
+        self.assertEqual(fit.enforce_load_check(other), [])
+        self.assertEqual(fit.VEHICLE_ENGINE_RPM["S105"], {"idle": 800.0, "max": 8000.0})   # run headers 1.8 and 1.9
         extra = json.loads(json.dumps(card))
         extra["gearbox"]["launch_clutch"]["couple_time"] = 0.85            # a misspelt key the engine would ignore
         self.assertTrue(fit.enforce_load_check(extra))
@@ -1316,12 +1368,20 @@ class FitTests(unittest.TestCase):
         self.assertIn("if (m_LaunchClutch.IsRamp()) { failure = \"gearbox.launch_clutch mode ramp applies to a "
                       "scripted gearbox only", check)
         self.assertLess(check.index("m_LaunchClutch.IsRamp()"), check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"))
-        self.assertIn("if (m_LaunchClutch.IsRamp() && m_LaunchClutch.m_fFullRpm >= "
-                      "DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT)", check)
-        self.assertLess(check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"), check.index("SCRIPTED_FULL_RPM_LIMIT"))
+        self.assertIn("if (m_LaunchClutch.IsRamp() && !CheckLaunchDownshifts(count, failure)) return false;", check)
+        self.assertLess(check.index("downshift_mps[i] < upshift_mps[i]"), check.index("CheckLaunchDownshifts("))
+        downshifts = enforce_body(source, "DC_VehicleCard", "CheckLaunchDownshifts")
+        for statement in ("if (m_aScriptedMpsPerKrpm.Count() != count) {",
+                          "foreach (float mpsPerKrpm : m_aScriptedMpsPerKrpm) { if (mpsPerKrpm <= 0) {",
+                          "float minimum = m_LaunchClutch.m_fFullRpm + DC_LaunchClutchConfig.DOWNSHIFT_RPM_MARGIN; "
+                          "for (int slot = 0; slot < count - 1; slot++) { float downshiftRpm = m_aDownshiftMps[slot] / "
+                          "m_aScriptedMpsPerKrpm[slot + 1] * 1000; if (downshiftRpm < minimum) {"):
+            self.assertIn(statement, downshifts)
+        self.assertNotIn("SCRIPTED_FULL_RPM_LIMIT", source)               # the round-1 static cap is replaced
         with open(os.path.join(REPO, "src", "enfusion", "datacapture", "DC_LaunchClutch.c"), "r", encoding="ascii") as f:
             helper = f.read()
-        self.assertIn("static const float SCRIPTED_FULL_RPM_LIMIT = %g;" % fit.LAUNCH_SCRIPTED_FULL_RPM_LIMIT, helper)
+        self.assertIn("static const float DOWNSHIFT_RPM_MARGIN = %g;" % fit.LAUNCH_DOWNSHIFT_RPM_MARGIN, helper)
+        self.assertIn("static const float FULL_RPM_MAX_FRACTION = %g;" % fit.LAUNCH_FULL_RPM_MAX_FRACTION, helper)
         # and at Init the band against the ego's engine (idle and max rpm), scripted gearbox only
         init = enforce_body(source, "DC_LLCv1", "Init")
         self.assertIn("if (card.m_sGearbox == DC_VehicleCard.GEARBOX_SCRIPTED && !card.m_LaunchClutch.CheckEngine("
@@ -1471,6 +1531,8 @@ class FitTests(unittest.TestCase):
             self.assertEqual(scan_numbers(text, "upshift_mps"), card["gearbox"]["upshift_mps"])
             self.assertEqual(scan_numbers(text, "scripted_gears"), card["gearbox"]["scripted_gears"])
             self.assertEqual(scan_numbers(text, "gear_indices_forward"), card["gear_indices_forward"])
+            if "scripted_mps_per_krpm" in card["gearbox"]:
+                self.assertEqual(scan_numbers(text, "scripted_mps_per_krpm"), card["gearbox"]["scripted_mps_per_krpm"])
             self.assertEqual(card["schema"], "drivedit.vehicle_card/1")
             self.assertIn(card["signs"]["steer_sign"], (-1, 1))
             self.assertIn(card["signs"]["yaw_axis_sign"], (-1, 1))
@@ -1490,10 +1552,13 @@ class FitTests(unittest.TestCase):
         body = source.split("protected bool ReadLlcNumbers", 1)[1].split("\n\t}\n", 1)[0]
         self.assertEqual(sorted(re.findall(r'ReadContextNumber\(context, "(\w+)"', body)), sorted(LLC_KEYS))
         arrays = re.findall(r'DC_JsonScan\.ReadNumbers\(text, "(\w+)"', source)
-        self.assertEqual(sorted(arrays), sorted(fit.ENGINE_ARRAY_KEYS))
+        self.assertEqual(sorted(arrays), sorted(fit.ENGINE_ARRAY_KEYS + fit.ENGINE_OPTIONAL_ARRAY_KEYS))
         scanned = re.findall(r'DC_JsonScan\.(?:ReadStrings|IsNull|ReadIndexOrNull)\(text, "(\w+)"', source)
         self.assertEqual(sorted(scanned), sorted((set(fit.ENGINE_SCANNED_KEYS) - set(fit.ENGINE_ARRAY_KEYS))
-                                                 | set(fit.ENGINE_OPTIONAL_SCANNED_KEYS)))
+                                                 | (set(fit.ENGINE_OPTIONAL_SCANNED_KEYS)
+                                                    - set(fit.ENGINE_OPTIONAL_ARRAY_KEYS))))
+        for key in fit.ENGINE_OPTIONAL_ARRAY_KEYS:                       # read only when the card has it
+            self.assertIn('text.IndexOf("\\"%s\\"") >= 0 && !DC_JsonScan.ReadNumbers(text, "%s"' % (key, key), source)
         with open(CARD, "r", encoding="ascii") as f:
             card = json.load(f)
         reader = source.split("class DC_VehicleCard", 1)[1].split("class DC_LLCv1", 1)[0]

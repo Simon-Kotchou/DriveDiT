@@ -7,6 +7,7 @@ Run it with the isolated interpreter (stdlib only; it reuses the probe kit's rea
         [--vehicle S105] [--build-key KEY] [[--scripted-gears 2,3,4] --upshift-mps 5,10 --downshift-mps 4,8]
         [--out FILE | --check FILE]
     python3 -I -B tools/ident/fit_steer_kappa.py --placeholder --pin-id 1.8.0.13 [--vehicle S105] [--out | --check]
+    python3 -I -B tools/ident/fit_steer_kappa.py --placeholder --pin-id 1.9.0.37 --launch-clutch ramp [--out | --check]
 
 <play_dir> is one $profile:DC_Probes/<probe>/<launch_id>/play_NN directory of the probe kit (run_header.txt,
 <probe>_steps.csv, e01_phases.csv or e02a_cells.csv, run_footer.txt; PROBE_DESIGN.md 5.3). Without --out the card is
@@ -89,11 +90,14 @@ says usable is never one the engine refuses. --placeholder writes the PLACEHOLDE
 identification session, build_key null, signs.measured false, the TBD-5 decided signs (steer_sign +1, yaw_axis_sign
 +1; E-01 run 3), kappa_ss and the scripted gears 2..4 with their shift speeds COPIED from the provisional run-3
 first-pass fit (PLACEHOLDER_SOURCE; it waits for the DD-14a build_key, so nothing is measured for this card's build),
-the S105's gear indices as E-04 measured them in T0-ENG probe run 2 (forward 2..5, neutral 1, reverse 0), an
-unidentified actuator, and the DD-14c launch clutch in mode ramp with DC_LaunchClutchConfig's defaults
-(PLACEHOLDER_LAUNCH_CLUTCH; not identified: the 1.9.0.37 powertrain stalls at a clutch-1 drive-off);
+the S105's gear indices as E-04 measured them in T0-ENG probe run 2 (forward 2..5, neutral 1, reverse 0) and an
+unidentified actuator;
 llc_v1 accepts it only for qualification (use_class dev or probe) and refuses it at any other use_class, production
-included.
+included. Under a pin other than PLACEHOLDER_MEASURED_PIN (1.8.0.13, where those values were measured) the same values
+are marked carried over and provisional (note and a "provisional" object: re-fit them from E-01 / E-02a on that pin).
+--launch-clutch ramp adds gearbox.launch_clutch in mode ramp with DC_LaunchClutchConfig's defaults (DD-14c;
+PLACEHOLDER_LAUNCH_CLUTCH, not identified: the 1.9.0.37 powertrain stalls at a clutch-1 drive-off): the provisional
+1.9.0.37 card. The 1.8.0.13 card has none, so its bytes stay those its sessions are stamped with.
 
 Sealed map: any path or run header naming eden / everon is refused with exit 2 before anything is fitted.
 Exit codes: 0 card built (and written or equal), 1 --check found a difference, 2 refused (input, fit or path).
@@ -156,12 +160,20 @@ INPUT_SHAPINGS = ("echo", "rate_limit", "lag", "unknown")
 # a card, every key required when it is present, with DC_LaunchClutchConfig.Check's ranges (RPM_MAX, TIME_MAX_S):
 # 0 <= stall_guard_rpm < engage_rpm < full_rpm <= LAUNCH_RPM_MAX, couple_time_s and uncouple_time_s in
 # (0, LAUNCH_TIME_MAX_S], restart_cooldown_s in [0, LAUNCH_TIME_MAX_S], restart_on_stall a bool; mode ramp only with a
-# scripted gearbox. Absent = mode off (the 1.8 sequence). The E-01 run header carries the same fields as launch_clutch.*
+# scripted gearbox, and there full_rpm < LAUNCH_SCRIPTED_FULL_RPM_LIMIT. Absent = mode off (the 1.8 sequence). The
+# E-01 run header carries the same fields as launch_clutch.*
 LAUNCH_CLUTCH_MODES = ("off", "ramp")
 LAUNCH_CLUTCH_KEYS = ("mode", "engage_rpm", "full_rpm", "couple_time_s", "uncouple_time_s", "stall_guard_rpm",
                       "restart_on_stall", "restart_cooldown_s")
 LAUNCH_RPM_MAX = 10000.0
 LAUNCH_TIME_MAX_S = 10.0
+# Mode ramp on a scripted gearbox: full_rpm below DC_LaunchClutchConfig.SCRIPTED_FULL_RPM_LIMIT, the static stand-in
+# for the probe kit's full_rpm < downshift rpm. llc_v1 shifts by speed; an rpm bound from the downshift speeds would
+# need each gear's rpm per speed, which llc_v1 does not read (only an identified card's gearbox.detail.speed_per_krpm
+# has it). 1800 rpm is the probe policy's downshift, which the placeholder's shift speeds come from. It is also the
+# generator's sanity bound against the vehicle: far below any S105 max rpm (8000; llc_v1 checks the ego's own
+# EngineGetRPMMax and EngineGetRPMIdle at Init, DC_LaunchClutchConfig.CheckEngine)
+LAUNCH_SCRIPTED_FULL_RPM_LIMIT = 1800.0
 HEADER_LAUNCH_CLUTCH = "launch_clutch"
 # The E-01 run header's gearbox lines (probe kit 699d8e2: DC_ProbeSequences.AppendVehicleLines and
 # DC_ProbeActuator.AppendGearboxLines; plays before the gearbox fix carry only the first three) and the phase note of a
@@ -231,6 +243,14 @@ PLACEHOLDER_CLUTCH_DIP_S = 0.0
 PLACEHOLDER_LAUNCH_CLUTCH = {"mode": "ramp", "engage_rpm": 1100.0, "full_rpm": 1700.0, "couple_time_s": 0.85,
                              "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
                              "restart_cooldown_s": 1.0}
+PLACEHOLDER_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14c, --launch-clutch ramp): mode ramp with the "
+                                   "DC_LaunchClutchConfig defaults, not identified, because the 1.9.0.37 powertrain "
+                                   "stalls at a clutch-1 drive-off (launch 20261106T052424Z-wb-addc) where 1.8.0.13 "
+                                   "slipped")
+# The pin the placeholder's values were measured on (T0-ENG runs 2 and 3). Under any other pin the card says they are
+# carried over and provisional (carried_over); the 1.8.0.13 card itself has no launch clutch (its bytes are those
+# llc_v1 sessions on 1.8.0.13 are stamped with)
+PLACEHOLDER_MEASURED_PIN = "1.8.0.13"
 
 WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
 FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
@@ -1054,6 +1074,36 @@ def build_identified(args):
 def build_placeholder(args):
     if not args.pin_id or not PIN_RE.match(args.pin_id):
         raise Refusal("--placeholder needs --pin-id (the pin the card is placed under)")
+    card = placeholder_base(args)
+    if args.pin_id != PLACEHOLDER_MEASURED_PIN:
+        card = carried_over(card, args.pin_id)
+    if args.launch_clutch == "ramp":
+        gearbox = card["gearbox"]
+        gearbox["basis"] += PLACEHOLDER_LAUNCH_CLUTCH_BASIS
+        gearbox["launch_clutch"] = dict(PLACEHOLDER_LAUNCH_CLUTCH)
+    return card
+
+
+def carried_over(card, pin_id):
+    """The placeholder under another pin than the one its values were measured on (PLACEHOLDER_MEASURED_PIN): the same
+    values, marked provisional for that pin (note and a "provisional" object after "note"; llc_v1 ignores both), to be
+    re-fitted from E-01 / E-02a on the new pin."""
+    out = {}
+    for key, value in card.items():
+        out[key] = value
+        if key == "note":
+            out["note"] = value + (" CARRIED OVER to pin %s: every kappa_ss, sign, gear and llc_v1 value here was "
+                                   "measured on %s (T0-ENG runs 2 and 3) and is PROVISIONAL on %s; re-fit it from "
+                                   "E-01 / E-02a (and E-04) on %s." % (pin_id, PLACEHOLDER_MEASURED_PIN, pin_id,
+                                                                     pin_id))
+            out["provisional"] = {"measured_on_pin_id": PLACEHOLDER_MEASURED_PIN, "for_pin_id": pin_id,
+                                  "refit": "fit_steer_kappa.py --e01 --e02a --e04 on %s plays" % pin_id,
+                                  "detail": "values carried over unchanged from the %s placeholder; not measured on "
+                                            "%s" % (PLACEHOLDER_MEASURED_PIN, pin_id)}
+    return out
+
+
+def placeholder_base(args):
     vehicle = args.vehicle
     indices = vanilla_gear_indices(PLACEHOLDER_E04["gearbox_gears"], PLACEHOLDER_E04["gearbox_forward_gears"])
     return {
@@ -1089,13 +1139,10 @@ def build_placeholder(args):
                              "DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 "
                              "rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in "
                              "gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear "
-                             "at clutch 1). launch_clutch (DD-14c): mode ramp with the DC_LaunchClutchConfig defaults, "
-                             "not identified, because the 1.9.0.37 powertrain stalls at a clutch-1 drive-off (launch "
-                             "20261106T052424Z-wb-addc) where 1.8.0.13 slipped",
+                             "at clutch 1)",
                     "has_automatic_gearbox": PLACEHOLDER_E04["has_automatic_gearbox"],
                     "scripted_gears": list(PLACEHOLDER_SCRIPTED_GEARS), "upshift_mps": list(PLACEHOLDER_UPSHIFT_MPS),
-                    "downshift_mps": list(PLACEHOLDER_DOWNSHIFT_MPS), "clutch_dip_s": PLACEHOLDER_CLUTCH_DIP_S,
-                    "launch_clutch": dict(PLACEHOLDER_LAUNCH_CLUTCH)},
+                    "downshift_mps": list(PLACEHOLDER_DOWNSHIFT_MPS), "clutch_dip_s": PLACEHOLDER_CLUTCH_DIP_S},
         "kappa_ss": {"speeds_mps": list(PLACEHOLDER_SPEEDS_MPS), "kappa_per_steer": list(PLACEHOLDER_KAPPA_PER_STEER),
                      "kappa_offset": list(PLACEHOLDER_KAPPA_OFFSET),
                      "basis": "COPIED from " + PLACEHOLDER_SOURCE + ": E-02a steady cells, R2 >= 0.99999 at 15 / 30 / "
@@ -1226,6 +1273,9 @@ def launch_clutch_violations(launch, mode):
     if launch["mode"] == "ramp" and mode == "automatic":
         return ["gearbox.launch_clutch mode ramp applies to a scripted gearbox only (an automatic gearbox keeps clutch "
                 "1)"]
+    if launch["mode"] == "ramp" and mode == "scripted" and full >= LAUNCH_SCRIPTED_FULL_RPM_LIMIT:
+        return ["gearbox.launch_clutch full_rpm %s is not below %s rpm (a scripted gearbox: the probe policy's downshift "
+                "rpm its shift speeds come from)" % (full, LAUNCH_SCRIPTED_FULL_RPM_LIMIT)]
     return []
 
 
@@ -1297,6 +1347,9 @@ def main(argv=None):
     ap.add_argument("--e04", help="E-04 play directory (optional: has_automatic_gearbox)")
     ap.add_argument("--placeholder", action="store_true", help="write the PLACEHOLDER card (no plays)")
     ap.add_argument("--pin-id", help="pin of the placeholder card")
+    ap.add_argument("--launch-clutch", choices=("off", "ramp"), default="off",
+                    help="placeholder only: ramp adds gearbox.launch_clutch with the DC_LaunchClutchConfig defaults "
+                         "(DD-14c); off (default) leaves it out (mode off)")
     ap.add_argument("--vehicle", default=DEFAULT_VEHICLE, help="card id and vehicle (default %(default)s)")
     ap.add_argument("--build-key", help="build_key of the plays when their run headers carry none (dd-launch/1)")
     ap.add_argument("--scripted-gears", help="forward gear indices of a scripted gearbox, comma-separated")
@@ -1314,6 +1367,8 @@ def main(argv=None):
                 raise Refusal("--placeholder takes no play")
             card = build_placeholder(args)
         else:
+            if args.launch_clutch != "off":
+                raise Refusal("--launch-clutch is for --placeholder; an identified card takes E-01's launch clutch")
             if not (args.e01 and args.e02a):
                 raise Refusal("an identified card needs --e01 and --e02a (or --placeholder)")
             card = build_identified(args)

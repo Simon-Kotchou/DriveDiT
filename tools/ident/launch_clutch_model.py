@@ -78,15 +78,17 @@ class LaunchClutch:
 
     DEFAULTS = {"mode": "off", "engage_rpm": 1100.0, "full_rpm": 1700.0, "couple_time_s": 0.85,
                 "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
-                "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001, "lock_tolerance_rpm": 100.0}
+                "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001, "lock_tolerance_rpm": 100.0,
+                "brake_drop_rpm_per_s": 29000.0}
     SLIP_FULL_RPM = 1400.0                  # DC_LaunchClutchConfig.DEFAULT_SLIP_FULL_RPM (Slip())
     RELEASE_LOOKAHEAD_CALLS = 1.5           # predicted rpm: this far ahead in units of the call's own duration
     RELEASE_LOOKAHEAD_ENGAGE_FACTOR = 2.0   # coupled: the lookahead acts below this x engage_rpm
     LOCK_AGREE_CALLS = 2                    # lock-up: engine and driveline agree on this many calls in a row
-    SYNC_S = 0.3                            # after an upshift: no lookahead or drop guard for this long
+    SYNC_S = 0.3                            # after an upshift: no lookahead or drop guard without a brake
     LUG_MARGIN_RPM = 300.0                  # coupled under drive: open at stall_guard_rpm + this (at most engage_rpm)
-    MAX_DROP_RPM_PER_S = 12000.0            # coupled: an rpm falling faster than this opens (a full brake in first
-                                            # gear is about 8000)
+    DROP_GUARD_RPM_PER_S = 12000.0          # coupled under a brake: a fall faster than this opens (a full brake in
+                                            # first gear is about 8000)
+    BRAKE_LAG_S = 0.016667                  # the brake rule's horizon beyond this call: half a step (the readback)
     GAIN_STEP_S = 0.033333                  # slip_kp / slip_ki are per call of this length (the fixed time slice)
     CALL_STEPS_DECAY = 0.05                 # the held call length (in GAIN_STEP_S) decays by this per call
 
@@ -148,7 +150,7 @@ class LaunchClutch:
             self.coupling = 0.0
         driving = in_gear and not handbrake and not dip and engine_on
         if cfg["mode"] == "slip":
-            self.step_slip(slice_s, driving, rpm, driveline_rpm, throttle > 0 and brake <= 0, gear)
+            self.step_slip(slice_s, driving, rpm, driveline_rpm, throttle, brake, gear)
         elif not driving:
             self.coupling = 0.0
         elif rpm < cfg["stall_guard_rpm"]:
@@ -179,14 +181,14 @@ class LaunchClutch:
         self.locked = False
         self.agree_calls = 0
 
-    def step_slip(self, slice_s, driving, rpm, driveline_rpm, drive, gear):
+    def step_slip(self, slice_s, driving, rpm, driveline_rpm, throttle, brake, gear):
         cfg = self.config
         engage = cfg["engage_rpm"]
-        # an upshift (a higher forward gear index): its synchronisation drop is no fall to predict, so the history
-        # restarts and the lookahead and the drop guard wait SYNC_S. A downshift raises the rpm and keeps the history,
-        # so a braking downshift keeps the braking lookahead
+        braking = brake > 0
+        drive = throttle > 0 and not braking
+        # an upshift: its synchronisation drop is no fall to predict without a brake (the history stays, so a brake
+        # during the synchronisation still predicts)
         if gear >= 0 and self.last_gear >= 0 and gear > self.last_gear:
-            self.forget_rpm()
             self.sync_left_s = self.SYNC_S
             self.agree_calls = 0
         self.last_gear = gear
@@ -208,7 +210,7 @@ class LaunchClutch:
         self.prev_slice_s = self.last_slice_s
         self.last_slice_s = slice_s
         self.call_steps = max(slice_s / self.GAIN_STEP_S, 1.0, self.call_steps - self.CALL_STEPS_DECAY)
-        in_sync = self.sync_left_s > 0
+        guarded = braking or self.sync_left_s <= 0
         self.sync_left_s = max(self.sync_left_s - slice_s, 0.0)
         predicted = rpm + self.RELEASE_LOOKAHEAD_CALLS * slice_s * min(rate, 0.0)
         if not driving:
@@ -219,22 +221,27 @@ class LaunchClutch:
                 self.guard_drops += 1
             self.open_clutch()
             return
+        # a brake: open now if the worst coupled fall (locked wheels drag the engine at clutch capacity / inertia)
+        # over this call and the readback's lag could reach engage_rpm, before the brake acts (one step later)
+        if braking and rpm - cfg["brake_drop_rpm_per_s"] * (slice_s + self.BRAKE_LAG_S) <= engage:
+            self.open_clutch()
+            return
         if self.locked:
-            open_rpm = engage
-            if drive:
-                open_rpm = self.lug_rpm()
+            open_rpm = self.lug_rpm()
+            if braking:
+                open_rpm = engage
             if rpm <= open_rpm:
                 self.open_clutch()
                 return
-            if not in_sync and rpm < self.lookahead_ceiling_rpm() and predicted <= open_rpm:
+            if guarded and rpm < self.lookahead_ceiling_rpm() and predicted <= open_rpm:
                 self.open_clutch()
                 return
-            if not drive and not in_sync and rate < -self.MAX_DROP_RPM_PER_S:
+            if braking and rate < -self.DROP_GUARD_RPM_PER_S:
                 self.open_clutch()
                 return
             self.coupling = 1.0
             return
-        if rpm <= engage or not drive or (not in_sync and predicted <= self.lug_rpm()):
+        if rpm <= engage or braking or (guarded and predicted <= self.lug_rpm()):
             self.open_clutch()
             return
         kp = cfg["slip_kp"] / self.call_steps
@@ -243,11 +250,11 @@ class LaunchClutch:
         lowest = max(self.coupling - slice_s / cfg["uncouple_time_s"], 0.0)
         highest = min(self.coupling + slice_s / cfg["couple_time_s"], 1.0)
         self.coupling = min(max(want, lowest), highest)                     # Math.Clamp(want, lowest, highest)
-        if self.coupling > 0 and driveline_rpm > 0 and abs(rpm - driveline_rpm) <= cfg["lock_tolerance_rpm"]:
+        if drive and self.coupling > 0 and driveline_rpm > 0 and abs(rpm - driveline_rpm) <= cfg["lock_tolerance_rpm"]:
             self.agree_calls += 1
         else:
             self.agree_calls = 0
-        if self.agree_calls >= self.LOCK_AGREE_CALLS or self.coupling >= 1:
+        if self.agree_calls >= self.LOCK_AGREE_CALLS or (drive and self.coupling >= 1):
             self.locked = True
             self.coupling = 1.0
             self.lockups += 1
@@ -442,16 +449,25 @@ def drive(clutch, schedule, seconds, timing="U", calls=(1,), plant=None, policy=
 
 
 def openings(rows):
-    """Clutch openings while the throttle is on: c > 0 on one call, 0 on the next (the chatter's dumps)."""
-    return sum(1 for a, b in zip(rows, rows[1:]) if a[1] > 0 and b[1] == 0 and b[8] > 0)
+    """Clutch openings: c > 0 on one call, 0 on the next, whatever the throttle and brake (the chatter's dumps, and a
+    stop's opening)."""
+    return sum(1 for a, b in zip(rows, rows[1:]) if a[1] > 0 and b[1] == 0)
 
 
-def alternations(values, eps=0.005):
-    """The longest run of step-to-step sign changes of the change of c (each change above eps): 1 = none in a row."""
+# The oscillation criterion's amplitude deadband (DD-14d round 2, stated): a reversal of c counts only when both changes
+# are at least this. Over 8127 launches with random 1-3 step callback sequences, engine inertia 0.7 / 1 / 1.3 x, throttle
+# 0.3 / 0.5 / 1.0 and all three readback timings, the largest change in a run of two alternations was 0.0097 (about 1.1
+# Nm of clutch torque): the dither of the call-length gain scaling, not an oscillation
+ALTERNATION_DEADBAND = 0.01
+
+
+def alternations(values, eps=ALTERNATION_DEADBAND):
+    """The longest run of step-to-step sign changes of the change of c, each change at least eps
+    (ALTERNATION_DEADBAND): 0 or 1 = no oscillation."""
     deltas = [b - a for a, b in zip(values, values[1:])]
     best = run = 0
     for a, b in zip(deltas, deltas[1:]):
-        if abs(a) > eps and abs(b) > eps and a * b < 0:
+        if abs(a) >= eps and abs(b) >= eps and a * b < 0:
             run += 1
             best = max(best, run)
         else:
@@ -499,7 +515,8 @@ def brake_to_stop(clutch, brake, from_kmh, throttle=0.6, **kw):
 # E-01 steps and the shooting fit (fit_launch_clutch.py)
 
 STEP_COLUMNS = ("physics_step", "phase", "segment", "cmd_throttle", "cmd_brake", "cmd_clutch", "input_post_clutch",
-                "cmd_gear", "cur_gear", "rpm", "engine_on", "speed_kmh", "vel_l_z")
+                "cmd_gear", "cur_gear", "rpm", "engine_on", "speed_kmh", "vel_l_z", "cmd_handbrake", "timeslice_s",
+                "world_time_ms")
 LAUNCH_PHASES = {"move_check": 0.5, "throttle_0.30": 0.3, "throttle_0.60": 0.6, "throttle_1.00": 1.0,
                  "gear_scripted": 0.4}
 

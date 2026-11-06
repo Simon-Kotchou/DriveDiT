@@ -16,7 +16,10 @@ reversals over the first 3 s; per braking stop (the clutch's last opening of eac
 and at it; the run header counters (launch_clutch.stalls, restarts, guard_drops, max_slip_s, lockups); and, from
 DD-14d plays on, EngineGetRPMFeedback (column rpm_feedback) against the engine and the speed-implied driveline rpm.
 PASS needs a complete capture (steps, run footer status complete, the launch_clutch block and its counters) with at
-least one launch phase, and in every launch phase found:
+least one launch phase, and in every launch phase found (times are physics time, physics_step deltas x the step length,
+so merged callbacks count their steps):
+  - evidence of its start (a handbrake row, then the release into first gear with the clutch open) and every physics
+    step covered from there (each row's physics_step = the last one's + its covered steps);
   - a complete window (MIN_WINDOW_S of throttle, or one that couples) and motion above MOTION_KMH;
   - c = 1 by COUPLE_DEADLINE_S at throttle >= COUPLE_DEADLINE_THROTTLE, else within the window;
   - no opening, and every in-gear rpm at or above stall_guard_rpm + MARGIN_RPM (also at the braking stops);
@@ -94,13 +97,52 @@ COUPLE_DEADLINE_THROTTLE = 0.5
 MIN_WINDOW_S = 2.5              # a launch window of at least this, or ending coupled
 
 
+def step_dt_of(header, rows):
+    """The play's step length [s]: the run header's clock.step_dt_s, else engine.fixed_time_slice_s, else 1/30 s (a
+    row's timeslice_s is the time it covers, n steps on a merged callback, so it is no step length)."""
+    for key in ("clock.step_dt_s", "engine.fixed_time_slice_s"):
+        try:
+            value = float(header.get(key, ""))
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return model.STEP_DT
+
+
+def launch_evidence(rows, first, step_dt, seconds=8.0):
+    """A launch of the play from rows[first] (its first excite row with throttle): (last row index, problems). The
+    start must be evident: the row before it in the same phase with the handbrake commanded, this one released, in
+    first gear, with cmd_clutch 0. Its rows must cover every physics step: each row's physics_step is the previous
+    one's plus the steps it covers (timeslice_s / step dt, merged callbacks included). The window runs while excite,
+    first gear and within seconds of physics time."""
+    problems = []
+    row = rows[first]
+    if first == 0 or rows[first - 1]["phase"] != row["phase"] or not rows[first - 1]["cmd_handbrake"]:
+        problems.append("no evidence of its start (no handbrake row before the first throttle row)")
+    if row["cmd_handbrake"] or row["cmd_gear"] != model.FIRST_GEAR or row["cmd_clutch"] != 0:
+        problems.append("its first row is not a release into first gear with the clutch open")
+    last = first
+    while (last + 1 < len(rows) and rows[last + 1]["phase"] == row["phase"] and rows[last + 1]["segment"] == "excite"
+           and rows[last + 1]["cmd_gear"] == model.FIRST_GEAR
+           and (rows[last + 1]["physics_step"] - row["physics_step"]) * step_dt < seconds):
+        last += 1
+    for i in range(first + 1, last + 1):
+        covered = max(1, int(round(rows[i]["timeslice_s"] / step_dt))) if rows[i].get("timeslice_s", 0) > 0 else 1
+        if rows[i]["physics_step"] - rows[i - 1]["physics_step"] != covered:
+            problems.append("a gap in the steps at physics_step %d (an incomplete capture)" % rows[i]["physics_step"])
+            break
+    return last, problems
+
+
 def check_play(rows, header):
     """The launch clutch of a play (see the module docstring); returns (lines, passed). Refuses (FAIL) an incomplete
     capture: no rows, a run footer that is not status complete, a missing launch_clutch block or counter, or no launch
-    phase. Every launch phase found must have a complete window (MIN_WINDOW_S, or one that couples), move above
-    MOTION_KMH, couple fully by COUPLE_DEADLINE_S at throttle >= COUPLE_DEADLINE_THROTTLE (else within the window),
-    open the clutch never and stay at or above stall_guard_rpm + MARGIN_RPM in gear; the recorded engine_on must never
-    fall (no stall), and the counters stalls and guard_drops must be 0."""
+    phase. Every launch phase found must show its start (launch_evidence) and cover every physics step to its coupling,
+    have a complete window (MIN_WINDOW_S, or one that couples), move above MOTION_KMH, couple fully by
+    COUPLE_DEADLINE_S at throttle >= COUPLE_DEADLINE_THROTTLE (else within the window), never open the clutch and stay
+    at or above stall_guard_rpm + MARGIN_RPM in gear; the recorded engine_on must never fall (no stall), and the
+    counters stalls and guard_drops must be 0. Times are physics time: physics_step deltas x the step length."""
     lines, passed = [], True
 
     def fail(text):
@@ -116,23 +158,29 @@ def check_play(rows, header):
     if "mode" not in launch:
         passed = fail("the run header has no launch_clutch block")
     guard = float(launch.get("stall_guard_rpm") or 600.0)
-    windows = model.launch_windows(rows, seconds=8.0)
-    if not windows:
+    step_dt = step_dt_of(header, rows)
+    starts = {}
+    for i, r in enumerate(rows):
+        if (r["phase"] in model.LAUNCH_PHASES and r["phase"] not in starts and r["segment"] == "excite"
+                and r["cmd_throttle"] > 0):
+            starts[r["phase"]] = i
+    if not starts:
         passed = fail("no launch phase (%s) in the steps" % ", ".join(model.LAUNCH_PHASES))
-    for name, (first, last) in windows.items():
+    for name, first in starts.items():
+        last, problems = launch_evidence(rows, first, step_dt)
         seg = rows[first:last + 1]
         throttle = model.LAUNCH_PHASES[name]
-        opens = [(i - first, rows[i]["speed_kmh"]) for i in range(first + 1, last + 1)
-                 if rows[i - 1]["cmd_clutch"] > 0 and rows[i]["cmd_clutch"] == 0 and rows[i]["cmd_throttle"] > 0]
-        coupled = next((i - first for i in range(first, last + 1) if rows[i]["cmd_clutch"] >= 1.0), None)
-        coupled_s = None if coupled is None else coupled * model.STEP_DT
+        t0 = rows[first]["physics_step"]
+        opens = [((rows[i]["physics_step"] - t0) * step_dt, rows[i]["speed_kmh"]) for i in range(first + 1, last + 1)
+                 if rows[i - 1]["cmd_clutch"] > 0 and rows[i]["cmd_clutch"] == 0]
+        coupled = next((i for i in range(first, last + 1) if rows[i]["cmd_clutch"] >= 1.0), None)
+        coupled_s = None if coupled is None else (rows[coupled]["physics_step"] - t0) * step_dt
         low = min(r["rpm"] for r in seg)
         top = max(r["speed_kmh"] for r in seg)
-        span_s = (last - first + 1) * model.STEP_DT
-        cs = [r["cmd_clutch"] for r in seg[:int(3.0 / model.STEP_DT)]]
+        span_s = (rows[last]["physics_step"] - t0) * step_dt + step_dt
+        cs = [r["cmd_clutch"] for r in seg if (r["physics_step"] - t0) * step_dt < 3.0]
         nz = [b - a for a, b in zip(cs, cs[1:]) if abs(b - a) > 1e-6]
         rev = sum(1 for a, b in zip(nz, nz[1:]) if a * b < 0)
-        problems = []
         if opens:
             problems.append("%d openings" % len(opens))
         if low < guard + MARGIN_RPM:
@@ -148,7 +196,7 @@ def check_play(rows, header):
         passed = passed and not problems
         lines.append("  %-14s throttle %.2f: %d openings %s, c = 1 at %s, lowest rpm %.0f, max %.1f km/h, c reversals "
                      "in 3 s %d%s" % (name, throttle, len(opens),
-                                      "[" + ", ".join("step %d at %.1f km/h" % o for o in opens) + "]",
+                                      "[" + ", ".join("%.2f s at %.1f km/h" % o for o in opens) + "]",
                                       "-" if coupled_s is None else "%.2f s" % coupled_s, low, top, rev,
                                       "" if not problems else "  <-- FAIL: " + "; ".join(problems)))
     stalls = sum(1 for a, b in zip(rows, rows[1:]) if a["engine_on"] and not b["engine_on"])

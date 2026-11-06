@@ -1555,8 +1555,14 @@ class DC_LLCv1
 			// launch clutch (DD-14c; the card's gearbox.launch_clutch, mode off without one): the dip clutch is its
 			// upper bound and its dip; rpm and engine_on as read now, the state after the previous callback; over
 			// sliceS. Always in a forward gear, never a handbrake (llc_v1 passes none). A stall restart is the Mode A
-			// start of the actuator (DC_ActuatorModeA.Start: ForceStartEngine), before this callback's setters
-			clutch = m_LaunchClutch.Step(sliceS, true, false, m_Simulation.EngineGetRPM(), m_Simulation.EngineIsOn(), clutch, clutch <= 0);
+			// start of the actuator (DC_ActuatorModeA.Start: ForceStartEngine), before this callback's setters. Mode
+			// slip (DD-14d) also gets the driveline rpm of the gear slot: the speed read now / the slot's
+			// gearbox.scripted_mps_per_krpm (-1 without one; CheckGearbox requires them for ramp and slip)
+			float drivelineRpm = -1;
+			if (m_iGearSlot < m_Card.m_aScriptedMpsPerKrpm.Count() && m_Card.m_aScriptedMpsPerKrpm[m_iGearSlot] > 0)
+				drivelineRpm = speed / m_Card.m_aScriptedMpsPerKrpm[m_iGearSlot] * 1000;
+
+			clutch = m_LaunchClutch.Step(sliceS, true, false, m_Simulation.EngineGetRPM(), m_Simulation.EngineIsOn(), clutch, clutch <= 0, drivelineRpm);
 			if (m_LaunchClutch.ConsumeRestart())
 				m_Actuator.Start();
 

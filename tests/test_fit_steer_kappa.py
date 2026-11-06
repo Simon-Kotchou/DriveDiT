@@ -46,7 +46,9 @@ probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or
     never at production; a scripted identified card copies E-01's launch_clutch.* run header block (none before
     DD-14c: mode off); gearbox_violations mirrors DC_VehicleCard's rules (optional, every key, the ranges, ramp only
     with a scripted gearbox and there full_rpm below 1800 rpm, never null), and the Enforce reader asks for exactly
-    LAUNCH_CLUTCH_KEYS;
+    LAUNCH_CLUTCH_KEYS; DD-14d: the 1.9.0.37 card is --launch-clutch slip (mode slip, with LAUNCH_CLUTCH_SLIP_KEYS,
+    required in slip and refused elsewhere, their ranges, the downshift rule and every upshift at or above 2 x
+    engage_rpm), a probe kit header's slip fields go into a slip card only;
   - the Enforce reader (src/enfusion/datacapture/DC_LLCv1.c) asks for exactly the llc_v1 keys and arrays the
     generator writes;
   - DC_Sha256 (the card and source digests llc_v1 stamps): its round constants and initial hash are FIPS 180-4's,
@@ -945,9 +947,11 @@ class FitTests(unittest.TestCase):
     def test_provisional_1_9_card(self):
         # DD-14c: the card llc_v1 loads on a 1.9.0.37 session is the generator's placeholder under that pin with the
         # launch clutch: the 1.8.0.13 values carried over and marked provisional, a placeholder (so production refuses
-        # it), and accepted by AcceptCard's pin rule on 1.9.0.37 only
-        code, text = run_fit(["--placeholder", "--pin-id", "1.9.0.37", "--launch-clutch", "ramp", "--check", CARD19])
+        # it), and accepted by AcceptCard's pin rule on 1.9.0.37 only. DD-14d: its launch clutch is in mode slip
+        code, text = run_fit(["--placeholder", "--pin-id", "1.9.0.37", "--launch-clutch", "slip", "--check", CARD19])
         self.assertEqual(code, 0, text)
+        code, text = run_fit(["--placeholder", "--pin-id", "1.9.0.37", "--launch-clutch", "ramp", "--check", CARD19])
+        self.assertEqual(code, 1, text)                                         # the DD-14c card is no longer it
         with open(CARD19, "r", encoding="ascii") as f:
             card = json.load(f)
         with open(CARD, "r", encoding="ascii") as f:
@@ -971,10 +975,14 @@ class FitTests(unittest.TestCase):
             self.assertGreaterEqual(speed / per_krpm[slot + 1] * 1000.0, launch["full_rpm"] + 50.0)
         self.assertEqual(sorted(k for k in gearbox if gearbox[k] != gearbox18.get(k)), ["basis"])
         self.assertTrue(gearbox["basis"].startswith(gearbox18["basis"]))
-        self.assertEqual(launch, fit.PLACEHOLDER_LAUNCH_CLUTCH)
-        self.assertEqual(launch["mode"], "ramp")
+        self.assertEqual(launch, fit.PLACEHOLDER_SLIP_LAUNCH_CLUTCH)
+        self.assertEqual(launch["mode"], "slip")
         for slot, gear in enumerate(RUN3_GEARBOX["scripted_gears"][:-1]):     # coupled below every downshift rpm
             self.assertLess(launch["full_rpm"], engine_rpm(RUN3_GEARBOX["downshift_mps"][slot], gear + 1) - 50.0)
+        for slot, speed in enumerate(card["gearbox"]["upshift_mps"]):             # about 2525 and 2998 rpm
+            self.assertGreaterEqual(speed / per_krpm[slot + 1] * 1000.0, 2.0 * launch["engage_rpm"])
+        self.assertIn("DD-14d, --launch-clutch slip", gearbox["basis"])
+        self.assertNotIn("DD-14c, --launch-clutch ramp", gearbox["basis"])
         provisional = card["provisional"]
         self.assertEqual((provisional["measured_on_pin_id"], provisional["for_pin_id"]), ("1.8.0.13", "1.9.0.37"))
         self.assertIn("--e01 --e02a", provisional["refit"])
@@ -1277,7 +1285,7 @@ class FitTests(unittest.TestCase):
         self.assertIn("launch clutch (DD-14c): none (mode off, the 1.8 sequence)", text)
         for name, change, reason in (("play_39", {"launch_clutch.full_rpm": "1100.0"}, "engage_rpm < full_rpm"),
                                      ("play_40", {"launch_clutch.restart_on_stall": "yes"}, "neither 0 nor 1"),
-                                     ("play_41", {"launch_clutch.mode": "auto"}, "neither off nor ramp")):
+                                     ("play_41", {"launch_clutch.mode": "auto"}, "none of off, ramp and slip")):
             bad = self.manual_e01(name, dict(KIT_GEARBOX_LINES, **dict(block, **change)))
             code, text = run_fit(["--e01", bad, "--e02a", self.e02a] + speeds)
             self.assertEqual(code, 2, text)
@@ -1288,14 +1296,42 @@ class FitTests(unittest.TestCase):
                               self.e02a] + speeds)
         self.assertEqual(code, 2, text)
         self.assertIn("misses uncouple_time_s", text)
+        # DD-14d: a probe kit header always has the slip fields; a ramp card takes the ramp's keys only, a slip card
+        # all of them (a slip header without them is refused)
+        slip_lines = {"launch_clutch.slip_kp": "0.000300", "launch_clutch.slip_ki": "0.001000",
+                      "launch_clutch.lock_tolerance_rpm": "100.0", "launch_clutch.mps_per_krpm": "1.548710,2.772066"}
+        ramp14d = self.manual_e01("play_43", dict(KIT_GEARBOX_LINES, **dict(block, **slip_lines)))
+        card, text = self.fit_card(["--e01", ramp14d, "--e02a", self.e02a] + speeds)
+        self.assertEqual(sorted(card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        slip_block = dict(block, **slip_lines)
+        slip_block.update({"launch_clutch.mode": "slip", "launch_clutch.engage_rpm": "1100.0",
+                           "launch_clutch.full_rpm": "1400.0"})
+        card, text = self.fit_card(["--e01", self.manual_e01("play_44", dict(KIT_GEARBOX_LINES, **slip_block)),
+                                    "--e02a", self.e02a] + speeds)
+        self.assertEqual(card["gearbox"]["launch_clutch"],
+                         {"mode": "slip", "engage_rpm": 1100.0, "full_rpm": 1400.0, "couple_time_s": 0.5,
+                          "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
+                          "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001, "lock_tolerance_rpm": 100.0})
+        self.assertEqual(fit.enforce_load_check(card), [])
+        self.assertIn("launch clutch (DD-14c): mode slip, engage_rpm 1100.0", text)
+        self.assertIn("lock_tolerance_rpm 100.0", text)
+        no_slip_fields = dict(slip_block)
+        del no_slip_fields["launch_clutch.slip_ki"]
+        code, text = run_fit(["--e01", self.manual_e01("play_45", dict(KIT_GEARBOX_LINES, **no_slip_fields)), "--e02a",
+                              self.e02a] + speeds)
+        self.assertEqual(code, 2, text)
+        self.assertIn("misses slip_ki", text)
 
     def test_launch_clutch_card_rules(self):
         # DC_VehicleCard's gearbox.launch_clutch rules (DD-14c) as gearbox_violations mirrors them: optional (absent =
         # mode off), every key required and no other, DC_LaunchClutchConfig.Check's ranges, ramp only with a scripted
         # gearbox and there every downshift at least full_rpm + 50 rpm in its gear (scripted_mps_per_krpm), the band
-        # against the vehicle's recorded engine (CheckEngine), never null (on the provisional 1.9.0.37 card)
+        # against the vehicle's recorded engine (CheckEngine), never null (on the provisional 1.9.0.37 card with the
+        # DD-14c ramp in place of its DD-14d slip: test_slip_launch_clutch_card_rules checks the slip)
         with open(CARD19, "r", encoding="ascii") as f:
             card = json.load(f)
+        self.assertEqual(fit.enforce_load_check(card), [])
+        card["gearbox"]["launch_clutch"] = dict(fit.PLACEHOLDER_LAUNCH_CLUTCH)
         self.assertEqual(fit.enforce_load_check(card), [])
         absent = json.loads(json.dumps(card))
         del absent["gearbox"]["launch_clutch"]
@@ -1359,16 +1395,16 @@ class FitTests(unittest.TestCase):
         self.assertIn("scripted gearbox only", " ".join(fit.enforce_load_check(automatic)))
         automatic["gearbox"]["launch_clutch"]["mode"] = "off"
         self.assertEqual(fit.enforce_load_check(automatic), [])
-        # the Enforce reader refuses the same: ramp in the automatic branch of CheckGearbox, the ranges through
+        # the Enforce reader refuses the same: ramp or slip in the automatic branch of CheckGearbox, the ranges through
         # DC_LaunchClutchConfig.Check, a null or repeated key in Load
         with open(LLC_SOURCE, "r", encoding="ascii") as f:
             source = f.read()
         check = enforce_body(source, "DC_VehicleCard", "CheckGearbox")
         self.assertIn("if (!m_LaunchClutch.Check(launchFailure))", check)
-        self.assertIn("if (m_LaunchClutch.IsRamp()) { failure = \"gearbox.launch_clutch mode ramp applies to a "
-                      "scripted gearbox only", check)
-        self.assertLess(check.index("m_LaunchClutch.IsRamp()"), check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"))
-        self.assertIn("if (m_LaunchClutch.IsRamp() && !CheckLaunchDownshifts(count, failure)) return false;", check)
+        self.assertIn("if (m_LaunchClutch.IsActive()) { failure = \"gearbox.launch_clutch mode \" + "
+                      "m_LaunchClutch.m_sMode + \" applies to a scripted gearbox only", check)
+        self.assertLess(check.index("m_LaunchClutch.IsActive()"), check.index("if (m_sGearbox != GEARBOX_SCRIPTED)"))
+        self.assertIn("if (m_LaunchClutch.IsActive() && !CheckLaunchDownshifts(count, failure)) return false;", check)
         self.assertLess(check.index("downshift_mps[i] < upshift_mps[i]"), check.index("CheckLaunchDownshifts("))
         downshifts = enforce_body(source, "DC_VehicleCard", "CheckLaunchDownshifts")
         for statement in ("if (m_aScriptedMpsPerKrpm.Count() != count) {",
@@ -1389,6 +1425,67 @@ class FitTests(unittest.TestCase):
         load = enforce_body(source, "DC_VehicleCard", "Load")
         self.assertIn('DC_JsonScan.FindValue(text, "launch_clutch") < 0 || DC_JsonScan.IsNull(text, "launch_clutch")',
                       load)
+
+    def test_slip_launch_clutch_card_rules(self):
+        # DD-14d: the 1.9.0.37 card's mode slip. Its keys are the ramp's plus slip_kp, slip_ki and lock_tolerance_rpm
+        # (required in slip, refused in ramp or off), with DC_LaunchClutchConfig.Check's ranges; the ramp's downshift
+        # rule holds, and every upshift lands at or above 2 x engage_rpm in the gear it shifts up into
+        with open(CARD19, "r", encoding="ascii") as f:
+            card = json.load(f)
+        launch = card["gearbox"]["launch_clutch"]
+        self.assertEqual(launch, fit.PLACEHOLDER_SLIP_LAUNCH_CLUTCH)
+        self.assertEqual(fit.enforce_load_check(card), [])
+        for change in ({"slip_kp": -0.0001}, {"slip_kp": 0.0101}, {"slip_ki": 0.0}, {"slip_ki": 0.11},
+                       {"lock_tolerance_rpm": -1.0}, {"lock_tolerance_rpm": 1000.5}, {"slip_kp": True},
+                       {"slip_ki": "0.001"}, {"full_rpm": 1750.0}, {"engage_rpm": 800.0, "stall_guard_rpm": 600.0},
+                       {"engage_rpm": 1300.0}):                         # 2600 rpm: above the 2525 rpm upshift
+            bad = json.loads(json.dumps(card))
+            bad["gearbox"]["launch_clutch"] = dict(launch, **change)
+            self.assertTrue(fit.enforce_load_check(bad), change)
+        for edge in ({"slip_kp": 0.0}, {"slip_kp": 0.01}, {"slip_ki": 0.1}, {"lock_tolerance_rpm": 0.0},
+                     {"lock_tolerance_rpm": 1000.0}, {"engage_rpm": 1260.0}, {"full_rpm": 1748.0}):
+            ok = json.loads(json.dumps(card))
+            ok["gearbox"]["launch_clutch"] = dict(launch, **edge)
+            self.assertEqual(fit.enforce_load_check(ok), [], edge)
+        for key in fit.LAUNCH_CLUTCH_SLIP_KEYS:                          # required in mode slip ...
+            missing = json.loads(json.dumps(card))
+            del missing["gearbox"]["launch_clutch"][key]
+            self.assertIn("exactly the keys", " ".join(fit.enforce_load_check(missing)), key)
+        for mode in ("ramp", "off"):                                      # ... and refused outside it
+            other = json.loads(json.dumps(card))
+            other["gearbox"]["launch_clutch"] = dict(launch, mode=mode, full_rpm=1700.0)
+            self.assertIn("exactly the keys", " ".join(fit.enforce_load_check(other)), mode)
+            for key in fit.LAUNCH_CLUTCH_SLIP_KEYS:
+                del other["gearbox"]["launch_clutch"][key]
+            self.assertEqual(fit.enforce_load_check(other), [], mode)
+        # the upshift rule: 5.0 m/s into scripted gear 3 is about 1804 rpm, below 2 x 1100; a ramp takes it
+        early = json.loads(json.dumps(card))
+        early["gearbox"]["upshift_mps"] = [5.5, 12.5]
+        early["gearbox"]["downshift_mps"] = [5.0, 7.5]
+        problems = fit.enforce_load_check(early)
+        self.assertTrue(any("upshift_mps 5.5 is 1984 rpm in scripted gear 3, below the slip release lookahead ceiling "
+                            "2200.0 rpm" in p for p in problems), problems)
+        early["gearbox"]["launch_clutch"] = dict(fit.PLACEHOLDER_LAUNCH_CLUTCH)
+        self.assertEqual(fit.enforce_load_check(early), [])
+        automatic = json.loads(json.dumps(card))
+        automatic["gearbox"].update(mode="automatic", scripted_gears=[], upshift_mps=[], downshift_mps=[])
+        del automatic["gearbox"]["scripted_mps_per_krpm"]
+        self.assertIn("mode slip applies to a scripted gearbox only", " ".join(fit.enforce_load_check(automatic)))
+        # the Enforce side: CheckLaunchDownshifts has the same upshift rule for slip, its ceiling is the helper's
+        with open(LLC_SOURCE, "r", encoding="ascii") as f:
+            source = f.read()
+        downshifts = enforce_body(source, "DC_VehicleCard", "CheckLaunchDownshifts")
+        self.assertIn("if (m_LaunchClutch.IsSlip()) { float ceiling = m_LaunchClutch.GetLookaheadCeilingRpm(); for (int "
+                      "up = 0; up < count - 1; up++) { float landingRpm = m_aUpshiftMps[up] / "
+                      "m_aScriptedMpsPerKrpm[up + 1] * 1000; if (landingRpm < ceiling) {", downshifts)
+        with open(os.path.join(REPO, "src", "enfusion", "datacapture", "DC_LaunchClutch.c"), "r", encoding="ascii") as f:
+            helper = f.read()
+        self.assertIn("static const float RELEASE_LOOKAHEAD_ENGAGE_FACTOR = %g;" % fit.LAUNCH_LOOKAHEAD_ENGAGE_FACTOR,
+                      helper)
+        self.assertIn("return RELEASE_LOOKAHEAD_ENGAGE_FACTOR * m_fEngageRpm;", helper)
+        for name, value in (("SLIP_KP_MAX", fit.LAUNCH_SLIP_KP_MAX), ("SLIP_KI_MAX", fit.LAUNCH_SLIP_KI_MAX),
+                            ("LOCK_TOLERANCE_MAX_RPM", fit.LAUNCH_LOCK_TOLERANCE_MAX_RPM)):
+            self.assertIn("static const float %s = %g;" % (name, value), helper)
 
     def test_manual_gearbox_earlier_header_style(self):
         # a play before the gearbox fix (probe run 2 style): only vehicle.has_automatic_gearbox=0 and the gear counts,
@@ -1572,11 +1669,16 @@ class FitTests(unittest.TestCase):
             self.assertTrue(key in card or key in card["signs"] or key in card["gearbox"]
                             or key in card["actuator"]["raw_engine_path"]
                             or key in launch_card["gearbox"]["launch_clutch"], key)
-        # the launch clutch object (DD-14c): ReadLaunchClutch asks for exactly the keys the generator writes
+        # the launch clutch object (DD-14c): ReadLaunchClutch asks for exactly the keys the generator writes, the slip
+        # fields (DD-14d) only in mode slip, the mode of the 1.9.0.37 card
         launch = reader.split("protected bool ReadLaunchClutch", 1)[1].split("\n\t}\n", 1)[0]
         launch_keys = re.findall(r'(?:context\.ReadValue|ReadContextNumber)\((?:context, )?"(\w+)"', launch)
-        self.assertEqual(sorted(launch_keys), sorted(fit.LAUNCH_CLUTCH_KEYS))
-        self.assertEqual(sorted(launch_card["gearbox"]["launch_clutch"]), sorted(fit.LAUNCH_CLUTCH_KEYS))
+        self.assertEqual(sorted(launch_keys), sorted(fit.LAUNCH_CLUTCH_KEYS + fit.LAUNCH_CLUTCH_SLIP_KEYS))
+        self.assertEqual(fit.launch_clutch_keys("slip"), fit.LAUNCH_CLUTCH_KEYS + fit.LAUNCH_CLUTCH_SLIP_KEYS)
+        self.assertEqual(fit.launch_clutch_keys("ramp"), fit.LAUNCH_CLUTCH_KEYS)
+        self.assertIn("bool slipOk = mode != DC_LaunchClutchConfig.MODE_SLIP || (", launch)
+        self.assertEqual(launch_card["gearbox"]["launch_clutch"]["mode"], "slip")
+        self.assertEqual(sorted(launch_card["gearbox"]["launch_clutch"]), sorted(fit.launch_clutch_keys("slip")))
         self.assertIn('context.StartObject("launch_clutch")', launch)
         shapings = re.search(r"s_aInputShapings = \{([^}]*)\}", reader).group(1)
         self.assertEqual(tuple(re.findall(r'"(\w+)"', shapings)), fit.INPUT_SHAPINGS)

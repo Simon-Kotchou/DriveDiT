@@ -35,7 +35,7 @@
   "gear_index_reverse": 0,
   "gearbox": {
     "mode": "scripted",
-    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, so a manual gearbox driven by SetGear; indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5. Scripted gears 2, 3, 4 and shift speeds COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03), provisional until the DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1). launch_clutch (DD-14c, --launch-clutch ramp): mode ramp with the DC_LaunchClutchConfig defaults, not identified, because the 1.9.0.37 powertrain stalls at a clutch-1 drive-off (launch 20261106T052424Z-wb-addc) where 1.8.0.13 slipped. scripted_mps_per_krpm: E-01 run 3's measured 1.54871 / 2.772066 / 4.169103 m/s per 1000 rpm in gears 2..4 (1.8.0.13, the run-3 fit's gearbox.detail.speed_per_krpm), carried over with the shift speeds; the downshifts lie at about 1804 and 1799 rpm, above full_rpm 1700 + 50",
+    "basis": "E-04 of T0-ENG probe run 2 (1.8.0.13): has_automatic_gearbox 0, 6 gears, 4 forward, so a manual gearbox driven by SetGear; indices by the vanilla rule (SCR_ToggleHandbrakeAction.c:99-108): reverse 0, neutral 1, forward 2..5. Scripted gears 2, 3, 4 and shift speeds COPIED from the first-pass fit of T0-ENG probe run 3 (launch 20261103T061122Z-wb-86bd, 2026-11-03), provisional until the DD-14a build_key and not measured for this card's build: the probe policy, up at 4500 rpm and down at 1800 rpm, over E-01 run 3's 1.549 / 2.772 / 4.169 m/s per 1000 rpm in gears 2..4; gear 5 was not driven. No clutch dip (vanilla VehicleCinematicTrack: SetGear at clutch 1). launch_clutch (DD-14d, --launch-clutch slip): mode slip with the DC_LaunchClutchConfig.Slip() values, designed on the powertrain model fitted to the first 1.9.0.37 ramp Play (launch 20261106T194516Z-wb-ab6a, e01 play_01; tools/ident/fit_launch_clutch.py), where the DD-14c ramp launched without a stall but chattered (2 openings at throttle 0.5, 4 at 0.3); not identified. It holds full_rpm 1400 while slipping and couples fully once the engine is within 100 rpm of the driveline rpm (speed / scripted_mps_per_krpm). scripted_mps_per_krpm: E-01 run 3's measured 1.54871 / 2.772066 / 4.169103 m/s per 1000 rpm in gears 2..4 (1.8.0.13, the run-3 fit's gearbox.detail.speed_per_krpm; 1.9.0.37 measured 1.540 / 2.755 / 4.13 in that Play), carried over with the shift speeds; the downshifts lie at about 1804 and 1799 rpm, above full_rpm 1400 + 50, the upshifts at about 2525 and 2998 rpm, above 2 x engage_rpm 2200",
     "has_automatic_gearbox": false,
     "scripted_gears": [
       2,
@@ -57,14 +57,17 @@
       4.169103
     ],
     "launch_clutch": {
-      "mode": "ramp",
+      "mode": "slip",
       "engage_rpm": 1100.0,
-      "full_rpm": 1700.0,
+      "full_rpm": 1400.0,
       "couple_time_s": 0.85,
       "uncouple_time_s": 0.45,
       "stall_guard_rpm": 600.0,
       "restart_on_stall": true,
-      "restart_cooldown_s": 1.0
+      "restart_cooldown_s": 1.0,
+      "slip_kp": 0.0003,
+      "slip_ki": 0.001,
+      "lock_tolerance_rpm": 100.0
     }
   },
   "kappa_ss": {

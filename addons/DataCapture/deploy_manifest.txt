@@ -38,6 +38,9 @@ script src/enfusion/datacapture/DC_ProbeCsv.c
 script src/enfusion/datacapture/DC_ProbeRunner.c
 script src/enfusion/datacapture/DC_ProbeEngine.c
 script src/enfusion/datacapture/DC_ProbeSequences.c
+# DD-14c: the Mode A launch clutch for the 1.9 powertrain (stalls at a clutch-1 drive-off), shared by the probe actuator
+# (DC_ProbeSequences.c) and llc_v1 (DC_LLCv1.c, below)
+script src/enfusion/datacapture/DC_LaunchClutch.c
 script src/enfusion/datacapture/DC_RigR1.c
 script src/enfusion/datacapture/DC_Fiducial.c
 script src/enfusion/datacapture/DC_FiducialShape.c

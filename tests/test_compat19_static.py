@@ -99,17 +99,88 @@ class CC02Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=base._tmp_base()) as d:
             planned = os.path.join(d, "planned.txt")
             with open(planned, "w") as fh:
-                fh.write("TestHarness GetNSuites Begin\n")
+                fh.write("ZxHarness CountSuites Start\n")
             rc, out, _ = self.run_api("--planned", planned)
             self.assertEqual(rc, 1, out)
-            self.assertIn("FAIL  TestHarness.GetNSuites REMOVED", out)
-            self.assertIn("FAIL  TestHarness.Begin SIG_CHANGED", out)
+            self.assertIn("FAIL  ZxHarness.CountSuites REMOVED", out)
+            self.assertIn("FAIL  ZxHarness.Start SIG_CHANGED", out)
             triage = os.path.join(d, "triage.txt")
             with open(triage, "w") as fh:
-                fh.write("TestHarness.GetNSuites REMOVED obsolete, unused (AD 2.6)\n"
-                         "TestHarness.Begin SIG_CHANGED notnull suites; our tests call ActiveSuite only\n")
+                fh.write("ZxHarness.CountSuites REMOVED obsolete, unused\n"
+                         "ZxHarness.Start SIG_CHANGED notnull suites; nothing calls it\n")
             rc, out, _ = self.run_api("--planned", planned, "--triage", triage)
             self.assertEqual(rc, 0, out)
+
+
+REAL_DUMP = os.environ.get("DD14A_SCRIPT_DUMP", "/mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable")
+
+
+class RealDumpSpotChecks(unittest.TestCase):
+    """Opt-in (the official dump is not in the repo; skipped when absent). An independent regex over a handful of
+    known declarations on both tags, compared with what the index parser makes of the same file (Codex round 1:
+    the diff tests share the parser, so a symmetric parser omission would stay invisible)."""
+
+    CASES = (
+        # (file under scripts/, class, member, regex for the independent reading, kind)
+        ("Game/generated/Vehicle/VehicleWheeledSimulation.c", "VehicleWheeledSimulation", "SetSteering",
+         r"proto external void SetSteering\(([^)]*)\);", "params"),
+        ("Game/generated/Vehicle/VehicleWheeledSimulation.c", "VehicleWheeledSimulation", "GetHandbrake",
+         r"proto external float GetHandbrake\(([^)]*)\);", "params"),
+        ("Game/generated/GameMode/RespawnSystemComponent.c", "RespawnSystemComponent", "DoSpawn",
+         r"GenericEntity DoSpawn\(([^)]*)\);", "params"),
+        ("Core/generated/Visual/Color.c", "Color", "Black", r"static const ref Color Black = (.*?);", "init"),
+        ("GameLib/entities/ScriptCamera.c", "ScriptCamera", None, r"^class ScriptCamera\s*:\s*(\w+)", "parent"),
+    )
+
+    def setUp(self):
+        if not os.path.isdir(os.path.join(REAL_DUMP, ".git")):
+            self.skipTest("the official script dump is not present (%s)" % REAL_DUMP)
+        import subprocess
+        self.subprocess = subprocess
+
+    def show(self, tag, rel):
+        r = self.subprocess.run(["git", "--no-optional-locks", "-C", REAL_DUMP, "show", "%s:scripts/%s" % (tag, rel)],
+                                capture_output=True)
+        return r.stdout.decode("utf-8", errors="replace") if r.returncode == 0 else None
+
+    def test_parser_agrees_with_an_independent_reading(self):
+        import re
+        api_index = p19_api.api_index
+        checked = 0
+        for tag in ("v1.8.0.13", "v1.9.0.37"):
+            for rel, cls, member, rx, kind in self.CASES:
+                text = self.show(tag, rel)
+                self.assertIsNotNone(text, (tag, rel))
+                m = re.search(rx, text, re.M)
+                parsed = {c["name"]: c for c in api_index.parse_file(rel, text)}[cls]
+                if kind == "parent":
+                    self.assertEqual(parsed["parents"], [m.group(1)], (tag, cls))
+                elif kind == "init":
+                    props = {p["name"]: p for p in parsed["properties"] + parsed["protectedProperties"]}
+                    self.assertEqual(props[member]["defaultValue"], m.group(1).strip(), (tag, cls, member))
+                else:
+                    meths = {x["name"]: x for x in parsed["methods"] + parsed["staticMethods"]
+                             + parsed["protectedMethods"]}
+                    if m is None:
+                        self.assertNotIn(member, meths, (tag, cls, member))
+                        continue
+                    want = ", ".join(" ".join(p.split()) for p in m.group(1).split(",")) if m.group(1).strip() else ""
+                    have = meths[member]["signature"]
+                    self.assertTrue(have.endswith("%s (%s)" % (member, want)), (tag, have, want))
+                checked += 1
+        self.assertGreaterEqual(checked, 9)
+
+    def test_known_facts(self):
+        api_index = p19_api.api_index
+        vws = {}
+        for tag in ("v1.8.0.13", "v1.9.0.37"):
+            rel = "Game/generated/Vehicle/VehicleWheeledSimulation.c"
+            c = {x["name"]: x for x in api_index.parse_file(rel, self.show(tag, rel))}["VehicleWheeledSimulation"]
+            vws[tag] = {m["name"] for m in c["methods"]}
+        self.assertEqual(vws["v1.9.0.37"] - vws["v1.8.0.13"], {
+            "GetHandbrake", "EngineGetRPMRedline", "UpdateEngineConfiguration", "UpdateClutchConfiguration",
+            "UpdateIADConfiguration", "UpdateDiffConfiguration", "UpdateWheelConfiguration",
+            "UpdateSuspensionConfiguration", "UpdateTyreConfiguration"})
 
 
 class TsvGuardTests(unittest.TestCase):

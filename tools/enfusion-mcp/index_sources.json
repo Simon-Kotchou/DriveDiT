@@ -1,0 +1,10 @@
+{
+  "schema": "dd-mcp-index-sources/1",
+  "about": "Which official script dump an MCP index of each pin is built from (api_index.py build; the gate checks the stamp against it). The tag must equal v<engine_version_expected> of the pin's engine sidecar, and the tag must resolve to this commit in the dump clone. Commits read 2026-11-05 from program/1_9/work/dl/sd_stable (G19_0_STATIC_1.9.0.37 2).",
+  "dump": {"name": "Arma-Reforger-Script-Diff", "url": "https://github.com/BohemiaInteractive/Arma-Reforger-Script-Diff"},
+  "pins": {
+    "1.9.0.37": {"tag": "v1.9.0.37", "commit": "4317af710d2f748626e7a5e205e0990546a799e5"},
+    "1.8.0.13": {"tag": "v1.8.0.13", "commit": "3d77cc212d5cda9922daf5f45635c7300d2d4cce"},
+    "1.8.0.13-cold": {"tag": "v1.8.0.13", "commit": "3d77cc212d5cda9922daf5f45635c7300d2d4cce"}
+  }
+}

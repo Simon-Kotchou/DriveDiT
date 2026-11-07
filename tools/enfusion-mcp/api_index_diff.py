@@ -91,14 +91,18 @@ def _norm(s: str) -> str:
 
 
 def members(cls: dict) -> dict:
-    """{member name: declaration} (overloads joined, sorted) of methods of every kind and member variables."""
+    """{member name: declaration} (overloads joined, sorted) of methods of every kind and member variables. Method
+    signatures keep their default literals ("0 0 0") and member variables their initializers."""
     out = {}
     for key in ("methods", "protectedMethods", "staticMethods"):
         for m in cls.get(key) or []:
             out.setdefault(m["name"], set()).add(_norm(m.get("signature")))
     for key in ("properties", "protectedProperties"):
         for p in cls.get(key) or []:
-            out.setdefault(p["name"], set()).add(_norm("%s %s" % (p.get("type"), p["name"])))
+            decl = "%s %s" % (p.get("type"), p["name"])
+            if p.get("defaultValue"):
+                decl += " = %s" % p["defaultValue"]   # an initializer change is a declaration change
+            out.setdefault(p["name"], set()).add(_norm(decl))
     return {k: " | ".join(sorted(v)) for k, v in out.items()}
 
 

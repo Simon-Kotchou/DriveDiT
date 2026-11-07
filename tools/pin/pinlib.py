@@ -635,6 +635,84 @@ def parse_sha256sums(data: bytes) -> dict:
     return sums
 
 
+# --------------------------------------------------------------------------- launch evidence (DD-14a)
+
+# A Workbench or client start writes <profile>\logs\logs_<local time>\console.log. Its second line is
+# "Log <path> started at <local> (<YYYY-MM-DD HH:MM:SS> UTC)", and within its first few KiB (about 17 KiB, measured)
+# come the CLI Params line (-dcLaunchId), the working directory and "Creating game instance(...), version X". The
+# freeze check and the MCP endpoint handshake read these heads to tie a launch id to a real start and its build.
+LOG_HEAD_BYTES = 256 * 1024
+_LOG_START_RE = re.compile(r"started at [0-9-]{10} [0-9:]{8} \(([0-9]{4})-([0-9]{2})-([0-9]{2}) ([0-9]{2}):([0-9]{2}):"
+                           r"([0-9]{2}) UTC\)")
+_LOG_INSTANCE_RE = re.compile(r"Creating game instance\([^)]*\), version (\S+?)(?: built (.*?))?\.?\s*$")
+_LOG_CWD_RE = re.compile(r"Current working directory: '([^']*)'")
+_ISO_UTC_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$")
+
+
+def iso_utc_to_unix(text):
+    """'YYYY-MM-DDTHH:MM:SSZ' -> Unix seconds, or None."""
+    m = _ISO_UTC_RE.match(text or "") if isinstance(text, str) else None
+    if not m:
+        return None
+    try:
+        return int(_dt.datetime(*map(int, m.groups()), tzinfo=_dt.timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+def read_launch_log(path: str):
+    """{path, start_unix, cli, version, built, cwd} from the head of a console.log, or None if unreadable."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(LOG_HEAD_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    out = {"path": path, "start_unix": None, "cli": None, "version": None, "built": None, "cwd": None}
+    for line in head.splitlines():
+        if out["start_unix"] is None:
+            m = _LOG_START_RE.search(line)
+            if m:
+                out["start_unix"] = int(_dt.datetime(*map(int, m.groups()), tzinfo=_dt.timezone.utc).timestamp())
+        if out["cli"] is None and "CLI Params:" in line:
+            out["cli"] = line.split("CLI Params:", 1)[1].strip()
+        if out["cwd"] is None:
+            m = _LOG_CWD_RE.search(line)
+            if m:
+                out["cwd"] = m.group(1)
+        if out["version"] is None:
+            m = _LOG_INSTANCE_RE.search(line)
+            if m:
+                out["version"], out["built"] = m.group(1), m.group(2)
+    return out
+
+
+def launch_logs(profile_wsl: str, launch_id: str, not_before_unix=None) -> list:
+    """Every console.log under <profile>/logs/logs_*/ whose CLI Params line carries -dcLaunchId <launch_id> (and, with
+    not_before_unix, whose header start time is not earlier), oldest first. Only log dirs modified within a minute of
+    not_before_unix or later are opened, and only their heads are read."""
+    logs = os.path.join(profile_wsl, "logs")
+    try:
+        names = sorted(d for d in os.listdir(logs) if d.startswith("logs_"))
+    except OSError:
+        return []
+    want = re.compile(r"(^|\s)-dcLaunchId %s(\s|$)" % re.escape(launch_id))
+    found = []
+    for d in names:
+        full = os.path.join(logs, d)
+        try:
+            if not_before_unix is not None and os.stat(full).st_mtime < not_before_unix - 60:
+                continue
+        except OSError:
+            continue
+        info = read_launch_log(os.path.join(full, "console.log"))
+        if not info or not info["cli"] or not want.search(info["cli"]):
+            continue
+        if not_before_unix is not None and (info["start_unix"] is None or info["start_unix"] < not_before_unix):
+            continue
+        found.append(info)
+    return found
+
+
 def sidecar_path(pin_dir: str, pin_id: str, kind: str) -> str:
     """<pin dir>/pin_<id>.<kind>.json for kind build_key or engine."""
     if kind not in ("build_key", "engine"):

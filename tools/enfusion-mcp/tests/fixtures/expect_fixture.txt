@@ -1,8 +1,8 @@
-# fixture expectations (api_index_diff.py)
-class-added VehicleWheelEffectComponent
-parent-changed ScriptCamera GenericEntity GenericCameraEntity
-member-added VehicleWheeledSimulation GetHandbrake UpdateTyreConfiguration
-member-removed TestHarness GetNSuites
-unchanged VehicleWheeledSimulation GetSteering SetSteering SetBreak GetSpeedKmh
-unchanged TestHarness ActiveSuite
+# synthetic fixture expectations (api_index_diff.py)
+class-added ZxWheelFx
+parent-changed ZxCamera ZxEntity ZxCameraEntity
+member-added ZxCarSim GetParkBrake UpdateTyres
+member-removed ZxHarness CountSuites
+unchanged ZxCarSim GetSteer SetSteer SetBrakes GetSpeed
+unchanged ZxHarness CurrentSuite
 planned tools/enfusion-mcp/tests/fixtures/planned_fixture.txt

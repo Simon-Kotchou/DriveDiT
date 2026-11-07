@@ -16,11 +16,14 @@ The wrapper (enfusion-mcp-wsl.sh, mcp_pin.py) serves <mcp root>/pins/<pin id>/da
 that pin and its build_key, so a 1.8 index can never answer for a 1.9 pin.
 
     python3 -I -B api_index.py build --dump-git /mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable \
-        --tag v1.9.0.37 --pin-id 1.9.0.37 --out /mnt/e/drivedit_realign/mcp/pins/1.9.0.37/data \
+        --pin-id 1.9.0.37 --out /mnt/e/drivedit_realign/mcp/pins/1.9.0.37/data \
         --shared /mnt/e/drivedit_realign/mcp/data --dry-run          # then --apply
 
-The dump is read with `git ls-tree` and `git cat-file --batch` at the tag (never a checkout); --dump-dir reads an
-extracted scripts/ tree instead. The parser is a declaration scanner, not a compiler: classes (parent from ':' or
+Provenance (Codex round 1): index_sources.json maps each pin id to a dump tag and its commit. A build refuses unless
+the pin is mapped, its engine sidecar's engine_version_expected gives the same tag (v<version>), and the tag resolves
+to the mapped commit in the clone; the stamp records them, and mcp_gate.py checks the stamp against the map again.
+So a 1.8 dump can never be stamped as a 1.9 pin. The dump is read with `git ls-tree` and `git cat-file --batch` at
+the tag (never a checkout). The index is written to a temp dir and renamed into place. The parser is a declaration scanner, not a compiler: classes (parent from ':' or
 'extends'), methods (multi-line declarations joined; public, protected/private, static), member variables and enums,
 with their '//!' doc lines. Bodies are skipped by brace depth.
 
@@ -121,9 +124,11 @@ def read_tree_dir(root: str):
 
 
 def _blank_strings_and_comments(text: str):
-    """(code, docs): code with comments and string contents blanked (newlines kept, so line numbers hold); docs maps
-    a line number to its '//!' doc text."""
-    out, docs = [], {}
+    """(masked, raw, docs). masked: comments and string contents blanked, for the structure (braces, parentheses,
+    '=' and ';' inside a string never count). raw: only comments blanked, string literals kept, so declarations and
+    their defaults ("0 0 0") are taken from it. Both keep every character position and newline, so a span found in
+    masked is the same span in raw. docs maps a line number to its '//!' doc text."""
+    masked, raw, docs = [], [], {}
     i, n, line = 0, len(text), 1
     while i < n:
         c = text[i]
@@ -132,13 +137,16 @@ def _blank_strings_and_comments(text: str):
             j = n if j < 0 else j
             if text.startswith("//!", i):
                 docs.setdefault(line, []).append(text[i + 3:j].strip())
-            out.append(" " * (j - i))
+            masked.append(" " * (j - i))
+            raw.append(" " * (j - i))
             i = j
         elif c == "/" and text.startswith("/*", i):
             j = text.find("*/", i + 2)
             j = n if j < 0 else j + 2
             chunk = text[i:j]
-            out.append("".join("\n" if ch == "\n" else " " for ch in chunk))
+            blank = "".join("\n" if ch == "\n" else " " for ch in chunk)
+            masked.append(blank)
+            raw.append(blank)
             line += chunk.count("\n")
             i = j
         elif c == '"':
@@ -146,14 +154,16 @@ def _blank_strings_and_comments(text: str):
             while j < n and text[j] != '"' and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
             j = min(j + 1, n)
-            out.append('"' + " " * max(0, j - i - 2) + '"')
+            masked.append('"' + " " * max(0, j - i - 2) + ('"' if j - i >= 2 else ""))
+            raw.append(text[i:j])
             i = j
         else:
             if c == "\n":
                 line += 1
-            out.append(c)
+            masked.append(c)
+            raw.append(c)
             i += 1
-    return "".join(out), docs
+    return "".join(masked), "".join(raw), docs
 
 
 def _doc_before(docs: dict, lineno: int) -> str:
@@ -164,63 +174,72 @@ def _doc_before(docs: dict, lineno: int) -> str:
     return " ".join(x for x in lines if x)
 
 
-def _split_params(params: str):
-    out, depth, cur = [], 0, ""
-    for ch in params:
-        if ch in "<([":
+def _norm(s: str) -> str:
+    return " ".join(s.split())
+
+
+def _split_params(params_m: str, params_r: str):
+    """ParamInfo list; commas and '=' are found in the masked text, names, types and defaults taken from the raw."""
+    spans, depth, start = [], 0, 0
+    for k, ch in enumerate(params_m):
+        if ch in "<([{":
             depth += 1
-        elif ch in ">)]":
+        elif ch in ">)]}":
             depth -= 1
-        if ch == "," and depth == 0:
-            out.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    if cur.strip():
-        out.append(cur)
+        elif ch == "," and depth == 0:
+            spans.append((start, k))
+            start = k + 1
+    spans.append((start, len(params_m)))
     res = []
-    for p in out:
-        p = " ".join(p.split())
-        default = ""
-        if "=" in p:
-            p, default = [x.strip() for x in p.split("=", 1)]
-        toks = p.split()
+    for a, b in spans:
+        pm, pr = params_m[a:b], params_r[a:b]
+        if not pm.strip():
+            continue
+        e = pm.find("=")
+        default = pr[e + 1:].strip() if e >= 0 else ""
+        toks = (pm[:e] if e >= 0 else pm).split()
         if not toks:
             continue
-        name = toks[-1].rstrip("[]")
-        res.append({"name": name, "type": " ".join(toks[:-1]), "defaultValue": default})
+        res.append({"name": toks[-1].rstrip("[]"), "type": " ".join(toks[:-1]), "defaultValue": default})
     return res
 
 
-def _method(decl: str, doc: str):
-    """MethodInfo from a declaration 'mods type Name(params) [const]', or None."""
-    decl = " ".join(decl.split())
-    decl = re.sub(r"^(?:\[[^\]]*\]\s*)+", "", decl)
-    m = re.match(r"^(?P<head>.*?)\b(?P<name>\w+)\s*\((?P<params>.*)\)\s*(?P<tail>[\w\s]*)$", decl)
+_METHOD_RE = re.compile(r"^(?P<head>.*?)\b(?P<name>\w+)\s*\((?P<params>.*)\)\s*(?P<tail>[\w\s]*)$", re.S)
+_PROPERTY_RE = re.compile(r"^(?P<head>[\w<>,\[\]\s]*?)\b(?P<name>\w+)\s*(?:\[[^\]]*\])?\s*(?P<init>=.*)?;\s*$", re.S)
+
+
+def _method(decl_m: str, decl_r: str, doc: str):
+    """(kind, MethodInfo) from a declaration 'mods type Name(params) [const]' (masked and raw), or (None, None)."""
+    m = _METHOD_RE.match(decl_m)
     if not m or m.group("name") in KEYWORDS:
         return None, None
-    head = m.group("head").strip()
+    head = _norm(m.group("head"))
     toks = head.split()
     if any(t in KEYWORDS for t in toks):
         return None, None
-    signature = "%s %s (%s)%s" % (head, m.group("name"), m.group("params").strip(),
-                                  (" " + m.group("tail").strip()) if m.group("tail").strip() else "")
+    params = _split_params(m.group("params"), decl_r[m.start("params"):m.end("params")])
+    plist = ", ".join(_norm("%s %s" % (p["type"], p["name"])) + (" = %s" % p["defaultValue"] if p["defaultValue"]
+                                                                  else "") for p in params)
+    tail = _norm(m.group("tail"))
+    signature = "%s %s (%s)%s" % (head, m.group("name"), plist, (" " + tail) if tail else "")
     kind = "static" if "static" in toks else ("protected" if ("protected" in toks or "private" in toks) else "public")
-    return kind, {"name": m.group("name"), "returnType": head, "signature": " ".join(signature.split()),
-                  "params": _split_params(m.group("params")), "description": doc}
+    return kind, {"name": m.group("name"), "returnType": head, "signature": signature.strip(), "params": params,
+                  "description": doc}
 
 
-def _property(decl: str, doc: str):
-    decl = " ".join(re.sub(r"^\s*(?:\[[^\]]*\]\s*)+", "", decl).split())
-    m = re.match(r"^(?P<head>[\w<>,\[\]\s]*?)\b(?P<name>\w+)\s*(?:\[[^\]]*\])?\s*(?:=.*)?;$", decl)
+def _property(decl_m: str, decl_r: str, doc: str):
+    """(kind, PropertyInfo) from a member variable 'mods type name [= init];' (masked and raw), or (None, None).
+    The initializer, which may hold parentheses ('= new Color(0, 0, 0, 1)'), is kept as defaultValue."""
+    m = _PROPERTY_RE.match(decl_m)
     if not m or not m.group("head").strip() or m.group("name") in KEYWORDS:
         return None, None
     toks = m.group("head").split()
     if any(t in KEYWORDS for t in toks):
         return None, None
     kind = "protected" if ("protected" in toks or "private" in toks) else "public"
-    return kind, {"name": m.group("name"), "type": " ".join(t for t in toks if t not in MODIFIERS) or m.group("head"),
-                  "description": doc}
+    default = decl_r[m.start("init") + 1:m.end("init")].strip() if m.group("init") else ""
+    return kind, {"name": m.group("name"), "type": " ".join(t for t in toks if t not in MODIFIERS) or _norm(
+        m.group("head")), "defaultValue": default, "description": doc}
 
 
 def _enum_values(body: str, docs: dict, first_line: int):
@@ -244,16 +263,19 @@ def parse_file(rel: str, text: str) -> list:
     source = "enfusion" if module in ENFUSION_MODULES else "arma"
     gm = GROUP_RE.search(text)
     group = gm.group(1) if gm else module
-    code, docs = _blank_strings_and_comments(text)
+    code, raw_code, docs = _blank_strings_and_comments(text)
     lines = code.split("\n")
+    raw_lines = raw_code.split("\n")
     out = []
     depth = 0
     cur = None              # the class being read
     pending = None          # a class/enum header seen, waiting for its '{'
-    acc, acc_line = "", 0   # a multi-line member declaration
+    acc, acc_r, acc_line = "", "", 0   # a multi-line member declaration, masked and raw (equal lengths)
     enum_acc = None
-    for lineno, line in enumerate(lines, 1):
-        stripped = line.strip()
+    for lineno, (line, line_r) in enumerate(zip(lines, raw_lines), 1):
+        lead = len(line) - len(line.lstrip())
+        end = len(line.rstrip())
+        stripped, stripped_r = line[lead:end], line_r[lead:end]
         if enum_acc is not None:
             enum_acc["body"] += line + "\n"
             depth += line.count("{") - line.count("}")
@@ -295,29 +317,37 @@ def parse_file(rel: str, text: str) -> list:
         if cur is not None and depth == 1 and pending is None:
             if acc:
                 acc += " " + stripped
+                acc_r += " " + stripped_r
             elif stripped and not stripped.startswith(("{", "}", "#")):
-                acc, acc_line = stripped, lineno
+                acc, acc_r, acc_line = stripped, stripped_r, lineno
             if acc:
                 opened = acc.count("(") - acc.count(")") + acc.count("[") - acc.count("]")
-                bare = re.sub(r"^(?:\[[^\]]*\]\s*)+", "", acc) if opened <= 0 else acc
+                pre = re.match(r"^(?:\[[^\]]*\]\s*)+", acc) if opened <= 0 else None
+                cut = pre.end() if pre else 0
+                bare, bare_r = acc[cut:], acc_r[cut:]
+                paren, eq = bare.find("("), bare.find("=")
                 if opened > 0:
                     pass                                    # a declaration or attribute that goes on
-                elif not bare:
-                    acc = ""                                # an attribute line; the member follows
-                elif "(" in bare:
-                    decl = bare.split("{", 1)[0].rstrip().rstrip(";").rstrip()
-                    kind, info = _method(decl, _doc_before(docs, acc_line))
+                elif not bare.strip():
+                    acc = acc_r = ""                        # an attribute line; the member follows
+                elif paren >= 0 and (eq < 0 or paren < eq):
+                    # a method: its parameter list comes before any '=' (an initializer with parentheses,
+                    # 'Color Black = new Color(...)', is a member variable)
+                    k = bare.find("{")
+                    decl = bare[:k] if k >= 0 else bare
+                    endk = len(decl.rstrip().rstrip(";").rstrip())
+                    kind, info = _method(decl[:endk], bare_r[:endk], _doc_before(docs, acc_line))
                     if info is not None:
                         cur[{"public": "methods", "protected": "protectedMethods", "static": "staticMethods"}[kind]] \
                             .append(info)
-                    acc = ""
-                elif bare.endswith(";"):
-                    kind, info = _property(bare, _doc_before(docs, acc_line))
+                    acc = acc_r = ""
+                elif bare.rstrip().endswith(";"):
+                    kind, info = _property(bare, bare_r, _doc_before(docs, acc_line))
                     if info is not None:
                         cur["properties" if kind == "public" else "protectedProperties"].append(info)
-                    acc = ""
+                    acc = acc_r = ""
                 elif "{" in bare or "}" in bare:
-                    acc = ""
+                    acc = acc_r = ""
         opens, closes = line.count("{"), line.count("}")
         if pending and opens:
             pending = None
@@ -327,7 +357,7 @@ def parse_file(rel: str, text: str) -> list:
             if cur is not None and closes and pending is None:
                 out.append(cur)
                 cur = None
-                acc = ""
+                acc = acc_r = ""
     if cur is not None:
         out.append(cur)
     return out
@@ -375,6 +405,49 @@ def render(index: dict) -> dict:
             "groups.json": _dump(index["groups"]), "hierarchy.json": _dump(index["hierarchy"])}
 
 
+SOURCES_SCHEMA = "dd-mcp-index-sources/1"
+DEFAULT_SOURCES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index_sources.json")
+
+
+def load_sources(path=None) -> dict:
+    """index_sources.json: {pin id: {tag, commit}}. ValueError when unreadable."""
+    path = path or DEFAULT_SOURCES
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read the index source map %s: %s" % (path, exc))
+    if not isinstance(data, dict) or data.get("schema") != SOURCES_SCHEMA or not isinstance(data.get("pins"), dict):
+        raise ValueError("%s is not a %s file" % (path, SOURCES_SCHEMA))
+    return data["pins"]
+
+
+def expected_source(pin_id: str, ident: dict, sources: dict) -> dict:
+    """{tag, commit} the index of pin_id must be built from. ValueError when the pin is not mapped, or when its
+    engine_version_expected is unknown or does not match the mapped tag (a 1.8 dump never stamps a 1.9 pin)."""
+    want = sources.get(pin_id)
+    if not isinstance(want, dict) or not want.get("tag") or not re.fullmatch(r"[0-9a-f]{40}", str(want.get("commit"))):
+        raise ValueError("pin %s has no entry in the index source map (index_sources.json)" % pin_id)
+    ver = ident.get("engine_version_expected")
+    if not ver:
+        raise ValueError("pin %s has no engine_version_expected (apply its engine sidecar, tools/pin/pin_sidecar.py "
+                         "engine), so the dump tag cannot be checked against the build" % pin_id)
+    if want["tag"] != "v" + ver:
+        raise ValueError("the source map names tag %s for pin %s, but the pin's engine reports %s (tag v%s)"
+                         % (want["tag"], pin_id, ver, ver))
+    return want
+
+
+def verify_source(pin_id: str, ident: dict, source, sources: dict) -> None:
+    """ValueError unless an index stamp's source is the dump tag and commit the map gives for this pin."""
+    want = expected_source(pin_id, ident, sources)
+    if not isinstance(source, dict) or source.get("kind") != "script-dump-git":
+        raise ValueError("the index was not built from the git script dump (source %r)" % (source,))
+    if (source.get("tag"), source.get("commit")) != (want["tag"], want["commit"]):
+        raise ValueError("the index was built from %s @ %s, but pin %s needs %s @ %s" % (
+            source.get("tag"), str(source.get("commit"))[:8], pin_id, want["tag"], want["commit"][:8]))
+
+
 def write_index(out_dir: str, blobs: dict, stamp: dict, shared, check_write_path, dry_run: bool) -> list:
     """Write <out>/api/* and INDEX_PIN.json, copy the shared dirs. The output dir must not exist yet (an index is
     built once per pin; rebuild into a new dir). Returns the planned paths."""
@@ -386,18 +459,35 @@ def write_index(out_dir: str, blobs: dict, stamp: dict, shared, check_write_path
         plan += [os.path.join(out_dir, d) + "/" for d in SHARED_DIRS]
     if dry_run:
         return plan
-    os.makedirs(os.path.join(out_dir, "api"))
-    for name, data in blobs.items():
-        with open(os.path.join(out_dir, "api", name), "xb") as fh:
-            fh.write(data)
-    if shared:
-        for d in SHARED_DIRS:
-            src = os.path.join(shared, d)
-            if os.path.isdir(src):
-                shutil.copytree(src, os.path.join(out_dir, d), symlinks=False)
-    with open(os.path.join(out_dir, "api", "INDEX_PIN.json"), "x", encoding="utf-8") as fh:
-        json.dump(stamp, fh, indent=2)
-        fh.write("\n")
+    # Built in a temp dir next to it and renamed into place: a killed build never leaves a partial index under the
+    # name the gate reads, and a leftover temp dir (unique name) never blocks a retry.
+    parent = os.path.dirname(out_dir)
+    os.makedirs(parent, exist_ok=True)
+    tmp = os.path.join(parent, ".%s.tmp-%d-%s" % (os.path.basename(out_dir), os.getpid(), os.urandom(3).hex()))
+    check_write_path(tmp)
+    try:
+        os.makedirs(os.path.join(tmp, "api"))
+        for name, data in blobs.items():
+            with open(os.path.join(tmp, "api", name), "xb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+        if shared:
+            for d in SHARED_DIRS:
+                src = os.path.join(shared, d)
+                if os.path.isdir(src):
+                    shutil.copytree(src, os.path.join(tmp, d), symlinks=False)
+        with open(os.path.join(tmp, "api", "INDEX_PIN.json"), "x", encoding="utf-8") as fh:
+            json.dump(stamp, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.path.lexists(out_dir):
+            raise ValueError("%s appeared during the build; not replaced" % out_dir)
+        os.rename(tmp, out_dir)
+    finally:
+        if os.path.lexists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
     return plan
 
 
@@ -407,34 +497,37 @@ def main(argv=None, write_roots=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
-    src = b.add_mutually_exclusive_group(required=True)
-    src.add_argument("--dump-git", metavar="REPO", help="a clone of Arma-Reforger-Script-Diff")
-    src.add_argument("--dump-dir", metavar="DIR", help="an extracted scripts/ tree")
-    b.add_argument("--tag", help="with --dump-git: the pin's tag, e.g. v1.9.0.37")
+    b.add_argument("--dump-git", metavar="REPO", required=True, help="a clone of Arma-Reforger-Script-Diff")
+    b.add_argument("--tag", help="optional: must equal the tag the source map gives for the pin")
     b.add_argument("--pin-id", required=True)
     b.add_argument("--pin-dir", default=pinlib.DEFAULT_PIN_DIR)
+    b.add_argument("--sources", default=None, help="the index source map (default %s)" % DEFAULT_SOURCES)
     b.add_argument("--out", required=True, help="the per-pin data dir, <mcp root>/pins/<pin id>/data")
     b.add_argument("--shared", default=None, help="data dir to copy patterns/, recipes/ and wiki/ from")
     mode = b.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     args = ap.parse_args(argv)
-    if args.dump_git and not args.tag:
-        print("api_index: --dump-git needs --tag", file=sys.stderr)
-        return 2
     try:
         pin_src = preflight.load_pin_by_id(os.path.abspath(pinlib.win_to_wsl(args.pin_dir)), args.pin_id)
         ident = preflight.pin_identity(pin_src)
         out = os.path.abspath(args.out)
-        if os.path.basename(os.path.dirname(out)) != args.pin_id:
+        if os.path.basename(os.path.dirname(out)) != args.pin_id or os.path.basename(out) != "data":
             raise pinlib.PinError("--out %s must be <mcp root>/pins/%s/data" % (out, args.pin_id))
-        if args.dump_git:
-            commit, files = read_tree_git(args.dump_git, args.tag)
-            source = {"kind": "script-dump-git", "repo": os.path.abspath(args.dump_git), "tag": args.tag,
-                      "commit": commit}
-        else:
-            files = read_tree_dir(args.dump_dir)
-            source = {"kind": "script-dump-dir", "dir": os.path.abspath(args.dump_dir)}
+        sources_path = args.sources or DEFAULT_SOURCES
+        want = expected_source(args.pin_id, ident, load_sources(sources_path))
+        if args.tag and args.tag != want["tag"]:
+            raise ValueError("--tag %s, but pin %s is built from %s (index source map)" % (args.tag, args.pin_id,
+                                                                                      want["tag"]))
+        commit, files = read_tree_git(args.dump_git, want["tag"])
+        if commit != want["commit"]:
+            raise ValueError("tag %s resolves to %s in %s, but the source map pins it to %s (a moved tag or another "
+                             "repo)" % (want["tag"], commit[:12], args.dump_git, want["commit"][:12]))
+        with open(sources_path, "rb") as fh:
+            sources_sha = hashlib.sha256(fh.read()).hexdigest()
+        source = {"kind": "script-dump-git", "repo": os.path.abspath(args.dump_git), "tag": want["tag"],
+                  "commit": commit, "verified": "tag commit equals the index source map; tag equals v<engine version>",
+                  "sources_sha256": sources_sha}
     except (pinlib.PinError, subprocess.CalledProcessError, OSError, ValueError) as exc:
         print("api_index: %s" % exc, file=sys.stderr)
         return 2

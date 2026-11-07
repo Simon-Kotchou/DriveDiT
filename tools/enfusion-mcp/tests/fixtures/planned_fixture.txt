@@ -1,2 +1,2 @@
-VehicleWheeledSimulation SetSteering GetSpeedKmh GetHandbrake
-VehicleWheelEffectComponent EnableSlidingTrack
+ZxCarSim SetSteer GetSpeed GetParkBrake
+ZxWheelFx EnableTracks

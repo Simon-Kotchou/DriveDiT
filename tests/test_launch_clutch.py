@@ -52,6 +52,9 @@ that Play's launches and a free decay, trimmed to the step columns the fit reads
   - Codex round 3's: light brake pulses downhill (its 624-case family against round 1's numbers in
     tests/fixtures/launch_clutch_19/round1_downhill.csv: no more openings per case, the speed after 30 s at most 10 %
     above), an upshift then a medium brake, and the brake sweep at both ends of brake_drop_rpm_per_s's range.
+  - Codex round 4's: braking slip beyond the assumed bound (a brake of 0.3 or more gets the full fall again; no stall
+    while brake x slip <= 2.4 m/s, and the plant's limit beyond it pinned), a coast after a clutch dip (c reaching 1
+    without a brake locks), a relaunch from a footbrake hold, and the coast test per episode.
   - check_play: a stopped start one callback before the first drive row, every callback number from there, and times
     from the covered times of the callbacks (timeslice_s), as the producer numbers them (Codex rounds 2 and 3: a
     truncated tail, a truncated launch of the real play and merged 3-step callbacks passed or were misjudged); the
@@ -73,13 +76,17 @@ TOLERANCE CHANGES SINCE ddca123 (DD-14d round 1), with the reasons (also in PR #
      above it in 12000 more).
   5. model.openings counts every opening (was: only with the throttle on): stricter.
   6. Stops: the end speed below 0.05 km/h (was == 0): a 3-step stop ends at 0.0003 km/h with the clutch open.
-  7. The coast test: under a brake of 0.5 or more the clutch may open, at most once per coast, and must re-couple with
-     no stall; under 0.1 and 0.3 it stays coupled (round 4: before, any brake opened it below 2550 rpm, unbounded).
+  7. The coast test, per coast episode (rounds 4 and 5): under a brake of 0.3 or more every complete coast opens
+     exactly once and is coupled again before the next one, a coast the run's end cuts off at most once; without a
+     brake and under 0.1 none opens (before round 4: any brake opened it below 2550 rpm, unbounded).
   8. Throttle pulses: the motion within 20 % of round 1 only where round 1 reached 5 km/h (on the 0.1 / 0.2 PRBS
      neither moves usefully: the engine makes about the rolling load's 5.6 Nm in first gear; on PRBS 0 / 0.2 slip
      creeps 0.0 .. 0.8 km/h against round 1's 0.4 .. 1.5).
   9. Downhill brake pulses: the speed after 30 s at most round 1's x 1.1 + 0.1 km/h (the 0.1 for cases that end at a
      standstill, 0.00 against 0.00).
+  10. Braking slip beyond the assumed bound (round 5): no stall asserted while brake x slip <= 2.4 m/s; beyond it the
+     plant moves a locked engine by the slip step at once, and the stalls there (brake x slip >= 3 m/s, as in round 3)
+     are pinned, not excluded. An open item of the PR.
 """
 
 import csv
@@ -1005,13 +1012,15 @@ class SlipStepTest(unittest.TestCase):
         # Codex round 2, HIGH: at c = 1 the clutch drags the engine about 965 rpm in one step when the wheels lock,
         # faster than a readback shows. A brake opens the clutch at once in any state when rpm - drop <= engage_rpm,
         # drop = brake_drop_rpm_per_s x min(brake / BRAKE_FULL_FALL_COMMAND, 1) x (the call's duration + BRAKE_LAG_S):
-        # with 1-step calls a full brake opens below 1100 + 29000 x 0.05 = 2550 rpm. Codex round 3, MEDIUM: a light
-        # brake cannot drag the engine that fast, so its drop is the brake's share of it (0.4: 1825 rpm), and a drop
-        # within the 200 rpm between engage_rpm and the lug rpm is left to the coupled floor at engage_rpm
+        # with 1-step calls a brake of BRAKE_LOCK_COMMAND (0.3) or more opens below 1100 + 29000 x 0.05 = 2550 rpm, as in
+        # round 3 (Codex round 4, HIGH: scaling medium brakes bet stall safety on the unmeasured braking slip). Codex round
+        # 3, MEDIUM: a light brake, assumed unable to lock the wheels, drags the engine at most brake / 0.8 of that (0.2:
+        # 1462.5 rpm), and a drop within the 200 rpm between engage_rpm and the lug rpm is left to the coupled floor
         horizon = STEP_DT + LaunchClutch.BRAKE_LAG_S
-        self.assertEqual(LaunchClutch.BRAKE_FULL_FALL_COMMAND, 0.8)
-        for brake, threshold in ((1.0, 2550.0), (0.8, 2550.0), (0.4, 1825.0), (0.2, 1462.5)):
-            self.assertAlmostEqual(1100.0 + 29000.0 * min(brake / 0.8, 1.0) * horizon, threshold, delta=1.0)
+        self.assertEqual((LaunchClutch.BRAKE_LOCK_COMMAND, LaunchClutch.BRAKE_FULL_FALL_COMMAND), (0.3, 0.8))
+        for brake, threshold in ((1.0, 2550.0), (0.6, 2550.0), (0.3, 2550.0), (0.29, 1625.6), (0.2, 1462.5)):
+            self.assertAlmostEqual(1100.0 + 29000.0 * (1.0 if brake >= 0.3 else brake / 0.8) * horizon, threshold,
+                                   delta=1.0)
             for rpm, opens in ((threshold - 2.0, True), (threshold + 2.0, False)):
                 lc = coupled(rpm)
                 self.assertEqual(hold(lc, rpm, throttle=0.0, brake=brake) == 0.0, opens, (brake, rpm))
@@ -1037,12 +1046,31 @@ class SlipStepTest(unittest.TestCase):
         # the default is the fit's clutch capacity over its engine inertia
         self.assertAlmostEqual(model.S105_19["clutch_nm"] / model.S105_19["j_kgm2"] * model.RPM_PER_RADS, 29000.0,
                                delta=100.0)
-        # BRAKE_FULL_FALL_COMMAND bounds the plant's coupled fall in first gear at every brake b: b x rpm per m/s x
-        # (2 m/s of braking slip, 8 x the fitted, + the e01 stops' largest 14.3 m/s2 per unit brake x the horizon)
+        # below BRAKE_LOCK_COMMAND the scaled fall bounds the plant's coupled fall in first gear for a brake that does
+        # not lock the wheels: b x rpm per m/s x (2 m/s of braking slip, 8 x the fitted, + the e01 stops' largest 14.3
+        # m/s2 per unit brake x the horizon)
         per_mps = 1000.0 / model.CARD_MPS_PER_KRPM[model.FIRST_GEAR]
-        for b in (0.05, 0.2, 0.5, 0.8, 1.0):
+        for b in (0.01, 0.05, 0.1, 0.2, 0.29):
             plant_fall = min(b * per_mps * (2.0 + 14.3 * horizon), 29000.0 * horizon)
-            self.assertGreaterEqual(29000.0 * min(b / 0.8, 1.0) * horizon, plant_fall, b)
+            self.assertGreaterEqual(29000.0 * b / 0.8 * horizon, plant_fall, b)
+
+    def test_a_coast_latches_when_c_reaches_1(self):
+        # Codex round 4, MEDIUM: c reaching 1 on the PI while coasting stayed unlocked, so the next light brake dumped
+        # it through the slipping branch. Without a brake, c reaching 1 locks too (coasting); the body-speed agreement
+        # still needs drive, and under a brake a slipping clutch opens
+        lc = slip()
+        lc.coupling = 0.99
+        lc.last_rpm = lc.last_mean_rpm = 2000.0
+        lc.history, lc.last_slice_s, lc.prev_slice_s = 3, STEP_DT, STEP_DT
+        self.assertEqual(hold(lc, 2000.0, throttle=0.0, driveline=2000.0), 1.0)
+        self.assertEqual((lc.locked, lc.lockups), (True, 1))
+        self.assertEqual(hold(lc, 2000.0, throttle=0.0, brake=0.01, driveline=2000.0), 1.0)   # stays coupled
+        lc = slip()
+        lc.coupling = 0.5
+        lc.last_rpm = lc.last_mean_rpm = 2000.0
+        lc.history = 3
+        hold(lc, 2000.0, throttle=0.0, driveline=2000.0, steps=2)
+        self.assertEqual(lc.agree_calls, 0)                           # no agreement without drive
 
     def test_lockup_needs_drive_and_two_agreeing_calls(self):
         lc = slip()
@@ -1317,6 +1345,32 @@ class CalibrationTest(unittest.TestCase):
         foot = play_rows(LaunchClutch(**analysis.card_launch_clutch()), phases={"move_check": 0.5},
                          anchor={"cmd_handbrake": 0.0, "cmd_brake": 1.0})
         self.assertTrue(analysis.check_play(foot, COMPLETE_HEADER)[1])
+        # Codex round 4, MEDIUM: a relaunch from a footbrake hold (throttle 0.5 to 15 km/h, full brake to rest, 0.1 s of
+        # hold, throttle 0.5 again) commands c = 0.00075 on its first drive row (the engine still above idle) and was
+        # refused; the clutch must be open at the anchor, and may engage from the first drive row on
+        state = {"phase": "drive", "stop_t": None, "release": None}
+
+        def stop_go(t, kmh):
+            if state["phase"] == "drive" and kmh >= 15.0:
+                state["phase"] = "brake"
+            if state["phase"] == "brake" and kmh < 0.01:
+                state["phase"], state["stop_t"] = "hold", t
+            if state["phase"] == "hold" and t >= state["stop_t"] + 0.1:
+                state["phase"], state["release"] = "relaunch", t
+            return (0.5, 0.0) if state["phase"] in ("drive", "relaunch") else (0.0, 1.0)
+
+        sim = model.drive(LaunchClutch(**analysis.card_launch_clutch()), stop_go, 10.0,
+                          policy=model.ShiftPolicy(first_only=True))
+        start = next(i for i, x in enumerate(sim) if x[0] > state["release"] + 1e-6)
+        relaunch = [dict(phase="move_check", segment="settle" if i == 0 else "excite", physics_step=100 + i,
+                         cmd_throttle=x[8], cmd_brake=x[9], cmd_handbrake=0.0, cmd_gear=2.0, cur_gear=2.0,
+                         cmd_clutch=x[1], input_post_clutch=x[1], engine_on=float(x[3]), rpm=x[2], speed_kmh=x[4],
+                         vel_l_z=x[4] / 3.6, timeslice_s=STEP_DT, world_time_ms=x[0] * 1000.0)
+                    for i, x in enumerate(sim[start - 1:])]
+        self.assertEqual((relaunch[0]["cmd_clutch"], relaunch[0]["cmd_brake"]), (0.0, 1.0))
+        self.assertGreater(relaunch[1]["cmd_clutch"], 0.0)
+        lines, passed = analysis.check_play(relaunch, COMPLETE_HEADER)
+        self.assertTrue(passed, lines)
 
     def test_check_play_checks_the_speed_hold_launches(self):
         # Codex round 3: the accel launches of steer_prbs, steer_reversal and brake_<v> (the speed hold from a stopped
@@ -1516,31 +1570,42 @@ class SlipAcceptanceTest(unittest.TestCase):
                 self.assertGreaterEqual(max(gears), 4, (calls, throttle))
                 first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
                 self.assertEqual(min(r[1] for r in rows[first:]), 1.0, (calls, throttle))
-        # a coast down through a downshift (throttle off at 30 km/h, on again at 15): without a brake and under a
-        # light one (0.1, 0.3) it stays coupled (engine braking); under 0.5 and 1.0 it opens at most once per coast (the
-        # brake rule) and re-couples on the throttle; never a stall
-        for brake, most in ((0.0, 0), (0.1, 0), (0.3, 0), (0.5, 1), (1.0, 1)):
-            state = {"coast": False, "coasts": 0}
+        # a coast down through a downshift (throttle off at 30 km/h, on again at 15), checked per coast episode (Codex
+        # round 4, LOW): without a brake and under a light one (0.1) every coast stays coupled (engine braking); under
+        # 0.3, 0.5 and 1.0 every complete coast opens exactly once (the brake rule) and the clutch is coupled again
+        # before the next coast starts; a coast the run's end cuts off opens at most once; never a stall
+        for brake, most in ((0.0, 0), (0.1, 0), (0.3, 1), (0.5, 1), (1.0, 1)):
+            state = {"coast": False, "marks": []}
 
             def schedule(t, kmh, state=state, brake=brake):
                 if kmh >= 30.0 and not state["coast"]:
                     state["coast"] = True
-                    state["coasts"] += 1
-                elif kmh <= 15.0:
+                    state["marks"].append(("coast", t))
+                elif kmh <= 15.0 and state["coast"]:
                     state["coast"] = False
+                    state["marks"].append(("drive", t))
                 return (0.0, brake) if state["coast"] else (0.4, 0.0)
 
             rows = model.drive(self.clutch(), schedule, 30.0)
             m = model.metrics(rows)
-            first = next(i for i, r in enumerate(rows) if r[1] >= 1.0)
             self.assertGreater(sum(1 for a, b in zip(rows, rows[1:]) if b[7] < a[7]), 0, brake)   # it shifted down
             self.assertEqual(m["stalls"], 0, brake)
             self.assertGreaterEqual(m["min_rpm"], self.floor, brake)
-            self.assertGreaterEqual(state["coasts"], 2, brake)
-            self.assertLessEqual(model.openings(rows[first:]), most * state["coasts"], brake)
-            if most:
-                self.assertGreater(model.openings(rows[first:]), 0, brake)
-            self.assertEqual(rows[-1][1], 1.0, brake)                                 # coupled again
+            coasts = [t for kind, t in state["marks"] if kind == "coast"]
+            self.assertGreaterEqual(len(coasts), 2, brake)
+            drives = [t for kind, t in state["marks"] if kind == "drive"]
+            complete = 0
+            for k, start in enumerate(coasts):
+                end = coasts[k + 1] if k + 1 < len(coasts) else rows[-1][0] + STEP_DT
+                episode = [r for r in rows if start <= r[0] < end]
+                label = (brake, k)
+                if any(start < t < end for t in drives):                             # a complete coast
+                    complete += 1
+                    self.assertEqual(model.openings(episode), most, label)
+                    self.assertEqual(episode[-1][1], 1.0, label)                     # coupled again
+                else:
+                    self.assertLessEqual(model.openings(episode), most, label)
+            self.assertGreaterEqual(complete, 1, brake)
 
     def test_gear_scripted_full_sequence(self):
         # Codex round 1, MEDIUM: E-01's gear_scripted (m_sGearSequence 2,3,4,3,2, m_fGearHoldS 3 s, throttle 0.4, no
@@ -1760,6 +1825,63 @@ class CodexAttackTest(unittest.TestCase):
             total += opens
         self.assertEqual(total, sum(v[0] for v in reference.values()))    # 464: the same openings as round 1
 
+    def test_braking_slip_beyond_the_assumed_bound(self):
+        # Codex round 4, HIGH: coupled at 13 km/h in first gear, brake 0.6 at 0.3 s, timing A, braking slip 4 m/s (twice
+        # round 4's assumed bound) stalled at 337 rpm with the brake-scaled fall; round 3 survived. A brake of 0.3 or
+        # more gets the full fall again. The sweep: brakes 0.3 / 0.6 / 1.0 at 0.3 s from 5 .. 40 km/h in first gear,
+        # braking slip 0.25 .. 4 m/s, callbacks of 1, 2, 3 and mixed steps, timings U and A (1440 cases): no stall while
+        # brake x slip <= 2.4 m/s. Beyond it the plant's locked branch applies the slip step to the engine at once
+        # (w = (v - brake x slip) / g), faster than its own clutch could drag it, and a few cases stall exactly as in
+        # round 3 (07c57da); the assertion below pins that boundary (DD-14d round 5, an open item of the PR)
+        def coupled_brake(speed, brake, slip_mps, calls, timing):
+            lc = LaunchClutch(**self.slip)
+            lc.coupling, lc.locked = 1.0, True
+            plant = model.Plant(rpm=speed / 3.6 / 1.54 * 1000.0, speed_mps=speed / 3.6, locked=True,
+                                params={"brake_slip_mps": slip_mps})
+            rows = model.drive(lc, lambda t, kmh: (0.0, brake if t >= 0.3 else 0.0), 2.0, plant=plant, calls=calls,
+                               timing=timing, gear_fn=lambda t, kmh: model.FIRST_GEAR)
+            return stalls_after(rows), min(r[6] for r in rows)
+
+        stalls, low = coupled_brake(13, 0.6, 4.0, (1,), "A")
+        self.assertEqual(stalls, 0)
+        self.assertGreater(low, 1000.0)                               # round 3: 1004 rpm; round 4: 337, a stall
+        stalled = []
+        for case in itertools.product((5, 8, 10, 13, 15, 16, 17, 18, 20, 25, 30, 40), (0.3, 0.6, 1.0),
+                                      (0.25, 1.0, 2.0, 3.0, 4.0), (CALLS["1"], CALLS["2"], CALLS["3"], CALLS["mixed"]),
+                                      ("U", "A")):
+            stalls, low = coupled_brake(*case)
+            if case[1] * case[2] <= 2.4:
+                self.assertEqual(stalls, 0, case)
+                self.assertGreaterEqual(low, self.floor, case)
+            elif stalls:
+                stalled.append(case)
+        self.assertTrue(all(c[1] * c[2] >= 3.0 for c in stalled), stalled)
+
+    def test_a_coast_after_a_dip_stays_coupled(self):
+        # Codex round 4, MEDIUM: coasting from 15 km/h in first gear on -5 %, a commanded clutch dip at 0.1 .. 0.2 s,
+        # then brake 0.01 from 2 s: the PI re-coupled to c = 1 at 1.2 s but stayed unlocked, so the brake dumped it
+        # (12.53 km/h after 5 s, round 1: 9.31). c reaching 1 without a brake now locks
+        lc = LaunchClutch(**self.slip)
+        lc.coupling, lc.locked = 1.0, True
+        clock = {"t": 0.0}
+        step = lc.step
+
+        def dipped(dt, in_gear, handbrake, rpm, on, commanded, dip, *rest):
+            if 0.1 - 1e-6 <= clock["t"] < 0.2 - 1e-6:
+                commanded, dip = 0.0, True
+            clock["t"] += dt
+            return step(dt, in_gear, handbrake, rpm, on, commanded, dip, *rest)
+
+        lc.step = dipped
+        rows = model.drive(lc, lambda t, kmh: (0.0, 0.0 if t < 2.0 else 0.01), 5.0, gear_fn=lambda t, kmh: 2,
+                           plant=model.Plant(rpm=15 / 3.6 / 1.54 * 1000.0, speed_mps=15 / 3.6, locked=True,
+                                             grade=-0.05))
+        self.assertEqual(model.openings(rows), 1)                     # the commanded dip only
+        self.assertEqual(stalls_after(rows), 0)
+        self.assertAlmostEqual(rows[-1][4], 9.31, delta=0.05)
+        self.assertTrue(lc.locked)
+        self.assertEqual(rows[-1][1], 1.0)
+
     def test_upshift_then_a_medium_brake(self):
         # DD-14d round 4: a scaled brake must still see an upshift's synchronisation drop (a 9 km/h upshift into third
         # lands at about 950 rpm): inside the wait the rule adds the fall to the new gear's driveline rpm. Brakes 0.1 ..
@@ -1835,13 +1957,14 @@ class SlipTiesTest(unittest.TestCase):
                 "m_fLastSliceS; m_fLastSliceS = slice; m_fCallSteps = Math.Max(Math.Max(slice / "
                 "DC_LaunchClutchConfig.GAIN_STEP_S, 1), m_fCallSteps - DC_LaunchClutchConfig.CALL_STEPS_DECAY); bool "
                 "syncing = m_fSyncLeftS > 0; bool guarded = (braking && brake >= "
-                "DC_LaunchClutchConfig.BRAKE_FULL_FALL_COMMAND) || !syncing; m_fSyncLeftS = Math.Max(m_fSyncLeftS - "
+                "DC_LaunchClutchConfig.BRAKE_LOCK_COMMAND) || !syncing; m_fSyncLeftS = Math.Max(m_fSyncLeftS - "
                 "slice, 0); float "
                 "predicted = rpm + DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_CALLS * slice * Math.Min(rate, 0);",
                 "if (!driving) { Open(); return; }",
                 "if (rpm < m_Config.m_fStallGuardRpm) { if (m_fCoupling > 0) m_iGuardDrops++; Open(); return; }",
-                "float share = Math.Min(brake / DC_LaunchClutchConfig.BRAKE_FULL_FALL_COMMAND, 1); float landing = "
-                "rpm; if (syncing) { if (drivelineRpm > 0) landing = Math.Min(rpm, drivelineRpm); else share = 1; } "
+                "float share = 1; if (brake < DC_LaunchClutchConfig.BRAKE_LOCK_COMMAND) share = brake / "
+                "DC_LaunchClutchConfig.BRAKE_FULL_FALL_COMMAND; float landing = rpm; if (syncing) { if (drivelineRpm "
+                "> 0) landing = Math.Min(rpm, drivelineRpm); else share = 1; } "
                 "float drop = rpm - landing + m_Config.m_fBrakeDropRpmPerS * share * (slice + "
                 "DC_LaunchClutchConfig.BRAKE_LAG_S); if (braking && drop > engage - m_Config.GetLugRpm() && rpm - drop "
                 "<= engage) { Open(); return; }",
@@ -1857,7 +1980,7 @@ class SlipTiesTest(unittest.TestCase):
                 "highest);",
                 "if (drive && m_fCoupling > 0 && drivelineRpm > 0 && Math.AbsFloat(rpm - drivelineRpm) <= "
                 "m_Config.m_fLockToleranceRpm) m_iAgreeCalls++; else m_iAgreeCalls = 0; if (m_iAgreeCalls >= "
-                "DC_LaunchClutchConfig.LOCK_AGREE_CALLS || (drive && m_fCoupling >= 1)) { m_bLocked = true; m_fCoupling "
+                "DC_LaunchClutchConfig.LOCK_AGREE_CALLS || (!braking && m_fCoupling >= 1)) { m_bLocked = true; m_fCoupling "
                 "= 1; m_iLockups++; }"):
             self.assertIn(statement, body)
         self.assertNotIn("ForgetRpm", body)                          # the history stays across an upshift
@@ -1865,7 +1988,7 @@ class SlipTiesTest(unittest.TestCase):
                       class_method(self.helper, "DC_LaunchClutch", "Open"))
         consts = enforce_constants(self.helper, "DC_LaunchClutchConfig")
         for name in ("RELEASE_LOOKAHEAD_CALLS", "RELEASE_LOOKAHEAD_ENGAGE_FACTOR", "SYNC_S", "LUG_MARGIN_RPM",
-                     "DROP_GUARD_RPM_PER_S", "BRAKE_LAG_S", "BRAKE_FULL_FALL_COMMAND", "GAIN_STEP_S",
+                     "DROP_GUARD_RPM_PER_S", "BRAKE_LAG_S", "BRAKE_LOCK_COMMAND", "BRAKE_FULL_FALL_COMMAND", "GAIN_STEP_S",
                      "CALL_STEPS_DECAY"):
             self.assertEqual(consts[name], getattr(LaunchClutch, name), name)
         self.assertEqual(consts["DEFAULT_BRAKE_DROP_RPM_PER_S"], LaunchClutch.DEFAULTS["brake_drop_rpm_per_s"])

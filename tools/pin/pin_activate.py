@@ -11,6 +11,8 @@ It refuses (and changes nothing) unless:
   - PIN_ID is a valid pin id and <pin dir>/pin_<id>.json is a regular file (not a symlink) holding that pin_id;
   - no other activation holds <pin dir>/ACTIVE.lock (created with O_EXCL; held from reading the old ACTIVE to the
     read-back, so switches are serialized; a lock left by a killed run is removed by hand);
+  - the pin is not a channel-experimental pin (DD-14a; refused with exit 1 before anything is written);
+  - its sidecars, if any (pin_<id>.build_key.json, pin_<id>.engine.json), are valid for exactly that pin file;
   - the full preflight check of that pin passes against the live installs it names, with no waivers. That includes
     <app>.launch_path: the pin must have been made from the installs the launchers start. A pin that does not match
     what Steam has installed cannot be activated, so a switch to 1.9 needs Steam to have installed 1.9 and a pin
@@ -125,13 +127,23 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     try:
         try:
             src = preflight.load_pin_by_id(pin_dir, new, dir_fd=dir_fd)
+            ident = preflight.pin_identity(src, dir_fd=dir_fd)
+        except pinlib.PinError as exc:
+            print("pin_activate: %s" % exc, file=sys.stderr)
+            return 2
+        if ident["channel"] == "experimental":
+            # Before the lock: a refused activation writes nothing at all.
+            print("pin_activate: %s is a channel-experimental pin; it is never activated, so no production launcher "
+                  "can start Experimental (use it with preflight --pin). Nothing written." % new, file=sys.stderr)
+            return 1
+        try:
             pinlib.create_lock_at(dir_fd, pinlib.ACTIVE_LOCK_NAME, "pid %d %s %s" % (
                 os.getpid(), who(), pinlib.utc_iso(pinlib.utc_now())), shown=lock)
         except pinlib.PinError as exc:
             print("pin_activate: %s" % exc, file=sys.stderr)
             return 2
         try:
-            return _activate_locked(dir_fd, pin_dir, new, src)
+            return _activate_locked(dir_fd, pin_dir, new, src, ident)
         finally:
             try:
                 pinlib.remove_lock_at(dir_fd, pinlib.ACTIVE_LOCK_NAME)
@@ -142,7 +154,7 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
         os.close(dir_fd)
 
 
-def _activate_locked(dir_fd: int, pin_dir: str, new: str, src: dict) -> int:
+def _activate_locked(dir_fd: int, pin_dir: str, new: str, src: dict, ident=None) -> int:
     active = os.path.join(pin_dir, pinlib.ACTIVE_NAME)
     log = os.path.join(pin_dir, pinlib.ACTIVE_LOG_NAME)
     try:
@@ -158,8 +170,12 @@ def _activate_locked(dir_fd: int, pin_dir: str, new: str, src: dict) -> int:
         return 2
 
     print("activate %s: %s (sha256 %s); ACTIVE now names %s" % (new, src["path"], src["sha256"], old))
-    acf_paths, roots = preflight.pinned_paths(src["pin"])
-    checks, _ = preflight.run_checks(src["pin"], acf_paths, roots)
+    if ident is None:
+        ident = preflight.pin_identity(src, dir_fd=dir_fd)
+    # The pin's own launch path: a cold pin is checked against its copy, a stable pin against LAUNCH_PATHS.
+    checks, _ = preflight.full_checks(src, ident)
+    if ident["build_key"]:
+        print("BUILD  build_key %s (from %s)" % (ident["build_key"], ident["build_key_source"]))
     failed = preflight.print_report(checks)
     if failed:
         print("RESULT: REFUSED (pin %s): %d check(s) failed: %s"

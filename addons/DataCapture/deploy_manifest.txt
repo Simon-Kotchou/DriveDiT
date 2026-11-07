@@ -48,6 +48,15 @@ script src/enfusion/datacapture/DC_ProbeFiducial.c
 script src/enfusion/datacapture/DC_ProbeImages.c
 script src/enfusion/datacapture/DC_ProbeMarkers.c
 script src/enfusion/datacapture/DC_RoadDump.c
+# DD-14b: the G19-1 steering probes e21 (S1 self-steer, CC-07 a/b/c), e22 (CC-07 step 0 and d) and e23 (S2 steering
+# steps, CC-08) on DC_Probes_Arland, with their wheel-angle candidates and the runtime site search. Every engine member
+# they call exists in 1.8.0.13 and 1.9.0.37 (no 1.9-only overlay file)
+script src/enfusion/datacapture/DC_SteerChannels.c
+script src/enfusion/datacapture/DC_SteerSites.c
+script src/enfusion/datacapture/DC_ProbeSteerBase.c
+script src/enfusion/datacapture/DC_ProbeSelfSteer.c
+script src/enfusion/datacapture/DC_ProbeSteerLoad.c
+script src/enfusion/datacapture/DC_ProbeSteerSteps.c
 
 # DC_Arland: the dc-2.0 capture session (DD-4-min). It reuses DC_LaunchGuard, DC_ProbeCsv, DC_RigR1 and DC_Fiducial
 # of the probe kit above.

@@ -33,7 +33,7 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    }
   }
   DC_ProbeRunner "{DC4A50B300000001}" {
-   m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e05,e06a"
+   m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e05,e06a,e21,e22,e23"
    m_sEgoName "DC_Ego"
    m_sMapId "arland"
    m_sTerrain "Arland"
@@ -182,6 +182,70 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fAabbMinY -500
    m_fAabbMaxY 2000
    m_iCapSuspect 64
+  }
+  DC_ProbeSelfSteer "{DC4A50B300000007}" {
+   m_sFlatSpeedsKmh "20,40"
+   m_fFlatHeldM 200
+   m_fFlatNocallM 200
+   m_fSpeedSettleS 2
+   m_bAssistVariant 1
+   m_iAssistVariantMode 0
+   m_fAssistHeldM 100
+   m_fAssistNocallM 100
+   m_bCross 1
+   m_sCrossSpeedsKmh "20,40"
+   m_fCrossHeldM 100
+   m_fCrossNocallM 100
+   m_fCrossFallbackM 60
+   m_fCrossRunupM 75
+   m_fCrossStopM 35
+   m_fCrossMin 0.05
+   m_fCrossMax 0.12
+   m_fCrossTarget 0.065
+   m_iCrossSide 1
+   m_fCrossHalfWidthM 8
+   m_fCrossGradeMax 0.02
+   m_fCrossGradeWindowMax 0.035
+   m_fCrossGradeWindowMaxAll 0.06
+   m_fCrossAbsMaxAll 0.15
+   m_fCrossRmsMax 0.5
+   m_fCrossHeadingSpreadDeg 10
+  }
+  DC_ProbeSteerLoad "{DC4A50B300000008}" {
+   m_sStairGrid "12:0.1,-0.1,0.2,-0.2,0.3,-0.3;18:0.05,-0.05,0.1,-0.1,0.15,-0.15"
+   m_fStairHoldS 3
+   m_fStairSettleS 1
+   m_sLoadSteers "0.3,-0.3"
+   m_fRefKmh 10
+   m_fRefHoldS 6
+   m_sALatTargets "2.0,2.75,3.5"
+   m_fALatToleranceMs2 0.1
+   m_fALatAdjustS 0.5
+   m_fALatHoldS 4
+   m_fALatMaxS 15
+   m_fBrakeDecelMs2 3
+   m_fBrakeFeedForward 0.2
+   m_fBrakeKp 0.03
+   m_fBrakeKi 0.1
+   m_fBrakeEndKmh 5
+   m_fCircleStartAlongM 40
+   m_fCircleEdgeM 5
+  }
+  DC_ProbeSteerSteps "{DC4A50B300000009}" {
+   m_sStepGrid "10:0.5x12,1.0x8;30:0.5x12,1.0x6;60:0.5x10"
+   m_fStepOnS 0.4
+   m_fStepOffS 0.6
+   m_fStepJitterS 0.3
+   m_iStepSeed 77
+   m_fCruiseS 1
+   m_sPrbsAmplitudes "10:0.5;30:0.3;60:0.2"
+   m_iPrbsOrder 5
+   m_fPrbsBitS 0.15
+   m_iPrbsSeed 11
+   m_fTrainReserveS 2.5
+   m_fTrainDecelMs2 4
+   m_iMaxRuns 4
+   m_iMaxSpins 2
   }
  }
  coords 2759.086 80.111 1664.452

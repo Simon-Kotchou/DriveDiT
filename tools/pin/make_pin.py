@@ -33,9 +33,16 @@ is written, unchanged (its build_key then comes from a sidecar, pin_sidecar.py b
         --expect-game-buildid <id> --expect-tools-buildid <id>
     python3 -I -B make_pin.py --channel experimental --pin-id 1.9.0.10-exp \
         --out /mnt/e/DriveDiT/pin/pin_1.9.0.10-exp.json             # the E: library's Experimental apps
+    python3 -I -B make_pin.py --channel cold --pin-id 1.8.0.13-cold --cold-of 1.8.0.13 \
+        --from-copy /mnt/e/DriveDiT/pin/1.8.0.13-run --out /mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json
+
+--channel cold runs a stable build from a working copy (MIGRATION_1_9 7.1): it reads the copy's saved appmanifests
+(meta/), hashes every pak and exe and compares them with the reference copy's SHA256SUMS, requires the reference
+pin's paks, exes and sizes, and refuses (exit 1) unless the build_key equals the reference pin's. --dry-run prints
+the pin and writes nothing.
 
 Exit codes: 0 written; 1 install state not pinnable (buildid mismatch, update pending, no paks, not a restore of
---restore-of or its build_key); 2 usage, path or read error
+--restore-of, a copy that does not match its SHA256SUMS or the reference build_key); 2 usage, path or read error
 (nothing written).
 """
 from __future__ import annotations
@@ -182,6 +189,68 @@ def mtimes_changed(ref: dict, apps: dict) -> int:
     return n
 
 
+def collect_cold_app(app: str, copy_dir: str, ref_app: dict, sums: dict) -> dict:
+    """Snapshot one app of a verified copy (channel cold, MIGRATION_1_9 7.1).
+
+    The copy is <copy>/<app>/ (the install) and <copy>/meta/appmanifest_<appid>.acf (the appmanifest saved by
+    cold_copy.sh). Instead of Steam's state, every pak and exe is hashed and compared with SHA256SUMS
+    (<app>/<rel>), and the copy must hold exactly the reference pin's paks and exes, with the same sizes.
+    NotPinnable otherwise. Reads the whole install (about 28 GB for 1.8.0.13).
+    """
+    appid = ref_app["appid"]
+    acf_path = os.path.join(copy_dir, "meta", "appmanifest_%d.acf" % appid)
+    acf = pinlib.load_acf(acf_path)
+    if acf["appid"] != appid or acf["buildid"] != ref_app["buildid"]:
+        raise NotPinnable("%s: %s has appid %s buildid %s, the reference pin %s/%s"
+                          % (app, acf_path, acf["appid"], acf["buildid"], appid, ref_app["buildid"]))
+    ref_depots = {d: (v or {}).get("manifest") for d, v in (ref_app.get("depots") or {}).items()}
+    if {d: v["manifest"] for d, v in acf["depots"].items()} != ref_depots:
+        raise NotPinnable("%s: depot manifests in %s differ from the reference pin" % (app, acf_path))
+    root = os.path.join(copy_dir, app)
+    if not os.path.isdir(root):
+        raise pinlib.PinError("%s: copy dir not found: %s" % (app, root))
+    paks = pinlib.scan_paks(root)
+    want_paks = {k: (v or {}).get("size") for k, v in (ref_app.get("paks") or {}).items()}
+    if {k: v["size"] for k, v in paks.items()} != want_paks:
+        missing = sorted(set(want_paks) - set(paks))
+        extra = sorted(set(paks) - set(want_paks))
+        raise NotPinnable("%s: the copy's paks differ from the reference pin (missing %s, extra %s, or a size)"
+                          % (app, missing[:4], extra[:4]))
+    binaries = {}
+    for rel in pinlib.CHANNEL_BINARIES["cold"][app]:
+        full = os.path.join(root, *rel.split("/"))
+        if not os.path.isfile(full):
+            raise NotPinnable("%s: missing executable %s" % (app, full))
+        binaries[rel] = pinlib.stat_entry(full)
+        if binaries[rel]["size"] != ((ref_app.get("binaries") or {}).get(rel) or {}).get("size"):
+            raise NotPinnable("%s: %s size differs from the reference pin" % (app, rel))
+    hashed, _ = pinlib.hash_files(root, sorted(set(paks) | set(binaries)))
+    bad = []
+    for rel, digest in sorted(hashed.items()):
+        want = sums.get("%s/%s" % (app, rel))
+        if want != digest:
+            bad.append("%s/%s: sha256 %s, SHA256SUMS %s" % (app, rel, digest[:16], (want or "no line")[:16]))
+    if bad:
+        raise NotPinnable("the copy does not match SHA256SUMS: %s" % "; ".join(bad[:6]))
+    for rel in paks:
+        paks[rel]["sha256"] = hashed[rel]
+    appid_txt = {}
+    for rel in pinlib.CHANNEL_STEAM_APPID_FILES["cold"][app]:
+        full = os.path.join(root, *rel.split("/"))
+        appid_txt[rel] = pinlib.read_small_text(full) if os.path.isfile(full) else None
+    if appid_txt != (ref_app.get("steam_appid_txt") or {}):
+        raise NotPinnable("%s: steam_appid.txt %s differs from the reference pin" % (app, appid_txt))
+    return {
+        "appid": acf["appid"], "name": acf["name"], "buildid": acf["buildid"],
+        "target_buildid": acf["target_buildid"], "state_flags": acf["state_flags"],
+        "auto_update_behavior_at_pin": acf["auto_update_behavior"],
+        "last_updated_utc": (pinlib.iso_utc_from_ns(acf["last_updated"] * 10**9) if acf["last_updated"] else None),
+        "depots": acf["depots"], "acf": _paths(os.path.abspath(acf_path)), "install": _paths(os.path.abspath(root)),
+        "steam_appid_txt": appid_txt, "binaries": binaries, "paks": paks,
+        "exe_sha256": {rel: hashed[rel] for rel in sorted(binaries)},
+    }
+
+
 def add_v2_fields(pin: dict, channel: str, launch_path_id: str, physics_hz: int) -> dict:
     """Turn a DD-0 pin dict into dd-pin/2: channel, launch path, exe hashes (already in each app), build_key."""
     inputs = pinlib.build_key_inputs(channel, {app: pin[app] for app in pinlib.APPS},
@@ -243,13 +312,33 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     ap.add_argument("--channel", choices=pinlib.CHANNELS, default=None,
                     help="write a dd-pin/2 pin of this channel (DD-14a): exe_sha256, build_key, launch path. Without "
                          "it, DD-0's dd-pin/1 pin is written")
+    ap.add_argument("--from-copy", default=None, metavar="DIR",
+                    help="--channel cold: the working copy to run from (a pinlib.COLD_RUN_ROOTS entry, e.g. "
+                         "/mnt/e/DriveDiT/pin/1.8.0.13-run), with game/, tools/ and meta/")
+    ap.add_argument("--cold-of", default=None, metavar="PIN_ID",
+                    help="--channel cold: the stable pin the copy was made from (<out dir>/pin_PIN_ID.json); the cold "
+                         "pin must get its build_key")
+    ap.add_argument("--sums", default=None, metavar="FILE",
+                    help="--channel cold: SHA256SUMS to check the copy against (default <out dir>/<--cold-of>/SHA256SUMS,"
+                         " the verified reference copy's)")
     ap.add_argument("--physics-hz-expected", type=int, default=pinlib.PHYSICS_HZ_EXPECTED,
                     help="dd-pin/2: the physics rate CC-11 expects GetFixedTimeSlice() to give (default %(default)s)")
     ap.add_argument("--dry-run", action="store_true",
                     help="collect and check everything, print the pin JSON that would be written, write nothing")
     args = ap.parse_args(argv)
+    if args.channel is None and (args.from_copy or args.cold_of or args.sums):
+        print("make_pin: --from-copy, --cold-of and --sums need --channel cold", file=sys.stderr)
+        return 2
     if args.channel == "cold":
-        print("make_pin: --channel cold is not available yet", file=sys.stderr)
+        if not (args.from_copy and args.cold_of):
+            print("make_pin: --channel cold needs --from-copy DIR and --cold-of PIN_ID", file=sys.stderr)
+            return 2
+        if args.game_acf or args.tools_acf or args.restore_of:
+            print("make_pin: --channel cold reads the copy's saved appmanifests; --game-acf, --tools-acf and "
+                  "--restore-of do not apply", file=sys.stderr)
+            return 2
+    elif args.from_copy or args.cold_of or args.sums:
+        print("make_pin: --from-copy, --cold-of and --sums are only for --channel cold", file=sys.stderr)
         return 2
     acf_defaults = pinlib.DEFAULT_ACF_BY_CHANNEL.get(args.channel or "stable", pinlib.DEFAULT_ACF)
     args.game_acf = args.game_acf or acf_defaults["game"]
@@ -284,6 +373,9 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
         except pinlib.PinError as exc:
             print("make_pin: %s" % exc, file=sys.stderr)
             return 2
+
+    if args.channel == "cold":
+        return _make_cold(args, out, write_roots)
 
     try:
         game = collect_app("game", args.game_acf, args.expect_game_buildid, args.channel)
@@ -379,6 +471,73 @@ def reference_build_key(ref: dict, pin_dir: str) -> tuple:
     inputs = pinlib.build_key_inputs("stable", {app: ref["pin"][app] for app in pinlib.APPS},
                                      pinlib.sums_exe_sha256(pinlib.parse_sha256sums(raw)))
     return pinlib.build_key_from_inputs(inputs), "computed from %s" % sums_path
+
+
+def _make_cold(args, out, write_roots) -> int:
+    """make_pin --channel cold --from-copy DIR --cold-of REF (MIGRATION_1_9 7.1)."""
+    import time
+    pin_dir = os.path.dirname(out)
+    preflight = _load("preflight")
+    try:
+        ref_id = pinlib.validate_pin_id(args.cold_of)
+        if ref_id == args.pin_id:
+            raise pinlib.PinError("--cold-of %s: a cold pin gets its own id (for example %s-cold)" % (ref_id, ref_id))
+        ref = preflight.load_pin_by_id(pin_dir, ref_id)
+        ref_ident = preflight.pin_identity(ref)
+        if ref_ident["channel"] != "stable":
+            raise pinlib.PinError("--cold-of %s: the reference must be a stable pin, not %s"
+                                  % (ref_id, ref_ident["channel"]))
+        ref_key, ref_key_source = reference_build_key(ref, pin_dir)
+        copy = os.path.realpath(os.path.abspath(pinlib.win_to_wsl(args.from_copy)))
+        lps = [lp for lp, root in pinlib.COLD_RUN_ROOTS.items() if os.path.realpath(root) == copy]
+        if not lps:
+            raise pinlib.PinError("--from-copy %s is not a cold run root the launchers start (pinlib.COLD_RUN_ROOTS: "
+                                  "%s); a cold pin made elsewhere could never launch"
+                                  % (copy, ", ".join("%s=%s" % kv for kv in sorted(pinlib.COLD_RUN_ROOTS.items()))))
+        reference_copy = os.path.realpath(os.path.join(pin_dir, ref_id))
+        if copy == reference_copy:
+            raise pinlib.PinError("--from-copy is the reference copy %s itself; run from a separate working copy so "
+                                  "the reference stays a pristine restore source (MIGRATION_1_9 decision 16)" % copy)
+        sums_path = os.path.abspath(args.sums or os.path.join(reference_copy, "SHA256SUMS"))
+        sums_raw = pinlib.read_regular_file(sums_path, "SHA256SUMS", 64 * 1024 * 1024)
+        sums = pinlib.parse_sha256sums(sums_raw)
+    except pinlib.PinError as exc:
+        print("make_pin: %s" % exc, file=sys.stderr)
+        return 2
+    t0 = time.monotonic()
+    try:
+        game = collect_cold_app("game", copy, ref["pin"]["game"], sums)
+        tools = collect_cold_app("tools", copy, ref["pin"]["tools"], sums)
+    except NotPinnable as exc:
+        print("make_pin: not pinnable: %s" % exc, file=sys.stderr)
+        return 1
+    except (pinlib.PinError, OSError) as exc:
+        print("make_pin: %s" % exc, file=sys.stderr)
+        return 2
+    hashed_bytes = sum(p["size"] for a in (game, tools) for p in list(a["paks"].values()) + list(a["binaries"].values()))
+    pin = build_pin(args.pin_id, out, game, tools)
+    try:
+        add_v2_fields(pin, "cold", lps[0], args.physics_hz_expected)
+    except pinlib.PinError as exc:
+        print("make_pin: %s" % exc, file=sys.stderr)
+        return 2
+    pin["release_channel"] = ref_ident["release_channel"]
+    if pin["build_key"] != ref_key:
+        print("make_pin: not pinnable: the copy's build_key %s differs from the reference pin %s's %s (%s)"
+              % (pin["build_key"], ref_id, ref_key, ref_key_source), file=sys.stderr)
+        return 1
+    pin["cold_of"] = {"pin_id": ref_id, "sha256": ref["sha256"], "path": ref["path"], "build_key": ref_key,
+                      "build_key_source": ref_key_source, "sums": sums_path,
+                      "sums_sha256": hashlib.sha256(sums_raw).hexdigest(),
+                      "rule": "every pak and exe of the copy hashed and equal to SHA256SUMS; same paks, exes and "
+                              "sizes as the reference pin; same build_key"}
+    pin["cold_copy"] = {app: pinlib.wsl_to_win(os.path.join(reference_copy, app)) for app in pinlib.APPS}
+    pin["sha256sums"] = pinlib.wsl_to_win(sums_path)
+    # The cold client always runs without the production backend (MIGRATION_1_9 7.1; client_C18_i01.bat).
+    pin["client_args_required"] = ["-noBackend"]
+    print("cold copy %s verified against %s: %.2f GB hashed in %.1f s; build_key %s = %s's"
+          % (copy, sums_path, hashed_bytes / 1e9, time.monotonic() - t0, pin["build_key"], ref_id), file=sys.stderr)
+    return _write_and_report(args, out, pin, None, write_roots)
 
 
 if __name__ == "__main__":

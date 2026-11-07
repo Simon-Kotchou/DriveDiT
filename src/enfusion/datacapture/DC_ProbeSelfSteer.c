@@ -248,6 +248,18 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The cross site as an m_sCrossExplicit candidate (the 1.8 cold baseline drives this same strip: CC-07 c)
+	override string ExtraSiteReuseText(string kind, notnull DC_SteerSite site)
+	{
+		if (kind != SITE_CROSS)
+			return string.Empty;
+
+		float x = site.m_vStart[0];
+		float z = site.m_vStart[2];
+		return "m_sCrossExplicit=" + x.ToString(-1, 3) + " " + z.ToString(-1, 3) + " " + site.m_fHeadingDeg.ToString(-1, 4);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! The cross-slope search (full segment lengths)
 	override void AddExtraSearches()
 	{

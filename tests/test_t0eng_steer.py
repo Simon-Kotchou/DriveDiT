@@ -141,18 +141,23 @@ class SteerCar:
     wheels straight), zero_noise (readback deviations at zero command after >= 60 zero rows, the 1.9.0.37 e01
     pattern), stair_error (added to the readback of every non-zero command), load_gain (rad of wheel angle per m/s2
     of a_lat), slope_gain (rad of wheel angle per unit cross-slope), sigma (relaxation length m), kappa_sign, merge
-    (engine steps per row)."""
+    (engine steps per row: one row per dispatched step, physics_step + 1, timeslice n x dt, as DC_ProbeRunner writes
+    it), heading_noise (rad rms on the written heading), readback_offset (added to the readback of every zero-command
+    measure row after 60 zero rows)."""
 
     def __init__(self, actuator=None, wheel_sign=1.0, bone_lag=0, late_changes=0, toe=0.0, kappa_bias=0.0,
                  kappa_wave=None, slope_kappa=0.0, zero_noise=False, stair_error=0.0, load_gain=0.0, slope_gain=0.0,
-                 sigma=0.6, kappa_sign=1.0, merge=1, seed=3):
+                 sigma=0.6, kappa_sign=1.0, merge=1, heading_noise=0.0, readback_offset=0.0, seed=3):
         self.act = actuator or Actuator()
         self.wheel_sign, self.bone_lag, self.late_changes, self.toe = wheel_sign, bone_lag, late_changes, toe
         self.kappa_bias, self.kappa_wave, self.slope_kappa = kappa_bias, kappa_wave, slope_kappa
         self.zero_noise, self.stair_error, self.load_gain = zero_noise, stair_error, load_gain
         self.slope_gain, self.sigma, self.kappa_sign, self.merge = slope_gain, sigma, kappa_sign, merge
+        self.heading_noise, self.readback_offset = heading_noise, readback_offset
+        self.offset_y = 0.0
         self.rng = random.Random(seed)
         self.step_no = 100
+        self.world_ms = 3000.0
         self.rows = []
         self.lag_hist = []
         self.changes = 0
@@ -175,8 +180,9 @@ class SteerCar:
         if abs(cmd - self.last_cmd) >= 0.04:
             self.changes += 1
         self.last_cmd = cmd
+        self.step_no += 1
         for _ in range(n):
-            self.step_no += 1
+            self.world_ms += DT * 1000.0
             if mode == "accel":
                 self.v = min(v_target, self.v + 2.5 * DT)
             elif mode == "stop":
@@ -208,6 +214,12 @@ class SteerCar:
             post += self.rng.choice((-1, 1)) * self.rng.uniform(0.002, 0.0146)
         if self.stair_error and abs(cmd) > 1e-9:
             post += self.stair_error
+        if self.readback_offset:
+            # a hidden first order (tau 0.2 s) towards the offset: each row is within 1e-3 of a one-step prediction
+            # from the previous readback, the sustained prediction is 0
+            target = self.readback_offset if self.zero_rows >= 60 and segment == "measure" else 0.0
+            self.offset_y += (1.0 - math.exp(-DT / 0.2)) * (target - self.offset_y)
+            post += self.offset_y
         left, right = ackermann(delta)
         left, right = left + self.toe, right - self.toe
         self.lag_hist.append((left, right))
@@ -222,7 +234,7 @@ class SteerCar:
         acc_z = acc if acc is not None else (-3.0 if mode == "brake" else 0.0)
         row = {c: "" for c in STEP_COLUMNS}
         row.update({
-            "physics_step": self.step_no, "world_time_ms": "%.3f" % (self.step_no * DT * 1000.0),
+            "physics_step": self.step_no, "world_time_ms": "%.3f" % self.world_ms,
             "timeslice_s": "%.6f" % (n * DT), "phase": phase, "segment": segment, "phase_step": 0, "run_idx": run_idx,
             "force_sim": 0, "cmd_steer": "%.4f" % cmd, "cmd_throttle": "0.3000", "cmd_brake": "0.0000",
             "cmd_clutch": "1.0000", "cmd_gear": 2, "cmd_handbrake": 0, "speed_hold_kmh": "%.3f" % (v_target * 3.6),
@@ -232,7 +244,9 @@ class SteerCar:
             "acc_l_x": "%.4f" % self.a_lat, "acc_l_y": "0.0000", "acc_l_z": "%.4f" % acc_z,
             "pos_x": "%.4f" % self.x, "pos_y": "39.000", "pos_z": "%.4f" % self.z,
             "fwd_x": "%.6f" % math.sin(rad), "fwd_y": "0.000000", "fwd_z": "%.6f" % math.cos(rad),
-            "heading_deg": "%.6f" % self.heading, "ground_contact": 1, "wheels_contact": 4,
+            "heading_deg": "%.5f" % (self.heading + (math.degrees(self.rng.gauss(0.0, self.heading_noise))
+                                                     if self.heading_noise else 0.0)),
+            "ground_contact": 1, "wheels_contact": 4,
             "steer_call": int(steer_call), "assist_mode": assist, "site": site, "along_m": "%.3f" % along,
             "lateral_m": "%.3f" % lateral, "in_area": 1, "seg_target": "%.4f" % seg_target, "seg_flag": seg_flag,
             "event_idx": event_idx,
@@ -242,6 +256,11 @@ class SteerCar:
             "sig_steer": "%.6f" % steer_input, "wa_rot_l_pf": "%.6f" % (s * left), "wa_rot_r_pf": "%.6f" % (s * right),
             "slip_lat_l": "0.0", "slip_lat_r": "0.0", "vdir_l": "%.6f" % left, "vdir_r": "%.6f" % right})
         self.rows.append(row)
+
+
+def phase_row(car, index, name, kind, site, kmh, steer, assist, first_step):
+    """A <probe>_phases.csv row as DC_ProbeSteerBase writes it (start / end = the phase's first and last physics_step)"""
+    return [index, name, kind, site, first_step, car.step_no, "", "", kmh, steer, assist, 1, "ok", ""]
 
 
 def drive_start(car, phase, run, v_target, site="flat", assist=2):
@@ -273,12 +292,17 @@ def common_header(probe, build="1.9.0.37"):
 FOOTER = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
 
 
+CROSS_PROFILE = " ".join("%.3f" % (50.0 + 0.004 * 5 * k + (0.039 if j else 0.117)) for k in range(63) for j in (0, 1))
+
+
 def build_e21(play_dir, car=None, cross_found=True, cross_min=0.06, flat_m=200.0, flat_kmh=None, build="1.9.0.37",
-              cross_start="2000.0 0.0 1500.0", footer=FOOTER, header_extra=None):
+              cross_start="2000.0 0.0 1500.0", cross_heading="33.0", profile=CROSS_PROFILE, footer=FOOTER,
+              header_extra=None):
     car = car or SteerCar()
     phases = []
 
     def zero_phase(name, kmh, held, nocall, site="flat", assist=2, slope=0.0, drive_kmh=None):
+        first = car.step_no + 1
         v = (drive_kmh or kmh) / 3.6
         drive_start(car, name, 1, v, site, assist)
         for _ in range(60):
@@ -289,7 +313,7 @@ def build_e21(play_dir, car=None, cross_found=True, cross_min=0.06, flat_m=200.0
                 car.run(name, segment, 1, 0.0, v, steer_call=call, seg_flag=1, site=site, assist=assist,
                         slope=slope, seg_target=kmh)
         drive_stop(car, name, 1, site, assist)
-        phases.append([len(phases), name, site, site, "", "", "", "", kmh, 0, assist, 1, "ok", ""])
+        phases.append(phase_row(car, len(phases), name, site, site, kmh, 0, assist, first))
 
     for kmh in (20, 40):
         zero_phase("flat_%d" % kmh, kmh, flat_m, 200.0, drive_kmh=(flat_kmh or {}).get(kmh))
@@ -302,8 +326,9 @@ def build_e21(play_dir, car=None, cross_found=True, cross_min=0.06, flat_m=200.0
     header.update({"params.m_sFlatSpeedsKmh": "20,40", "params.m_sCrossSpeedsKmh": "20,40",
                    "site.cross.found": int(cross_found), "site.cross.cross_min_signed": "%.5f" % cross_min,
                    "site.cross.cross_max_signed": "0.07000", "site.cross.cross_mean": "0.06500",
-                   "site.cross.start": cross_start, "site.cross.heading_deg": "33.0",
-                   "site.cross.grade": "0.004", "site.cross.fallback": 0})
+                   "site.cross.start": cross_start, "site.cross.heading_deg": cross_heading,
+                   "site.cross.length_m": "310.0", "site.cross.zone_from_m": "75.0", "site.cross.zone_to_m": "275.0",
+                   "site.cross.track_profile": profile, "site.cross.grade": "0.004", "site.cross.fallback": 0})
     header.update(header_extra or {})
     probe_common.write_synthetic_play(play_dir, header, {"e21_steps": (STEP_COLUMNS, car.rows),
                                                          "e21_phases": (PHASE_COLUMNS, phases)}, footer)
@@ -316,15 +341,17 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
     phases = []
     for kmh, levels in ((12, (0.1, -0.1, 0.2, -0.2, 0.3, -0.3)), (18, (0.05, -0.05, 0.1, -0.1, 0.15, -0.15))):
         name = "stair_%d" % kmh
+        first = car.step_no + 1
         v = kmh / 3.6
         drive_start(car, name, 1, v)
         for level, steer in enumerate(levels):
             for k in range(90):
                 car.run(name, "stair", 1, steer, v, seg_flag=int(k >= 30), event_idx=level, seg_target=kmh)
         drive_stop(car, name, 1)
-        phases.append([len(phases), name, "stair", "flat", "", "", "", "", kmh, 0, -1, 1, "ok", ""])
+        phases.append(phase_row(car, len(phases), name, "stair", "flat", kmh, 0, -1, first))
     for steer in steer_load:
         name = "load_%+.2f" % steer
+        first = car.step_no + 1
         v = 10.0 / 3.6
         drive_start(car, name, 1, v)
         for k in range(180):
@@ -333,11 +360,13 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
         for level, target in enumerate(targets):
             vt = math.sqrt(target / kappa)
             for k in range(40 + steady_rows):
+                if k < 40 and k % 8 == 7 and abs(car.a_lat) > 0.1:
+                    vt *= math.sqrt(target / abs(car.a_lat))       # the probe adapts the speed to the measured a_lat
                 car.run(name, "alat", 1, steer, vt, seg_flag=int(k >= 40), event_idx=level, seg_target=target)
         while car.v > 5.0 / 3.6:
             car.run(name, "brake", 1, steer, car.v, mode="brake", seg_flag=1, seg_target=3.0)
         drive_stop(car, name, 1)
-        phases.append([len(phases), name, "load", "flat", "", "", "", "", 10, steer, -1, 1, "ok", ""])
+        phases.append(phase_row(car, len(phases), name, "load", "flat", 10, steer, -1, first))
     header = common_header("e22")
     header.update({"params.m_sALatTargets": ",".join("%g" % t for t in targets), "params.m_fBrakeDecelMs2": "3.000"})
     header.update(header_extra or {})
@@ -369,6 +398,7 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6",
                     order += [item_[0], -item_[0]]
                     item_[1] -= 1
         name = "steps_%d" % kmh
+        first = car.step_no + 1
         v = kmh / 3.6
         drive_start(car, name, 1, v)
         for _ in range(30):
@@ -412,7 +442,7 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6",
                     car.run(name, "prbs", 1, amp if bit else -amp, end_v, seg_flag=1, seg_target=kmh)
             car.act.gain = gain
         drive_stop(car, name, 1)
-        phases.append([len(phases), name, "steps", "flat", "", "", "", "", kmh, 0, -1, 1, "ok", ""])
+        phases.append(phase_row(car, len(phases), name, "steps", "flat", kmh, 0, -1, first))
     header = common_header("e23")
     header.update({"params.m_sStepGrid": grid})
     probe_common.write_synthetic_play(play_dir, header, {"e23_steps": (STEP_COLUMNS, car.rows),
@@ -522,7 +552,7 @@ class Cc07Tests(unittest.TestCase):
         e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
         code, text = run_main(e21, argv + ["--e23", e23_play])
         self.assertEqual(item(text, "a_readback"), "PASS", text)
-        self.assertIn(" 0 rows not explained", text)
+        self.assertIn(" 0 deviating rows not explained", text)
 
     def test_unexplained_zero_command_deviations_fail_a(self):
         # Codex: 71 deviations > 1e-3 after >= 60 zero-command rows (max 0.0146) that the short lag cannot explain
@@ -533,7 +563,7 @@ class Cc07Tests(unittest.TestCase):
         e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
         code, text = run_main(e21, argv + ["--e23", e23_play])
         self.assertEqual(item(text, "a_readback"), "FAIL", text)
-        self.assertRegex(detail(text, "a_readback"), r" [1-9]\d* rows not explained")
+        self.assertRegex(detail(text, "a_readback"), r" [1-9]\d* deviating rows not explained")
         self.assertRegex(detail(text, "a_readback"), r"[1-9]\d* of them after >= 60 zero-command rows")
         self.assertEqual(code, 1, text)
         self.assertIn("Mode B (seated driver, CC-14) becomes", text)
@@ -619,7 +649,7 @@ class Cc07Tests(unittest.TestCase):
         drop_footer(argv[0])
         code, text = run_main(e21, argv)
         self.assertEqual(item(text, "evidence"), "INCOMPLETE", text)
-        self.assertIn("[the play is not complete]", text)
+        self.assertIn("withheld: a play it depends on is not complete]", text)
         self.assertEqual(code, 3, text)
         no_mode(self, text)
 
@@ -704,6 +734,130 @@ class Cc07Tests(unittest.TestCase):
         self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
 
 
+    # --- Codex round 2 (a58ddd6) ------------------------------------------------------------------------------
+    def test_a_failed_part_never_hides_a_missing_one(self):
+        # Codex: no negative-load phase plus a failed positive load selected Mode B (exit 1)
+        a = build_e21(self.path("e21", "play_01"))
+        b = build_e22(self.path("e22", "play_01"), SteerCar(load_gain=math.radians(0.5)), steer_load=(0.3,))
+        base = build_e21(self.path("base", "play_01"), build="1.8.0.13")
+        code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
+        self.assertEqual(item(text, "d_load"), "INCOMPLETE", text)
+        self.assertIn("[observed FAIL", detail(text, "d_load"))
+        self.assertEqual(code, 3, text)
+        no_mode(self, text)
+        self.assertIn("FAIL observed inside incomplete items: d_load", text)
+
+    def test_an_interrupted_e23_withholds_its_dependents(self):
+        # Codex: removing e23's footer gave evidence PASS, exit 0 and Mode A (e23 silently dropped)
+        def act():
+            return Actuator(tau=0.014)
+
+        argv = self.session(e21_car=SteerCar(actuator=act()), e22_car=SteerCar(actuator=act()))
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
+        drop_footer(e23_play)
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(item(text, "evidence"), "INCOMPLETE", text)
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertEqual(item(text, "step0_channel"), "INCOMPLETE", text)
+        self.assertEqual(code, 3, text)
+        no_mode(self, text)
+
+    def test_missing_called_rows_or_values_are_incomplete(self):
+        # Codex: blanking every e22 braking readback still gave a_readback PASS and Mode A
+        argv = self.session()
+        e22_steps = os.path.join(argv[2], "e22_steps.csv")
+        with open(e22_steps, "r", encoding="ascii") as handle:
+            lines = handle.read().splitlines()
+        header = lines[0].split(",")
+        seg, post = header.index("segment"), header.index("input_post_steer")
+        out = [lines[0]]
+        for line in lines[1:]:
+            cells = line.split(",")
+            if cells[seg] == "brake":
+                cells[post] = ""
+            out.append(",".join(cells))
+        with open(e22_steps, "w", encoding="ascii") as handle:
+            handle.write("\n".join(out) + "\n")
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertIn("no finite command / readback", detail(text, "a_readback"))
+        no_mode(self, text)
+        # rows missing from a phase (a gap in physics_step) are just as incomplete
+        argv = self.session()
+        e21_steps = os.path.join(argv[0], "e21_steps.csv")
+        with open(e21_steps, "r", encoding="ascii") as handle:
+            lines = handle.read().splitlines()
+        del lines[400:410]
+        with open(e21_steps, "w", encoding="ascii") as handle:
+            handle.write("\n".join(lines) + "\n")
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertRegex(detail(text, "a_readback"), r"\d+ of \d+ rows")
+
+    def test_a_persistent_offset_fails_the_free_running_model(self):
+        # Codex: a validated tau 0.2 s model passed 300 zero-command rows carrying a 0.005 offset (one-step 0.000768)
+        def act():
+            return Actuator(tau=0.2)
+
+        argv = self.session(e21_car=SteerCar(actuator=act(), readback_offset=0.005),
+                            e22_car=SteerCar(actuator=act()))
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(item(text, "a_readback"), "FAIL", text)
+        m = re.search(r"one-step max ([0-9.e-]+), free-running max ([0-9.e-]+), 1 s mean max ([0-9.e-]+)",
+                      detail(text, "a_readback"))
+        self.assertIsNotNone(m, text)
+        self.assertLess(float(m.group(1)), 1e-3)
+        self.assertGreater(float(m.group(2)), 4e-3)
+        self.assertGreater(float(m.group(3)), 2e-4)
+
+    def test_the_model_exception_needs_a_passing_prbs(self):
+        # Codex: a 10:0.5x6 first-order fixture without PRBS qualified as a validated model and gave Mode A
+        def act():
+            return Actuator(tau=0.014)
+
+        argv = self.session(e21_car=SteerCar(actuator=act()), e22_car=SteerCar(actuator=act()))
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()), grid="10:0.5x6", prbs=False)
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertIn("PRBS 10 km/h INCOMPLETE", detail(text, "a_readback"))
+        no_mode(self, text)
+
+    def test_short_wave_curvature_fails_b(self):
+        # Codex: 8e-4 1/m at a 25 m wavelength kept the 25 m window maxima at 1.15e-5 and passed
+        code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_wave=(8e-4, 25.0))))
+        self.assertEqual(item(text, "b_flat"), "FAIL", text)
+        m = re.search(r"\|dpsi\|/ds p95 ([0-9.e-]+)", detail(text, "b_flat"))
+        self.assertGreater(float(m.group(1)), 5e-4)
+
+    def test_an_unresolvable_noise_floor_is_incomplete(self):
+        code, text = run_main(e21, self.session(e21_car=SteerCar(heading_noise=5e-4),
+                                                baseline_car=SteerCar(heading_noise=5e-4)))
+        self.assertEqual(item(text, "b_flat"), "INCOMPLETE", text)
+        self.assertIn("not resolvable", detail(text, "b_flat"))
+
+    def test_a_near_zero_baseline_gets_no_uncalibrated_floor(self):
+        # Codex: a zero-drift baseline and 0.09 deg/100 m passed on the 0.1 deg/100 m floor
+        code, text = run_main(e21, self.session(e21_car=SteerCar(slope_kappa=2.62e-4)))
+        self.assertRegex(detail(text, "c_cross"), r"heading drift 0\.0[89]")
+        self.assertEqual(item(text, "c_cross"), "FAIL", text)
+
+    def test_the_baseline_must_drive_the_surveyed_strip(self):
+        # Codex: 4.9 m and 1.9 deg apart were accepted as the same site
+        a = build_e21(self.path("e21", "play_01"))
+        b = build_e22(self.path("e22", "play_01"))
+        cases = {"close": (dict(cross_start="2000.6 0.0 1500.5", cross_heading="33.4"), "PASS"),
+                 "far": (dict(cross_start="2004.9 0.0 1500.0", cross_heading="34.9"), "INCOMPLETE"),
+                 "other_ground": (dict(profile=" ".join("%.3f" % (float(v) + 0.1) for v in CROSS_PROFILE.split())),
+                                  "INCOMPLETE")}
+        for name, (kw, expected) in cases.items():
+            with self.subTest(name):
+                base = build_e21(self.path("base_" + name, "play_01"), build="1.8.0.13", **kw)
+                code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
+                self.assertEqual(item(text, "c_cross"), expected, text)
+        self.assertIn("not the same ground", detail(text, "c_cross"))
+
+
 class Cc08Tests(unittest.TestCase):
     def setUp(self):
         self.base = probe_common.make_temp_dir("t0eng_steer_")
@@ -753,7 +907,9 @@ class Cc08Tests(unittest.TestCase):
         play = build_e23(self.path("e23", "play_01"), prbs_gain=-0.6, grid="10:0.5x6;30:0.5x6")
         code, text = run_main(e23, [play])
         self.assertEqual(item(text, "prbs_input_10kmh"), "FAIL", text)
-        self.assertIn("PARTIAL FAIL", detail(text, "raw_engine_path"))
+        # the other spec bins are missing, so the aggregate stays INCOMPLETE with the FAIL kept as a diagnostic
+        self.assertIn("PARTIAL INCOMPLETE", detail(text, "raw_engine_path"))
+        self.assertIn("observed FAIL", detail(text, "raw_engine_path"))
 
     def test_a_reduced_grid_is_preview_coverage(self):
         # Codex: a 10:0.5x6 experiment alone returned CC-08 PASS
@@ -847,6 +1003,31 @@ class Cc08Tests(unittest.TestCase):
         self.assertNotIn("[PASS] input_", text)
 
 
+    def test_a_missing_footer_prints_no_bin_or_prbs_pass(self):
+        # Codex: CC-08 printed input-bin and PRBS PASS with its own footer missing
+        play = build_e23(self.path("e23", "play_01"), grid="10:0.5x6;30:0.5x6")
+        drop_footer(play)
+        code, text = run_main(e23, [play])
+        self.assertEqual(item(text, "evidence"), "INCOMPLETE", text)
+        self.assertNotIn("[PASS] input_", text)
+        self.assertNotIn("[PASS] prbs_", text)
+        self.assertIn("[observed PASS; withheld: the play is not complete]", text)
+
+    def test_a_stage_present_in_some_repetitions_is_unresolved(self):
+        # Codex: relaxation [1, 1, 1, 0] reported CV 0; three active events plus one inactive passed every gate
+        state, text = e23.stage_stability("sigma", [1.0, 1.0, 1.0, None], 0.2)
+        self.assertIsNone(state)
+        self.assertIn("active in 3 of 4", text)
+        per = [e23.Params(d=1, g=1.0, tau=0.05, q=3.0, sigma=s) for s in (1.0, 1.0, 1.0, 0.0)]
+        windows = [{"release_index": 5, "amplitude": 0.5, "y0": 0.0, "u_e": [0.5] * 20, "offset": 0, "n": [1] * 12,
+                    "v": 3.0, "step_size": 0.5} for _ in per]
+        out = e23.stability("M4", per[0], per, windows, DT, 0.5, 0.2)
+        self.assertIsNone(out["sigma"][0])
+        rates = e23.stability("M3", per[0], [e23.Params(d=1, g=1.0, tau=0.05, q=q) for q in (3.0, 3.0, 3.0, None)],
+                              windows, DT, 0.5, 0.2)
+        self.assertIsNone(rates["R"][0])
+
+
 class ContractTests(unittest.TestCase):
     def test_delta_eff_inverts_ackermann(self):
         for delta in (-0.4, -0.1, -0.01, 0.0, 0.003, 0.05, 0.2, 0.45):
@@ -855,7 +1036,11 @@ class ContractTests(unittest.TestCase):
 
     def test_strict_verdict_and_combine(self):
         self.assertIsNone(steer_common.combine([True, None]))
-        self.assertIs(steer_common.combine([True, False, None]), False)
+        # Codex round 2: a FAIL must not hide an INCOMPLETE part
+        self.assertIsNone(steer_common.combine([True, False, None]))
+        self.assertIn("observed FAIL in 1 part", steer_common.observed([True, False, None]))
+        self.assertIs(steer_common.combine([True, False]), False)
+        self.assertEqual(steer_common.observed([True, False]), "")
         self.assertIsNone(steer_common.combine([]))
         v = steer_common.StrictVerdict("X")
         v.check("a", False, "")
@@ -936,9 +1121,85 @@ class ContractTests(unittest.TestCase):
         # vehicle-sized volume sweeps with an initial-overlap check and the stopping envelope
         for needle in ("new TraceOBB()", "TracePosition(", "TraceMove(", "c.m_fEnvelopeLongM = stopping;"):
             self.assertIn(needle, code)
-        # the exact per-frame terrain budget and the refusal when one strip costs more
-        self.assertIn("GetStripCost()", code)
-        self.assertIn("more than m_iSiteSamplesPerFrame", code)
+        # one budget per frame shared by every search (Codex round 2: each search got the whole budget)
+        steps = base[base.index("protected void StepSearches()"):]
+        steps = steps[:steps.index("OnSearchesDone()")]
+        self.assertIn("m_Budget.Reset(m_iSiteSamplesPerFrame, m_iSiteTracesPerFrame);", steps)
+        self.assertIn("search.StepSearch(world, m_Budget)", steps)
+        self.assertLess(steps.index("m_Budget.Reset("), steps.index("foreach (DC_SteerSiteSearch search"))
+
+    def test_every_native_call_of_the_search_is_charged_first(self):
+        # Codex round 2: one charged sweep could make TracePosition, TraceMove and 8 retries
+        sites = read(SITE_SOURCE)
+        body = sites[sites.index("class DC_SteerSiteSearch"):sites.index("class DC_SteerTerrainMath")]
+        code = "\n".join(line.split("//", 1)[0] for line in body.split("\n"))
+        methods = {}
+        for m in re.finditer(r"\n\t(?:protected )?\w+ (\w+)\(([^)]*)\)\n\t\{(.*?)\n\t\}", code, re.S):
+            methods[m.group(1)] = m.group(3)
+        natives = {name: (len(re.findall(r"\.GetSurfaceY\(", text)), len(re.findall(r"\.Trace(?:Position|Move)\(", text)))
+                   for name, text in methods.items()}
+        self.assertEqual({n: c for n, c in natives.items() if c != (0, 0)},
+                         {"GenerateStrips": (4, 0), "ContinueSampling": (1, 0), "SweepEnds": (2, 0),
+                          "TraceOnce": (0, 2)})
+        once = methods["TraceOnce"]                                        # one call: an if / else of the two
+        self.assertRegex(once, r"if \(m_Plan\.GetCall\(\) == DC_SteerSweepPlan\.CALL_POSITION\)\s*\{\s*blocked = world\."
+                               r"TracePosition\(m_Box, null\) < 0;\s*\}\s*else\s*\{\s*fraction = world\.TraceMove")
+        self.assertRegex(methods["StepGrid"], r"if \(!budget\.TakeSamples\(4\)\)\s*return;\s*(?:.*\n)*?.*GenerateStrips\(")
+        self.assertRegex(methods["ContinueSampling"], r"if \(!budget\.TakeSamples\(1\)\)\s*return false;(?:.*\n)*?.*"
+                                                      r"GetSurfaceY")
+        self.assertRegex(methods["StepObstacles"], r"if \(!budget\.TakeSamples\(2\)\)\s*return;\s*SweepEnds\(")
+        self.assertRegex(methods["StepObstacles"], r"if \(!budget\.TakeTrace\(\)\)\s*return;\s*m_Plan\.Report\("
+                                                   r"TraceOnce\(")
+        for name in ("StepGrid", "ContinueSampling", "StepObstacles", "StepStages"):
+            self.assertNotIn("m_iSiteSamplesPerFrame", methods.get(name, ""))
+
+    def test_the_sweep_plan_and_budget_with_a_mock_tracer(self):
+        # the translated DC_SteerSweepPlan / DC_SteerBudget, driven the way StepObstacles drives them: at most the
+        # frame's traces per frame, a benign retry continues in the next frame, a block ends the plan
+        classes = enforce_subset.translate(read(SITE_SOURCE), ["DC_SteerBudget", "DC_SteerSweepPlan"])
+        Budget, Plan = classes["DC_SteerBudget"], classes["DC_SteerSweepPlan"]
+        K = Plan()                                                         # the static constants
+
+        def run(results, lines, segments, traces_per_frame):
+            plan, budget = Plan(), Budget()
+            plan.Reset(lines, segments)
+            calls, frames, log = [], 0, []
+            while not plan.IsDone() and frames < 100:
+                frames += 1
+                budget.Reset(1000, traces_per_frame)
+                made = 0
+                while not plan.IsDone():
+                    if not budget.TakeTrace():
+                        break
+                    call = (plan.GetLine(), plan.GetSegment(), plan.GetCall())
+                    result = results.get(len(calls), K.RESULT_CLEAR)
+                    calls.append(call)
+                    plan.Report(result)
+                    made += 1
+                log.append(made)
+                self.assertLessEqual(budget.m_iTracesUsed, traces_per_frame)
+            return plan, calls, log
+
+        plan, calls, log = run({1: K.RESULT_BENIGN, 2: K.RESULT_BENIGN}, 2, 2, 3)
+        self.assertTrue(plan.IsClear())
+        p, m = K.CALL_POSITION, K.CALL_MOVE
+        self.assertEqual(calls, [(0, 0, p), (0, 0, m), (0, 0, m), (0, 0, m), (0, 1, m), (1, 0, p), (1, 0, m),
+                                 (1, 1, m)])
+        self.assertEqual(log, [3, 3, 2])
+        self.assertEqual(plan.m_iCalls, 8)
+        plan, calls, _ = run({4: K.RESULT_BLOCKED}, 3, 3, 2)
+        self.assertTrue(plan.IsDone())
+        self.assertFalse(plan.IsClear())
+        self.assertEqual(len(calls), 5)
+        plan, calls, _ = run({k: K.RESULT_BENIGN for k in range(1, 20)}, 1, 1, 4)
+        self.assertTrue(plan.m_bRetryCap)
+        self.assertEqual(len(calls), 1 + K.MAX_BENIGN_RETRIES + 1)
+        budget = Budget()
+        budget.Reset(5, 1)
+        self.assertTrue(budget.TakeSamples(4))
+        self.assertFalse(budget.TakeSamples(2))
+        self.assertTrue(budget.TakeSamples(1))
+        self.assertEqual(budget.m_iSamplesUsed, 5)
 
     def test_probe_rules_in_the_source(self):
         base = read(BASE_SOURCE)
@@ -959,6 +1220,19 @@ class ContractTests(unittest.TestCase):
         # Codex: load counters counted callbacks, not engine steps
         self.assertIn("m_iLevelSteps += covered;", load)
         self.assertIn("m_fBrakeIntegral += error * m_fDt * m_iLastCovered;", load)
+        # Codex round 2: e22's controller allowed 90 km/h against a 35 km/h envelope; heading assumed, not enforced
+        self.assertNotIn("ALAT_MAX_KMH", load)
+        self.assertEqual(load.count("Math.Clamp(m_fLevelKmh"), 2)
+        self.assertEqual(len(re.findall(r"Math\.Clamp\(m_fLevelKmh[^;]*SPEED_CAP_KMH\);", load)), 2)
+        self.assertIn("return SPEED_CAP_KMH;", load)
+        self.assertRegex(load, r"override bool AllowsAnyHeading\(\)\s*\{\s*return true;")
+        guard = base[base.index('EndRun(phase, "aborted_area");'):]
+        guard = guard[:guard.index('EndRun(phase, "aborted_heading");')]
+        self.assertIn("speedNow > GetMaxSpeedKmh() + OVERSPEED_KMH", guard)
+        self.assertIn('EndRun(phase, "overspeed");', guard)
+        self.assertIn("!AllowsAnyHeading() && headingOff > GetEnvelopeAngleDeg()", guard)
+        self.assertIn("c.m_fEnvelopeBackM = stopping;", base)
+        self.assertIn("c.m_fEnvelopeLatM = stopping * Math.Sin(GetEnvelopeAngleDeg() * Math.DEG2RAD);", base)
         # the steering probes stay within 15 min of Play together
         timeouts = [float(re.search(r"TIMEOUT_E2%d_S = (\d+)" % k, read(path)).group(1))
                     for k, path in ((1, SELF_SOURCE), (2, LOAD_SOURCE), (3, STEPS_SOURCE))]
@@ -1013,6 +1287,7 @@ class SiteStub:
             setattr(self, name, enforce_subset.f32(0.0))
         self.m_bTerrainOk = False
         self.m_sTerrainReason = ""
+        self.m_aTrackProfile = enforce_subset.EArray([], "float")
 
 
 def translated_terrain_math():
@@ -1023,6 +1298,11 @@ def translated_terrain_math():
                                        externals={"DC_SteerSite": SiteStub, "DC_SteerSiteCriteria": CriteriaStub},
                                        external_fields=fields)
     return classes["DC_SteerTerrainMath"]()
+
+
+def corridor_points(corridor_half, track_half=0.65):
+    """DC_ProbeSteerBase.SetSiteGeometry: an odd count, the centre included, at most 2 x track_half apart"""
+    return 2 * int(math.ceil(corridor_half / (2.0 * track_half))) + 1
 
 
 class TerrainMathTests(unittest.TestCase):
@@ -1041,11 +1321,38 @@ class TerrainMathTests(unittest.TestCase):
         self.math.Apply(site, criteria, arr(along), arr(lateral), arr(heights))
         return site
 
-    def cross_criteria(self, **kw):
+    def cross_criteria(self, points=None, **kw):
         values = dict(m_fGradeMax=0.02, m_fGradeWindowMax=0.035, m_fGradeWindowMaxAll=0.06, m_fCrossMin=0.05,
                       m_fCrossMax=0.12, m_fCrossAbsMaxAll=0.15, m_fCrossTarget=0.065, m_fRmsMax=0.5)
         values.update(kw)
-        return CriteriaStub("cross", half_width=8.0, corridor_half=5.0, corridor_points=4, **values)
+        return CriteriaStub("cross", half_width=8.0, corridor_half=5.0,
+                            corridor_points=points or corridor_points(5.0), **values)
+
+    def test_the_corridor_rule_samples_the_centre_pair_without_gaps(self):
+        self.assertIn("int half = Math.Ceil(c.m_fCorridorHalfM / (2 * c.m_fTrackHalfM));", read(BASE_SOURCE))
+        self.assertIn("c.m_iCorridorPoints = 2 * half + 1;", read(BASE_SOURCE))
+        for corridor in (0.0, 1.0, 5.0, 7.0, 12.0, 19.0):
+            crit = CriteriaStub("cross", half_width=corridor + 3, corridor_half=corridor,
+                                corridor_points=corridor_points(corridor))
+            tracks = sorted(crit.offsets()[3:])
+            self.assertIn(-0.65, [round(t, 6) for t in tracks])
+            self.assertIn(0.65, [round(t, 6) for t in tracks])
+            grid = [-corridor + 0.01 * k for k in range(int(200 * corridor) + 1)]
+            self.assertLessEqual(max(min(abs(g - t) for t in tracks) for g in grid), 0.65 + 1e-6)
+
+    def test_a_two_metre_flat_lane_between_shoulders_is_not_a_cross_site(self):
+        # Codex round 2: the default positions (-5, -1.667, 1.667, 5 m) missed the centre tyres; a 2 m flat lane
+        # between 6% shoulders passed as a 6% cross-slope
+        def lane(a, lat):
+            return 50.0 - 0.06 * math.copysign(max(0.0, abs(lat) - 1.0), lat) + 0.004 * a
+
+        old = self.apply(SiteStub(310, 8, 75, 275, side=1), self.cross_criteria(points=4), lane)
+        self.assertTrue(old.m_bTerrainOk)            # what the round-1 layout accepted
+        site = self.apply(SiteStub(310, 8, 75, 275, side=1), self.cross_criteria(), lane)
+        self.assertFalse(site.m_bTerrainOk)
+        self.assertEqual(site.m_sTerrainReason, "cross_zone")
+        self.assertLess(float(site.m_fCrossMin), 0.01)
+        self.assertEqual(len(site.m_aTrackProfile), 2 * 63)
 
     def test_flat_runway_passes(self):
         site = self.apply(SiteStub(1000, 22, 0, 1000), CriteriaStub("flat"), lambda a, lat: 39.0 + 0.00002 * a)

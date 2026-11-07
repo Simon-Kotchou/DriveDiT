@@ -49,7 +49,9 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	static const float BRAKE_ACC_ALPHA = 0.3;
 	//! Speed of the alat levels [km/h]: bounds of the adapted target
 	static const float ALAT_MIN_KMH = 5;
-	static const float ALAT_MAX_KMH = 90;
+	//! The speed cap of every e22 phase [km/h]: the adaptive a_lat controller never targets more, the obstacle envelope
+	//! is swept for it in every exit direction, and the base ends a run above it + 3 km/h (overspeed)
+	static const float SPEED_CAP_KMH = 35;
 
 	// === STEP 0 ===
 	[Attribute("12:0.1,-0.1,0.2,-0.2,0.3,-0.3;18:0.05,-0.05,0.1,-0.1,0.15,-0.15", UIWidgets.EditBox, "Step-0 staircase: groups '<speed km/h>:<steer>,...' separated by ';' (low-slip regime: 10-20 km/h, a_lat <= 1 m/s2)", category: "Step 0")]
@@ -152,10 +154,17 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! a_lat 3.5 m/s2 at kappa about 0.064 1/m is about 27 km/h; the margin covers the speed adaptation
+	//! a_lat 3.5 m/s2 at kappa about 0.064 1/m is about 27 km/h; the cap leaves room for understeer
 	override float GetMaxSpeedKmh()
 	{
-		return 35;
+		return SPEED_CAP_KMH;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Circles: the car may leave the area in any direction, so the envelope covers all of them (no heading guard)
+	override bool AllowsAnyHeading()
+	{
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -410,7 +419,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 		else if (level == 0)
 			m_fLevelKmh = m_fRefKmh * 2;
 
-		m_fLevelKmh = Math.Clamp(m_fLevelKmh, ALAT_MIN_KMH, ALAT_MAX_KMH);
+		m_fLevelKmh = Math.Clamp(m_fLevelKmh, ALAT_MIN_KMH, SPEED_CAP_KMH);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -443,7 +452,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 				if (mean > 0.01)
 					factor = Math.Clamp(Math.Sqrt(target / mean), 0.85, 1.15);
 
-				m_fLevelKmh = Math.Clamp(m_fLevelKmh * factor, ALAT_MIN_KMH, ALAT_MAX_KMH);
+				m_fLevelKmh = Math.Clamp(m_fLevelKmh * factor, ALAT_MIN_KMH, SPEED_CAP_KMH);
 			}
 
 			m_fALatSum = 0;

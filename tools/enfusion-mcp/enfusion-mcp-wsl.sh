@@ -148,7 +148,7 @@ case "${1:-}" in
     if [[ -f "$GATE" ]] && "$PY" -I -B "$GATE" --print-config; then log "pin gate: ok"; else log "pin gate: REFUSED or missing ($GATE); the server will not start"; fi
     if [[ "$1" == "--check" ]]; then
       if timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ENFUSION_WORKBENCH_HOST" "$ENFUSION_WORKBENCH_PORT" 2>/dev/null; then
-        log "TCP ${ENFUSION_WORKBENCH_HOST}:${ENFUSION_WORKBENCH_PORT} reachable (handlers not tested; use wb_diagnose)"
+        log "TCP ${ENFUSION_WORKBENCH_HOST}:${ENFUSION_WORKBENCH_PORT} reachable (handlers not tested; use wb_connect)"
       else
         log "TCP ${ENFUSION_WORKBENCH_HOST}:${ENFUSION_WORKBENCH_PORT} NOT reachable (Workbench closed, NET API off, or Windows firewall)"
       fi

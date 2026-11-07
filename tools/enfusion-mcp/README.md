@@ -145,7 +145,7 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   | Class | Tools and actions |
   |---|---|
   | read (no handshake) | `api_search`, `component_search`, `wiki_search`, `wiki_read`, `wb_knowledge` |
-  | wb read (after the handshake) | `wb_connect`, `wb_diagnose`, `wb_state`, `wb_entity_list`, `wb_entity_inspect`; `wb_entity_modify` getProperty/listProperties/listArrayItems/getWorldTransform; `wb_entity_select` getSelected; `wb_script_editor` getCurrentFile/getLine/getLinesCount (no `path`); `wb_layers` list/isVisible/getInfo; `wb_localization` getTable/listLanguages; `wb_component` list; `wb_terrain` getHeight/getBounds |
+  | wb read (after the handshake) | `wb_connect`, `wb_state`, `wb_entity_list`, `wb_entity_inspect`; `wb_entity_modify` getProperty/listProperties/listArrayItems/getWorldTransform; `wb_entity_select` getSelected; `wb_script_editor` getCurrentFile/getLine/getLinesCount (no `path`); `wb_layers` list/isVisible/getInfo; `wb_localization` getTable/listLanguages; `wb_component` list; `wb_terrain` getHeight/getBounds |
 
   Denied, among others: every file writer (`project` write, `script_create`, `prefab`, `config_create`,
   `layout_create`, `mod` create/build/validate, ...), `wb_projects` open, `wb_play`, `wb_stop`, `wb_save`, every
@@ -154,7 +154,9 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   (`MaterialValidator.CheckTextures()` can remove an item from Workbench's shared texture queue, and BK's request
   fields do not match the handlers'), and every tool that takes a filesystem, resource or mod path: `project`,
   `workshop_info`, `wb_read_props`, `asset_search`, `game_browse`, `game_read` (the game install holds the sealed
-  Everon world), `wb_resources`, `wb_prefabs` and `wb_projects`. There is no read-path check any more: no allowed
+  Everon world), `wb_resources`, `wb_prefabs` and `wb_projects`; and (Codex round 4) `wb_diagnose`, which lists each
+  addon's `Scripts/WorkbenchGame/EnfusionMCP` directory without resolving symlinks (BK `client.ts:288`), an indirect
+  filesystem read. `wb_connect` stays: it is a ping. There is no read-path check any more: no allowed
   entry takes a path. **Enabling any write tool, or re-enabling any path-taking read tool, needs its own reviewed
   per-tool policy first** (for writes, where each argument and generated subdirectory really lands, as BK computes it;
   for reads, every read-location field per action, resolved against its real base, symlinks followed, rooted and
@@ -263,9 +265,10 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
    - In the C: repo's `.claude/settings.local.json`, delete the stale allowlist names `mcp__enfusion-mcp__project_browse` and `mcp__enfusion-mcp__prefab_create`.
    - Do **not** allowlist `…__project`, `…__prefab`, `…__wb_cleanup` or any other tool with write actions: the permission prompt is the only check on their arguments (see Rules).
 4. **Restart Claude Code, run `/mcp`, and probe in this order:**
-   1. `wb_diagnose`: it never launches or copies anything. It may report `error` instead of `up_no_handlers` (a BK classifier bug, see below).
-   2. `wb_connect`: expect `Workbench Connected` with `Info: EnfusionMCP Workbench bridge active`.
-   3. `wb_state`.
+   1. `wb_connect`: expect `Workbench Connected` with `Info: EnfusionMCP Workbench bridge active`.
+   2. `wb_state`.
+
+   (`wb_diagnose` is denied by the gate since DD-14a, Codex round 4; `enfusion-mcp-wsl.sh --check` tests TCP reachability.)
 
    Then follow the capture runbook R0-R4 in `CAPTURE_PROGRAM.md` §7.2.
 
@@ -274,13 +277,13 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
 - **Never use `wb_launch` or `mod build` from WSL.** Both are blocked by the guards, so don't try to work around them. Launch Workbench only with `wb_R1.bat` or `launch-workbench.sh`.
 - **Never use `wb_cleanup`.** With `all: true` it deletes the handlers from DataCapture (Workbench then loses the bridge until they are redeployed and Workbench restarts), and with `modDir` it deletes from any directory it is given, C: included.
 - **Tool arguments bypass the wrapper's path defaults.** 13 BK tools (`project`, `prefab`, `mod`, `script_create`, `config_create`, `server_config`, `layout_create`, `layout_recipe`, `menu_create`, `gamemode_scaffold`, `scenario_create_conflict`, `animation_graph`, `workshop_info`) take a `projectPath` argument that replaces `ENFUSION_PROJECT_PATH`; `animation_graph` and `mod` also take an `outputPath`. Never pass a `/mnt/c/...` path (or a Windows `C:` path) in any of them, and approve such calls only after reading the arguments. Relative paths resolve under `$EMCP_ROOT/cwd`.
-- Before handlers are loaded, use only `wb_diagnose` and `wb_connect` as probes. With the guards on, other `wb_*` calls fail with `LAUNCH_FAILED` instead of copying files.
+- Before handlers are loaded, use only `wb_connect` (and `enfusion-mcp-wsl.sh --check`) as probes. With the guards on, other `wb_*` calls fail with `LAUNCH_FAILED` instead of copying files.
 - Never point `ENFUSION_PROJECT_PATH` at the OneDrive addons dir on C: (the wrapper refuses it).
 
 ## Known quirks
 
-- `wb_diagnose` matches only `not existing Net API function`, but 1.8 replies `Undefined API func`. So it reports `error` rather than `up_no_handlers`.
-- `wb_connect` reports `Connection Failed` both when Workbench is down and when the handlers are not loaded; `wb_diagnose` tells them apart (`refused` vs `error`).
+- `wb_diagnose` (denied by the gate) matches only `not existing Net API function`, but 1.8 replies `Undefined API func`. So it reports `error` rather than `up_no_handlers`.
+- `wb_connect` reports `Connection Failed` both when Workbench is down and when the handlers are not loaded; `enfusion-mcp-wsl.sh --check` tells a closed port apart (`NOT reachable`).
 - `wb_projects list` prints "No projects loaded". BK reads `result.projects`, but Workbench returns `{"Loaded Projects": [...]}`.
 - The `NO_AUTO_INSTALL` error text still says "Load the DriveDiT_EMCP handler addon". After the re-home, read it as "deploy the handlers into DataCapture and restart Workbench". The patch is kept byte-identical to the reviewed version (sha256 above).
 - `npm prune` rewrites the root `version` field in the build copy's `package-lock.json` (BK ships 0.7.0 there). No dependency changes.

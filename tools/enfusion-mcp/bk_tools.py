@@ -42,7 +42,6 @@ ALLOW = {
     "wiki_read": ("read", {None: {"title"}}),
     "wb_knowledge": ("read", {None: {"query", "max_files"}}),
     "wb_connect": ("wb_read", {None: set()}),
-    "wb_diagnose": ("wb_read", {None: set()}),
     "wb_state": ("wb_read", {None: set()}),
     "wb_entity_list": ("wb_read", {None: {"offset", "limit", "nameFilter"}}),
     "wb_entity_inspect": ("wb_read", {None: {"name", "index"}}),
@@ -66,6 +65,8 @@ DENIED = {
     "project": _PATH, "workshop_info": _PATH, "wb_read_props": _PATH, "asset_search": _PATH + "; the game install "
     "holds the sealed Everon world", "game_browse": _PATH + "; the game install holds the sealed Everon world",
     "game_read": _PATH + "; the game install holds the sealed Everon world",
+    "wb_diagnose": "enumerates each addon's Scripts/WorkbenchGame/EnfusionMCP directory without resolving symlinks "
+                   "(BK client.ts:288), an indirect filesystem read (Codex round 4)",
     "wb_validate": "material validation can change shared Workbench state (Codex round 3), texture validation's "
                    "contract is unverified",
     "wb_resources": _PATH, "wb_prefabs": _PATH, "wb_projects": "locate takes a resource name; open switches projects",

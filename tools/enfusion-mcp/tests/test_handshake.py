@@ -722,10 +722,11 @@ PATH_CALLS = [("project", {"action": "browse"}), ("project", {"action": "read", 
               ("wb_resources", {"action": "getInfo", "path": "x"}), ("wb_prefabs", {"action": "getGuid"}),
               ("wb_prefabs", {"action": "locate", "searchPath": "x"}),
               ("wb_prefabs", {"action": "getAncestor", "entityName": "x"}),
-              ("wb_projects", {"action": "list"}), ("wb_projects", {"action": "locate", "name": "x"})]
+              ("wb_projects", {"action": "list"}), ("wb_projects", {"action": "locate", "name": "x"}),
+              ("wb_diagnose", {})]
 READ_CALLS = [("api_search", {"query": "ZxWheelFx"}), ("wiki_search", {"query": "x"}), ("wiki_read", {"title": "x"}),
               ("component_search", {"query": "x"}), ("wb_knowledge", {"query": "index"})]
-WB_READ_CALLS = [("wb_connect", {}), ("wb_diagnose", {}), ("wb_state", {}), ("wb_entity_list", {"limit": 10}),
+WB_READ_CALLS = [("wb_connect", {}), ("wb_state", {}), ("wb_entity_list", {"limit": 10}),
                  ("wb_entity_inspect", {"name": "x"}), ("wb_terrain", {"action": "getHeight", "x": 1, "z": 2}),
                  ("wb_terrain", {"action": "getBounds"}), ("wb_layers", {"action": "list", "subScene": 0}),
                  ("wb_layers", {"action": "getInfo", "layerPath": "default"}),
@@ -778,6 +779,18 @@ class GatePolicyTests(unittest.TestCase):
                            ("workshop_info", {"modName": "/x/stable/Elsewhere"}),
                            ("wb_read_props", {"resource": "{0123456789ABCDEF}Prefabs/x.et", "path": "a"})):
             self.assertIn("takes a filesystem, resource or mod path", g.decide(name, args), name)
+
+    def test_diagnose_is_denied_and_connect_stays(self):
+        # Codex round 4: wb_diagnose lists each addon's EnfusionMCP handler dir without resolving symlinks
+        g = self.gate(ok=True)
+        for args in ({}, None):
+            why = g.decide("wb_diagnose", args)
+            self.assertIn("without resolving symlinks", why)
+            self.assertIn("indirect filesystem read", why)
+        self.assertEqual(self.calls, [])          # denied before any handshake
+        self.assertNotIn("wb_diagnose", bk.ALLOW)
+        self.assertIsNone(g.decide("wb_connect", {}))       # a ping; stays, after the handshake
+        self.assertEqual(len(self.calls), 1)
 
     def test_project_switch_is_denied(self):
         why = self.gate().decide("wb_projects", {"action": "open", "name": "x"})

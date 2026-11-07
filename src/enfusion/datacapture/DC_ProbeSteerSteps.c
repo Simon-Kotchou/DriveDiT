@@ -25,8 +25,9 @@
 // that result and the next run continues; after m_iMaxSpins spins the phase ends with its remaining events unrun
 // (note events_left). One row per event in e23_events.csv.
 //
-// BUDGET (defaults, PR text): 10 km/h 12 doublets of 0.5 and 8 of 1.0, 30 km/h 12 of 0.5 and 6 of 1.0, 60 km/h 10 of
-// 0.5; 80 km/h and 0 -> 1.0 at 60 km/h are cut (add '80:0.3x6' or '60:1.0x4' to the grid to run them). About 3 min.
+// BUDGET (defaults): 10 km/h 12 doublets of 0.5 and 8 of 1.0, 30 km/h 12 of 0.5 and 6 of 1.0, 60 km/h 10 of 0.5. This
+// is PREVIEW coverage of CC-08 (the spec asks for 50 repetitions of each step and 0 -> 1.0 at 60 km/h); the analysis
+// reports it as such. 80 km/h and 0 -> 1.0 at 60 km/h are grid entries away ('80:0.3x6', '60:1.0x4').
 // The analysis is tools/probes/t0eng/e23_steer_steps.py.
 // ============================================================================
 
@@ -40,7 +41,11 @@ class DC_ProbeSteerStepsClass : DC_ProbeSteerBaseClass
 class DC_ProbeSteerSteps : DC_ProbeSteerBase
 {
 	static const string PROBE_E23 = "e23";
-	static const float TIMEOUT_E23_S = 600;
+	static const float TIMEOUT_E23_S = 240;
+	//! Caps checked before any event array is built
+	static const int MAX_DOUBLETS = 100;		//!< per amplitude of one speed
+	static const int MAX_EVENTS = 400;			//!< over the whole grid
+	static const int MAX_SPEEDS = 6;
 	static const int JITTER_ORDER = 10;
 
 	// === S2 ===
@@ -124,9 +129,44 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Straight runs with doublets: +-10 m of drift room
+	override float GetFlatHalfWidthM()
+	{
+		return 10;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The highest speed of the grid (60 by default)
+	override float GetMaxSpeedKmh()
+	{
+		float top = 10;
+		array<string> groups = {};
+		m_sStepGrid.Split(";", groups, true);
+		foreach (string groupText : groups)
+		{
+			array<string> parts = {};
+			groupText.Split(":", parts, false);
+			float speed;
+			if (parts.Count() == 2 && ParseSteerFloat(parts[0], speed) && InRange(speed, 5, 100))
+				top = Math.Max(top, speed);
+		}
+
+		return top;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The timing attributes in range, 1..MAX_SPEEDS speed groups of 5..100 km/h, amplitudes in (0, 1], doublets
+	//! 1..MAX_DOUBLETS per amplitude and at most MAX_EVENTS events in all, checked before any event is built
 	override bool BuildSteerPlan(out string failure)
 	{
 		failure = string.Empty;
+		bool timing = InRange(m_fStepOnS, 0.05, 5) && InRange(m_fStepOffS, 0.1, 10) && InRange(m_fStepJitterS, 0, 5) && InRange(m_fCruiseS, 0, 10) && InRange(m_fPrbsBitS, 0.03, 2) && InRange(m_fTrainReserveS, 0, 20) && InRange(m_fTrainDecelMs2, 1, 10) && m_iMaxRuns >= 1 && m_iMaxRuns <= 20 && m_iMaxSpins >= 1;
+		if (!timing)
+		{
+			failure = "a step timing, PRBS, room or run-limit attribute is out of range";
+			return false;
+		}
+
 		m_iOnSteps = Math.MaxInt(1, DC_ProbeSequences.StepsFor(m_fStepOnS, m_fDt));
 		m_iOffSteps = Math.MaxInt(1, DC_ProbeSequences.StepsFor(m_fStepOffS, m_fDt));
 		m_iJitterMaxSteps = DC_ProbeSequences.StepsFor(m_fStepJitterS, m_fDt);
@@ -149,12 +189,19 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		m_iPrbsPeriodBits = m_Prbs.GetPeriod();
 		array<string> groups = {};
 		m_sStepGrid.Split(";", groups, true);
+		if (groups.IsEmpty() || groups.Count() > MAX_SPEEDS)
+		{
+			failure = string.Format("m_sStepGrid '%1' needs 1..%2 speed groups", m_sStepGrid, MAX_SPEEDS);
+			return false;
+		}
+
+		int totalEvents = 0;
 		foreach (string groupText : groups)
 		{
 			array<string> parts = {};
 			groupText.Split(":", parts, false);
 			float speed;
-			if (parts.Count() != 2 || !ParseSteerFloat(parts[0], speed) || speed <= 0)
+			if (parts.Count() != 2 || !ParseSteerFloat(parts[0], speed) || !InRange(speed, 5, 100))
 			{
 				failure = "m_sStepGrid '" + m_sStepGrid + "' is not '<speed>:<amplitude>x<doublets>,...;...'";
 				return false;
@@ -164,7 +211,18 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			array<int> counts = {};
 			if (!ParseAmplitudes(parts[1], amplitudes, counts))
 			{
-				failure = "m_sStepGrid '" + m_sStepGrid + "': '" + parts[1] + "' is not '<amplitude>x<doublets>,...' with amplitudes in 0..1 and counts >= 1";
+				failure = string.Format("m_sStepGrid '%1': '%2' is not '<amplitude>x<doublets>,...' with amplitudes in (0, 1] and 1..%3 doublets", m_sStepGrid, parts[1], MAX_DOUBLETS);
+				return false;
+			}
+
+			foreach (int doublets : counts)
+			{
+				totalEvents += 2 * doublets;
+			}
+
+			if (totalEvents > MAX_EVENTS)
+			{
+				failure = string.Format("m_sStepGrid '%1' has more than %2 events", m_sStepGrid, MAX_EVENTS);
 				return false;
 			}
 
@@ -203,7 +261,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			if (pair.Count() != 2 || !ParseSteerFloat(pair[0], amplitude) || !ParseSteerFloat(pair[1], count))
 				return false;
 
-			if (amplitude <= 0 || amplitude > 1 || count < 1)
+			if (!InRange(amplitude, 0.01, 1) || !InRange(count, 1, MAX_DOUBLETS))
 				return false;
 
 			amplitudes.Insert(amplitude);
@@ -257,7 +315,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			if (parts.Count() != 2 || !ParseSteerFloat(parts[0], groupSpeed) || !ParseSteerFloat(parts[1], value))
 				return false;
 
-			if (value < 0 || value > 1)
+			if (!InRange(value, 0, 1) || !InRange(groupSpeed, 5, 100))
 				return false;
 
 			if (Math.AbsFloat(groupSpeed - speed) < 0.01)

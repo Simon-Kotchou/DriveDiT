@@ -20,7 +20,7 @@ hashes in their INDEX_PIN.json. The expectations file holds one assertion per li
 
 Members are looked up on the class and its ancestors (parents in the index), as a script call resolves them.
 Prints PASS/FAIL per assertion, the delta counts and the two INDEX_PIN stamps; --tsv writes the whole class and
-member delta. Exit codes: 0 every assertion holds; 1 at least one fails; 2 usage or read error.
+member delta (E: only: the same resolved-path and mount guard as tools/pin). Exit codes: 0 every assertion holds; 1 at least one fails; 2 usage or read error.
 """
 from __future__ import annotations
 
@@ -33,6 +33,29 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CLASS_FILES = ("enfusion-classes.json", "arma-classes.json")
+
+
+def _pinlib():
+    """tools/pin/pinlib.py through api_index's loader (the write guard for --tsv)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_index.py")
+    mod = sys.modules.get("dd_emcp_api_index")
+    if mod is None or getattr(mod, "__file__", None) != path:
+        spec = importlib.util.spec_from_file_location("dd_emcp_api_index", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_emcp_api_index"] = mod
+        spec.loader.exec_module(mod)
+    return mod._load_pinlib()[0]
+
+
+def open_output(path: str, write_roots=None):
+    """Open a new report file for writing, after pinlib's resolved-path and mount guard (E: only, never C:, a
+    symlinked parent resolved first); the parent must exist and the file must not."""
+    pinlib = _pinlib()
+    target = pinlib.check_write_path(path, write_roots or pinlib.DEFAULT_WRITE_ROOTS)
+    if not os.path.isdir(os.path.dirname(target)):
+        raise pinlib.PinError("output directory does not exist: %s" % os.path.dirname(target))
+    return open(target, "x", encoding="utf-8")
 
 
 class IndexError_(Exception):
@@ -175,13 +198,20 @@ def check(old: dict, new: dict, expectations: list, base_dir: str = REPO_ROOT) -
     return res
 
 
-def main(argv=None) -> int:
+def main(argv=None, write_roots=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--old", required=True)
     ap.add_argument("--new", required=True)
     ap.add_argument("--expect", required=True)
-    ap.add_argument("--tsv", default=None, help="write the full delta here (must not exist)")
+    ap.add_argument("--tsv", default=None, help="write the full delta here (must not exist; E: only)")
     args = ap.parse_args(argv)
+    if args.tsv:
+        pinlib = _pinlib()
+        try:
+            pinlib.check_write_path(args.tsv, write_roots or pinlib.DEFAULT_WRITE_ROOTS)
+        except pinlib.PinError as exc:
+            print("api_index_diff: --tsv: %s" % exc, file=sys.stderr)
+            return 2
     try:
         so, old = load_index(args.old)
         sn, new = load_index(args.new)
@@ -204,11 +234,11 @@ def main(argv=None) -> int:
         print("%-4s %s" % ("PASS" if ok else "FAIL", text))
     if args.tsv:
         try:
-            with open(args.tsv, "x", encoding="utf-8") as fh:
+            with open_output(args.tsv, write_roots) as fh:
                 fh.write("kind\tclass\tmember\told\tnew\n")
                 for r in rows:
                     fh.write("\t".join(r) + "\n")
-        except OSError as exc:
+        except Exception as exc:  # PinError or OSError: nothing was written
             print("api_index_diff: %s" % exc, file=sys.stderr)
             return 2
     failed = [t for ok, t in results if not ok]

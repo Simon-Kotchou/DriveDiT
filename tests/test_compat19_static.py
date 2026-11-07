@@ -112,5 +112,68 @@ class CC02Tests(unittest.TestCase):
             self.assertEqual(rc, 0, out)
 
 
+class TsvGuardTests(unittest.TestCase):
+    """Codex round 1 (HIGH, R1): --tsv goes through the tools/pin write guard."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="dd14a-tsv-", dir=base._tmp_base())
+        self.outside = tempfile.mkdtemp(prefix="dd14a-tsv-outside-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(shutil.rmtree, self.outside, True)
+        self.roots = (self.tmp,)
+
+    def run_api(self, tsv, cwd=None):
+        out, err = io.StringIO(), io.StringIO()
+        old = os.getcwd()
+        if cwd:
+            os.chdir(cwd)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = p19_api.main(["--dump-dirs", os.path.join(FIX, "dump_18", "scripts"),
+                                   os.path.join(FIX, "dump_19", "scripts"), "--planned",
+                                   os.path.join(FIX, "planned_fixture.txt"), "--tsv", tsv], write_roots=self.roots)
+        finally:
+            os.chdir(old)
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_inside_the_roots_is_written(self):
+        rc, out = self.run_api(os.path.join(self.tmp, "cc02.tsv"))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "cc02.tsv")))
+
+    def test_c_drive_stand_in_refused(self):
+        pinlib = base.pinlib
+        fake_c = os.path.join(self.tmp, "fake_c_drive")
+        os.makedirs(fake_c)
+        saved = pinlib.FORBIDDEN_WRITE_PREFIXES
+        pinlib.FORBIDDEN_WRITE_PREFIXES = saved + (os.path.realpath(fake_c).lower() + "/",)
+        self.addCleanup(setattr, pinlib, "FORBIDDEN_WRITE_PREFIXES", saved)
+        rc, out = self.run_api(os.path.join(fake_c, "cc02.tsv"))
+        self.assertEqual(rc, 2, out)
+        self.assertIn("refusing to write on C:", out)
+        self.assertEqual(os.listdir(fake_c), [])
+
+    def test_real_c_path_refused_before_anything_runs(self):
+        rc, out = self.run_api("/mnt/c/__dd14a_never_written__/cc02.tsv")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("refusing to write on C:", out)
+
+    def test_symlinked_parent_refused(self):
+        link = os.path.join(self.tmp, "link")
+        os.symlink(self.outside, link)
+        rc, out = self.run_api(os.path.join(link, "cc02.tsv"))
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(os.listdir(self.outside), [])
+
+    def test_relative_path_off_the_roots_refused(self):
+        # a relative --tsv resolves against the cwd; on the WSL disk (C:-backed) that is outside E:
+        rc, out = self.run_api("cc02.tsv", cwd=self.outside)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("outside", out)
+        self.assertEqual(os.listdir(self.outside), [])
+
+
 if __name__ == "__main__":
     unittest.main()

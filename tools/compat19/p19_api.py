@@ -10,7 +10,7 @@ tools/enfusion-mcp/api_index.py, so CC-02 and CC-05 read the dump the same way:
 Every member of the planned surface (one 'Class Member...' line each, looked up on the class and its ancestors)
 must be unchanged or new in the new dump; REMOVED, SIG_CHANGED and NOT_FOUND fail, unless the member is listed in a
 triage file (--triage FILE: 'Class.Member status reason' lines, the accepted differences of the G19 report). --tsv
-writes the planned rows (class, member, status, old, new) for the report. Reads the dump through git only; writes
+writes the planned rows (class, member, status, old, new) for the report, under the tools/pin write guard (E: only). Reads the dump through git only; writes
 only --tsv. Exit codes: 0 PASS; 1 FAIL; 2 usage or read error.
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ def planned_rows(old: dict, new: dict, planned_path: str) -> list:
     return rows
 
 
-def main(argv=None) -> int:
+def main(argv=None, write_roots=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--dump-git", metavar="REPO")
@@ -79,6 +79,13 @@ def main(argv=None) -> int:
     ap.add_argument("--triage", default=None)
     ap.add_argument("--tsv", default=None, help="write the planned rows here (must not exist)")
     args = ap.parse_args(argv)
+    if args.tsv:
+        pinlib = api_index._load_pinlib()[0]
+        try:
+            pinlib.check_write_path(args.tsv, write_roots or pinlib.DEFAULT_WRITE_ROOTS)
+        except pinlib.PinError as exc:
+            print("p19_api: --tsv: %s" % exc, file=sys.stderr)
+            return 2
     try:
         if args.dump_git:
             if not (args.old_tag and args.new_tag):
@@ -107,11 +114,11 @@ def main(argv=None) -> int:
         print("FAIL  %s" % b)
     if args.tsv:
         try:
-            with open(args.tsv, "x", encoding="utf-8") as fh:
+            with api_index_diff.open_output(args.tsv, write_roots) as fh:
                 fh.write("class\tmember\tstatus\told\tnew\n")
                 for r in rows:
                     fh.write("\t".join(r) + "\n")
-        except OSError as exc:
+        except Exception as exc:  # PinError or OSError: nothing was written
             print("p19_api: %s" % exc, file=sys.stderr)
             return 2
     print("CC-02 %s" % ("PASS" if not bad else "FAIL (%d untriaged difference(s))" % len(bad)))

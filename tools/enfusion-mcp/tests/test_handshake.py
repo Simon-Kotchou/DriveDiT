@@ -219,6 +219,31 @@ class IndexDiffTests(PinCase):
         self.assertIn("TestHarness.GetNSuites REMOVED", out)
         self.assertIn("RESULT: MISMATCH (1 of 6 assertions hold)", out)
 
+    def test_tsv_goes_through_the_write_guard(self):
+        out_ok = os.path.join(self.tmp, "delta.tsv")
+        expect = os.path.join(FIX, "expect_fixture.txt")
+        rc, o, err = quiet(api_index_diff.main, ["--old", self.old, "--new", self.new, "--expect", expect, "--tsv",
+                                                 out_ok], write_roots=self.roots)
+        self.assertEqual(rc, 0, o + err)
+        self.assertTrue(os.path.isfile(out_ok))
+        outside = tempfile.mkdtemp(prefix="dd14a-outside-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, outside, True)
+        link = os.path.join(self.tmp, "link")
+        os.symlink(outside, link)
+        for tsv in ("/mnt/c/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
+            rc, o, err = quiet(api_index_diff.main, ["--old", self.old, "--new", self.new, "--expect", expect,
+                                                     "--tsv", tsv], write_roots=self.roots)
+            self.assertEqual(rc, 2, tsv)
+        cwd = os.getcwd()
+        os.chdir(outside)
+        try:
+            rc, o, err = quiet(api_index_diff.main, ["--old", self.old, "--new", self.new, "--expect", expect,
+                                                     "--tsv", "d.tsv"], write_roots=self.roots)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(os.listdir(outside), [])
+
     def test_tampered_index_refused(self):
         with open(os.path.join(self.new, "api", "arma-classes.json"), "a") as fh:
             fh.write(" ")

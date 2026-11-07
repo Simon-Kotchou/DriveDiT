@@ -19,8 +19,9 @@ two agree to < 0.3% at the step-0 angles (<= 0.15 rad).
 
 Evidence rules shared by both analyses (they decide Mode A against Mode B, so missing or partial evidence never
 passes and never selects a production mode):
-  - every item is PASS, FAIL or INCOMPLETE (with the reason). StrictVerdict's RESULT is INCOMPLETE while any item is
-    INCOMPLETE, FAIL only when every item is decided and one failed, PASS only when all passed;
+  - every item is PASS, FAIL or INCOMPLETE (with the reason), and completeness is never lost in an aggregation:
+    combine() is INCOMPLETE as soon as one part is (a FAIL seen in a part is kept as a diagnostic, observed()), so an
+    item is FAIL only when all its parts are decided. StrictVerdict's RESULT is INCOMPLETE while any item is;
   - a play counts only with a complete run footer (play_evidence); an interrupted, failed or missing play makes the
     items that need it INCOMPLETE;
   - identity: every input play must carry engine.build_version, launch.pin_id, ego.prefab, world.map_id and
@@ -90,13 +91,31 @@ class StrictVerdict(probe_common.Verdict):
 
 
 def combine(states):
-    """Tri-state aggregate of True / False / None (PASS / FAIL / INCOMPLETE): a definite FAIL is FAIL (more data
-    cannot turn it into a pass), else None when there is no state or any state is None, else True"""
-    if any(s is False for s in states):
-        return False
+    """Tri-state aggregate of True / False / None (PASS / FAIL / INCOMPLETE) that never loses completeness: None
+    when there is no state or any state is None (even next to a False: a decision needs every part), else False when
+    any is False, else True. A False hidden by a None is reported by observed()"""
     if not states or any(s is None for s in states):
         return None
+    if any(s is False for s in states):
+        return False
     return True
+
+
+def observed(states):
+    """The diagnostic of an incomplete aggregate: ' [observed FAIL in N part(s); withheld: incomplete]' when a part
+    failed although the aggregate is INCOMPLETE, else ''"""
+    fails = sum(1 for s in states if s is False)
+    if fails and combine(states) is None:
+        return " [observed FAIL in %d part(s); withheld: incomplete]" % fails
+    return ""
+
+
+def withhold(verdict, names, reason):
+    """Every decided item of names becomes INCOMPLETE (its observed tag kept in the detail): the play it depends on
+    is not complete evidence"""
+    for i, (tag, name, detail) in enumerate(verdict.items):
+        if name in names and tag in (probe_common.PASS, probe_common.FAIL):
+            verdict.items[i] = (probe_common.INCOMPLETE, name, "%s [observed %s; withheld: %s]" % (detail, tag, reason))
 
 
 def play_evidence(play, name):
@@ -322,8 +341,8 @@ def path_curvature(rows):
     return math.radians(turn) / distance, distance, turn
 
 
-def path_windows(rows, window_m, step_m):
-    """Sliding windows of window_m path length every step_m: [(kappa 1/m, mean yaw rate rad/s, mean speed m/s)]"""
+def path_points(rows):
+    """[(s m, psi rad, r rad/s, v m/s, row)] along the rows: the path length and the unwrapped heading"""
     points = []
     s = 0.0
     psi = 0.0
@@ -336,7 +355,15 @@ def path_windows(rows, window_m, step_m):
             s += math.hypot(x - prev[0], z - prev[1])
             psi += math.radians(wrap_deg(h - prev[2]))
         prev = (x, z, h)
-        points.append((s, psi, step.f.get("angvel_l_y"), step.f.get("vel_l_z")))
+        points.append((s, psi, step.f.get("angvel_l_y"), step.f.get("vel_l_z"), step))
+    return points
+
+
+def local_windows(rows, window_m, step_m):
+    """Sliding windows of window_m path length every step_m: [(|dpsi| / ds 1/m, |mean r| / mean v 1/m, rows in the
+    window)]. The absolute value is taken per window, so a curvature that alternates over more than a window length
+    is not cancelled"""
+    points = path_points(rows)
     out = []
     start = 0
     begin = 0.0
@@ -344,18 +371,160 @@ def path_windows(rows, window_m, step_m):
         while start < len(points) and points[start][0] < begin:
             start += 1
         end = start
-        while end < len(points) and points[end][0] < begin + window_m:
+        while end < len(points) and points[end][0] < points[start][0] + window_m:
             end += 1
         if end >= len(points) or end <= start:
             break
         ds = points[end][0] - points[start][0]
         dpsi = points[end][1] - points[start][1]
-        rates = [p[2] for p in points[start:end + 1] if p[2] is not None]
-        speeds = [p[3] for p in points[start:end + 1] if p[3] is not None]
+        rates = [p[2] for p in points[start + 1:end + 1] if p[2] is not None]
+        speeds = [p[3] for p in points[start + 1:end + 1] if p[3] is not None]
+        yaw = abs(mean(rates)) / mean(speeds) if rates and speeds and mean(speeds) > MIN_SPEED_MS else None
         if ds > 0:
-            out.append((dpsi / ds, mean(rates), mean(speeds)))
+            out.append((abs(dpsi) / ds, yaw, end - start))
         begin += step_m
     return out
+
+
+def decimals(texts):
+    """The most decimals of the number strings (the CSV resolution)"""
+    best = 0
+    for text in texts:
+        if text and "." in text:
+            best = max(best, len(text.split(".", 1)[1].rstrip()))
+    return best
+
+
+def heading_noise(rows):
+    """(sigma_h rad, quantisation step rad): the per-row heading noise from the data, the rms of the second
+    differences of the unwrapped heading over consecutive rows / sqrt(6) (white noise; a smooth curvature adds
+    almost nothing at one step), at least the quantisation q / sqrt(12) of the CSV's heading decimals"""
+    points = path_points(rows)
+    q = math.radians(10.0 ** -decimals(p[4].raw.get("heading_deg", "") for p in points)) if points else None
+    second = [points[k + 1][1] - 2.0 * points[k][1] + points[k - 1][1] for k in range(1, len(points) - 1)]
+    if len(second) < 10 or q is None:
+        return None, q
+    jitter = math.sqrt(sum(d * d for d in second) / len(second) / 6.0)
+    return max(jitter, q / math.sqrt(12.0)), q
+
+
+def yaw_noise(rows):
+    """sigma_r rad/s per row: the rms of the first differences of angvel_l_y / sqrt(2), at least the quantisation of
+    its decimals / sqrt(12)"""
+    values = [s.f.get("angvel_l_y") for s in rows if s.f.get("angvel_l_y") is not None]
+    diffs = [values[k] - values[k - 1] for k in range(1, len(values))]
+    if len(diffs) < 10:
+        return None
+    q = 10.0 ** -decimals(s.raw.get("angvel_l_y", "") for s in rows)
+    return max(math.sqrt(sum(d * d for d in diffs) / len(diffs) / 2.0), q / math.sqrt(12.0))
+
+
+def curvature_stats(rows, window_m, step_m):
+    """The local absolute-curvature statistic of zero-command rows and its noise floor: {'k_p95', 'k_max', 'r_p95',
+    'r_max', 'k_floor', 'r_floor', 'windows', 'sigma_h', 'sigma_r', 'q_h'}. Floors (3 sigma of one window):
+    heading 3 sqrt(2) sigma_h / window_m (the two end headings), yaw 3 rms(yaw statistic - heading statistic)"""
+    windows = local_windows(rows, window_m, step_m)
+    sigma_h, q_h = heading_noise(rows)
+    sigma_r = yaw_noise(rows)
+    out = {"windows": len(windows), "sigma_h": sigma_h, "sigma_r": sigma_r, "q_h": q_h}
+    kappas = [w[0] for w in windows]
+    yaws = [w[1] for w in windows if w[1] is not None]
+    out["k_p95"] = probe_common.percentile(kappas, 95) if kappas else None
+    out["k_max"] = max(kappas) if kappas else None
+    out["r_p95"] = probe_common.percentile(yaws, 95) if yaws else None
+    out["r_max"] = max(yaws) if yaws else None
+    out["k_floor"] = 3.0 * math.sqrt(2.0) * sigma_h / window_m if sigma_h is not None else None
+    # the yaw statistic measures the same curvature from the sampled rate: 3 x the rms of its difference to the
+    # heading statistic on the same windows (the per-row rate jitter integrates away in the heading, so a white-noise
+    # floor from sigma_r would overstate it; e01 1.9.0.37: rms 1e-5..2.5e-5 1/m), at least its quantisation
+    diffs = [w[1] - w[0] for w in windows if w[1] is not None]
+    speeds = [s.f.get("vel_l_z") for s in rows if s.f.get("vel_l_z") is not None]
+    v = mean(speeds)
+    if len(diffs) >= 10 and sigma_r is not None and v:
+        q_r = 10.0 ** -decimals(s.raw.get("angvel_l_y", "") for s in rows)
+        out["r_floor"] = max(3.0 * math.sqrt(sum(d * d for d in diffs) / len(diffs)), q_r / v)
+    else:
+        out["r_floor"] = None
+    return out
+
+
+def drift_estimate(rows, min_half_m):
+    """(drift deg / 100 m, sigma deg / 100 m, detail) of a zero-command segment: the heading change over the path
+    length; sigma = sqrt(noise^2 + split^2) with noise = sqrt(2) sigma_h / length (heading_noise) and split = |d1 -
+    d2| / 2 of the two halves (the repeat variance). (None, None, why) when a half is shorter than min_half_m or the
+    noise cannot be measured"""
+    points = path_points(rows)
+    if len(points) < 4:
+        return None, None, "too few rows"
+    length = points[-1][0] - points[0][0]
+    if length < 2 * min_half_m:
+        return None, None, "%s m (< 2 x %g m halves)" % (fmt(length, 4), min_half_m)
+    mid = next(k for k, p in enumerate(points) if p[0] - points[0][0] >= length / 2.0)
+    scale = math.degrees(1.0) * 100.0
+
+    def rate(a, b):
+        return (points[b][1] - points[a][1]) / (points[b][0] - points[a][0]) * scale
+
+    drift = rate(0, len(points) - 1)
+    d1, d2 = rate(0, mid), rate(mid, len(points) - 1)
+    sigma_h, _ = heading_noise(rows)
+    if sigma_h is None:
+        return None, None, "the heading noise cannot be measured"
+    noise = math.sqrt(2.0) * sigma_h / length * scale
+    split = abs(d1 - d2) / 2.0
+    sigma = math.sqrt(noise * noise + split * split)
+    return drift, sigma, "halves %s / %s, noise %s, split %s deg/100 m" % (fmt(d1, 3), fmt(d2, 3), fmt(noise, 3),
+                                                                            fmt(split, 3))
+
+
+def phase_rows_complete(steps, play, probe, expect_call):
+    """(True, detail) when every phase of <probe>_phases.csv with a start step has all its rows (physics_step
+    start_step..end_step, one row per dispatched step) and every row is called or not as expect_call(step) says,
+    with a finite cmd_steer and input_post_steer on every called row; else (None, what is missing)"""
+    if not play.has(probe + "_phases.csv"):
+        return None, "%s: no phases file" % probe
+    by_phase = {}
+    for s in steps:
+        by_phase.setdefault(s.phase, []).append(s)
+    problems = []
+    called = 0
+    for row in play.csv(probe + "_phases", ("phase", "start_step", "end_step")):
+        start = probe_common.to_int(row.get("start_step"))
+        end = probe_common.to_int(row.get("end_step"))
+        name = row.get("phase", "")
+        if start is None or end is None:
+            if by_phase.get(name):
+                problems.append("%s: rows but no start / end step" % name)
+            continue
+        rows = by_phase.get(name, [])
+        numbers = [s.i.get("physics_step") for s in rows]
+        expected = end - start + 1
+        if len(rows) != expected or numbers != list(range(start, end + 1)):
+            problems.append("%s: %d of %d rows (steps %d..%d)" % (name, len(rows), expected, start, end))
+        bad = 0
+        for s in rows:
+            want = expect_call(s)
+            if s.i.get("steer_call") != (1 if want else 0):
+                bad += 1
+            elif want:
+                called += 1
+                cmd, post = s.f.get("cmd_steer"), s.f.get("input_post_steer")
+                if cmd is None or post is None or not math.isfinite(cmd) or not math.isfinite(post):
+                    bad += 1
+        if bad:
+            problems.append("%s: %d rows with a wrong steer_call or no finite command / readback" % (name, bad))
+    if problems:
+        return None, "%s: %s" % (probe, "; ".join(problems[:6]) + ("; ..." if len(problems) > 6 else ""))
+    return True, "%s: %d called rows, every phase complete" % (probe, called)
+
+
+def track_profile(play, kind):
+    """The site's centre tyre-pair heights per station (site.<kind>.track_profile), or None"""
+    text = play.header.get("site.%s.track_profile" % kind) or ""
+    values = [probe_common.to_float(v) for v in text.split()]
+    if not values or any(v is None for v in values):
+        return None
+    return values
 
 
 def median(values):

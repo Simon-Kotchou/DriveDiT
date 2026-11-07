@@ -44,9 +44,13 @@ Gain: closed form for the linear structures; for a clamped M3 / M4 the gain is o
 simulation (golden section around the closed-form start) wherever the parameters are refined.
 Fit: a grid over d (0..D_MAX) and tau; joint grids of tau with R (M3) or sigma (M4); coordinate descent; golden-section
 refinement at the best delay and at +-1 step. Selection: the lowest held-out MSE; within 2% of it (or the noise
-floor) the lowest BIC. Parameter stability: the selected structure fitted to each event alone; CV = stdev / |mean| of
-g, of tau (resolved when tau >= dt / ln 100: the first-step residual is >= 1%), of R and sigma (resolved when finite in
->= 2/3 of the events); the delay is stable when constant or its CV <= --max-cv.
+floor) the lowest BIC; a first-order stage that does not improve the fit beyond the noise floor is dropped (tau 0).
+Parameter stability: the selected structure fitted to each event alone; CV = stdev / |mean| of g (unresolved when a
+rate limit covers the whole on-time in more than 1/3 of the events), of tau, R and sigma; a stage active in some
+events and inactive in others (tau < dt / ln 100, no rate limit, no relaxation) is unresolved, never stable; the delay
+is stable when constant or its CV <= --max-cv. Without a complete footer every bin, PRBS and steer_sign result is
+withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input bin and the held-out
+PRBS at every bin speed to PASS.
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
 """
 
@@ -428,6 +432,19 @@ def fit_bin(windows, dt):
     if selected == "M3" and params.q is None:
         selected = "M2"
         result["structures"]["M2"] = dict(result["structures"]["M3"], demoted_from="M3")
+    # a first-order stage that does not change the training fit beyond the noise floor is absent (tau 0): it is not
+    # identified, so it must not be reported as a parameter
+    params = result["structures"][selected]["params"]
+    if selected != "M1" and params.tau > 0:
+        trial = params.copy()
+        trial.tau = 0.0
+        trial_sse = score(train, trial, dt, selected, exact=True)
+        info = result["structures"][selected]
+        if trial_sse <= info["train_sse"] + info["train_n"] * floor_mse:
+            test_sse, test_n = sse(test, trial, dt, selected)
+            result["structures"][selected] = dict(info, params=trial, train_sse=trial_sse, tau_dropped=True,
+                                                  test_mse=test_sse / test_n if test_n else None,
+                                                  test_r2=r2(test, trial, dt, selected))
     result["selected"] = selected
     return result
 
@@ -484,28 +501,29 @@ def stability(selected, params, per_event, windows, dt, step_size, max_cv):
     if selected != "M1":
         resolution = dt / TAU_RESOLUTION
         active = [p.tau for p in per_event if p.tau >= resolution]
-        if not active:
-            out["tau"] = (True, "tau < dt / ln 100 = %s s in every event (no first-order stage)" % sc.fmt(
+        if not active and params.tau < resolution:
+            out["tau"] = (True, "tau < dt / ln 100 = %s s in the bin and every event (no first-order stage)" % sc.fmt(
                 resolution, 3))
         else:
-            tau_cv = cv([p.tau for p in per_event])
-            out["tau"] = (None if tau_cv is None else tau_cv <= max_cv, "tau CV %s (%d of %d events >= %s s)" % (
-                sc.fmt(tau_cv, 3), len(active), len(per_event), sc.fmt(resolution, 3)))
+            out["tau"] = stage_stability("tau", [p.tau if p.tau >= resolution else None for p in per_event],
+                                         max_cv)
     if selected in ("M3", "M4"):
-        rates = [p.q * abs(p.g) * step_size for p in per_event if p.q is not None]
-        if len(rates) < RESOLVED_SHARE * len(per_event):
-            out["R"] = (None, "R unresolved (finite in %d of %d events)" % (len(rates), len(per_event)))
-        else:
-            rate_cv = cv(rates)
-            out["R"] = (None if rate_cv is None else rate_cv <= max_cv, "R CV %s" % sc.fmt(rate_cv, 3))
+        out["R"] = stage_stability("R", [p.q * abs(p.g) * step_size if p.q is not None else None
+                                         for p in per_event], max_cv)
     if selected == "M4":
-        sigmas = [p.sigma for p in per_event if p.sigma > 0]
-        if len(sigmas) < RESOLVED_SHARE * len(per_event):
-            out["sigma"] = (None, "sigma unresolved (> 0 in %d of %d events)" % (len(sigmas), len(per_event)))
-        else:
-            sigma_cv = cv(sigmas)
-            out["sigma"] = (None if sigma_cv is None else sigma_cv <= max_cv, "sigma CV %s" % sc.fmt(sigma_cv, 3))
+        out["sigma"] = stage_stability("sigma", [p.sigma if p.sigma > 0 else None for p in per_event], max_cv)
     return out
+
+
+def stage_stability(name, values, max_cv):
+    """(state, text) of a model stage's parameter over the events (None = the stage is inactive in that event): a
+    stage present in some repetitions and absent in others is unresolved (None), never stable; present in all: its
+    CV"""
+    present = [v for v in values if v is not None]
+    if len(present) < len(values):
+        return None, "%s unresolved (the stage is active in %d of %d events)" % (name, len(present), len(values))
+    value = cv(present)
+    return (None if value is None else value <= max_cv), "%s CV %s" % (name, sc.fmt(value, 3))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -700,7 +718,8 @@ def analyse_bin(windows, dt, args, step_size):
     per_event = per_event_params(windows, dt, selected, params)
     stable = stability(selected, params, per_event, windows, dt, step_size, args.max_cv)
     r2_ok = info["test_r2"] is not None and info["test_r2"] >= args.min_r2
-    state = sc.combine([r2_ok] + [s for s, _ in stable.values()])
+    parts = [r2_ok] + [s for s, _ in stable.values()]
+    state = sc.combine(parts)
     rate = params.q * abs(params.g) * step_size if clamped(selected, params) else None
     others = ", ".join("%s R2 %s BIC %s" % (s, sc.fmt(v["test_r2"], 4), sc.fmt(v["bic"], 6))
                        for s, v in fit["structures"].items())
@@ -713,7 +732,7 @@ def analyse_bin(windows, dt, args, step_size):
                          sc.fmt(params.tau, 3), sc.fmt(rate, 4) if rate is not None else "none",
                          sc.fmt(params.sigma, 3) if selected == "M4" else "-",
                          "; ".join(text for _, text in stable.values()), args.max_cv, len(windows),
-                         "/".join("%+d" % s for s in signs), others))
+                         "/".join("%+d" % s for s in signs), others)) + sc.observed(parts)
     return out
 
 
@@ -833,9 +852,15 @@ def analyse(play, args, verdict):
                                                                    "path; not gated): %s, %s" % (
                                                                        STATE_TEXT[res["state"]], res["detail"]))
     report_extras(channel, results, verdict)
+    evidence_state = verdict.tag_of("evidence")
+    if evidence_state != probe_common.PASS:
+        sc.withhold(verdict, [name for _, name, _ in verdict.items if name.startswith(("input_", "wheel_", "prbs_"))]
+                    + ["steer_sign"], "the play is not complete")
+        raw_states.append(None)
     verdict.info("raw_engine_path", "PARTIAL %s (cmd -> steer_input -> wheel_angle; coverage %s); CC-08 as a whole "
-                                    "is INCOMPLETE until the llc checks exist" % (
-                                        STATE_TEXT[sc.combine(raw_states)], "FULL" if coverage_ok else "PREVIEW"))
+                                    "is INCOMPLETE until the llc checks exist%s" % (
+                                        STATE_TEXT[sc.combine(raw_states)], "FULL" if coverage_ok else "PREVIEW",
+                                        sc.observed(raw_states)))
     verdict.info("channel_validated", "yes: %s (CC-07 step 0)" % channel if channel else "no")
     return results
 
@@ -865,26 +890,42 @@ def input_model(play, args):
     states = [res["state"] for _, res in fitted]
     results = {("input", key): res for key, res in fitted}
     results[("input", "prbs")] = prbs_windows(steps, "input", None, None, dt)
-    for speed in sorted(set(key[0] for key, _ in fitted)):
-        state, _ = prbs_check(results, "input", speed, dt, args)
-        if state is False:
-            states.append(False)
-            texts.append("PRBS %g km/h fails" % speed)
+    speeds = sorted(set(key[0] for key, _ in fitted))
+    for speed in speeds:
+        # the model is claimed at this speed only with a usable, passing held-out PRBS there
+        state, text = prbs_check(results, "input", speed, dt, args)
+        states.append(state)
+        texts.append("PRBS %g km/h %s" % (speed, STATE_TEXT[state]))
     state = sc.combine(states)
     if state is not True:
-        return state, None, "; ".join(texts)
+        return state, None, "; ".join(texts) + sc.observed(states)
     structures = set(res["selected"] for _, res in fitted)
     if len(structures) != 1:
         return None, None, "the input bins select different structures (%s)" % ", ".join(sorted(structures))
     structure = structures.pop()
     if structure == "M4":
         return None, None, "M4 on the input path: the one-step check needs the hidden relaxation state"
+    params = [res["params"] for _, res in fitted]
     model = {"structure": structure, "dt": dt,
-             "d": int(round(sc.median([res["params"].d for _, res in fitted]))),
-             "g": sc.median([res["params"].g for _, res in fitted]),
-             "tau": sc.median([res["params"].tau for _, res in fitted]),
+             "d": int(round(sc.median([p.d for p in params]))),
+             "g": sc.median([p.g for p in params]),
+             "tau": sc.median([p.tau for p in params]),
              "rate": sc.median([res["rate"] for _, res in fitted]) if structure == "M3" else None}
-    return True, model, "%s d %d g %s tau %s s rate %s, from %d e23 input bins" % (
+    # scope: the amplitudes up to the largest bin; the speeds of the bins (+-SPEED_BIN_SHARE), from 0 km/h only when
+    # the model is the same at every bin speed (one delay, gain / tau / rate CV across the bins <= max_cv) over >= 2
+    # speeds: then it is stated as speed-independent and extrapolated below the lowest bin
+    same = len(speeds) >= 2 and len(set(p.d for p in params)) == 1 and all(
+        (cv(values) or 0.0) <= args.max_cv for values in (
+            [p.g for p in params], [p.tau for p in params],
+            [res["rate"] for _, res in fitted] if structure == "M3" else [1.0, 1.0]))
+    low = 0.0 if same else speeds[0] * (1.0 - SPEED_BIN_SHARE)
+    model["scope"] = {"kmh": (low, speeds[-1] * (1.0 + SPEED_BIN_SHARE)),
+                      "amplitude": max(key[1] for key, _ in fitted),
+                      "text": "%g..%g km/h%s, |cmd| <= %g" % (low, speeds[-1] * (1.0 + SPEED_BIN_SHARE),
+                                                              " (speed-independent across %s km/h, extrapolated below "
+                                                              "%g)" % ("/".join("%g" % v for v in speeds), speeds[0])
+                                                              if same else "", max(key[1] for key, _ in fitted))}
+    return True, model, "%s d %d g %s tau %s s rate %s, from %d e23 input bins with PRBS" % (
         structure, model["d"], sc.fmt(model["g"], 4), sc.fmt(model["tau"], 3), sc.fmt(model["rate"], 4), len(fitted))
 
 

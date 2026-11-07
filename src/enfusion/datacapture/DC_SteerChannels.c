@@ -30,12 +30,15 @@
 //                empty below 0.5 m/s): close to the wheel angle minus the slip angle in the low-slip regime
 //
 // WHEEL SPIN REMOVED. Each bone or entity source uses one axis of its own frame: the column of its matrix that points
-// most along the vehicle's x axis at the first read (|x| share >= AXLE_MIN_SHARE, else the source is unusable and
-// stays empty), signed to point to +x. The spin of a wheel turns its frame about that axle, so the axle and its yaw
-// atan2(-a_z, a_x) do not change with the spin; the rotator bone carries no spin at all. The first read happens in
-// the first reset of a probe (steering commanded 0), so the axle choice is made at zero command and the toe at zero
-// command shows as the value itself. The choice and its x share go into the run header at the probe stop
-// (steer.channel.<source>.*).
+// most along the vehicle's x axis (|x| share >= AXLE_MIN_SHARE), signed to point to +x. The spin of a wheel turns its
+// frame about that axle, so the axle and its yaw atan2(-a_z, a_x) do not change with the spin; the rotator bone
+// carries no spin at all. The axle is chosen only at a confirmed zero-steer standstill: the probe arms the choice in a
+// settle segment once the steering readback is within 1e-3 of 0 and the car stands still (ArmAxleSelection), the
+// choice waits for a fresh animation update after that (the next ReadPostFrame), and the probe disarms it when the
+// settle ends (DisarmAxleSelection). A matrix whose best axis is below the share is retried at the next armed read;
+// only after AXLE_MAX_TRIES failed tries is the source unusable. Until a source's axle is chosen its columns stay
+// empty. The toe at zero command shows as the value itself. The choice, its x share and the tries go into the run
+// header at the probe stop (steer.channel.<source>.*).
 //
 // TIMING: bones are animated in the frame update, so the value read after a physics step may be the previous frame's;
 // the analysis measures the lag against the steering readback (CC-07 step 0: no lag beyond one physics step). The
@@ -61,6 +64,12 @@ class DC_SteerChannels
 	//! Axis choice states (m_aAxis)
 	static const int AXIS_NOT_CHOSEN = -1;
 	static const int AXIS_UNUSABLE = -2;
+	//! Armed reads with no usable axle before a source is unusable
+	static const int AXLE_MAX_TRIES = 30;
+	//! Arm states of the axle choice
+	static const int ARM_OFF = 0;
+	static const int ARM_WAIT_FRAME = 1;
+	static const int ARM_READY = 2;
 	//! vdir_l/r stay empty below this wheel speed [m/s]
 	static const float VDIR_MIN_SPEED = 0.5;
 
@@ -99,6 +108,9 @@ class DC_SteerChannels
 	protected bool m_bVdirLValid;
 	protected bool m_bVdirRValid;
 	protected int m_iReads;
+	protected int m_iArmState = ARM_OFF;
+	protected int m_iArmings;
+	protected ref array<int> m_aTries = {};
 	protected int m_iPostFrameReads;
 
 	//------------------------------------------------------------------------------------------------
@@ -137,6 +149,8 @@ class DC_SteerChannels
 		m_aValue = {};
 		m_aValid = {};
 		m_aReadsValid = {};
+		m_aTries = {};
+		m_iArmState = ARM_OFF;
 
 		SlotManagerComponent slots = SlotManagerComponent.Cast(vehicle.FindComponent(SlotManagerComponent));
 		for (int source = 0; source < SOURCE_COUNT; source++)
@@ -159,6 +173,7 @@ class DC_SteerChannels
 			m_aBones.Insert(bone);
 			m_aEntities.Insert(attached);
 			m_aAxis.Insert(AXIS_NOT_CHOSEN);
+			m_aTries.Insert(0);
 			m_aAxisSign.Insert(1);
 			m_aAxisShare.Insert(0);
 			m_aValue.Insert(0);
@@ -236,11 +251,50 @@ class DC_SteerChannels
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The probe confirmed a zero-steer standstill (settle segment): the axle choice may happen after the next
+	//! animation update (ReadPostFrame)
+	void ArmAxleSelection()
+	{
+		if (m_iArmState != ARM_OFF)
+			return;
+
+		m_iArmState = ARM_WAIT_FRAME;
+		m_iArmings++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The settle ended: no axle is chosen while the car drives
+	void DisarmAxleSelection()
+	{
+		m_iArmState = ARM_OFF;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true once every bone and entity source has an axle or is unusable
+	bool AxlesSettled()
+	{
+		for (int source = 0; source < SOURCE_COUNT; source++)
+		{
+			bool present = m_aEntities[source] != null;
+			if (IsBoneSource(source))
+				present = m_aBones[source] >= 0;
+
+			if (present && m_aAxis[source] == AXIS_NOT_CHOSEN)
+				return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Once per render frame after its physics update (OnProbePostFrame): the rotator bones only, into the *_pf columns
 	void ReadPostFrame()
 	{
 		if (!m_Vehicle)
 			return;
+
+		if (m_iArmState == ARM_WAIT_FRAME)
+			m_iArmState = ARM_READY;
 
 		m_iPostFrameReads++;
 		float yaw = 0;
@@ -289,8 +343,9 @@ class DC_SteerChannels
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Picks the axle column at the first call (the axis with the largest |x| share, signed to +x; below
-	//! AXLE_MIN_SHARE the source is unusable for the rest of the probe), then yaw = atan2(-a_z, a_x) of that axis
+	//! Picks the axle column while the choice is armed and ready (the axis with the largest |x| share, signed to +x;
+	//! below AXLE_MIN_SHARE the next armed read tries again, after AXLE_MAX_TRIES the source is unusable), then
+	//! yaw = atan2(-a_z, a_x) of that axis
 	protected bool AxleYaw(int source, vector axis0, vector axis1, vector axis2, out float yaw)
 	{
 		yaw = 0;
@@ -300,6 +355,9 @@ class DC_SteerChannels
 
 		if (axis == AXIS_NOT_CHOSEN)
 		{
+			if (m_iArmState != ARM_READY)
+				return false;
+
 			float share0 = AxisShare(axis0);
 			float share1 = AxisShare(axis1);
 			float share2 = AxisShare(axis2);
@@ -330,7 +388,10 @@ class DC_SteerChannels
 
 			if (share < AXLE_MIN_SHARE)
 			{
-				m_aAxis[source] = AXIS_UNUSABLE;
+				m_aTries[source] = m_aTries[source] + 1;
+				if (m_aTries[source] >= AXLE_MAX_TRIES)
+					m_aAxis[source] = AXIS_UNUSABLE;
+
 				return false;
 			}
 
@@ -489,13 +550,16 @@ class DC_SteerChannels
 			float sign = m_aAxisSign[source];
 			float share = m_aAxisShare[source];
 			int validReads = m_aReadsValid[source];
+			int tries = m_aTries[source];
 			lines.Insert(prefix + ".axis=" + axis.ToString());
+			lines.Insert(prefix + ".failed_tries=" + tries.ToString());
 			lines.Insert(prefix + ".axis_sign=" + sign.ToString(-1, 0));
 			lines.Insert(prefix + ".axis_share=" + share.ToString(-1, 4));
 			lines.Insert(prefix + ".valid_reads=" + validReads.ToString());
 		}
 
 		lines.Insert("steer.reads=" + m_iReads.ToString());
+		lines.Insert("steer.axle_armings=" + m_iArmings.ToString());
 		lines.Insert("steer.postframe_reads=" + m_iPostFrameReads.ToString());
 	}
 

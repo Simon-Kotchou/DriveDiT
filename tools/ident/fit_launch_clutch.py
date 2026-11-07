@@ -24,7 +24,8 @@ missing), and the callback numbers must run on by 1 from the start's anchor to t
 PASS needs a complete capture (steps, run footer status complete, the launch_clutch block and its counters) with at
 least one launch phase (LAUNCH_PHASES), and in every launch checked:
   - a stopped start: the row before the first drive row is the anchor, one callback before it, held (handbrake, or the
-    footbrake) below STOPPED_KMH with the clutch open, and the first drive row has the clutch open;
+    footbrake) below STOPPED_KMH with the clutch open (the clutch may begin to engage on the first drive row: a
+    relaunch from a footbrake hold with the engine above idle commands a little c at once);
   - no missing callback number from the anchor to the window's end;
   - a complete window (MIN_WINDOW_S, or one that couples) and motion above MOTION_KMH;
   - c = 1 by COUPLE_DEADLINE_S while the throttle stays >= COUPLE_DEADLINE_THROTTLE, else within the window;
@@ -133,8 +134,8 @@ def launch_window(rows, first):
     """A launch from rows[first] (a phase's first drive row): (last row index, times, problems, skip). times[k] is the
     time of rows[first + k] from the launch's start (the covered times of the rows before it). problems: no stopped
     start (the anchor: the row one callback before, held by the handbrake or the footbrake below STOPPED_KMH with the
-    clutch open; the first row with the clutch open), a missing callback number from the anchor to the window's end, or
-    a row without its covered time. skip: why a phase that is no launch phase is not checked (no stopped start)."""
+    clutch open), a missing callback number from the anchor to the window's end, or a row without its covered time.
+    skip: why a phase that is no launch phase is not checked (no stopped start)."""
     problems = []
     row = rows[first]
     anchor = rows[first - 1] if first > 0 and rows[first - 1]["phase"] == row["phase"] else None
@@ -147,8 +148,6 @@ def launch_window(rows, first):
               and anchor["cmd_clutch"] == 0):
         problems.append("no stopped start (the row before: handbrake %d, brake %.2f, %.2f km/h, c %.2f)"
                         % (anchor["cmd_handbrake"], anchor["cmd_brake"], anchor["speed_kmh"], anchor["cmd_clutch"]))
-    if row["cmd_clutch"] != 0:
-        problems.append("its first drive row has the clutch at %.2f, not open" % row["cmd_clutch"])
     skip = None
     if problems and not is_launch_phase(row["phase"]):
         skip = problems[0]

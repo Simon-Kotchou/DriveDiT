@@ -53,7 +53,7 @@ that Play's launches and a free decay, trimmed to the step columns the fit reads
     tests/fixtures/launch_clutch_19/round1_downhill.csv: no more openings per case, the speed after 30 s at most 10 %
     above), an upshift then a medium brake, and the brake sweep at both ends of brake_drop_rpm_per_s's range.
   - Codex round 4's: braking slip beyond the assumed bound (a brake of 0.3 or more gets the full fall again; no stall
-    while brake x slip <= 2.4 m/s, and the plant's limit beyond it pinned), a coast after a clutch dip (c reaching 1
+    while brake x slip < 2.8 m/s, and the plant's stalls beyond it frozen), a coast after a clutch dip (c reaching 1
     without a brake locks), a relaunch from a footbrake hold, and the coast test per episode.
   - check_play: a stopped start one callback before the first drive row, every callback number from there, and times
     from the covered times of the callbacks (timeslice_s), as the producer numbers them (Codex rounds 2 and 3: a
@@ -84,9 +84,10 @@ TOLERANCE CHANGES SINCE ddca123 (DD-14d round 1), with the reasons (also in PR #
      creeps 0.0 .. 0.8 km/h against round 1's 0.4 .. 1.5).
   9. Downhill brake pulses: the speed after 30 s at most round 1's x 1.1 + 0.1 km/h (the 0.1 for cases that end at a
      standstill, 0.00 against 0.00).
-  10. Braking slip beyond the assumed bound (round 5): no stall asserted while brake x slip <= 2.4 m/s; beyond it the
-     plant moves a locked engine by the slip step at once, and the stalls there (brake x slip >= 3 m/s, as in round 3)
-     are pinned, not excluded. An open item of the PR.
+  10. Braking slip beyond the assumed bound (rounds 5 and 6): no stall and rpm at or above the guard + 100 asserted
+     while brake x slip <= 2.4 m/s, no stall (the rpm may dip lower) at 2.6 and 2.7; from 2.8 the plant moves a locked
+     engine by the slip step at once, and the stalls there (as in round 3) are frozen in SLIP_STALL_BASELINE, not
+     excluded. An open item of the PR.
 """
 
 import csv
@@ -1684,6 +1685,15 @@ def downhill_case(config, speed, gear, brake, period, calls, timing):
     return stalls_after(rows), model.openings(rows), min(r[6] for r in rows), rows[-1][4]
 
 
+# The coupled brake sweep's stalls beyond brake x slip 2.8 m/s on this head (test_braking_slip_beyond_the_assumed_bound):
+# (km/h, brake, braking slip m/s, callbacks, timing, the lowest true rpm rounded). The first stall is at brake 1 x slip
+# 2.8 (16 km/h, 1-step calls, timing A); round 3 (07c57da) stalls in the same cases. Frozen (Codex round 5): a stall
+# that appears or disappears fails the test until this list is updated on purpose
+SLIP_STALL_BASELINE = ((16, 1.0, 2.8, "1", "A", 407), (16, 1.0, 3.0, "1", "A", 281), (16, 1.0, 4.0, "1", "U", 0),
+                       (16, 1.0, 4.0, "1", "A", 0), (17, 1.0, 4.0, "1", "U", 42), (17, 1.0, 4.0, "1", "A", 42),
+                       (18, 1.0, 4.0, "1", "U", 205), (18, 1.0, 4.0, "1", "A", 205), (20, 1.0, 4.0, "1", "A", 311))
+
+
 def stalls_after(rows, start=0):
     r = rows[start:]
     return sum(1 for a, b in zip(r, r[1:]) if a[3] and not b[3])
@@ -1829,10 +1839,13 @@ class CodexAttackTest(unittest.TestCase):
         # Codex round 4, HIGH: coupled at 13 km/h in first gear, brake 0.6 at 0.3 s, timing A, braking slip 4 m/s (twice
         # round 4's assumed bound) stalled at 337 rpm with the brake-scaled fall; round 3 survived. A brake of 0.3 or
         # more gets the full fall again. The sweep: brakes 0.3 / 0.6 / 1.0 at 0.3 s from 5 .. 40 km/h in first gear,
-        # braking slip 0.25 .. 4 m/s, callbacks of 1, 2, 3 and mixed steps, timings U and A (1440 cases): no stall while
-        # brake x slip <= 2.4 m/s. Beyond it the plant's locked branch applies the slip step to the engine at once
-        # (w = (v - brake x slip) / g), faster than its own clutch could drag it, and a few cases stall exactly as in
-        # round 3 (07c57da); the assertion below pins that boundary (DD-14d round 5, an open item of the PR)
+        # braking slip 0.25 .. 4 m/s, callbacks of 1, 2, 3 and mixed steps, timings U and A (2304 cases):
+        #  - brake x slip <= 2.4 m/s: no stall, rpm at or above the guard + 100;
+        #  - 2.4 < brake x slip < 2.8 (sampled at 2.6 and 2.7): no stall (the rpm may dip below the guard + 100);
+        #  - brake x slip >= 2.8: the plant's locked branch moves the engine by the slip step at once (w = (v - brake x
+        #    slip) / g), faster than its own clutch could drag it, and these cases stall as in round 3 (07c57da). They
+        #    are frozen in SLIP_STALL_BASELINE (Codex round 5: the earlier all(... >= 3) could not fail). An open item of
+        #    the PR
         def coupled_brake(speed, brake, slip_mps, calls, timing):
             lc = LaunchClutch(**self.slip)
             lc.coupling, lc.locked = 1.0, True
@@ -1845,17 +1858,25 @@ class CodexAttackTest(unittest.TestCase):
         stalls, low = coupled_brake(13, 0.6, 4.0, (1,), "A")
         self.assertEqual(stalls, 0)
         self.assertGreater(low, 1000.0)                               # round 3: 1004 rpm; round 4: 337, a stall
-        stalled = []
+        names = {CALLS[k]: k for k in ("1", "2", "3", "mixed")}
+        stalled, band = [], 0
         for case in itertools.product((5, 8, 10, 13, 15, 16, 17, 18, 20, 25, 30, 40), (0.3, 0.6, 1.0),
-                                      (0.25, 1.0, 2.0, 3.0, 4.0), (CALLS["1"], CALLS["2"], CALLS["3"], CALLS["mixed"]),
-                                      ("U", "A")):
+                                      (0.25, 1.0, 2.0, 2.6, 2.7, 2.8, 3.0, 4.0),
+                                      (CALLS["1"], CALLS["2"], CALLS["3"], CALLS["mixed"]), ("U", "A")):
             stalls, low = coupled_brake(*case)
-            if case[1] * case[2] <= 2.4:
+            product = case[1] * case[2]
+            if product <= 2.4 + 1e-9:
                 self.assertEqual(stalls, 0, case)
                 self.assertGreaterEqual(low, self.floor, case)
+            elif product < 2.8 - 1e-9:
+                band += 1
+                self.assertEqual(stalls, 0, case)
             elif stalls:
-                stalled.append(case)
-        self.assertTrue(all(c[1] * c[2] >= 3.0 for c in stalled), stalled)
+                stalled.append((case[0], case[1], case[2], names[case[3]], case[4], int(round(low))))
+        self.assertEqual(band, 192)                                   # brake 1 x slip 2.6 and 2.7
+        self.assertEqual(sorted(stalled), sorted(SLIP_STALL_BASELINE),
+                         "the stalls beyond brake x slip 2.8 m/s changed: if that is intended, update "
+                         "SLIP_STALL_BASELINE deliberately (and the PR's open item); got %r" % sorted(stalled))
 
     def test_a_coast_after_a_dip_stays_coupled(self):
         # Codex round 4, MEDIUM: coasting from 15 km/h in first gear on -5 %, a commanded clutch dip at 0.1 .. 0.2 s,

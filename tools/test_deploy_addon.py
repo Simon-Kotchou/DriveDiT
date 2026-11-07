@@ -577,6 +577,48 @@ class TargetPinTest(unittest.TestCase):
         self.assertIn("no deploy root", r(scratch, roots, (), exp_pin))
         self.assertIn("deploys to %s" % cold, r(scratch, roots, (), cold_pin))
 
+    def test_case_aliases_reach_the_protected_roots(self):
+        # Codex round 2 N1: drvfs is case-insensitive, so /mnt/e/DriveDiT/ADDONS is the production root
+        r = deploy_addon.isolation_reason
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        wide = ("/mnt/e/DriveDiT",)
+        self.assertIn("belongs to stable pins", r("/mnt/e/DriveDiT/ADDONS/DataCapture", self.ROOTS, wide, cold_pin))
+        self.assertIn("belongs to stable pins", r("/mnt/e/DriveDiT/Addons/datacapture", self.ROOTS, wide, cold_pin))
+        self.assertIn("takes only a deploy with --target-pin", r("/mnt/e/DriveDiT/ADDONS_C18/DataCapture",
+                                                                  self.ROOTS, wide))
+        self.assertIsNone(r("/mnt/e/DriveDiT/ADDONS_C18/DATACAPTURE", self.ROOTS, wide, cold_pin))
+        self.assertIn("only deploy target", r("/mnt/e/DriveDiT/ADDONS_C18/Other", self.ROOTS, wide, cold_pin))
+
+    def test_identity_alias_reaches_the_protected_root(self):
+        # The same directory under another name (any alias the path strings do not show) is found by (st_dev,
+        # st_ino) of the target's ancestors.
+        root = os.path.join(self.tmp, "prod")
+        alias = os.path.join(self.tmp, "alias")
+        os.makedirs(os.path.join(root, "DataCapture"))
+        os.makedirs(os.path.join(alias, "DataCapture"))
+        real_identity = deploy_addon._identity
+
+        def identity(path):
+            if os.path.normpath(path) == alias:
+                return real_identity(root)
+            if os.path.normpath(path) == os.path.join(alias, "DataCapture"):
+                return real_identity(os.path.join(root, "DataCapture"))
+            return real_identity(path)
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        roots = {"stable": root, "cold-1.8.0.13": os.path.join(self.tmp, "cold")}
+        with mock.patch.object(deploy_addon, "_identity", identity):
+            why = deploy_addon.isolation_reason(os.path.join(alias, "DataCapture"), roots, (self.tmp,), cold_pin)
+        self.assertIn("belongs to stable pins", why)
+
+    def test_live_case_alias_of_the_production_root(self):
+        # Where E: is mounted: the real ADDONS alias is the production root (read-only stat; nothing deployed)
+        if not os.path.isdir("/mnt/e/DriveDiT/addons/DataCapture"):
+            self.skipTest("the production addon is not here")
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        self.assertTrue(deploy_addon.same_dir("/mnt/e/DriveDiT/ADDONS/DataCapture", "/mnt/e/DriveDiT/addons/DataCapture"))
+        self.assertIn("belongs to stable pins", deploy_addon.isolation_reason(
+            os.path.realpath("/mnt/e/DriveDiT/ADDONS/DataCapture"), self.ROOTS, ("/mnt/e/DriveDiT",), cold_pin))
+
     def test_pinlib_and_launchers_agree(self):
         pinlib, _ = deploy_addon.load_pin_tools()
         self.assertEqual(pinlib.DEPLOY_ROOTS, self.ROOTS)

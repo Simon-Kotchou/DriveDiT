@@ -385,12 +385,54 @@ def load_pin_tools():
     return tuple(mods)
 
 
+def _fold(path):
+    """Case-folded on /mnt/<drive>: drvfs (E:) is case-insensitive, so ADDONS and addons are one directory."""
+    return path.lower() if re.match(r"^/mnt/[A-Za-z](/|$)", path) else path
+
+
+def _identity(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def same_dir(a, b):
+    """True if a and b are the same directory: equal after case folding on /mnt/<drive>, or the same (st_dev,
+    st_ino)."""
+    if _fold(os.path.normpath(a)) == _fold(os.path.normpath(b)):
+        return True
+    ia = _identity(a)
+    return ia is not None and ia == _identity(b)
+
+
+def inside_root(path, root):
+    """True if path is root or below it, by case-folded path or by filesystem identity of an existing ancestor (Codex
+    round 2: a case alias such as /mnt/e/DriveDiT/ADDONS/DataCapture reaches the protected root)."""
+    p, r = _fold(os.path.normpath(path)), _fold(os.path.normpath(root))
+    if p == r or p.startswith(r.rstrip(os.sep) + os.sep):
+        return True
+    rid = _identity(root)
+    if rid is None:
+        return False
+    cur = path
+    while True:
+        if _identity(cur) == rid:
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
 def isolation_reason(real_target, deploy_roots, allow_roots=(), target=None):
     """Why a deploy may not go to real_target under the per-pin root rules, or None (DD-14a; Codex round 1).
 
     deploy_roots is pinlib.DEPLOY_ROOTS ({launch path: root}); target is None (no --target-pin) or
     {"pin_id", "launch_path_id", "is_active"}. The protected roots are checked FIRST, so an --allow-root that covers
-    one (for example --allow-root /mnt/e/DriveDiT) never reaches it:
+    one (for example --allow-root /mnt/e/DriveDiT) never reaches it, and they are compared case-insensitively on
+    /mnt/<drive> and by filesystem identity (inside_root), so a case alias never reaches one either:
       - the stable (production) root: a deploy without --target-pin is as before; with --target-pin the pin must be
         a stable pin AND the active one (ACTIVE), and the target its DataCapture;
       - any other root (the cold addons_c18): only <root>/DataCapture, and only with --target-pin of a pin of that
@@ -399,12 +441,12 @@ def isolation_reason(real_target, deploy_roots, allow_roots=(), target=None):
     must otherwise go to its launch path's root (an experimental pin has none)."""
     protected = sorted(((lp, os.path.realpath(r)) for lp, r in deploy_roots.items()), key=lambda kv: -len(kv[1]))
     for lp, root in protected:
-        if not inside(real_target, root):
+        if not inside_root(real_target, root):
             continue
         want = os.path.join(root, "DataCapture")
         if lp == "stable" and target is None:
             return None
-        if real_target != want:
+        if not same_dir(real_target, want):
             return "%s is inside the protected %s root %s, whose only deploy target is %s" % (real_target, lp, root,
                                                                                           want)
         if target is None:

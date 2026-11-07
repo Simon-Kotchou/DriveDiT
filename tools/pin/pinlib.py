@@ -7,6 +7,9 @@ _load_pinlib): `python3 -I` does not put the script directory on sys.path, and
 loading by path keeps a stray json.py or os.py next to the scripts from shadowing
 the stdlib.
 
+DD-14a adds pin channels (stable, experimental, cold), the build identity build_key/1, the dd-pin/2 schema and the
+two write-once sidecars of a pin (pin_<id>.build_key.json for a dd-pin/1 pin, pin_<id>.engine.json); see README.
+
 Write safety: every path this package writes to goes through check_write_path().
 Writes are allowed only under /mnt/e/ (the E: drive). /mnt/c/ is always refused,
 whatever the allowed roots are, because C: is nearly full and holds the live
@@ -26,8 +29,11 @@ import os
 import re
 import stat
 
-PIN_SCHEMA = "dd-pin/1"
+PIN_SCHEMA = "dd-pin/1"            # what make_pin.py writes without --channel (DD-0)
+PIN_SCHEMA_V2 = "dd-pin/2"         # make_pin.py --channel ... (DD-14a): channel, exe_sha256, build_key
+PIN_SCHEMAS = (PIN_SCHEMA, PIN_SCHEMA_V2)
 LAUNCH_SCHEMA = "dd-launch/1"
+LAUNCH_SCHEMA_V2 = "dd-launch/2"   # adds top-level build_key, channel, pin_channel, use_class (DD-14a)
 
 APPS = ("game", "tools")
 APPIDS = {"game": 1874880, "tools": 1874910}
@@ -45,6 +51,61 @@ STEAM_APPID_FILES = {
     "game": ("steam_appid.txt",),
     "tools": ("steam_appid.txt", "Workbench/steam_appid.txt"),
 }
+
+# ---- pin channels (dd-pin/2, DD-14a; MIGRATION_1_9 5.3, 7.1) ----
+# stable: the Steam stable apps (1874880/1874910), as in DD-0. experimental: the 1.9 Experimental apps
+# (1890860/1890880); such a pin is never activated and launches only with use_class compat-preview. cold: a run from
+# a verified copy of a stable build (pin/<id>-run), checked against the copy's SHA256SUMS; it has the build_key of the
+# stable pin it was copied from (MIGRATION_1_9 2.2).
+CHANNELS = ("stable", "experimental", "cold")
+# The release channel a pin's sessions carry (dc-2.0 session.json pin.channel: stable or experimental). A cold pin
+# runs a stable build, so its sessions say stable; the launch record keeps the pin's own channel as pin_channel.
+RELEASE_CHANNEL = {"stable": "stable", "experimental": "experimental", "cold": "stable"}
+CHANNEL_APPIDS = {"stable": APPIDS, "experimental": {"game": 1890860, "tools": 1890880}, "cold": APPIDS}
+# The Experimental game exe is ArmaReforgerSteam_Experimental.exe (its Steam launch option; RELEASE_STATUS 4.1),
+# read from the install on E: on 2026-11-06. The Workbench exe has the same name in both.
+CHANNEL_BINARIES = {
+    "stable": BINARIES,
+    "experimental": {"game": ("ArmaReforgerSteam_Experimental.exe", "ArmaReforgerSteamDiag.exe"),
+                     "tools": ("Workbench/ArmaReforgerWorkbenchSteamDiag.exe",)},
+    "cold": BINARIES,
+}
+CHANNEL_STEAM_APPID_FILES = {"stable": STEAM_APPID_FILES, "experimental": STEAM_APPID_FILES,
+                             "cold": STEAM_APPID_FILES}
+DEFAULT_ACF_BY_CHANNEL = {
+    "stable": DEFAULT_ACF,
+    "experimental": {"game": "/mnt/e/SteamLibrary/steamapps/appmanifest_1890860.acf",
+                     "tools": "/mnt/e/SteamLibrary/steamapps/appmanifest_1890880.acf"},
+}
+
+# ---- build identity (MIGRATION_1_9 2.2; dc-2.0 section 11) ----
+# build_key/1 = sha256 of the ASCII text "build_key/1\n" + "<app>.appid=..\n<app>.buildid=..\n<app>.exe_sha256=..\n"
+# for game then tools: the app ids and buildids and the sha256 of the client exe and of the Workbench exe. It is the
+# same function as tools/harvester/harvest.py build_key_v1, so the harvester, the pin and the sidecar agree.
+BUILD_KEY_SCHEMA = "build_key/1"
+BUILD_KEY_EXES = {
+    "stable": {"game": "ArmaReforgerSteam.exe", "tools": "Workbench/ArmaReforgerWorkbenchSteamDiag.exe"},
+    "experimental": {"game": "ArmaReforgerSteam_Experimental.exe",
+                     "tools": "Workbench/ArmaReforgerWorkbenchSteamDiag.exe"},
+    "cold": {"game": "ArmaReforgerSteam.exe", "tools": "Workbench/ArmaReforgerWorkbenchSteamDiag.exe"},
+}
+BUILD_KEY_RE = re.compile(r"[0-9a-f]{64}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# A dd-pin/1 pin file is immutable, so its build_key lives next to it in a write-once sidecar (the name the harvester
+# reads, tools/harvester/harvest.py resolve_build_key). pin_sidecar.py build-key writes it.
+BUILD_KEY_SIDECAR_SCHEMA = "dd-pin-build-key/1"
+# engine_version_expected: the GetBuildVersion() string of the first E-11 (probe run header) on that pin, write-once
+# (SURFACE 5 row 2). pin_sidecar.py engine writes it; the preflight copies it into the launch record, where DC_Session
+# compares it with GetBuildVersion().
+ENGINE_SIDECAR_SCHEMA = "dd-pin-engine/1"
+# MIGRATION_1_9 8.2 component 1 (CC-11 compares GetFixedTimeSlice() with it). Not part of build_key.
+PHYSICS_HZ_EXPECTED = 60
+
+# use_class is set at launch time (MIGRATION_1_9 3.3; dc-2.0 section 11). An experimental pin always launches as
+# compat-preview. production needs a qualified G19 admission record (DD-14b), so the preflight refuses it for now.
+USE_CLASSES = ("dev", "appearance", "probe", "compat-preview", "g19", "production")
+DEFAULT_USE_CLASS = "dev"
+EXPERIMENTAL_USE_CLASS = "compat-preview"
 
 # Steam "Automatic updates" setting stored as AutoUpdateBehavior in appmanifest_<appid>.acf.
 # Mapping is community-documented (CAPTURE_PROGRAM r2 4.2 item 1); Valve docs are UNVERIFIED.
@@ -69,6 +130,62 @@ LAUNCH_PATHS = {
     "tools": {"acf": DEFAULT_ACF["tools"],
               "install": "/mnt/c/Program Files (x86)/Steam/steamapps/common/Arma Reforger Tools"},
 }
+
+# Launch paths per launch-path id (DD-14a). Every launcher starts fixed exes and names its launch-path id to the
+# preflight (--launch-path; default "stable", which is LAUNCH_PATHS above, read at call time so tests can point it
+# at a fake layout). A pin records the id it was made for (dd-pin/2 launch_path_id; a dd-pin/1 pin is "stable"), and
+# <app>.launch_path refuses a pin whose id or paths differ from the launcher's. Change an entry only together with
+# its launchers (tools/pin/tests compares them with the .bat files).
+#   cold-1.8.0.13: the working copy E:\DriveDiT\pin\1.8.0.13-run (MIGRATION_1_9 7.1, decision 16), made from the
+#   verified reference copy E:\DriveDiT\pin\1.8.0.13; its appmanifests are the saved ones in meta\.
+#   Launchers: tools/launch/wb_C18.bat and client_C18_i01.bat.
+COLD_RUN_ROOTS = {"cold-1.8.0.13": "/mnt/e/DriveDiT/pin/1.8.0.13-run"}
+
+
+def _cold_paths(root: str) -> dict:
+    return {"game": {"acf": root + "/meta/appmanifest_1874880.acf", "install": root + "/game"},
+            "tools": {"acf": root + "/meta/appmanifest_1874910.acf", "install": root + "/tools"}}
+
+
+COLD_LAUNCH_PATHS = {lp: _cold_paths(root) for lp, root in COLD_RUN_ROOTS.items()}
+# The Experimental apps on the E: library (decision 3). No launcher starts them (wb_X19.bat is moot after the
+# 2026-11-05 stable re-pin), so an experimental pin is for --check only.
+EXPERIMENTAL_LAUNCH_PATHS = {
+    "game": {"acf": DEFAULT_ACF_BY_CHANNEL["experimental"]["game"],
+             "install": "/mnt/e/SteamLibrary/steamapps/common/Arma Reforger Experimental"},
+    "tools": {"acf": DEFAULT_ACF_BY_CHANNEL["experimental"]["tools"],
+              "install": "/mnt/e/SteamLibrary/steamapps/common/Arma Reforger Experimental Tools"},
+}
+STABLE_LAUNCH_PATH = "stable"
+EXPERIMENTAL_LAUNCH_PATH = "experimental"
+
+# What each Workbench launcher passes as -profile and -gproj, per launch-path id (Windows form). The MCP endpoint
+# handshake compares the running Workbench's command line with these; tools/pin/tests compares them with the .bat
+# files. The cold Workbench gets its own profile and addon copy, so a 1.8 Workbench never re-saves the 1.9 addon.
+WB_LAUNCH = {
+    "stable": {"profile": "E:\\DriveDiT\\wb_profile", "gproj": "E:\\DriveDiT\\addons\\DataCapture\\addon.gproj",
+               "launcher": "wb_R1.bat"},
+    "cold-1.8.0.13": {"profile": "E:\\DriveDiT\\wb_profile_c18",
+                      "gproj": "E:\\DriveDiT\\addons_c18\\DataCapture\\addon.gproj", "launcher": "wb_C18.bat"},
+}
+# The deploy root (parent of DataCapture/) each launch-path id's Workbench and client load (tools/deploy_addon.py
+# --target-pin).
+DEPLOY_ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
+
+
+def launch_path_ids() -> tuple:
+    return (STABLE_LAUNCH_PATH, EXPERIMENTAL_LAUNCH_PATH) + tuple(sorted(COLD_LAUNCH_PATHS))
+
+
+def launch_paths_for(lp_id: str) -> dict:
+    """{app: {acf, install}} the launchers of launch-path id lp_id start. PinError for an unknown id."""
+    if lp_id == STABLE_LAUNCH_PATH:
+        return LAUNCH_PATHS
+    if lp_id == EXPERIMENTAL_LAUNCH_PATH:
+        return EXPERIMENTAL_LAUNCH_PATHS
+    if lp_id in COLD_LAUNCH_PATHS:
+        return COLD_LAUNCH_PATHS[lp_id]
+    raise PinError("unknown launch path %r (known: %s)" % (lp_id, ", ".join(launch_path_ids())))
 
 DEFAULT_WRITE_ROOTS = ("/mnt/e/",)
 FORBIDDEN_WRITE_PREFIXES = ("/mnt/c/",)
@@ -410,6 +527,119 @@ def sha256_file(path: str) -> str:
         for block in iter(lambda: fh.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def hash_files(root: str, rels) -> tuple:
+    """({rel: sha256}, bytes read) for files relative to root ('/'-separated). PinError if one is missing."""
+    out, total = {}, 0
+    for rel in rels:
+        full = os.path.join(root, *rel.split("/"))
+        if not os.path.isfile(full):
+            raise PinError("cannot hash %s: not a file" % full)
+        out[rel] = sha256_file(full)
+        total += os.path.getsize(full)
+    return out, total
+
+
+# --------------------------------------------------------------------------- build identity (DD-14a)
+
+
+def pin_channel(pin: dict) -> str:
+    """The pin's channel: dd-pin/2 records it; a dd-pin/1 pin is stable."""
+    ch = pin.get("channel", "stable") if pin.get("schema") == PIN_SCHEMA_V2 else "stable"
+    if ch not in CHANNELS:
+        raise PinError("pin %s has unknown channel %r" % (pin.get("pin_id"), ch))
+    return ch
+
+
+def pin_launch_path_id(pin: dict) -> str:
+    """The launch-path id the pin was made for: dd-pin/2 records it; a dd-pin/1 pin is stable."""
+    if pin.get("schema") != PIN_SCHEMA_V2:
+        return STABLE_LAUNCH_PATH
+    lp = pin.get("launch_path_id")
+    if not isinstance(lp, str) or not lp:
+        raise PinError("dd-pin/2 pin %s has no launch_path_id" % pin.get("pin_id"))
+    return lp
+
+
+def pin_release_channel(pin: dict) -> str:
+    rc = pin.get("release_channel") if pin.get("schema") == PIN_SCHEMA_V2 else None
+    return rc if rc in ("stable", "experimental") else RELEASE_CHANNEL[pin_channel(pin)]
+
+
+def build_key_inputs(channel: str, apps: dict, exe_sha256: dict) -> dict:
+    """The inputs of build_key/1: per app its appid, buildid, the build-key exe and that exe's sha256.
+
+    apps: {app: {"appid": int, "buildid": int}}; exe_sha256: {app: {exe rel path: sha256}}. PinError when an input
+    is missing, so a key is never computed from a partial build.
+    """
+    if channel not in BUILD_KEY_EXES:
+        raise PinError("no build-key exes for channel %r" % (channel,))
+    out = {"schema": BUILD_KEY_SCHEMA}
+    for app in APPS:
+        a = apps.get(app) or {}
+        exe = BUILD_KEY_EXES[channel][app]
+        digest = (exe_sha256.get(app) or {}).get(exe)
+        if not isinstance(a.get("appid"), int) or not isinstance(a.get("buildid"), int):
+            raise PinError("build_key: %s appid or buildid missing" % app)
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise PinError("build_key: no sha256 for %s/%s" % (app, exe))
+        out[app] = {"appid": a["appid"], "buildid": a["buildid"], "exe": exe, "exe_sha256": digest}
+    return out
+
+
+def build_key_from_inputs(inputs: dict) -> str:
+    """build_key/1 from build_key_inputs(); the same bytes as tools/harvester/harvest.py build_key_v1."""
+    if not isinstance(inputs, dict) or inputs.get("schema") != BUILD_KEY_SCHEMA:
+        raise PinError("build_key inputs are not %s" % BUILD_KEY_SCHEMA)
+    lines = [BUILD_KEY_SCHEMA]
+    for app in APPS:
+        a = inputs.get(app)
+        if not isinstance(a, dict) or not isinstance(a.get("appid"), int) or not isinstance(a.get("buildid"), int) \
+                or not isinstance(a.get("exe_sha256"), str) or not SHA256_RE.fullmatch(a["exe_sha256"]):
+            raise PinError("build_key inputs: %s incomplete" % app)
+        lines += ["%s.appid=%d" % (app, a["appid"]), "%s.buildid=%d" % (app, a["buildid"]),
+                  "%s.exe_sha256=%s" % (app, a["exe_sha256"])]
+    return hashlib.sha256(("\n".join(lines) + "\n").encode("ascii")).hexdigest()
+
+
+def sums_exe_sha256(sums: dict, channel: str = "stable") -> dict:
+    """{app: {rel: sha256}} of every launched exe of the channel, from a cold copy's SHA256SUMS ({<app>/<rel>: sha})."""
+    out = {}
+    for app in APPS:
+        out[app] = {}
+        for rel in CHANNEL_BINARIES[channel][app]:
+            digest = sums.get("%s/%s" % (app, rel))
+            if digest is None:
+                raise PinError("SHA256SUMS has no line for %s/%s" % (app, rel))
+            out[app][rel] = digest
+    return out
+
+
+_SUM_LINE_RE = re.compile(r"^([0-9a-f]{64}) [ *](.+)$")
+
+
+def parse_sha256sums(data: bytes) -> dict:
+    """{relative path: sha256} of sha256sum output (as cold_copy.sh writes it). PinError on a malformed line."""
+    sums = {}
+    for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        m = _SUM_LINE_RE.match(line)
+        if not m:
+            raise PinError("SHA256SUMS line %d is not '<sha256>  <path>'" % n)
+        path = m.group(2)
+        if path.startswith("./"):
+            path = path[2:]
+        sums[path] = m.group(1)
+    return sums
+
+
+def sidecar_path(pin_dir: str, pin_id: str, kind: str) -> str:
+    """<pin dir>/pin_<id>.<kind>.json for kind build_key or engine."""
+    if kind not in ("build_key", "engine"):
+        raise PinError("unknown sidecar kind %r" % kind)
+    return os.path.join(pin_dir, "pin_%s.%s.json" % (validate_pin_id(pin_id), kind))
 
 
 def utc_now() -> _dt.datetime:

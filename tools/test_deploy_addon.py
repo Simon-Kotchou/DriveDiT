@@ -531,5 +531,83 @@ class DeployAddonTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.target))
 
 
+def minimal_pin(pin_dir, pin_id):
+    """A dd-pin/1 pin file with just the sections the pin loader requires (no installs behind it)."""
+    import json
+    app = {"appid": 1, "buildid": 1, "depots": {}, "paks": {}, "acf": {"wsl": "/x.acf"}, "install": {"wsl": "/x"}}
+    path = os.path.join(pin_dir, "pin_%s.json" % pin_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"schema": "dd-pin/1", "pin_id": pin_id, "game": app, "tools": app}, f)
+    return path
+
+
+class TargetPinTest(unittest.TestCase):
+    """DD-14a: --target-pin, the per-pin deploy roots and the TARGET_PIN stamp."""
+
+    setUp = DeployAddonTest.setUp
+    tearDown = DeployAddonTest.tearDown
+    run_tool = DeployAddonTest.run_tool
+
+    ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
+
+    def test_target_pin_reason(self):
+        r = deploy_addon.target_pin_reason
+        self.assertIsNone(r("/mnt/e/DriveDiT/addons/DataCapture", "stable", self.ROOTS))
+        self.assertIsNone(r("/mnt/e/DriveDiT/addons_c18/DataCapture", "cold-1.8.0.13", self.ROOTS))
+        self.assertIn("production root", r("/mnt/e/DriveDiT/addons/DataCapture", "cold-1.8.0.13", self.ROOTS))
+        self.assertIn("deploys to /mnt/e/DriveDiT/addons_c18/DataCapture",
+                      r("/mnt/e/DriveDiT/addons_c18/Other", "cold-1.8.0.13", self.ROOTS))
+        self.assertIn("no deploy root", r("/mnt/e/DriveDiT/addons_x19/DataCapture", "experimental", self.ROOTS))
+        self.assertIsNone(r(self.target, "experimental", self.ROOTS, (self.tmp,)))  # scratch deploys
+
+    def test_pinlib_and_launchers_agree(self):
+        pinlib, _ = deploy_addon.load_pin_tools()
+        self.assertEqual(pinlib.DEPLOY_ROOTS, self.ROOTS)
+
+    def buildinfo(self):
+        with open(os.path.join(self.target, SCRIPT_DST, "DC_BuildInfo.c"), encoding="ascii") as f:
+            return f.read()
+
+    def test_stamp_and_state(self):
+        pins = os.path.join(self.tmp, "pins")
+        os.makedirs(pins)
+        minimal_pin(pins, "9.9.0.1")
+        minimal_pin(pins, "9.9.0.2")
+        rc, out = self.run_tool("--target-pin", "9.9.0.1", "--pin-dir", pins)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("target pin 9.9.0.1 (launch path stable, build_key unknown)", out)
+        info = self.buildinfo()
+        self.assertIn('static const string TARGET_PIN = "9.9.0.1";', info)
+        self.assertIn('static const string TARGET_LAUNCH_PATH = "stable";', info)
+        import json
+        with open(os.path.join(self.target, ".deploy_state.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["target_pin"], "9.9.0.1")
+        rc, out = self.run_tool("--target-pin", "9.9.0.2", "--pin-dir", pins)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("deployed for pin 9.9.0.1", out)
+
+    def test_without_target_pin_nothing_changes(self):
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("TARGET_", self.buildinfo())
+        self.assertNotIn("target pin", out)
+
+    def test_bad_target_pin_refused_before_writing(self):
+        for args in (("--target-pin", "../x", "--pin-dir", self.tmp), ("--target-pin", "9.9.0.3", "--pin-dir", self.tmp)):
+            rc, out = self.run_tool(*args)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("nothing was written", out)
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_cold_root_needs_its_target_pin(self):
+        # addons_c18 is not an allowed root without a target pin naming it (pure check, no write)
+        target = "/mnt/e/DriveDiT/addons_c18/DataCapture"
+        self.assertIsNotNone(deploy_addon.target_reason(target))
+        if deploy_addon.forbidden_device_reason(os.path.realpath("/mnt/e/DriveDiT"), "target"):
+            self.skipTest("/mnt/e is not mounted here (it is the WSL disk), so every E: target is refused anyway")
+        self.assertIn("not inside an allowed deploy root", deploy_addon.target_reason(target))
+        self.assertIsNone(deploy_addon.target_reason(target, ("/mnt/e/DriveDiT/addons_c18",)))
+
+
 if __name__ == "__main__":
     unittest.main()

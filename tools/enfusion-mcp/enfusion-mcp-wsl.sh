@@ -9,6 +9,11 @@
 #   enfusion-mcp-wsl.sh --check      also open+close one TCP connection to the NET API port (opens a
 #                                    socket to Workbench; it sends no request)
 #
+# DD-14a (CC-05): the server runs behind mcp_gate.py, which picks the pin (EMCP_PIN, else the ACTIVE pointer),
+# serves only that pin's API index ($EMCP_ROOT/pins/<pin id>/data, stamped by api_index.py) and its project root
+# (pinlib.DEPLOY_ROOTS), and runs the endpoint handshake (endpoint_handshake.py) before every wb_* call. A second
+# config for another pin sets EMCP_PIN in the MCP entry's env. Any mismatch refuses before the server starts.
+#
 # stdout belongs to JSON-RPC: every diagnostic in this script goes to stderr.
 # Paths, host and port can be overridden by exporting them beforehand (or via "env" in the MCP config).
 # The three guards cannot: they are always 1 here, and the wrapper refuses to start a build without them.
@@ -82,18 +87,18 @@ ENFUSION_WORKBENCH_PORT="${ENFUSION_WORKBENCH_PORT:-5775}"
 export ENFUSION_WORKBENCH_HOST ENFUSION_WORKBENCH_PORT
 
 # --- paths: WSL form for everything the server opens itself ----------------------------------------
-# Generators (project write, script_create, prefab create, mod create, game_duplicate, ...) write here, and
-# so would any handler copy: it must stay off C: (never the OneDrive addons dir).
-export ENFUSION_PROJECT_PATH="${ENFUSION_PROJECT_PATH:-/mnt/e/DriveDiT/addons}"
-off_c_drive "$ENFUSION_PROJECT_PATH" || die 2 "refusing ENFUSION_PROJECT_PATH=$ENFUSION_PROJECT_PATH: the server writes there; use an absolute path off C:"
-export ENFUSION_GAME_PATH="${ENFUSION_GAME_PATH:-/mnt/d/SteamLibrary/steamapps/common/Arma Reforger}"                      # read only
-export ENFUSION_WORKBENCH_PATH="${ENFUSION_WORKBENCH_PATH:-/mnt/c/Program Files (x86)/Steam/steamapps/common/Arma Reforger Tools}"  # read only (launch and mod build are guarded)
-# Data dir must contain api/ wiki/ patterns/ recipes/ (kb/ is always read from the package).
-# Only export it when it is really populated: BK's loader silently falls back to an EMPTY index
-# when api/*.json is missing (src/index/loader.ts loadJson(..., [])).
-if [[ -z "${ENFUSION_MCP_DATA_DIR:-}" && -s "$ROOT/data/api/arma-classes.json" ]]; then
-  export ENFUSION_MCP_DATA_DIR="$ROOT/data"
+# Generators (project write, script_create, prefab create, mod create, game_duplicate, ...) write into the project
+# path, and so would any handler copy: it must stay off C: (never the OneDrive addons dir). mcp_gate.py sets it to
+# the pin's project root (E:\DriveDiT\addons for a stable pin); a value set here must be that root.
+if [[ -n "${ENFUSION_PROJECT_PATH:-}" ]]; then
+  off_c_drive "$ENFUSION_PROJECT_PATH" || die 2 "refusing ENFUSION_PROJECT_PATH=$ENFUSION_PROJECT_PATH: the server writes there; use an absolute path off C:"
 fi
+# ENFUSION_GAME_PATH and ENFUSION_WORKBENCH_PATH (read only; launch and mod build are guarded) are the pin's
+# installs, and ENFUSION_MCP_DATA_DIR is the pin's index: mcp_gate.py sets all three. BK's loader silently falls back
+# to an EMPTY index when api/*.json is missing (src/index/loader.ts loadJson(..., [])), so the gate checks every
+# api file against the index stamp first.
+GATE="${EMCP_GATE:-$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")/mcp_gate.py}"
+PY=/usr/bin/python3
 # If anything ever injects handlers, it must target the addon that is actually open, not the
 # alphabetically-first addon that findFallbackGproj() would otherwise pick.
 export ENFUSION_DEFAULT_MOD="${ENFUSION_DEFAULT_MOD:-DataCapture}"
@@ -131,16 +136,14 @@ WORK_CWD="$ROOT/cwd"
 
 case "${1:-}" in
   --print-env|--check)
-    for v in NODE_BIN DIST ENFUSION_WORKBENCH_HOST ENFUSION_WORKBENCH_PORT ENFUSION_PROJECT_PATH \
+    for v in NODE_BIN DIST GATE EMCP_PIN ENFUSION_WORKBENCH_HOST ENFUSION_WORKBENCH_PORT ENFUSION_PROJECT_PATH \
              ENFUSION_GAME_PATH ENFUSION_WORKBENCH_PATH ENFUSION_MCP_DATA_DIR ENFUSION_DEFAULT_MOD \
              ENFUSION_MCP_NO_AUTO_INSTALL ENFUSION_MCP_NO_AUTO_LAUNCH ENFUSION_MCP_WSL_PATHS HOME TMPDIR WORK_CWD; do
       printf '  %-30s %s\n' "$v" "${!v:-<unset>}" >&2
     done
     if [[ -f "$DIST" ]]; then log "dist present: $DIST"; else log "dist MISSING: $DIST (run build-bk.sh)"; fi
     if guarded_build; then log "guards compiled into dist: yes"; else log "guards compiled into dist: NO (the server will refuse to start)"; fi
-    for p in "$ENFUSION_PROJECT_PATH" "$ENFUSION_GAME_PATH/addons" "$ENFUSION_WORKBENCH_PATH/Workbench/ArmaReforgerWorkbenchSteamDiag.exe"; do
-      if [[ -e "$p" ]]; then log "ok      $p"; else log "MISSING $p"; fi
-    done
+    if [[ -f "$GATE" ]] && "$PY" -I -B "$GATE" --print-config; then log "pin gate: ok"; else log "pin gate: REFUSED or missing ($GATE); the server will not start"; fi
     if [[ "$1" == "--check" ]]; then
       if timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ENFUSION_WORKBENCH_HOST" "$ENFUSION_WORKBENCH_PORT" 2>/dev/null; then
         log "TCP ${ENFUSION_WORKBENCH_HOST}:${ENFUSION_WORKBENCH_PORT} reachable (handlers not tested; use wb_diagnose)"
@@ -154,6 +157,7 @@ esac
 
 [[ -f "$DIST" ]] || die 1 "missing $DIST - run build-bk.sh (tools/enfusion-mcp/README.md) first"
 guarded_build || die 1 "refusing to start $DIST: the WSL guard code is not compiled in (rebuild with build-bk.sh)"
+[[ -f "$GATE" && -x "$PY" ]] || die 1 "missing $GATE or $PY: the server never runs without the pin gate (DD-14a)"
 mkdir -p "$HOME" "$TMPDIR" "$WORK_CWD"
 cd "$WORK_CWD"
-exec "$NODE_BIN" "$DIST" "$@"
+exec "$PY" -I -B "$GATE" -- "$NODE_BIN" "$DIST" "$@"

@@ -29,9 +29,13 @@ This directory does three things:
 | `tools/pin/preflight.py` | Checks the active pin before every launch. Every launcher calls it with `--pin-active`. |
 | `tools/pin/pinlib.py` | Shared code: KeyValues (`.acf`) parser, path guard, file stats, the ACTIVE pointer. |
 | `tools/pin/cold_copy.sh` | Copies both installs of the active pin to E: and writes `SHA256SUMS`. It is a dry run unless `--run` is passed. |
+| `tools/pin/pin_sidecar.py` | DD-14a. Writes the write-once sidecars of a pin: `pin_<id>.build_key.json` (the build_key of a dd-pin/1 pin) and `pin_<id>.engine.json` (`engine_version_expected`). Dry run or `--apply`. |
+| `tools/pin/freeze_check.py` | DD-14a. The direct-launch freeze check of MIGRATION_1_9 5.5 (CC-01): `before`, a user launch, `after`. |
 | `tools/pin/tests/` | Unit tests (stdlib `unittest`) with sanitized fixture appmanifests. |
 | `tools/launch/wb_R1.bat` | Pinned Workbench launcher. |
 | `tools/launch/client_R1_i01.bat` | Pinned game-client launcher, instance i01. |
+| `tools/launch/wb_C18.bat` | DD-14a. Cold-run Workbench launcher: 1.8.0.13 from the working copy `E:\DriveDiT\pin\1.8.0.13-run`, explicit pin `1.8.0.13-cold`. |
+| `tools/launch/client_C18_i01.bat` | DD-14a. Cold-run client launcher, instance c18_i01, always `-noBackend`. |
 
 The installed copies live on E:, and the launchers call those paths:
 
@@ -39,6 +43,9 @@ The installed copies live on E:, and the launchers call those paths:
 E:\DriveDiT\tools\pin\{pinlib,make_pin,preflight,pin_activate}.py, cold_copy.sh
 E:\DriveDiT\tools\launch\wb_R1.bat, client_R1_i01.bat
 E:\DriveDiT\pin\pin_1.8.0.13.json                     a pin (pins are immutable; one file per build)
+E:\DriveDiT\pin\pin_1.9.0.37.build_key.json           (DD-14a) build_key sidecar of a dd-pin/1 pin (write-once)
+E:\DriveDiT\pin\pin_1.9.0.37.engine.json              (DD-14a) engine_version_expected sidecar (write-once)
+E:\DriveDiT\pin\freeze\freeze_<id>_<UTC>.{before,after}.json   (DD-14a) freeze-check records
 E:\DriveDiT\pin\pin_1.8.0.13-r1.json                  (only after a rollback) a re-pin of restored 1.8 installs; see "Rollback"
 E:\DriveDiT\pin\ACTIVE                                one line: the active pin id (written only by pin_activate.py)
 E:\DriveDiT\pin\ACTIVE.log                            one line per switch: <UTC time> <old> -> <new> <user>@<host>
@@ -383,10 +390,140 @@ restored installs get a new pin id, checked against the original. Every step tha
 Never delete or overwrite `pin_1.8.0.13.json`. Restoring the exact mtimes from Windows (NTFS keeps 100 ns, and the pin
 in `meta/` records every `mtime_ns`) would let `1.8.0.13` itself pass again, but these tools do not do that.
 
-**Side-by-side Experimental install.** 1.9 Experimental is not the stable app. If MIGRATION_1_9.md chooses to test
-it beside the stable install, its app id, install paths and Tools arrangement are to be confirmed there. These tools
-pin only the stable app ids in `pinlib.APPIDS` (1874880 and 1874910), so such a pin needs a code change first. The id
-format already allows a suffix such as `1.9.0.9-exp`.
+**Side-by-side Experimental install.** 1.9 Experimental is not the stable app. DD-14a added the experimental channel
+(app ids 1890860 and 1890880 on the E: library; `make_pin.py --channel experimental`); see section 6. Such a pin is
+never activated. Since 1.9 stable shipped (2026-11-05) the Experimental apps are unused.
+
+## 6. Pin channels, build_key and use_class (DD-14a, dd-pin/2)
+
+MIGRATION_1_9 2.2, 5.3, 5.5 and 8.2 component 1. Since 2026-11-05 the active pin is `1.9.0.37` (dd-pin/1, made before
+DD-14a); 1.8.0.13 survives only as the cold copy `E:\DriveDiT\pin\1.8.0.13`.
+
+**build_key.** `build_key/1` names a build, not a pin: the sha256 of the ASCII text
+
+```
+build_key/1
+game.appid=<int>
+game.buildid=<int>
+game.exe_sha256=<sha256 of the client exe, ArmaReforgerSteam.exe>
+tools.appid=<int>
+tools.buildid=<int>
+tools.exe_sha256=<sha256 of Workbench/ArmaReforgerWorkbenchSteamDiag.exe>
+```
+
+(LF after each line). It is the same function as the harvester's `build_key_v1`, so the pin, its sidecar, the launch
+record and the harvester agree. Pins with equal `build_key` are one build (`1.8.0.13`, `1.8.0.13-r1`, `1.8.0.13-cold`).
+
+**dd-pin/2.** `make_pin.py --channel stable|experimental|cold` writes schema `dd-pin/2`: `channel`, `release_channel`
+(what sessions carry as `pin.channel`: stable or experimental; a cold pin runs a stable build), `launch_path_id`, the
+sha256 of every launched exe (`<app>.exe_sha256`), `build_key` with its `build_key_inputs`, and `physics_hz_expected`
+(default 60, `--physics-hz-expected`). Without `--channel`, make_pin writes DD-0's dd-pin/1 pin, unchanged. Use
+`--channel stable` for the next re-pin. `--dry-run` prints the pin and writes nothing. With `--restore-of`, a dd-pin/2
+re-pin must also have the reference pin's build_key.
+
+| Channel | App ids | Exes (build_key exe first) | Launch path | Activation |
+|---|---|---|---|---|
+| `stable` | 1874880 / 1874910 | `ArmaReforgerSteam.exe`, `ArmaReforgerSteamDiag.exe`; Workbench | `stable` (`LAUNCH_PATHS`) | yes |
+| `experimental` | 1890860 / 1890880 (E: library) | `ArmaReforgerSteam_Experimental.exe`, `ArmaReforgerSteamDiag.exe`; Workbench | `experimental` | **never**: `pin_activate.py` exits 1 and writes nothing; `--pin-active` refuses an ACTIVE naming one (exit 2). Explicit `--pin` only, always `use_class compat-preview` |
+| `cold` | as the reference stable pin | as stable, run from a verified copy | `cold-<ref id>` (`COLD_LAUNCH_PATHS`) | yes (the preferred rollback); see section 7 |
+
+No launcher starts an experimental pin: the side-by-side `wb_X19.bat` of the plan is moot since 1.9 stable shipped.
+
+**The dd-pin/1 migration path: sidecars.** A pin file is immutable, so a dd-pin/1 pin gets its build_key from a
+write-once sidecar next to it, bound to the exact pin bytes (`pin_sha256`). The harvester reads the same file.
+
+```bash
+python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_sidecar.py build-key 1.9.0.37 --from-live --dry-run   # then --apply
+python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_sidecar.py build-key 1.8.0.13 --from-sums --dry-run   # the cold copy
+python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_sidecar.py engine 1.9.0.37 --run-header <run_header.txt> --dry-run
+```
+
+- `build-key --from-live` hashes the live exes only after the full preflight check of the pin passes against the live
+  installs (so the hashed exes are the pinned ones), and stats them again afterwards. It reads about 147 MB (0.9 s on
+  2026-11-07 for 1.9.0.37).
+- `build-key --from-sums` takes the exe hashes from `<pin dir>/<id>/SHA256SUMS` and hashes the copy's exes to confirm
+  them: for a pin whose installs have moved on (1.8.0.13).
+- `engine` writes `pin_<id>.engine.json` with `engine_version_expected`, the `engine.build_version` of a probe run
+  header that names this pin id and pin sha256 (SURFACE 5 row 2: the first E-11). It also records the measured
+  `engine.fixed_time_slice_s`. Apply the build-key sidecar first, so the engine sidecar names the build_key.
+- A sidecar is never replaced (O_EXCL). One that exists but does not validate (another pin's bytes, a build_key that
+  does not match its inputs) is a config error everywhere (exit 2), never ignored.
+
+**What the preflight does with it.** When the exe hashes are known (dd-pin/2, or a dd-pin/1 pin with its build_key
+sidecar), every launch, `--check` and activation also runs `<app>.exe_sha256`: each pinned exe is hashed (about 147 MB,
+under a second) and compared, so an exe replaced with the same size and mtime is refused. A launcher names its launch
+path (`--launch-path`, default `stable`); `<app>.launch_path` refuses a pin made for another one. `--use-class` sets the
+launch-time `use_class` (dev, appearance, probe, compat-preview, g19; default dev). An experimental pin always
+records `compat-preview`; `production` is refused until DD-14b's G19 admission record exists.
+
+**Launch record dd-launch/2.** When there is anything to add (a known build_key, a dd-pin/2 pin, a non-stable channel
+or `--use-class`), the record is `dd-launch/2` with top-level `build_key` and `build_key_source`, `channel` (the
+release channel), `pin_channel`, `launch_path_id`, `use_class`, `physics_hz_expected` and, from the engine sidecar,
+`engine_version_expected`. DC_LaunchGuard reads the first five; DC_Session compares `engine_version_expected` with
+`GetBuildVersion()`. `build_key` is left out, never null, while it is unknown. A dd-pin/1 pin without sidecars keeps
+DD-0's dd-launch/1 record and its 22 checks.
+
+**Freeze check (MIGRATION_1_9 5.5, CC-01).** Once per app pair, with Steam running online:
+
+```bash
+python3 -I -B /mnt/e/DriveDiT/tools/pin/freeze_check.py before --pin-active --steam online   # --dry-run first
+#   the user starts Workbench with wb_R1.bat, lets it load, closes it
+python3 -I -B /mnt/e/DriveDiT/tools/pin/freeze_check.py after --before /mnt/e/DriveDiT/pin/freeze/freeze_<id>_<UTC>.before.json
+```
+
+`before` runs the full preflight check, then records both appmanifests (identity fields, file size, mtime and
+sha256; never `LastOwner`) and the pinned exes. `after` re-reads them and lists the launch records of this pin written
+in between. PASS: no identity field changed (buildid, TargetBuildID, StateFlags, AutoUpdateBehavior, depot manifests,
+LastUpdated), the full preflight check passes again, and at least one launch record lies in between. An appmanifest
+rewrite that changes none of them (Steam updating `LastPlayed` on a launch, measured 2026-11-07) is a note, not a
+failure. Steam's online state cannot be read from WSL, so `--steam` records what the user says. The records live in
+`<pin dir>/freeze/`; `tools/compat19/p19_build.py` reads them for CC-01.
+
+## 7. The cold-run pin: 1.8.0.13 without Steam (DD-14a, MIGRATION_1_9 7.1)
+
+Both stable apps are single Steam installs, and they are on 1.9.0.37 since 2026-11-05. 1.8.0.13 runs again only from
+a copy. The verified reference copy `E:\DriveDiT\pin\1.8.0.13` (cold_copy.sh, 2026-10-22) stays a pristine restore
+source; runs use a separate **working copy** `E:\DriveDiT\pin\1.8.0.13-run` (decision 16), about 28 GB more on E:.
+
+| Piece | Value |
+|---|---|
+| Pin | `pin_1.8.0.13-cold.json`, dd-pin/2, channel `cold`, release channel `stable`, launch path `cold-1.8.0.13` |
+| Launch paths | `pinlib.COLD_LAUNCH_PATHS["cold-1.8.0.13"]`: installs `<run>/game`, `<run>/tools`; appmanifests `<run>/meta/appmanifest_<appid>.acf` (the saved ones) |
+| Launchers | `wb_C18.bat` (profile `E:\DriveDiT\wb_profile_c18`, gproj `E:\DriveDiT\addons_c18\DataCapture\addon.gproj`, `-addonsDir` the copy's game addons) and `client_C18_i01.bat` (always `-noBackend`). Both pass the explicit pin and `--launch-path cold-1.8.0.13`; neither reads ACTIVE, so a 1.8 baseline never switches the active 1.9 pin |
+| Addon | its own copy, `mkdir /mnt/e/DriveDiT/addons_c18`, then `deploy_addon.py --target /mnt/e/DriveDiT/addons_c18/DataCapture --target-pin 1.8.0.13-cold --require-clean`, so a 1.8 Workbench never re-saves the 1.9 addon |
+| build_key | equal to 1.8.0.13's (`0d31b417…` from the reference copy's SHA256SUMS); `make_pin.py` refuses otherwise |
+
+**Make it** (agent, E: only; reads the whole copy, about 28 GB):
+
+```bash
+# 1. the working copy, from the verified reference (the user's call: about 28 GB on E:)
+cd /mnt/e/DriveDiT/pin/1.8.0.13 && sha256sum -c --quiet SHA256SUMS            # verify the reference first
+mkdir /mnt/e/DriveDiT/pin/1.8.0.13-run
+rsync -rt /mnt/e/DriveDiT/pin/1.8.0.13/{game,tools,meta} /mnt/e/DriveDiT/pin/1.8.0.13-run/
+# 2. the reference pin's build_key sidecar (so the cold pin and the harvester read one key)
+python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_sidecar.py build-key 1.8.0.13 --from-sums --apply
+# 3. the cold pin: every pak and exe of the working copy is hashed against the reference SHA256SUMS
+python3 -I -B /mnt/e/DriveDiT/tools/pin/make_pin.py --channel cold --pin-id 1.8.0.13-cold --cold-of 1.8.0.13 \
+  --from-copy /mnt/e/DriveDiT/pin/1.8.0.13-run --out /mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json --dry-run   # then without
+python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json \
+  --launch-path cold-1.8.0.13 --check [--verify-hashes]
+```
+
+`make_pin.py --channel cold` refuses (exit 1, nothing written) unless the copy's saved appmanifests name the reference
+pin's app ids, buildids and depot manifests, the copy holds exactly the reference pin's paks and exes with their sizes,
+every one of them matches SHA256SUMS, `steam_appid.txt` is unchanged, and the build_key equals the reference pin's. It
+refuses the reference copy itself as `--from-copy`, and any directory that is not a `COLD_RUN_ROOTS` entry (a pin from
+there could never launch). The pin records each pak's sha256, so `preflight --check --verify-hashes` can re-hash the
+whole copy; a launch checks sizes and mtimes and hashes the exes. The acf checks read the saved appmanifests: on a
+copy nothing moves them, so they catch tampering only. `pin_activate.py 1.8.0.13-cold` works (the preferred rollback,
+MIGRATION_1_9 7 step 16); while it is active, `wb_R1.bat` and `client_R1_i01.bat` refuse (launch path mismatch) and
+the cold launchers are the ones to use.
+
+**User verification, once (decision 16; never by an agent).** Steam closed or in offline mode. Run `wb_C18.bat`; check
+that `E:\DriveDiT\wb_profile_c18\logs\...\console.log` shows `version 1.8.0.13` and the c18 profile and gproj, then
+close it. Later, once the client launcher can run (DC_WORLD set, engine_R1.conf built), `client_C18_i01.bat`.
+UNVERIFIED until then: that the exes run outside their Steam library at all, and that a 1.8 client is not refused by
+the production backend with `-noBackend`. If it fails, the fallback is the DD-0 restore procedure ("Rollback").
 
 ## Tests
 
@@ -394,6 +531,8 @@ format already allows a suffix such as `1.9.0.9-exp`.
 mkdir -p /dev/shm/dd0t && TMPDIR=/dev/shm/dd0t /usr/bin/python3 -B tools/pin/tests/test_pin.py; rm -rf /dev/shm/dd0t
 python3 -I -B -m unittest discover -s tools/pin/tests -v
 ```
+
+`test_pin_dd14a.py` covers the DD-14a additions (channels, build_key, dd-pin/2, sidecars, use_class, the freeze check); `test_cold_pin.py` the cold-run pin, the cold launchers and the golden start lines of the stable launchers (`fixtures/golden_start_lines.txt`, recorded at DD-0 HEAD). Both reuse the fake Steam layout of `test_pin.py`, which is unchanged.
 
 Temp trees go to `$DD_PIN_TEST_TMP`, otherwise `/dev/shm`, and are deleted afterwards. Run the tests with
 `/usr/bin/python3` (3.10) as well, because the launchers run the preflight with it. No test hands a real `/mnt/c`

@@ -1,0 +1,49 @@
+"AppState"
+{
+	"appid"		"1890860"
+	"universe"		"1"
+	"LauncherPath"		"C:\\Program Files (x86)\\Steam\\steam.exe"
+	"name"		"Arma Reforger Experimental"
+	"StateFlags"		"4"
+	"installdir"		"Arma Reforger Experimental"
+	"LastUpdated"		"1792697261"
+	"LastPlayed"		"0"
+	"SizeOnDisk"		"28516800904"
+	"StagingSize"		"0"
+	"buildid"		"25426149"
+	"LastOwner"		"0"
+	"DownloadType"		"1"
+	"UpdateResult"		"0"
+	"BytesToDownload"		"0"
+	"BytesDownloaded"		"0"
+	"BytesToStage"		"0"
+	"BytesStaged"		"0"
+	"TargetBuildID"		"25426149"
+	"AutoUpdateBehavior"		"1"
+	"AllowOtherDownloadsWhileRunning"		"0"
+	"ScheduledAutoUpdate"		"0"
+	"InstalledDepots"
+	{
+		"1890861"
+		{
+			"manifest"		"625861437842340539"
+			"size"		"28516800904"
+		}
+	}
+	"InstallScripts"
+	{
+		"1890861"		"installscript.vdf"
+	}
+	"SharedDepots"
+	{
+		"228989"		"228980"
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+	}
+	"MountedConfig"
+	{
+		"language"		"english"
+	}
+}

@@ -89,7 +89,7 @@ explicit = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["tests", "tools/test_deploy_addon.py", "tools/pin/tests"]
+testpaths = ["tests", "tools/test_deploy_addon.py", "tools/pin/tests", "tools/enfusion-mcp/tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
     "torch: needs torch (the `model` extra); applied by tests/conftest.py (TORCH_TEST_MODULES)",

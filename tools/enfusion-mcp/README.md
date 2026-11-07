@@ -18,7 +18,7 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | Piece | Pin |
 |---|---|
 | MCP server | BK `0acfa884228477043c6b4c2b8c7f0c270d648398` (main, 2026-08-05), `package.json` 0.12.0, 54 tools |
-| API index | Reforger 1.8 index from [`fma-rc/enfusion-mcp`](https://github.com/fma-rc/enfusion-mcp) `4cd14dbbfb8a3b2832b0ec2480a5dcc8fe1b2c49` (`data/api/*.json`: 887 Enfusion + 8,085 Arma classes, scraped from Tools buildid 24870687). BK's own index predates 1.7 |
+| API index (legacy) | Reforger 1.8 index from [`fma-rc/enfusion-mcp`](https://github.com/fma-rc/enfusion-mcp) `4cd14dbbfb8a3b2832b0ec2480a5dcc8fe1b2c49` (`data/api/*.json`: 887 Enfusion + 8,085 Arma classes, scraped from Tools buildid 24870687). BK's own index predates 1.7 |
 | Node | nvm `v24.2.0` (BK needs `>=20`), resolved from the real `~/.nvm` (read-only) |
 | Engine | Reforger 1.8.0.13 (game buildid 24903726, Tools buildid 24870687), the **interim** pin; see DD-0 for the build pin. The target is 1.9 once it is stable and compatibility is checked; a move to 1.9 also needs a 1.9 API index here |
 
@@ -30,6 +30,11 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | `enfusion-mcp-wsl.sh` | stdio wrapper that Claude Code runs. Forces the three guards to `1`, refuses a `dist/` without the guard code, finds the Windows host, runs the server from `$EMCP_ROOT/cwd`. `--print-env` shows the resolved config and creates nothing; `--check` also opens one TCP connection to the NET API port |
 | `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "E:\DriveDiT\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight against the **active** pin (`preflight.py --pin-active`: the pin that `E:\DriveDiT\pin\ACTIVE` names, switched only by DD-0's `pin_activate.py`; `WB_PIN_DIR` overrides the pin dir, `WB_PIN` is refused), names no game version, and starts Workbench only if the preflight (run on `/usr/bin/python3`) printed exactly one launch id and `launch_<id>.json` exists, as `wb_R1.bat` does. Its `WB_DIR` is the Tools install in DD-0's `pinlib.LAUNCH_PATHS`, and the preflight's `launch_path` check refuses any pin not made from that install. It refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
 | `claude-mcp-entry.json` | the user-scope MCP entry (same as the `claude mcp add` command below) |
+| `mcp_gate.py` | DD-14a. What the wrapper execs: picks the pin (`EMCP_PIN`, else ACTIVE), serves only that pin's index and project root, and proxies the stdio session, running the endpoint handshake before every `wb_*` call. Refuses `wb_launch`, `wb_cleanup`, `mod_build` and any call naming eden/everon |
+| `endpoint_handshake.py` | DD-14a. The read-only endpoint handshake of MIGRATION_1_9 6.3 (also a CLI) |
+| `api_index.py` | DD-14a. Builds a per-pin API index in BK's JSON shape from the official script dump at the pin's tag, stamped with the pin (`api/INDEX_PIN.json`) |
+| `api_index_diff.py`, `expect_1.8.0.13_to_1.9.0.37.txt` | DD-14a, CC-05. Diffs two per-pin indexes and checks them against the API delta (API_DELTA 2-3, G19-0) and the planned surface (`tools/compat19/planned_surface.txt`) |
+| `tests/test_handshake.py` | DD-14a fixture tests: index, diff, gate config, handshake (stub Windows probes), proxy (stub server) |
 | `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `457d5e46…1c92`) |
 | `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `09803bae…dc9ba`) |
 
@@ -97,11 +102,55 @@ any incoming value (it logs `ignoring ...` on stderr) and exports `1`. It also r
 `workbench/client.js` and `tools/mod.js` lack the guard code, so an unpatched build can never run behind it.
 
 Other wrapper defaults (each can be overridden by exporting it, or through `env` in the MCP entry):
-- `ENFUSION_PROJECT_PATH=/mnt/e/DriveDiT/addons`: generators (`project`, `prefab`, `mod` create, `script_create`, ...) write there. A value on C: or the WSL disk is refused (exit 2).
+- `ENFUSION_PROJECT_PATH`: set by `mcp_gate.py` to the pin's project root (`/mnt/e/DriveDiT/addons` for a stable pin); generators (`project`, `prefab`, `mod` create, `script_create`, ...) write there. A value on C: or the WSL disk is refused (exit 2), and so is any value other than the pin's root.
 - `ENFUSION_DEFAULT_MOD=DataCapture`: if anything ever injects handlers, it targets the open addon, not `ArmaDrive` on C:.
-- `ENFUSION_MCP_DATA_DIR`: exported only when `data/api/arma-classes.json` exists. BK silently falls back to an empty index otherwise.
+- `ENFUSION_MCP_DATA_DIR`: set by `mcp_gate.py` to the pin's index (see "Per-pin index"); BK silently falls back to an empty index when it is empty, so the gate checks every api file first.
 - `ENFUSION_GAME_PATH` (D:) and `ENFUSION_WORKBENCH_PATH` (C:) are only read. Everything BK does with the Workbench path that could write (launch, `mod build`) is guarded.
 - `HOME`, `TMPDIR` and `XDG_*` point at `$EMCP_ROOT`, and the server runs in `$EMCP_ROOT/cwd`. stdout carries only JSON-RPC.
+
+## Per-pin index and the endpoint handshake (DD-14a, CC-05)
+
+Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is the 1.8 scrape: it has no
+`VehicleWheelEffectComponent`, `GetHandbrake` or `Update*Configuration`. The wrapper therefore no longer serves
+`data/`. It execs `mcp_gate.py`, which serves `$EMCP_ROOT/pins/<pin id>/data` only:
+
+- **The pin.** `EMCP_PIN=<id>` in the MCP entry's `env` (a second config), else `E:\DriveDiT\pin\ACTIVE`. A stable
+  `EMCP_PIN` must be the active pin: the stable project root and installs are the active pin's. A 1.8 config after
+  the re-pin is the cold pin, `EMCP_PIN=1.8.0.13-cold` (project root `E:\DriveDiT\addons_c18`).
+- **The index.** `pins/<id>/data/api/INDEX_PIN.json` must name that pin id and pin file sha256 (and its build_key,
+  when both are known), and every api file must match its hash. There is no fallback: a missing or foreign index
+  refuses (exit 2) before the server starts, and `--print-env` says why.
+- **The project root** is `pinlib.DEPLOY_ROOTS[launch path]`; an `ENFUSION_PROJECT_PATH` set by hand must be it, and
+  a deploy stamped for another pin (`.deploy_state.json` `target_pin`) refuses. `ENFUSION_GAME_PATH` and
+  `ENFUSION_WORKBENCH_PATH` are the pin's installs.
+- **The endpoint handshake** (MIGRATION_1_9 6.3) runs before the first `wb_*` call and before every later one;
+  a refused call is answered with an MCP error and never reaches Workbench. All read-only: netstat.exe gives the one
+  PID listening on 5775; powershell.exe (`Get-CimInstance Win32_Process`, `-NoProfile`) its exe and command line.
+  The exe must be the pin's Workbench with the pin's exe sha256 (from dd-pin/2 or the build_key sidecar); `-profile`
+  and `-gproj` must be the launch path's (`pinlib.WB_LAUNCH`: `E:\DriveDiT\wb_profile` and the DataCapture gproj for
+  wb_R1.bat); `-dcLaunchId` must name an ok wb launch record of this pin file (and build_key and launch path). The
+  build comes from that launch's own `console.log` (`Creating game instance(...), version X`) and must equal the
+  pin's `engine_version_expected` once the engine sidecar exists. 6.3 asks for a read-only handler call there; no
+  deployed handler returns `GetBuildVersion()`, so the log of the same process is read instead. A Workbench started
+  by hand (no `-dcLaunchId`, a OneDrive profile, a C: project) fails by design.
+
+Build the indexes (agent, E: only, about 15 s each; `--dry-run` first). Apply the build_key sidecars first, so the
+stamps carry the build_key:
+
+```bash
+SD=/mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable R=/mnt/e/drivedit_realign/mcp
+python3 -I -B tools/enfusion-mcp/api_index.py build --dump-git $SD --tag v1.9.0.37 --pin-id 1.9.0.37 \
+  --out $R/pins/1.9.0.37/data --shared $R/data --apply
+python3 -I -B tools/enfusion-mcp/api_index.py build --dump-git $SD --tag v1.8.0.13 --pin-id 1.8.0.13 \
+  --out $R/pins/1.8.0.13/data --shared $R/data --apply
+python3 -I -B tools/enfusion-mcp/api_index_diff.py --old $R/pins/1.8.0.13/data --new $R/pins/1.9.0.37/data \
+  --expect tools/enfusion-mcp/expect_1.8.0.13_to_1.9.0.37.txt     # from the repo root; RESULT: OK
+```
+
+Then copy `mcp_gate.py`, `endpoint_handshake.py`, `api_index.py`, `api_index_diff.py` and the wrapper to `$EMCP_ROOT`
+(the gate finds `tools/pin` at `E:\DriveDiT\tools\pin`, or `DD_PIN_TOOLS`), and check with `enfusion-mcp-wsl.sh
+--print-env` (`pin gate: ok`). `endpoint_handshake.py --pin-active` runs the handshake by hand against a running
+Workbench.
 
 ## Network: Windows host discovery under WSL NAT
 

@@ -1,0 +1,30 @@
+# What the 1.8.0.13 -> 1.9.0.37 index diff must show (api_index_diff.py; CC-05 "agrees with [AD 2-3]").
+# Sources: program/1_9/API_DELTA.md 2-3 (written on 1.9.0.10) and G19_0_STATIC_1.9.0.37.md 1.2, 4, 8 (1.9.0.37).
+
+# AD 2.6, G19-0 4.2: new 1.9 names (none collides with ours)
+class-added VehicleWheelEffectComponent CameraSystem GenericCameraEntity WheelSlotInfo Duration Timestamp DateTimeView
+# G19-0 4.2: classes removed since 1.8 (none is referenced by our code)
+class-removed VehicleDust VehiclesDustSystem TerrainToolDesc
+# AD 2.4: ScriptCamera re-parented (it compiles; DD-12 retires our only use)
+parent-changed ScriptCamera GenericEntity GenericCameraEntity
+# G19-0 1.2: VehicleWheeledSimulation gained only these between 1.8 and 1.9
+member-added VehicleWheeledSimulation GetHandbrake EngineGetRPMRedline UpdateEngineConfiguration UpdateClutchConfiguration UpdateIADConfiguration UpdateDiffConfiguration UpdateWheelConfiguration UpdateSuspensionConfiguration UpdateTyreConfiguration
+# G19-0 1.2: the seated-driver manual clutch setting
+member-added CharacterControllerComponent SetManualClutch GetManualClutch
+# G19-0 8: new in 1.9.0.37 (skid marks and trails)
+member-added VehicleWheelEffectComponent EnableSlidingTrack EnableStaticTrack IsSlidingTrackEnabled IsStaticTrackEnabled
+# AD 2.6 (for DD-13): the obsolete TestHarness accessors are gone
+member-removed TestHarness GetNSuites GetSuite
+# AD 2.1: the vehicle simulation getters and setters our code calls, unchanged in script
+unchanged VehicleWheeledSimulation GetSteering GetThrottle GetBrake GetClutch GetGear IsHandbrakeOn EngineGetRPM EngineIsOn SetSteering SetThrottle SetBreak SetClutch SetGear ForceEnableSimulation
+unchanged VehicleBaseSimulation GetSpeedKmh GetVelocity GetWorldTransform IsValid
+# AD 2.2, 2.5
+unchanged CarControllerComponent GetSimulation SetPersistentHandBrake HasAutomaticGearbox GetCurrentGear GetFutureGear
+unchanged BaseVehicleControllerComponent ForceStartEngine IsEngineOn GetDrivingAssistanceMode SetDrivingAssistanceMode
+# AD 2.3, 2.4; the build stamps of 8.3
+unchanged BaseWorld GetFixedTimeSlice GetWorldTime TraceMove
+unchanged CameraManager CurrentCamera SetCamera
+unchanged System MakeScreenshot MakeScreenshotRawData
+unchanged Game GetBuildVersion GetBuildTime
+# AD 3 / CC-02: the whole planned surface, 1.9-only members included
+planned tools/compat19/planned_surface.txt

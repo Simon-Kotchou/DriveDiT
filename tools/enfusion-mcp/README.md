@@ -30,13 +30,13 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | `enfusion-mcp-wsl.sh` | stdio wrapper that Claude Code runs. Forces the three guards to `1`, refuses a `dist/` without the guard code, finds the Windows host, runs the server from `$EMCP_ROOT/cwd`. `--print-env` shows the resolved config and creates nothing; `--check` also opens one TCP connection to the NET API port |
 | `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "E:\DriveDiT\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight against the **active** pin (`preflight.py --pin-active`: the pin that `E:\DriveDiT\pin\ACTIVE` names, switched only by DD-0's `pin_activate.py`; `WB_PIN_DIR` overrides the pin dir, `WB_PIN` is refused), names no game version, and starts Workbench only if the preflight (run on `/usr/bin/python3`) printed exactly one launch id and `launch_<id>.json` exists, as `wb_R1.bat` does. Its `WB_DIR` is the Tools install in DD-0's `pinlib.LAUNCH_PATHS`, and the preflight's `launch_path` check refuses any pin not made from that install. It refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
 | `claude-mcp-entry.json` | the user-scope MCP entry (same as the `claude mcp add` command below) |
-| `mcp_gate.py` | DD-14a. What the wrapper execs: picks the pin (`EMCP_PIN`, else ACTIVE), serves only that pin's index and project root, binds the endpoint host, and proxies the stdio session through the `bk_tools.py` policy (handshake before every `wb_*` and write call, destinations inside the pin's root, sealed-map guard) |
+| `mcp_gate.py` | DD-14a. What the wrapper execs: picks the pin (`EMCP_PIN`, else ACTIVE), serves only that pin's index and project root, binds the endpoint host, and proxies the stdio session through the `bk_tools.py` policy (deny by default: reads, and wb reads after the handshake; every write denied; sealed-map guard) |
 | `endpoint_handshake.py`, `wb_proc.js` | DD-14a. The read-only endpoint handshake of MIGRATION_1_9 6.3 (also a CLI); `wb_proc.js` is its WMI process query, run by cscript.exe (no PowerShell) |
-| `bk_tools.py` | DD-14a. The gate's table of BK tools and actions (deny, read, write, wb_read, wb_write), the destination check and the sealed-map guard |
+| `bk_tools.py` | DD-14a. The gate's deny-by-default allow-list of BK read tools and wb read actions, the read-path check and the sealed-map guard |
 | `index_sources.json` | DD-14a. Pin id to dump tag and commit, for the index provenance check |
 | `api_index.py` | DD-14a. Builds a per-pin API index in BK's JSON shape from the official script dump at the pin's tag, stamped with the pin (`api/INDEX_PIN.json`) |
 | `api_index_diff.py`, `expect_1.8.0.13_to_1.9.0.37.txt` | DD-14a, CC-05. Diffs two per-pin indexes and checks them against the API delta (API_DELTA 2-3, G19-0) and the planned surface (`tools/compat19/planned_surface.txt`) |
-| `tests/test_handshake.py`, `tests/fixtures/` | DD-14a tests: index, provenance, diff, gate config, policy (one case per mutating BK tool), handshake (stub Windows probes), proxy (stub server). The fixture dumps are synthetic classes, not game scripts |
+| `tests/test_handshake.py`, `tests/fixtures/` | DD-14a tests: index, provenance, diff, gate config, policy (every write tool and action denied, reads allowed), handshake (stub Windows probes), proxy (stub server). The fixture dumps are synthetic classes, not game scripts |
 | `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `457d5e46…1c92`) |
 | `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `09803bae…dc9ba`) |
 
@@ -127,34 +127,53 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
 - **The project root** is `pinlib.DEPLOY_ROOTS[launch path]`; an `ENFUSION_PROJECT_PATH` set by hand must be it, and
   a deploy stamped for another pin (`.deploy_state.json` `target_pin`) refuses. `ENFUSION_GAME_PATH` and
   `ENFUSION_WORKBENCH_PATH` are the pin's installs.
-- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback or the WSL default gateway (the Windows host under NAT,
-  `172.19.208.1` today); any other host refuses, because the handshake can only vouch for the local Workbench. The
-  gate passes the checked host and port to the server.
-- **Every call is classified** (`bk_tools.py`, the BK tools and actions at the pinned commit; an unknown tool is
-  refused, an unknown action of a known tool counts as a write): `deny` (`wb_launch`, `wb_cleanup`, `mod` build),
-  `read` (index, wiki and file reads: forwarded), `wb_read` (handshake), `write` and `wb_write` (handshake, and every
-  destination argument, `projectPath`, `outputPath`, `path`, `destPath`, ..., must resolve inside the pin's project
-  root; a cold config can never write into `E:\DriveDiT\addons`). The sealed-map guard runs on every call: an
-  identifier token `eden` or `everon` (split on non-alphanumerics and camelCase, so `EdenTerrain` is caught and
-  `foreverOnline` is not) or the Everon root world GUID `853E92315D1D9EFE` refuses. Not detected: a call acting on a
-  sealed world already open in Workbench without naming it; the runbook rule (never open Eden in Workbench) covers it.
-- **The endpoint handshake** (MIGRATION_1_9 6.3) runs before every gated call; a refused call is answered with an
-  MCP error and never forwarded. All read-only and without PowerShell: `netstat.exe -ano` gives the one PID listening
-  on the port at an address that serves the host; `cscript.exe` running `wb_proc.js` (a WMI `Win32_Process` query,
-  E:-resident) gives its exe path, creation time and command line. The exe must be the pin's Workbench with the
-  pin's exe sha256; `-profile` and `-gproj` must be the launch path's (`pinlib.WB_LAUNCH`); `-dcLaunchId` must name a
-  launch record that is a JSON object with the dd-launch fields, an ok wb record of this pin file (and build_key and
-  launch path), written 0..300 s before the process started. Exactly one `console.log` under the profile names that
-  launch id after the record; it must start within -2..+120 s of the process, show the pin's Workbench as its working
-  directory and the process's `-gproj`, and report `Creating game instance(...), version X` equal to the pin's
-  `engine_version_expected`. 6.3 asks for a read-only handler call there; no deployed handler returns
-  `GetBuildVersion()`, so the log of the same process, bound by its creation time, is read instead. A Workbench
-  started by hand (no `-dcLaunchId`, a OneDrive profile, a C: project) fails by design. Not detected: a project
-  changed inside a running Workbench (a documented limitation; we never do that).
-- **Cost, measured 2026-11-07:** `netstat.exe -ano` 0.03 s, `wb_proc.js` 0.15 s; the exe hash (68 MB) once per path,
-  size and mtime; the log heads (256 KiB each, only dirs touched since the record). About 0.2 s per gated call.
-  PowerShell is not used at all: a check of the profile's AppData (Local, Roaming, Temp) after five helper runs found
-  no new file.
+- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback, or the WSL NAT gateway (the Windows host,
+  `172.19.208.1` today) when NAT mode is established: exactly one IPv4 default route, via `eth0`, and
+  `/etc/resolv.conf` carrying WSL's generated header with that gateway as its only nameserver. Anything else (a LAN or
+  VPN gateway such as `192.168.1.1`) refuses: the handshake can only vouch for the local Workbench. The gate passes the
+  checked host and port to the server, and the listener must serve that address (`0.0.0.0`, `[::]` or the host).
+- **Deny by default** (coordinator decision, Codex round 2: the runbook never uses MCP mutations; agents never call
+  MCP tools to change anything, the user presses Play). `bk_tools.py` allows only these, and denies every other tool,
+  every other action, unknown tools, unknown actions and a missing action:
+
+  | Class | Tools and actions |
+  |---|---|
+  | read (no handshake) | `api_search`, `wiki_search`, `wiki_read`, `asset_search`, `component_search`, `game_browse`, `game_read`, `workshop_info`, `wb_knowledge`, `project` with `browse` or `read` |
+  | wb read (after the handshake) | `wb_connect`, `wb_diagnose`, `wb_state`, `wb_entity_list`, `wb_entity_inspect`, `wb_read_props`; `wb_validate` material/texture; `wb_terrain` getHeight/getBounds; `wb_resources` getInfo; `wb_projects` list/locate; `wb_layers` list/isVisible/getInfo; `wb_prefabs` getGuid/locate/getAncestor; `wb_localization` getTable/listLanguages; `wb_script_editor` getCurrentFile/getLine/getLinesCount; `wb_entity_select` getSelected; `wb_entity_modify` getProperty/listProperties/listArrayItems/getWorldTransform; `wb_component` list |
+
+  Denied, among others: every file writer (`project` write, `script_create`, `prefab`, `config_create`,
+  `layout_create`, `mod` create/build/validate, ...), `wb_projects` open, `wb_play`, `wb_stop`, `wb_save`, every
+  entity, layer, component, clipboard, localization and script-editor write, `wb_undo_redo`, `wb_execute_action`,
+  `wb_reload`, `wb_open_resource`, `wb_launch` and `wb_cleanup`. Read tools that take a path pass one small check: no
+  absolute, UNC, drive-relative or `..` path outside the pin's project root and game install (case-insensitive on
+  `/mnt/<drive>`), and no relative `projectPath`. **Enabling any write tool later needs its own reviewed per-tool
+  destination policy** (where each argument and each generated subdirectory really lands, as BK computes it).
+- **The sealed-map guard** runs on every call: an identifier token `eden` or `everon` (split on non-alphanumerics and
+  camelCase, so `EdenTerrain` is caught and `foreverOnline` is not) or the Everon root world GUID
+  `853E92315D1D9EFE` refuses. Not detected: a read on a sealed world already open in Workbench without naming it; the
+  runbook rule "never open Eden/Everon in an MCP-attached Workbench" covers it (writes are denied anyway).
+- **The endpoint handshake** (MIGRATION_1_9 6.3) runs before every wb read; a refused call is answered with an MCP
+  error and never forwarded. All read-only and without PowerShell: `netstat.exe -ano` gives the one PID listening on
+  the port; `cscript.exe` running `wb_proc.js` (a WMI `Win32_Process` query, E:-resident) gives its exe path,
+  creation time and command line. The exe must be the pin's Workbench with the pin's exe sha256; `-profile` and
+  `-gproj` must be the launch path's (`pinlib.WB_LAUNCH`); `-dcLaunchId` must name a launch record that is a JSON
+  object with the dd-launch fields, an ok wb record of this pin file (and build_key and launch path), and the process
+  must have been created -5..+300 s from the record's utc. Exactly one `console.log` under the profile names that
+  launch id after the record, and it must be the newest log of the profile; it must start 0..+120 s after the
+  process creation (whole seconds), show the pin's Workbench as its working directory and the process's `-gproj`,
+  and report `Creating game instance(...), version X` equal to the pin's `engine_version_expected`. 6.3 asks for a
+  read-only handler call there; no deployed handler returns `GetBuildVersion()`, so the log of the same process,
+  bound by its creation time, is read instead. A Workbench started by hand (no `-dcLaunchId`, a OneDrive profile, a
+  C: project) fails by design. Residual, documented: a replacement process that writes no log of its own within the
+  same second, and a project changed inside a running Workbench, are not detected (we never do either).
+- **R1.** Both Windows helpers run with Windows `TEMP` and `TMP` set to `E:\DriveDiT\tmp\mcp` (`WSLENV=TEMP/p:TMP/p`
+  path translation; the gate creates the dir through the tools/pin write guard), and `wb_proc.js --env` proves it once
+  per session before any query (measured: it reports `E:\...`). The claim is **no tool-owned C: file writes**. WMI's
+  own repository and event-log activity is Windows service behaviour, outside these tools and outside R1; it is not
+  claimed to be zero.
+- **Cost, measured 2026-11-07:** `netstat.exe -ano` 0.03 s, `wb_proc.js --env` 0.08 s once, a process query 0.16 s;
+  the exe hash (68 MB) once per path, size and mtime; the log heads (256 KiB each, only dirs touched since the
+  record). About 0.2 s per wb read.
 
 Build the indexes (agent, E: only, about 15 s each; `--dry-run` first). Apply the build_key and engine sidecars of
 both pins first: the build needs `engine_version_expected`, and the stamps then carry the build_key:

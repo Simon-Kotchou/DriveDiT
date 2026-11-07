@@ -6,27 +6,35 @@ The wrapper's index and project checks do not prove which process answers on the
 auto-installs its handlers into the first addon on its first wb_* call. So mcp_gate.py runs this before every wb_*
 call and every mutating call. Every step is read-only and writes nothing; no PowerShell is used:
 
-  0. The endpoint: BK connects to ENFUSION_WORKBENCH_HOST:PORT. The host must be loopback or the WSL NAT default
-     gateway, which is this machine's Windows host (endpoint_host_reason); anything else is refused, so a check of
-     the local Windows listener never vouches for another machine.
+  0. The endpoint: BK connects to ENFUSION_WORKBENCH_HOST:PORT. The host must be loopback, or the WSL NAT gateway
+     when NAT mode is established (nat_gateway: exactly one default route, via eth0, and /etc/resolv.conf carries
+     WSL's generated header with that gateway as its only nameserver). Anything else is refused, so a check of the
+     local Windows listener never vouches for a LAN or VPN gateway.
   1. The listener: netstat.exe -ano must show exactly one PID LISTENING on that port, on 0.0.0.0, [::] or the host's
      own address. Its process (cscript.exe running wb_proc.js, a WMI Win32_Process query; about 0.15 s, measured)
      gives the exe path, the creation time and the command line. The exe must be the pin's Workbench exe (its Tools
      install) with the pin's exe_sha256; -profile and -gproj must be the launch path's (pinlib.WB_LAUNCH), and the
-     command line must carry -dcLaunchId.
+     command line must carry -dcLaunchId. cscript runs with Windows TEMP and TMP set to an E: dir
+     (E:\DriveDiT\tmp\mcp, through WSLENV path translation), checked once per session by wb_proc.js --env.
   2. The launch: launch_<id>.json of that -dcLaunchId under <pin dir>/launches must be a JSON object with the
      dd-launch schema fields, an ok wb record of this pin file (pin id and sha256), with this build_key and launch
-     path when it records them. The process must have started 0..300 s after the record was written.
-  3. The log: exactly one console.log under the -profile's logs/ names the launch id after its record. Its start
-     time must lie within -2..+120 s of the process creation time, its working directory must be the pin's Workbench
-     dir, its CLI line the process's -gproj, and its "Creating game instance(...), version X" must equal the pin's
-     engine_version_expected once the pin has an engine sidecar (until then the version is recorded, not compared).
+     path when it records them. The process must have been created -5..+300 s from the record's utc (the record is
+     stamped seconds before the start; the slack absorbs clock rounding).
+  3. The log: exactly one console.log under the -profile's logs/ names the launch id after its record, and it must be
+     the newest log of that profile (a later start in the same profile, by hand, makes it stale). Its start time must
+     lie 0..+120 s after the process creation time (both in whole seconds, the creation time truncated), its working
+     directory must be the pin's Workbench dir, its CLI line the process's -gproj, and its "Creating game
+     instance(...), version X" must equal the pin's engine_version_expected once the pin has an engine sidecar
+     (until then the version is recorded, not compared).
 
   Any mismatch refuses, with the reasons. 6.3 step 2 asks for a read-only handler call for GetBuildVersion(); no
   deployed handler answers it (BK has none, and a DataCapture handler is DD-14b's Enforce code), so the build is read
-  from the launch's own console.log, bound to the process by its creation time. Not detected (a documented
-  limitation; the runbook forbids both): a project or world opened by hand inside a running Workbench after its
-  start.
+  from the launch's own console.log, bound to the process by its creation time. Residual ambiguity: a replacement
+  process that writes no log at all, started within the same second as the original's log, and a project or world
+  opened by hand inside a running Workbench after its start, are not detected (the runbook forbids both).
+
+  R1: the tools write no file on C:. WMI's own repository and event-log activity is Windows service behaviour
+  outside these tools (and outside R1); it is not claimed to be zero.
 
     python3 -I -B endpoint_handshake.py --pin-active [--pin-dir DIR] [--host H] [--port 5775] [--json]
 
@@ -52,8 +60,10 @@ WB_EXE_REL = "Workbench/ArmaReforgerWorkbenchSteamDiag.exe"
 DEFAULT_PORT = 5775
 LAUNCH_SCHEMAS = ("dd-launch/1", "dd-launch/2")
 START_AFTER_RECORD_S = (-5, 300)     # process creation relative to the record's utc (launcher: preflight, copy, start)
-LOG_AFTER_START_S = (-2, 120)        # console.log header time relative to the process creation time
+LOG_AFTER_START_S = (0, 120)         # console.log header time relative to the process creation time (whole seconds)
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
+MCP_WIN_TEMP = "/mnt/e/DriveDiT/tmp/mcp"   # Windows TEMP/TMP of the cscript helper (R1)
+WSL_RESOLV_HEADER = "# This file was automatically generated by WSL"
 
 
 def load_pin_tools():
@@ -80,57 +90,134 @@ pinlib, preflight = load_pin_tools()
 # --------------------------------------------------------------------------- the endpoint host
 
 
-def default_gateway(route_text=None):
-    """The IPv4 default gateway of this WSL distro (/proc/net/route), the Windows host under WSL NAT; or None."""
-    if route_text is None:
-        try:
-            with open("/proc/net/route", encoding="ascii", errors="replace") as fh:
-                route_text = fh.read()
-        except OSError:
-            return None
-    for line in route_text.splitlines()[1:]:
+def _read(path):
+    try:
+        with open(path, encoding="ascii", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def default_routes(route_text: str) -> list:
+    """[(iface, gateway)] of the up IPv4 default routes with a gateway in /proc/net/route text."""
+    out = []
+    for line in (route_text or "").splitlines()[1:]:
         f = line.split()
-        if len(f) >= 8 and f[1] == "00000000" and f[7] == "00000000" and f[2] != "00000000":
-            try:
-                return str(ipaddress.IPv4Address(bytes.fromhex(f[2])[::-1]))
-            except ValueError:
-                return None
-    return None
+        if len(f) < 8 or f[1] != "00000000" or f[7] != "00000000":
+            continue
+        try:
+            flags = int(f[3], 16)
+            gw = str(ipaddress.IPv4Address(bytes.fromhex(f[2])[::-1]))
+        except ValueError:
+            continue
+        if flags & 0x3 == 0x3 and gw != "0.0.0.0":      # RTF_UP | RTF_GATEWAY
+            out.append((f[0], gw))
+    return out
 
 
-def endpoint_host_reason(host: str, gateway=None):
-    """Why BK may not use this host, or None. Loopback, or the WSL NAT default gateway (the local Windows host)."""
+def nat_gateway(route_text=None, resolv_text=None) -> tuple:
+    """(gateway, None) when WSL NAT mode is established, else (None, why): exactly one default route, via eth0, and
+    /etc/resolv.conf generated by WSL with that gateway as its only nameserver (WSL NAT points both at the Windows
+    host). Codex round 2: a LAN or VPN gateway is never taken for the Windows host."""
+    route_text = _read("/proc/net/route") if route_text is None else route_text
+    resolv_text = _read("/etc/resolv.conf") if resolv_text is None else resolv_text
+    routes = default_routes(route_text or "")
+    if len(routes) != 1:
+        return None, "%d IPv4 default routes (exactly one, via eth0, is WSL NAT)" % len(routes)
+    iface, gw = routes[0]
+    if iface != "eth0":
+        return None, "the default route goes via %s, not eth0" % iface
+    lines = (resolv_text or "").splitlines()
+    if not any(ln.startswith(WSL_RESOLV_HEADER) for ln in lines):
+        return None, "/etc/resolv.conf was not generated by WSL"
+    servers = [ln.split()[1] for ln in lines if ln.split()[:1] == ["nameserver"] and len(ln.split()) > 1]
+    if servers != [gw]:
+        return None, "/etc/resolv.conf names %s, not only the gateway %s" % (servers, gw)
+    return gw, None
+
+
+def default_gateway(route_text=None, resolv_text=None):
+    """The WSL NAT gateway (the Windows host), or None when NAT mode is not established (nat_gateway)."""
+    return nat_gateway(route_text, resolv_text)[0]
+
+
+def endpoint_host_reason(host: str, gateway=None, gateway_why=None):
+    """Why BK may not use this host, or None. Loopback, or the validated WSL NAT gateway (the local Windows host)."""
     if host in LOOPBACK:
         return None
     if gateway is not None and host == gateway:
         return None
-    return ("ENFUSION_WORKBENCH_HOST=%s is neither loopback nor this machine's Windows host (the WSL default gateway "
-            "%s): the handshake can only vouch for the local Workbench" % (host, gateway))
+    return ("ENFUSION_WORKBENCH_HOST=%s is neither loopback nor this machine's Windows host (WSL NAT gateway: %s): "
+            "the handshake can only vouch for the local Workbench" % (host, gateway or gateway_why or "none"))
 
 
 # --------------------------------------------------------------------------- Windows probes (read-only)
 
 
 class WindowsProbes:
-    """netstat.exe and cscript.exe (wb_proc.js, WMI) from WSL. Both only read; neither starts PowerShell."""
+    """netstat.exe and cscript.exe (wb_proc.js, WMI) from WSL. Both only read; neither starts PowerShell. Both run
+    with Windows TEMP and TMP set to the E: dir win_temp (WSLENV path translation), and wb_proc.js --env proves it
+    once per session before the first process query (R1: no tool-owned file write on C:)."""
 
-    def __init__(self, netstat=NETSTAT, cscript=CSCRIPT, helper=HELPER, timeout=15):
+    def __init__(self, netstat=NETSTAT, cscript=CSCRIPT, helper=HELPER, timeout=15, win_temp=None):
         self.netstat, self.cscript, self.helper, self.timeout = netstat, cscript, helper, timeout
+        self.win_temp = win_temp or MCP_WIN_TEMP
+        self.env_checked = False
 
-    def netstat_text(self) -> str:
-        return subprocess.run([self.netstat, "-ano"], capture_output=True, timeout=self.timeout,
-                              check=True).stdout.decode("utf-8", errors="replace")
+    def win_env(self) -> dict:
+        """The environment for a Windows process: TEMP and TMP = win_temp, translated by WSLENV (/p)."""
+        env = dict(os.environ)
+        env["TEMP"] = env["TMP"] = self.win_temp
+        keep = [x for x in env.get("WSLENV", "").split(":") if x and x.split("/")[0] not in ("TEMP", "TMP")]
+        env["WSLENV"] = ":".join(keep + ["TEMP/p", "TMP/p"])
+        return env
 
-    def process_line(self, pid: int) -> str:
+    def _helper(self):
         helper = os.path.realpath(self.helper)
         win = pinlib.wsl_to_win(helper)
         if not win or not helper.startswith("/mnt/e/"):
             raise OSError("the helper %s must lie on E: (it runs as a Windows process)" % self.helper)
+        return helper, win
+
+    def check_env(self) -> None:
+        """OSError unless wb_proc.js --env reports Windows TEMP and TMP equal to the E: dir."""
+        temp = os.path.realpath(self.win_temp)
+        want = pinlib.wsl_to_win(temp)
+        if not want or not temp.startswith("/mnt/e/") or not os.path.isdir(temp):
+            raise OSError("the helper temp dir %s must be an existing directory on E:" % self.win_temp)
+        helper, win = self._helper()
+        r = subprocess.run([self.cscript, "//NoLogo", win, "--env"], capture_output=True, timeout=self.timeout,
+                           cwd=os.path.dirname(helper), env=self.win_env())
+        seen = parse_env_line(r.stdout.decode("utf-8", errors="replace"))
+        if r.returncode != 0 or win_norm(seen.get("TEMP")) != win_norm(want) or \
+                win_norm(seen.get("TMP")) != win_norm(want):
+            raise OSError("wb_proc.js sees TEMP=%r TMP=%r, not %s; refusing to query WMI" % (
+                seen.get("TEMP"), seen.get("TMP"), want))
+        self.env_checked = True
+
+    def netstat_text(self) -> str:
+        return subprocess.run([self.netstat, "-ano"], capture_output=True, timeout=self.timeout, check=True,
+                              env=self.win_env()).stdout.decode("utf-8", errors="replace")
+
+    def process_line(self, pid: int) -> str:
+        if not self.env_checked:
+            self.check_env()
+        helper, win = self._helper()
         r = subprocess.run([self.cscript, "//NoLogo", win, str(int(pid))], capture_output=True, timeout=self.timeout,
-                           cwd=os.path.dirname(helper))
+                           cwd=os.path.dirname(helper), env=self.win_env())
         if r.returncode not in (0, 1):
             raise OSError("wb_proc.js exited %d: %s" % (r.returncode, r.stderr.decode(errors="replace").strip()))
         return r.stdout.decode("utf-8", errors="replace")
+
+
+def parse_env_line(text: str) -> dict:
+    """{'TEMP': ..., 'TMP': ...} from wb_proc.js --env output ('TEMP=<v>\tTMP=<v>')."""
+    out = {}
+    for part in (text or "").replace("\r", "").strip().split("\t"):
+        k, sep, v = part.partition("=")
+        if sep:
+            out[k] = v
+    return out
 
 
 def listening_pids(netstat_text: str, port: int, host: str = "127.0.0.1") -> set:
@@ -260,6 +347,28 @@ def check_log(log: dict, want_cwd: str, gproj, expected, created=None, reasons=N
     return reasons
 
 
+def newest_log(profile_wsl: str, not_before_unix=None):
+    """The console.log with the latest header start time under <profile>/logs (dirs touched since not_before_unix,
+    a minute's slack), or None."""
+    logs = os.path.join(profile_wsl, "logs")
+    try:
+        names = [d for d in os.listdir(logs) if d.startswith("logs_")]
+    except OSError:
+        return None
+    best = None
+    for d in names:
+        full = os.path.join(logs, d)
+        try:
+            if not_before_unix is not None and os.stat(full).st_mtime < not_before_unix - 60:
+                continue
+        except OSError:
+            continue
+        info = pinlib.read_launch_log(os.path.join(full, "console.log"))
+        if info and info["start_unix"] is not None and (best is None or info["start_unix"] > best[0]):
+            best = (info["start_unix"], info["path"])
+    return best[1] if best else None
+
+
 def handshake(pin_src: dict, ident: dict, port: int = DEFAULT_PORT, probes=None, exe_hash_cache=None,
               host: str = "127.0.0.1", gateway=None) -> dict:
     """{ok, reasons, facts} for the endpoint host:port against the pin. Reads only."""
@@ -344,13 +453,18 @@ def handshake(pin_src: dict, ident: dict, port: int = DEFAULT_PORT, probes=None,
             not (START_AFTER_RECORD_S[0] <= created - rec_unix <= START_AFTER_RECORD_S[1]):
         reasons.append("process %d started %+d s from launch record %s (expected %d..%d s): a restart that reuses an "
                        "old launch id?" % (pid, created - rec_unix, lid, *START_AFTER_RECORD_S))
-    # 3. the launch's own console.log, exactly one, bound to the process by its creation time
-    logs = pinlib.launch_logs(pinlib.win_to_wsl(args.get("profile") or ""), lid, rec_unix)
+    # 3. the launch's own console.log: exactly one, the newest of the profile, bound to the process by its creation
+    profile_wsl = pinlib.win_to_wsl(args.get("profile") or "")
+    logs = pinlib.launch_logs(profile_wsl, lid, rec_unix)
     facts["console_logs"] = [x["path"] for x in logs]
     if len(logs) != 1:
         reasons.append("%d console.log(s) under %s\\logs name launch %s after its record (expected exactly one)"
                        % (len(logs), args.get("profile"), lid))
     else:
+        newest = newest_log(profile_wsl, rec_unix)
+        if newest is not None and os.path.realpath(newest) != os.path.realpath(logs[0]["path"]):
+            reasons.append("console.log %s is not the newest log of %s (%s is newer: a later start in the same "
+                           "profile)" % (logs[0]["path"], args.get("profile"), newest))
         check_log(logs[0], want_cwd, args.get("gproj"), ident.get("engine_version_expected"), created, reasons, facts)
     return {"ok": not reasons, "reasons": reasons, "facts": facts}
 
@@ -381,6 +495,13 @@ def main(argv=None, probes=None, gateway=None) -> int:
         return 2
     gw = default_gateway() if gateway is None else gateway
     host = args.host or os.environ.get("ENFUSION_WORKBENCH_HOST") or gw or "127.0.0.1"
+    if probes is None:
+        probes = WindowsProbes(win_temp=os.environ.get("EMCP_WIN_TEMP") or MCP_WIN_TEMP)
+        try:
+            os.makedirs(pinlib.check_write_path(probes.win_temp), exist_ok=True)
+        except (pinlib.PinError, OSError) as exc:
+            print("endpoint_handshake: the helper temp dir %s: %s" % (probes.win_temp, exc), file=sys.stderr)
+            return 2
     res = handshake(src, ident, args.port, probes, None, host, gw)
     if args.json:
         print(json.dumps(res, indent=2))

@@ -21,17 +21,15 @@ Windows host), and the index stamp's source must be the dump tag and commit inde
 the tag equal to the pin's engine_version_expected (api_index.verify_source).
 
 During the session it forwards every JSON-RPC line both ways, except tools/call requests it refuses itself (an MCP
-error result, the request is never forwarded). Each call is classified by bk_tools.py (the BK tools and actions at the
-pinned commit):
-  - deny: wb_launch, wb_cleanup, mod build, always (README "Rules");
-  - unknown tools are refused;
-  - the sealed-map guard on every call: an identifier token eden or everon, or the Everon root world GUID;
-  - wb_read: endpoint_handshake.handshake() must pass right before the call;
-  - write and wb_write: the handshake, and every destination argument (projectPath, outputPath, path, ...) must
-    resolve inside this pin's project root;
-  - read: forwarded as is.
-The handshake runs before every gated call (an exe hash is cached per path, size and mtime), so a Workbench restarted
-by hand in the middle of a session is caught at the next call.
+error result, the request is never forwarded). The policy is bk_tools.py, deny by default (coordinator decision, Codex
+round 2: the runbook never uses MCP mutations):
+  - every write-class tool and action, every unknown tool, every unknown or missing action: denied;
+  - the sealed-map guard on every call (identifier tokens eden/everon, the Everon root world GUID);
+  - read tools (api_search, wiki, assets, game and project reads): forwarded, after a small read-path check (no
+    absolute, UNC, drive-relative or '..' path outside the pin's project root and game install);
+  - wb_* read actions (wb_state, wb_entity_list/inspect, ...): forwarded only after endpoint_handshake.handshake()
+    passes right before the call.
+Enabling any write tool later needs its own reviewed per-tool destination policy.
 
     mcp_gate.py --print-config            resolve and print the config, start nothing
     mcp_gate.py -- NODE DIST [ARGS...]    what the wrapper runs
@@ -149,11 +147,12 @@ def resolve_config(env: dict) -> dict:
         target_pin = None
     if target_pin and target_pin != src["pin_id"]:
         raise GateRefusal("project root %s was deployed for pin %s, not %s" % (project, target_pin, src["pin_id"]))
-    gateway = eh.default_gateway(env.get("EMCP_TEST_ROUTE")) if env.get("EMCP_TEST_ROUTE") else eh.default_gateway()
+    gateway, gw_why = eh.nat_gateway(env.get("EMCP_TEST_ROUTE"), env.get("EMCP_TEST_RESOLV"))
     host = env.get("ENFUSION_WORKBENCH_HOST") or "127.0.0.1"
-    why = eh.endpoint_host_reason(host, gateway)
+    why = eh.endpoint_host_reason(host, gateway, gw_why)
     if why:
         raise GateRefusal(why)
+    win_temp = env.get("EMCP_WIN_TEMP") or eh.MCP_WIN_TEMP
     try:
         port = int(env.get("ENFUSION_WORKBENCH_PORT") or eh.DEFAULT_PORT)
     except ValueError:
@@ -161,7 +160,7 @@ def resolve_config(env: dict) -> dict:
     return {"pin_src": src, "ident": ident, "resolved_by": how, "data_dir": data_dir, "project": project,
             "game_path": src["pin"]["game"]["install"]["wsl"], "workbench_path": src["pin"]["tools"]["install"]["wsl"],
             "index_stamp": stamp_path, "host": host, "gateway": gateway, "port": port,
-            "server_cwd": os.path.join(root, "cwd")}
+            "server_cwd": os.path.join(root, "cwd"), "win_temp": win_temp}
 
 
 def server_env(env: dict, cfg: dict) -> dict:
@@ -174,39 +173,35 @@ def server_env(env: dict, cfg: dict) -> dict:
 
 
 class Gate:
-    """The tools/call policy. handshake_fn() -> {ok, reasons, facts}; project_root and server_cwd for the destination
-    check (bk_tools.destination_reason)."""
+    """The tools/call policy (bk_tools.py, deny by default). handshake_fn() -> {ok, reasons, facts}; read_roots for
+    the read-path check (the pin's project root and game install)."""
 
-    def __init__(self, handshake_fn, log=None, project_root=None, server_cwd=None):
+    def __init__(self, handshake_fn, log=None, read_roots=()):
         self.handshake_fn = handshake_fn
         self.log = log or (lambda msg: print("[mcp_gate] %s" % msg, file=sys.stderr, flush=True))
-        self.project_root = project_root
-        self.server_cwd = server_cwd or "/nonexistent-server-cwd"
+        self.read_roots = tuple(read_roots)
         self.handshakes = 0
 
     def decide(self, name: str, arguments) -> str:
         """None to forward, else the refusal text."""
         kind, why = bk.classify(name, arguments)
-        if kind in ("deny", "unknown"):
-            return "%s is never allowed from this wrapper: %s" % (name, why)
+        if kind == "deny":
+            return "%s is refused: %s" % (name, why)
         sealed = bk.sealed_reason(arguments if arguments is not None else {})
         if sealed:
             return sealed + "; the sealed-map guard refuses the call"
+        rp = bk.read_path_reason(name, arguments, self.read_roots, pinlib.win_to_wsl)
+        if rp:
+            return rp
         if kind == "read":
             return None
-        if kind in ("write", "wb_write"):
-            if self.project_root is None:
-                return "no project root is configured for writes"
-            dest = bk.destination_reason(name, arguments, self.project_root, self.server_cwd, pinlib.win_to_wsl)
-            if dest:
-                return dest
         self.handshakes += 1
         res = self.handshake_fn()
         if not res.get("ok"):
             return "endpoint handshake refused (MIGRATION_1_9 6.3), nothing was forwarded: " + \
                 "; ".join(res.get("reasons") or ["unknown"])
-        self.log("handshake ok for %s (%s): pid %s, launch %s" % (name, kind, res["facts"].get("pid"),
-                                                                 res["facts"].get("launch_id")))
+        self.log("handshake ok for %s: pid %s, launch %s" % (name, res["facts"].get("pid"),
+                                                           res["facts"].get("launch_id")))
         return None
 
     @staticmethod
@@ -297,8 +292,8 @@ def main(argv=None, env=None) -> int:
         cfg["ident"]["build_key"]), "index %s" % cfg["data_dir"], "project %s" % cfg["project"],
         "game %s" % cfg["game_path"], "workbench %s" % cfg["workbench_path"],
         "endpoint %s:%d (gateway %s)" % (cfg["host"], cfg["port"], cfg["gateway"]),
-        "handshake before every wb_* and write call; destinations inside %s; denied %s; sealed-map guard on"
-        % (cfg["project"], ", ".join(sorted(bk.DENY)))]
+        "deny by default: %d read tools, %d wb_* read tools after the handshake; every write denied; sealed-map "
+        "guard on; Windows TEMP/TMP for cscript %s" % (len(bk.READ), len(bk.WB_READ), cfg["win_temp"])]
     for ln in lines:
         print("[mcp_gate] %s" % ln, file=sys.stderr)
     if args.print_config:
@@ -307,9 +302,16 @@ def main(argv=None, env=None) -> int:
     if not cmd:
         print("[mcp_gate] no server command given (mcp_gate.py -- NODE DIST)", file=sys.stderr)
         return 2
+    try:  # the Windows TEMP/TMP of the cscript helper (R1): an E: dir, through the tools/pin write guard
+        os.makedirs(pinlib.check_write_path(cfg["win_temp"]), exist_ok=True)
+    except (pinlib.PinError, OSError) as exc:
+        print("[mcp_gate] REFUSED: the helper temp dir %s: %s; the MCP server was not started" % (cfg["win_temp"], exc),
+              file=sys.stderr)
+        return 2
     cache = {}
-    gate = Gate(lambda: eh.handshake(cfg["pin_src"], cfg["ident"], cfg["port"], None, cache, cfg["host"],
-                                     cfg["gateway"]), project_root=cfg["project"], server_cwd=cfg["server_cwd"])
+    probes = eh.WindowsProbes(win_temp=cfg["win_temp"])
+    gate = Gate(lambda: eh.handshake(cfg["pin_src"], cfg["ident"], cfg["port"], probes, cache, cfg["host"],
+                                     cfg["gateway"]), read_roots=(cfg["project"], cfg["game_path"]))
     return proxy(gate, cmd, server_env(env, cfg))
 
 

@@ -86,8 +86,19 @@ def load_index(data_dir: str) -> tuple:
     return stamp, classes
 
 
+_LITERAL_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+
+
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+    """Whitespace collapsed outside string literals only (Codex round 2): '"a b"' and '"a  b"' stay different."""
+    s = s or ""
+    out, pos = [], 0
+    for m in _LITERAL_RE.finditer(s):
+        out.append(re.sub(r"\s+", " ", s[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(re.sub(r"\s+", " ", s[pos:]))
+    return "".join(out).strip()
 
 
 def members(cls: dict) -> dict:

@@ -33,7 +33,7 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    }
   }
   DC_ProbeRunner "{DC4A50B300000001}" {
-   m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e05,e06a,e21,e22,e23"
+   m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e21,e22,e23,e05,e06a"
    m_sEgoName "DC_Ego"
    m_sMapId "arland"
    m_sTerrain "Arland"
@@ -189,7 +189,6 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fFlatNocallM 200
    m_fSpeedSettleS 2
    m_bAssistVariant 1
-   m_iAssistVariantMode 0
    m_fAssistHeldM 100
    m_fAssistNocallM 100
    m_bCross 1

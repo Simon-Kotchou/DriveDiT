@@ -278,8 +278,8 @@ PLACEHOLDER_LAUNCH_CLUTCH = {"mode": "ramp", "engage_rpm": 1100.0, "full_rpm": 1
 # (tools/ident/fit_launch_clutch.py), the clutch moves the rpm by about 965 rpm per step at c = 1, so the ramp's band is a
 # loop gain of 1.6 per step. Mode slip holds 1400 rpm while slipping (PI kp 0.0003 per rpm, ki 0.001 per rpm s within
 # the couple / uncouple rates 0.85 / 0.45 s), couples fully within 100 rpm of the driveline rpm and opens at 1100 rpm;
-# a brake opens it when 29000 rpm/s (117.6 Nm / 0.0388 kg m2, the worst fall of a coupled engine) over the call could
-# reach 1100 rpm.
+# a brake opens it when 29000 rpm/s (117.6 Nm / 0.0388 kg m2, the worst fall of a coupled engine; x the brake / 0.8
+# below a brake of 0.3) over the call could reach 1100 rpm.
 PLACEHOLDER_SLIP_LAUNCH_CLUTCH = {"mode": "slip", "engage_rpm": 1100.0, "full_rpm": 1400.0, "couple_time_s": 0.85,
                                   "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
                                   "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001,
@@ -291,10 +291,11 @@ PLACEHOLDER_SLIP_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14d, --launch-clutc
                                         "launched without a stall but chattered (2 openings at throttle 0.5, 4 at "
                                         "0.3); not identified. It holds full_rpm 1400 while slipping and couples "
                                         "fully once the engine is within 100 rpm of the driveline rpm (speed / "
-                                        "scripted_mps_per_krpm) on two callbacks under drive; a brake opens it when "
+                                        "scripted_mps_per_krpm) on two callbacks under drive, or once c reaches 1 "
+                                        "without a brake; a brake opens it when "
                                         "the fall it could cause over the callback could reach engage_rpm: the "
                                         "worst fall of a coupled engine, brake_drop_rpm_per_s 29000 (117.6 Nm / "
-                                        "0.0388 kg m2, the fit), x the brake / 0.8 up to 1. "
+                                        "0.0388 kg m2, the fit) at a brake of 0.3 or more, x the brake / 0.8 below. "
                                         "scripted_mps_per_krpm: E-01 run 3's measured "
                                         "1.54871 / 2.772066 / 4.169103 m/s per 1000 rpm in gears 2..4 (1.8.0.13, the "
                                         "run-3 fit's gearbox.detail.speed_per_krpm; 1.9.0.37 measured 1.540 / 2.755 "

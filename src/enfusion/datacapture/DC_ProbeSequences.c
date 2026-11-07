@@ -40,14 +40,15 @@
 //     uncouple_time_s inside the band, it opens at once at or below engage_rpm, and an engine that stalls with the
 //     handbrake released is restarted by StartModeA;
 //   - mode "slip" (DD-14d, the default since the ramp chattered on 1.9.0.37, launch 20261106T194516Z-wb-ab6a): a PI
-//     holds the engine at full_rpm while the clutch slips; a brake command opens it in any state once the worst fall
-//     of a coupled engine (m_fLaunchBrakeDropRpmPerS over the step) could reach engage_rpm; it couples fully once the
+//     holds the engine at full_rpm while the clutch slips; a brake command opens it in any state once the fall it
+//     could cause (m_fLaunchBrakeDropRpmPerS x the brake / 0.8 up to 1, over the step, plus an upshift's fall to the
+//     driveline rpm) could reach engage_rpm, a drop within 200 rpm left to the coupled floor; it couples fully once the
 //     engine rpm agrees with the driveline's (forward speed vel_l_z / the gear's m/s per 1000 rpm of
 //     m_sLaunchMpsPerKrpm, from first gear up) on two calls under drive, and stays coupled until the rpm, looked ahead
 //     below 2 x engage_rpm, reaches 900 rpm (engage_rpm under a brake) (the DC_LaunchClutch.c header, MODE SLIP). It
 //     gets this step's commanded throttle and brake and the applied gear (an upshift's synchronisation waits unless a
-//     brake is commanded). The same stall restart. full_rpm per mode: ramp m_fLaunchFullRpm (1700, exactly DD-14c),
-//     slip m_fLaunchHoldRpm (1400).
+//     brake of 0.8 or more is commanded). The same stall restart. full_rpm per mode: ramp m_fLaunchFullRpm (1700,
+//     exactly DD-14c), slip m_fLaunchHoldRpm (1400).
 // The dips compose with it: the policy dip (m_fGearClutchDipS) and gear_scripted's commanded 0 open it, and it
 // re-ramps from 0 after them. cmd_clutch stays the clutch passed to SetClutch. Every probe that drives gets it:
 //   - DC_ProbeSequences sets it from its Launch clutch attributes (default ramp; params.* and the launch_clutch.*
@@ -732,7 +733,7 @@ class DC_ProbeActuator
 		lines.Insert("launch_clutch.mps_per_krpm=" + FloatsText(m_aLaunchMpsPerKrpm));
 		lines.Insert("launch_clutch.source=" + m_sLaunchClutchSource);
 		lines.Insert("launch_clutch.active=" + DC_LaunchGuard.BoolText(m_bShiftPolicy && m_LaunchClutch.IsActive()));
-		lines.Insert("launch_clutch.rule=DC_LaunchClutch, manual gearbox only (an automatic one keeps the commanded clutch): mode off = the commanded clutch, the 1.8 sequence; mode ramp = c 0 in neutral, with the handbrake commanded, during a dip (policy dip or a commanded 0) and with the engine off, 0 at once at or below engage_rpm (a guard drop below stall_guard_rpm), else toward clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1) by at most dt / couple_time_s up and dt / uncouple_time_s down; mode slip (DD-14d) = the same 0 cases, and in every state c 0 at once when cmd_brake > 0 and rpm - brake_drop_rpm_per_s x (the step's time + 1/60 s) <= engage_rpm; slipping c moves by dt x (slip_kp x rate + slip_ki x (mean - full_rpm)) on the mean of the last two rpm readbacks (gains per 1/30 s, divided by the held call length) within the same rate limits, 0 at once at or below engage_rpm, under a brake and at a predicted 900 rpm (zero throttle coasts on the PI), c = 1 once the rpm is within lock_tolerance_rpm of the driveline rpm (vel_l_z / mps_per_krpm of the gear x 1000) on 2 calls under drive or c reaches 1, then 1 until the rpm reaches 900 (engage_rpm under a brake), or below 2 x engage_rpm is predicted to (1.5 x the call's duration ahead), or under a brake falls faster than 12000 rpm/s; an upshift waits 0.3 s without a brake; cmd_clutch = min(commanded, c); rpm, engine_on and vel_l_z of the previous step's readback; with restart_on_stall an engine off with the handbrake released gets StartModeA at most every restart_cooldown_s");
+		lines.Insert("launch_clutch.rule=DC_LaunchClutch, manual gearbox only (an automatic one keeps the commanded clutch): mode off = the commanded clutch, the 1.8 sequence; mode ramp = c 0 in neutral, with the handbrake commanded, during a dip (policy dip or a commanded 0) and with the engine off, 0 at once at or below engage_rpm (a guard drop below stall_guard_rpm), else toward clamp((rpm - engage_rpm) / (full_rpm - engage_rpm), 0, 1) by at most dt / couple_time_s up and dt / uncouple_time_s down; mode slip (DD-14d) = the same 0 cases, and in every state c 0 at once when cmd_brake > 0 and rpm - drop <= engage_rpm with drop = brake_drop_rpm_per_s x min(cmd_brake / 0.8, 1) x (the step's time + 1/60 s), plus inside an upshift's wait rpm - the driveline rpm, if drop > engage_rpm - 900; slipping c moves by dt x (slip_kp x rate + slip_ki x (mean - full_rpm)) on the mean of the last two rpm readbacks (gains per 1/30 s, divided by the held call length) within the same rate limits, 0 at once at or below engage_rpm, under a brake and at a predicted 900 rpm (zero throttle coasts on the PI), c = 1 once the rpm is within lock_tolerance_rpm of the driveline rpm (vel_l_z / mps_per_krpm of the gear x 1000) on 2 calls under drive or c reaches 1, then 1 until the rpm reaches 900 (engage_rpm under a brake), or below 2 x engage_rpm is predicted to (1.5 x the call's duration ahead), or under a brake falls faster than 12000 rpm/s; an upshift waits 0.3 s unless cmd_brake >= 0.8; cmd_clutch = min(commanded, c); rpm, engine_on and vel_l_z of the previous step's readback; with restart_on_stall an engine off with the handbrake released gets StartModeA at most every restart_cooldown_s");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1636,7 +1637,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 	[Attribute("100", UIWidgets.Slider, "Launch clutch (slip): couple fully once the engine rpm is within this of the driveline rpm", "0 1000 10", category: "Launch clutch")]
 	protected float m_fLaunchLockTolRpm;
 
-	[Attribute("29000", UIWidgets.EditBox, "Launch clutch (slip): the worst fall of a coupled engine whose wheels lock [rpm/s], clutch capacity / engine inertia (S105 on 1.9.0.37: 117.6 Nm / 0.0388 kg m2); a brake opens the clutch when this fall over the call could reach the engage rpm", category: "Launch clutch")]
+	[Attribute("29000", UIWidgets.EditBox, "Launch clutch (slip): the worst fall of a coupled engine whose wheels lock [rpm/s], clutch capacity / engine inertia (S105 on 1.9.0.37: 117.6 Nm / 0.0388 kg m2); a brake b opens the clutch when this x min(b / 0.8, 1) over the call could reach the engage rpm; 24000 .. 58000", category: "Launch clutch")]
 	protected float m_fLaunchBrakeDropRpmPerS;
 
 	[Attribute("1.54871,2.772066,4.169103", UIWidgets.EditBox, "Launch clutch (slip): m/s per 1000 rpm of each forward gear from the first, for the driveline rpm of the lock-up (the S105's: the 1.9.0.37 card's gearbox.scripted_mps_per_krpm; a gear without a value locks up only when the PI reaches 1)", category: "Launch clutch")]

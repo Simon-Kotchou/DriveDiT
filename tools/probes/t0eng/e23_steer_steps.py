@@ -1,44 +1,52 @@
 #!/usr/bin/env python3
 """CC-08 steering actuator structure from the S2 steering steps of probe e23 (DD-14b, DC_ProbeSteerSteps).
 
-    python3 -I -B tools/probes/t0eng/e23_steer_steps.py <e23 play_dir> [--e22 <e22 play_dir>] [--channel auto]
-                                                        [--min-r2 0.9] [--max-cv 0.2] [--min-events 6]
+    python3 -I -B tools/probes/t0eng/e23_steer_steps.py <e23 play_dir> [--e22 <e22 play_dir>] [--min-r2 0.9]
+                                                        [--max-cv 0.2] [--min-events 6]
 
 <play_dir> is one $profile:DC_Probes/e23/<launch_id>/play_NN directory (run_header.txt, e23_steps.csv,
-e23_events.csv, e23_phases.csv, run_footer.txt). Nothing is written.
+e23_events.csv, e23_phases.csv, run_footer.txt); --e22 is the e22 play whose CC-07 step 0 validates the wheel-angle
+channel. Nothing is written.
 
-MIGRATION_1_9.md 6.1 CC-08: steps 0 -> +-0.5 and 0 -> +1.0 at 10/30/60 (+80) km/h, repetitions with random phase,
-plus a held-out PRBS; competing structures fitted per speed and amplitude bin, separately for the raw engine path and
-the full kappa path; pass: the selected structure (lowest held-out error, BIC as tie-break) reaches held-out
-R2 >= 0.9 in every bin with parameters stable across repetitions (CV <= 20%); the rate limit as a function of speed,
-the centering on release, the L/R angle ratio, steer_sign and whether a steering-speed limit acts on the script setter
-are recorded.
-
-Paths (one fit per path, speed and |amplitude| bin, both signs together):
-  input   cmd_steer -> input_post_steer (the engine's steering input after the step)
-  wheel   cmd_steer -> delta_eff of the wheel-angle channel (steer_common.delta_eff; the channel validated by CC-07
-          step 0 when --e22 is given, else the first candidate with data, reported unvalidated)
-  kappa   cmd_steer -> kappa_realised = angvel_l_y / vel_l_z (the llc path with the gain as a parameter)
-Structures (discrete, one physics step dt; target = g x u[k - d]):
+MIGRATION_1_9.md 6.1 CC-08 asks for steps 0 -> +-0.5 and 0 -> +1.0 at 10/30/60 km/h, 50 repetitions each with random
+phase, a held-out PRBS, competing structures per speed and amplitude bin for the raw engine path (cmd -> steer_input
+-> wheel_angle) and the full llc path (kappa target -> kappa_realised), the llc limiter rule and the 10 Hz ZOH
+tracking. This analysis covers the raw engine path; what it cannot cover is INCOMPLETE, never PASS:
+  coverage       the spec grid (SPEC_SPEEDS x SPEC_STEPS x SPEC_REPS, encoded here, not read from the run) against the
+                 ok events in each measured-speed bin, and a PRBS segment at every spec speed: PASS only when all of
+                 it is there; else INCOMPLETE with the counts (the default e23 grid is PREVIEW coverage)
+  llc_path       always INCOMPLETE: the llc path (llc_v1 in the loop), its limiter rule and the 10 Hz ZOH kappa
+                 tracking are not measured by e23 (DD-7 checks)
+  evidence       the e23 run footer complete (and the e22 footer with --e22), else INCOMPLETE
+  input_<v>kmh_<A>, wheel_<v>kmh_<A>   the raw engine path per spec bin (PARTIAL evidence for CC-08):
+                 input = cmd_steer -> input_post_steer; wheel = cmd_steer -> delta_eff of the channel validated by
+                 CC-07 step 0 (--e22; the steering0 signal with its validated scale), INCOMPLETE without one.
+                 PASS: the selected structure's held-out R2 >= --min-r2 and every identified parameter stable
+                 (CV <= --max-cv); FAIL: R2 or a CV out of bounds; INCOMPLETE: too few events or doublets, a
+                 parameter that is not resolved
+  prbs_<path>_<v>kmh   the held-out PRBS segment at each spec speed predicted by the bin model of that speed:
+                 R2 >= --min-r2 PASS, below FAIL, no segment or no model INCOMPLETE
+  steer_sign     the kappa plateaus have the command's sign (+1 on 1.8.0.13 and 1.9.0.37)
+  INFO           cmd -> kappa per bin (labelled PARTIAL: the command to the realised curvature, not the llc path),
+                 the rate limit vs speed, the centering on release, the L/R angle ratio, the script-setter limit
+Structures (discrete in engine steps of dt; a row that covers n merged steps is n steps of the model with the row's
+command, its output compared at the last of them; target = g x u[step - d]):
   M1 delay           y = target
   M2 + first order   y1 += (1 - a) (target - y1), a = exp(-dt / tau)
-  M3 + rate limit    the M2 step clamped to +-R dt (R as a share of the bin's step size per second, reported in
-                     output units / s)
+  M3 + rate limit    the M2 step clamped to +-R dt (R = q x |g| x the bin's step size per second)
   M4 + relaxation    M3 then a second first order with tau2 = sigma / v (tyre relaxation length sigma)
-Windows: from 3 steps before each onset to the end of the event's centering gap, the output measured from the
-run's hold baseline (command 0 at speed) and every model stage starting at the measured value, so the state the
-previous event left is the initial condition, not an error.
-g is the least-squares gain of each candidate (closed form: the output scales with g; the free response of the
-initial state is separated). Fit on the even events of the bin: a grid over d (0..8 steps) and tau; for M3 / M4 a
-joint grid of tau with R (M3) or sigma (M4) over the delay and up to 3 steps less; coordinate descent; then
-golden-section refinement of tau, R and sigma between their grid neighbours, at the best delay and at +-1 step.
-Held-out = the odd events. Selection: the lowest held-out MSE; within 2% of it (or within the noise floor, 1e-4 of
-the output variance), the lowest BIC (n ln(SSE / n) + k ln n on the training events, the SSE floored at that noise
-floor, so the parameter count decides between candidates that both reach it). Parameter CV:
-the selected structure fitted to each event alone (d and tau from the bin start); CV = stdev / |mean| per continuous
-parameter (g always, tau when the bin tau is >= one step, R when finite, sigma when > 0); the delay as a range.
-A planned bin (params m_sStepGrid) with fewer than --min-events ok events, a missing path signal or a wrong
-steer_sign fails, never passes.
+Windows: the scored rows run from an event's onset to its end; the rows before are unscored history (the model state
+starts at the measured output of the row before the onset, the D_MAX engine steps of commands before feed the delay),
+so no row is scored twice. Every output is measured from its run's hold baseline (command 0 at speed). An event
+counts in a bin only when its mean measured speed is within SPEED_BIN_SHARE of the bin speed.
+Split: whole doublets (+A then -A), alternating train / held-out, so both sets hold both signs.
+Gain: closed form for the linear structures; for a clamped M3 / M4 the gain is optimised against the full nonlinear
+simulation (golden section around the closed-form start) wherever the parameters are refined.
+Fit: a grid over d (0..D_MAX) and tau; joint grids of tau with R (M3) or sigma (M4); coordinate descent; golden-section
+refinement at the best delay and at +-1 step. Selection: the lowest held-out MSE; within 2% of it (or the noise
+floor) the lowest BIC. Parameter stability: the selected structure fitted to each event alone; CV = stdev / |mean| of
+g, of tau (resolved when tau >= dt / ln 100: the first-step residual is >= 1%), of R and sigma (resolved when finite in
+>= 2/3 of the events); the delay is stable when constant or its CV <= --max-cv.
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
 """
 
@@ -52,10 +60,9 @@ sys.path.insert(0, HERE)
 import probe_common  # noqa: E402
 import steer_common as sc  # noqa: E402
 
-PRE_STEPS = 3
 D_MAX = 8
-TAU_GRID_S = [0.0] + [0.017 * (1.5 / 0.017) ** (i / 11.0) for i in range(12)]
-Q_GRID = [None] + [0.3 * (60.0 / 0.3) ** (i / 13.0) for i in range(14)]     # rate limit: steps per second
+TAU_GRID_S = [0.0] + [0.008 * (1.5 / 0.008) ** (i / 13.0) for i in range(14)]
+Q_GRID = [None] + [0.3 * (60.0 / 0.3) ** (i / 13.0) for i in range(14)]     # rate limit: step sizes per second
 SIGMA_GRID_M = [0.0] + [0.05 * (5.0 / 0.05) ** (i / 9.0) for i in range(10)]
 TIE_SHARE = 0.02
 NOISE_FLOOR_SHARE = 1e-4      # a held-out MSE below this share of the output variance (R2 >= 0.9999) is a tie
@@ -63,9 +70,18 @@ STRUCTURES = ("M1", "M2", "M3", "M4")
 STRUCTURE_NAMES = {"M1": "delay", "M2": "delay+first order", "M3": "delay+first order+rate limit",
                    "M4": "delay+first order+rate limit+relaxation"}
 PARAM_COUNT = {"M1": 2, "M2": 3, "M3": 4, "M4": 5}
-PATHS = ("input", "wheel", "kappa")
+RAW_PATHS = ("input", "wheel")
 EVENT_COLUMNS = ("event_idx", "phase", "target_kmh", "amplitude", "run_idx", "jitter_steps", "onset_step",
                  "release_step", "end_step", "onset_kmh", "result")
+# The CC-08 grid (MIGRATION_1_9.md 6.1), independent of what the run was configured to do
+SPEC_SPEEDS = (10.0, 30.0, 60.0)
+SPEC_STEPS = ((0.5, (1, -1)), (1.0, (1,)))
+SPEC_REPS = 50
+SPEED_BIN_SHARE = 0.15
+MIN_DOUBLETS = 2              # per side of the split
+RESOLVED_SHARE = 2.0 / 3.0
+TAU_RESOLUTION = math.log(100.0)
+STATE_TEXT = {True: "PASS", False: "FAIL", None: "INCOMPLETE"}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -73,7 +89,7 @@ EVENT_COLUMNS = ("event_idx", "phase", "target_kmh", "amplitude", "run_idx", "ji
 
 
 class Params:
-    """One candidate: delay d (steps), gain g, tau (s), q (rate limit in step sizes per second, None = none),
+    """One candidate: delay d (engine steps), gain g, tau (s), q (rate limit in step sizes per second, None = none),
     sigma (relaxation length m, 0 = none)."""
 
     __slots__ = ("d", "g", "tau", "q", "sigma")
@@ -85,92 +101,115 @@ class Params:
         return Params(self.d, self.g, self.tau, self.q, self.sigma)
 
 
+def clamped(structure, params):
+    return structure in ("M3", "M4") and params.q is not None
+
+
 def simulate(window, params, dt, structure, with_input=True, with_state=True):
-    """Output of a structure over one window: u (the command), y0 (the measured output at the first row, the
-    initial state of every stage), u_hist (the commands of the D_MAX rows before the window, oldest first), v,
-    step_size. with_input / with_state: the forced and the free response alone (their sum is the output of the
-    linear structures; the gain fit uses them)."""
-    u = window["u"]
-    hist = window.get("u_hist", [])
+    """Output of a structure at the scored rows of one window: u_e (the commands per engine step, the history
+    first), offset (where the scored steps begin), n (engine steps per scored row), y0 (the measured output before
+    the first scored row, the initial state of every stage), v, step_size. with_input / with_state: the forced and
+    the free response alone (their sum is the output of the linear structures; the closed-form gain uses them)."""
+    u_e = window["u_e"]
     a = math.exp(-dt / params.tau) if params.tau > 0 else 0.0
     rate = None
-    if structure in ("M3", "M4") and params.q is not None:
+    if clamped(structure, params):
         rate = params.q * abs(params.g) * window["step_size"] * dt
     b = 0.0
     if structure == "M4" and params.sigma > 0 and window["v"] > 0.1:
         b = math.exp(-dt * window["v"] / params.sigma)
-    y0 = window.get("y0", 0.0) if with_state else 0.0
+    y0 = window["y0"] if with_state else 0.0
     y1 = y0
     y2 = y0
+    y = y0
     out = []
-    for k in range(len(u)):
-        j = k - params.d
-        if not with_input:
-            command = 0.0
-        elif j >= 0:
-            command = u[j]
-        else:
-            command = hist[j] if -j <= len(hist) else 0.0
-        target = params.g * command
-        if structure == "M1":
-            y = target
-        else:
-            step = (1.0 - a) * (target - y1)
-            if rate is not None:
-                step = max(-rate, min(rate, step))
-            y1 += step
-            y = y1
-            if structure == "M4" and b > 0:
-                y2 = b * y2 + (1.0 - b) * y1
-                y = y2
+    e = window["offset"]
+    g = params.g
+    d = params.d
+    for n in window["n"]:
+        for _ in range(n):
+            j = e - d
+            command = u_e[j] if with_input and j >= 0 else 0.0
+            target = g * command
+            if structure == "M1":
+                y = target
+            else:
+                step = (1.0 - a) * (target - y1)
+                if rate is not None:
+                    step = max(-rate, min(rate, step))
+                y1 += step
+                y = y1
+                if b > 0:
+                    y2 = b * y2 + (1.0 - b) * y1
+                    y = y2
+            e += 1
         out.append(y)
     return out
-
-
-def pairs(window, sim):
-    """(simulated, measured) of the rows with a measured value"""
-    return [(ys, ym) for ys, ym in zip(sim, window["y"]) if ym is not None]
 
 
 def sse(windows, params, dt, structure):
     total = 0.0
     n = 0
     for w in windows:
-        for ys, ym in pairs(w, simulate(w, params, dt, structure)):
-            total += (ys - ym) ** 2
-            n += 1
+        for ys, ym in zip(simulate(w, params, dt, structure), w["y"]):
+            if ym is not None:
+                total += (ys - ym) ** 2
+                n += 1
     return total, n
 
 
-def score(windows, params, dt, structure):
-    """SSE of a candidate with its least-squares gain (set on params). The output is the forced response (linear
-    in g; the rate limit is a share of g times the step size) plus the free response of the measured initial state:
-    g = sum(A (y - B)) / sum(A A) from the unit-gain forced response A and the free response B, then the SSE of a
-    full simulation with that g (exact also where the clamp couples the two)."""
+def closed_gain(windows, params, dt, structure):
+    """Least-squares gain of the linear decomposition: g = sum(A (y - B)) / sum(A A) from the unit-gain forced
+    response A and the free response B (exact for M1 / M2 and an unclamped M3 / M4)"""
     unit = params.copy()
     unit.g = 1.0
     num = 0.0
     den = 0.0
-    parts = []
     for w in windows:
         forced = simulate(w, unit, dt, structure, with_state=False)
         free = simulate(w, unit, dt, structure, with_input=False)
-        parts.append((forced, free, w["y"]))
         for fa, fb, ym in zip(forced, free, w["y"]):
-            if ym is None:
-                continue
-            num += fa * (ym - fb)
-            den += fa * fa
-    params.g = num / den if den > 0 else 0.0
-    clamped = structure in ("M3", "M4") and params.q is not None
-    if clamped:
-        return sse(windows, params, dt, structure)[0]
-    total = 0.0
-    for forced, free, measured in parts:
-        for fa, fb, ym in zip(forced, free, measured):
             if ym is not None:
-                total += (params.g * fa + fb - ym) ** 2
-    return total
+                num += fa * (ym - fb)
+                den += fa * fa
+    return num / den if den > 0 else 0.0
+
+
+def score(windows, params, dt, structure, exact=False):
+    """SSE of a candidate with its gain (set on params). Linear structures: the closed form (exact). A clamped M3 /
+    M4 does not superpose, so the closed form is only the start: the gain is then optimised on the full nonlinear
+    simulation, by successive parabolic steps in the grid stages and by a golden-section search (exact) in the
+    refinement"""
+    params.g = closed_gain(windows, params, dt, structure)
+    if not clamped(structure, params):
+        return sse(windows, params, dt, structure)[0]
+
+    def evaluate(g):
+        p = params.copy()
+        p.g = g
+        return sse(windows, p, dt, structure)[0]
+
+    g = params.g
+    value = evaluate(g)
+    if exact:
+        lo, hi = (0.25 * g, 2.5 * g) if abs(g) > 1e-9 else (-1.0, 1.0)
+        best_g, best = golden(evaluate, min(lo, hi), max(lo, hi), steps=18)
+        if best < value:
+            g, value = best_g, best
+    for _ in range(3):
+        h = 0.15 * abs(g) if abs(g) > 1e-9 else 0.05
+        lo_v, hi_v = evaluate(g - h), evaluate(g + h)
+        curvature = lo_v + hi_v - 2.0 * value
+        if curvature <= 0:
+            trial = g - h if lo_v < hi_v else g + h
+        else:
+            trial = g - h * (hi_v - lo_v) / (2.0 * curvature)
+        trial_v = evaluate(trial)
+        for cand, cand_v in ((g - h, lo_v), (g + h, hi_v), (trial, trial_v)):
+            if cand_v < value:
+                g, value = cand, cand_v
+    params.g = g
+    return value
 
 
 def neighbours(grid, value):
@@ -202,17 +241,18 @@ def golden(evaluate, lo, hi, steps=14):
 
 def fit_structure(windows, dt, structure, start=None, joint=True):
     """Grid / coordinate-descent fit of one structure, then a continuous refinement of tau, the rate limit and
-    sigma between their grid neighbours (so a richer structure never wins by the grid alone); returns
-    (Params, SSE, n). joint: the two-parameter grids of M3 / M4 (the bin fits; the per-event fits start next to the
-    bin optimum and skip them)."""
+    sigma between their grid neighbours with the exact gain (so a richer structure never wins by the grid or by a
+    superposition shortcut); returns (Params, SSE, n). joint: the two-parameter grids of M3 / M4 (the bin fits;
+    the per-event fits start next to the bin optimum and skip them)."""
     best = None
     best_sse = None
 
-    def consider(p):
+    def consider(p, exact=False):
         nonlocal best, best_sse
-        value = score(windows, p, dt, structure)
+        p = p.copy()
+        value = score(windows, p, dt, structure, exact)
         if best_sse is None or value < best_sse - 1e-15:
-            best, best_sse = p.copy(), value
+            best, best_sse = p, value
 
     if start is None:
         taus = [0.0] if structure == "M1" else TAU_GRID_S
@@ -220,10 +260,18 @@ def fit_structure(windows, dt, structure, start=None, joint=True):
             for tau in taus:
                 consider(Params(d=d, tau=tau))
     else:
-        consider(start.copy())
+        consider(start)
+        for d in range(D_MAX + 1):
+            p = best.copy()
+            p.d = d
+            consider(p)
+        if structure != "M1":
+            for tau in TAU_GRID_S:
+                p = best.copy()
+                p.tau = tau
+                consider(p)
     # joint grids of the two parameters that trade off against each other (a lag can mimic a rate limit or a
-    # relaxation), then coordinate descent over all of them
-    # an added stage takes over part of the dead time, so the joint grids also try up to 3 steps less delay
+    # relaxation); an added stage takes over part of the dead time, so they also try up to 3 steps less delay
     if structure == "M3" and joint:
         base = best.copy()
         for d in range(max(0, base.d - 3), base.d + 1):
@@ -261,13 +309,14 @@ def fit_structure(windows, dt, structure, start=None, joint=True):
                 consider(p)
 
     def refine_from(params):
-        """Rounds of golden-section refinement of the continuous parameters from params; (params, SSE)"""
+        """Rounds of golden-section refinement of the continuous parameters from params (exact gain); (params,
+        SSE)"""
         current = params.copy()
-        current_sse = score(windows, current, dt, structure)
+        current_sse = score(windows, current, dt, structure, exact=True)
         names = []
         if structure != "M1":
             names.append(("tau", TAU_GRID_S))
-        if structure in ("M3", "M4") and current.q is not None:
+        if clamped(structure, current):
             names.append(("q", Q_GRID))
         if structure == "M4" and current.sigma > 0:
             names.append(("sigma", SIGMA_GRID_M))
@@ -280,16 +329,14 @@ def fit_structure(windows, dt, structure, start=None, joint=True):
                 def evaluate(x, name=name):
                     p = current.copy()
                     setattr(p, name, x)
-                    return score(windows, p, dt, structure)
+                    return score(windows, p, dt, structure, exact=True)
 
-                x, value = golden(evaluate, lo, hi)
+                x, value = golden(evaluate, lo, hi, steps=12)
                 if value < current_sse:
                     setattr(current, name, x)
-                    current_sse = score(windows, current, dt, structure)
+                    current_sse = score(windows, current, dt, structure, exact=True)
         return current, current_sse
 
-    # continuous refinement at the best delay and at its two neighbours (a refined lag or rate limit can move the
-    # best dead time by a step)
     refined, refined_sse = refine_from(best)
     for d in (refined.d - 1, refined.d + 1):
         if d < 0 or d > D_MAX or structure == "M1":
@@ -299,7 +346,8 @@ def fit_structure(windows, dt, structure, start=None, joint=True):
         candidate, candidate_sse = refine_from(trial)
         if candidate_sse < refined_sse:
             refined, refined_sse = candidate, candidate_sse
-    consider(refined)
+    if refined_sse < best_sse - 1e-15:
+        best, best_sse = refined, refined_sse
     total, n = sse(windows, best, dt, structure)
     return best, total, n
 
@@ -335,12 +383,27 @@ def variance(windows):
     return sum((y - m) ** 2 for y in values) / len(values)
 
 
+def split_doublets(windows):
+    """(train, test, train doublets, test doublets): whole doublets alternately, in the order they ran (both signs
+    on both sides)"""
+    order = []
+    for w in windows:
+        if w["doublet"] not in order:
+            order.append(w["doublet"])
+    train_keys = set(order[0::2])
+    train = [w for w in windows if w["doublet"] in train_keys]
+    test = [w for w in windows if w["doublet"] not in train_keys]
+    return train, test, len(order[0::2]), len(order[1::2])
+
+
 def fit_bin(windows, dt):
-    """All four structures on the even windows, held-out on the odd ones; the selection and its numbers."""
-    train = windows[0::2]
-    test = windows[1::2]
+    """All four structures on the training doublets, held-out on the others; the selection and its numbers."""
+    train, test, n_train, n_test = split_doublets(windows)
     floor_mse = NOISE_FLOOR_SHARE * variance(train)
-    result = {"structures": {}, "floor_mse": floor_mse}
+    result = {"structures": {}, "floor_mse": floor_mse, "train_doublets": n_train, "test_doublets": n_test,
+              "selected": None}
+    if n_train < MIN_DOUBLETS or n_test < MIN_DOUBLETS:
+        return result
     start = None
     for structure in STRUCTURES:
         params, total, n = fit_structure(train, dt, structure, start if structure in ("M3", "M4") else None)
@@ -352,7 +415,6 @@ def fit_bin(windows, dt):
             start = params
     candidates = [(s, v) for s, v in result["structures"].items() if v["test_mse"] is not None]
     if not candidates:
-        result["selected"] = None
         return result
     best_mse = min(v["test_mse"] for _, v in candidates)
     close = [(s, v) for s, v in candidates if v["test_mse"] <= best_mse * (1.0 + TIE_SHARE) + floor_mse]
@@ -371,37 +433,9 @@ def fit_bin(windows, dt):
 
 
 def per_event_params(windows, dt, structure, start):
-    """The selected structure fitted to every window alone (coordinate descent from the bin fit)."""
-    out = []
-    for w in windows:
-        params, _, _ = fit_structure([w], dt, structure, start, joint=False)
-        if structure == "M2":
-            # M2 has no descent stage in fit_structure: refine tau and d around the bin start
-            best, best_sse = params, score([w], params, dt, structure)
-            for tau in TAU_GRID_S:
-                p = best.copy()
-                p.tau = tau
-                value = score([w], p, dt, structure)
-                if value < best_sse:
-                    best, best_sse = p.copy(), value
-            for d in range(D_MAX + 1):
-                p = best.copy()
-                p.d = d
-                value = score([w], p, dt, structure)
-                if value < best_sse:
-                    best, best_sse = p.copy(), value
-            params = best
-        elif structure == "M1":
-            best, best_sse = params, score([w], params, dt, structure)
-            for d in range(D_MAX + 1):
-                p = best.copy()
-                p.d = d
-                value = score([w], p, dt, structure)
-                if value < best_sse:
-                    best, best_sse = p.copy(), value
-            params = best
-        out.append(params)
-    return out
+    """The selected structure fitted to every window alone (from the bin fit: delay, tau and the other stages
+    searched again, the gain exact)"""
+    return [fit_structure([w], dt, structure, start, joint=False)[0] for w in windows]
 
 
 def cv(values):
@@ -414,167 +448,214 @@ def cv(values):
     return sc.stdev(values) / abs(m)
 
 
+def reaches_target(window, params, dt, structure):
+    """The simulated output comes within 10% of its target g x amplitude before the release (else a rate limit
+    covers the whole on-time and the gain is not identified)"""
+    rel = window.get("release_index")
+    if rel is None or rel < 1:
+        return False
+    target = params.g * window["amplitude"]
+    span = abs(target - window["y0"])
+    if span <= 1e-12:
+        return False
+    sim = simulate(window, params, dt, structure)
+    return any(abs(v - target) <= 0.1 * span for v in sim[:rel])
+
+
+def stability(selected, params, per_event, windows, dt, step_size, max_cv):
+    """Every identified parameter of the selected structure: {name: (state, text)} with state True (stable), False
+    (CV over max_cv) or None (not resolved)"""
+    out = {}
+    gain_cv = cv([p.g for p in per_event])
+    out["g"] = (None if gain_cv is None else gain_cv <= max_cv, "g CV %s" % sc.fmt(gain_cv, 3))
+    if clamped(selected, params):
+        reached = sum(1 for w, p in zip(windows, per_event) if reaches_target(w, p, dt, selected))
+        if reached < RESOLVED_SHARE * len(per_event):
+            out["g"] = (None, "g unresolved (the output reaches the target before the release in %d of %d events: "
+                              "the rate limit hides the gain)" % (reached, len(per_event)))
+    delays = [p.d for p in per_event]
+    mean_d = sum(delays) / len(delays)
+    if max(delays) == min(delays):
+        out["d"] = (True, "d %d in every event" % delays[0])
+    else:
+        delay_cv = sc.stdev(delays) / mean_d if mean_d > 0 else None
+        out["d"] = (delay_cv is not None and delay_cv <= max_cv, "d %d..%d (CV %s)" % (
+            min(delays), max(delays), sc.fmt(delay_cv, 3)))
+    if selected != "M1":
+        resolution = dt / TAU_RESOLUTION
+        active = [p.tau for p in per_event if p.tau >= resolution]
+        if not active:
+            out["tau"] = (True, "tau < dt / ln 100 = %s s in every event (no first-order stage)" % sc.fmt(
+                resolution, 3))
+        else:
+            tau_cv = cv([p.tau for p in per_event])
+            out["tau"] = (None if tau_cv is None else tau_cv <= max_cv, "tau CV %s (%d of %d events >= %s s)" % (
+                sc.fmt(tau_cv, 3), len(active), len(per_event), sc.fmt(resolution, 3)))
+    if selected in ("M3", "M4"):
+        rates = [p.q * abs(p.g) * step_size for p in per_event if p.q is not None]
+        if len(rates) < RESOLVED_SHARE * len(per_event):
+            out["R"] = (None, "R unresolved (finite in %d of %d events)" % (len(rates), len(per_event)))
+        else:
+            rate_cv = cv(rates)
+            out["R"] = (None if rate_cv is None else rate_cv <= max_cv, "R CV %s" % sc.fmt(rate_cv, 3))
+    if selected == "M4":
+        sigmas = [p.sigma for p in per_event if p.sigma > 0]
+        if len(sigmas) < RESOLVED_SHARE * len(per_event):
+            out["sigma"] = (None, "sigma unresolved (> 0 in %d of %d events)" % (len(sigmas), len(per_event)))
+        else:
+            sigma_cv = cv(sigmas)
+            out["sigma"] = (None if sigma_cv is None else sigma_cv <= max_cv, "sigma CV %s" % sc.fmt(sigma_cv, 3))
+    return out
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # data
 
 
-def path_value(step, path, channel):
+def path_value(step, path, channel, scale_rad):
     if path == "input":
         return step.f.get("input_post_steer")
     if path == "kappa":
         return step.kappa
-    return sc.channel_angle(step, channel)
+    return sc.channel_angle(step, channel, scale_rad)
 
 
-def run_baselines(steps, path, channel):
+def run_baselines(steps, path, channel, scale_rad):
     """{(phase, run): the median output over the run's hold segment} (command 0, at speed: the at-rest level that
     every window of the run is measured from, so toe and self-steer offsets cancel)"""
     values = {}
     for step in steps:
         if step.segment != "hold":
             continue
-        value = path_value(step, path, channel)
+        value = path_value(step, path, channel, scale_rad)
         if value is not None:
             values.setdefault((step.phase, step.i.get("run_idx")), []).append(value)
     return {key: sc.median(v) for key, v in values.items()}
 
 
-def make_window(steps, first, last, path, channel, baselines):
-    """u (the command), y (the output minus the run's baseline), y0, u_hist over steps[first..last]; None without a
-    baseline, an initial value or enough values"""
-    rows = steps[first:last + 1]
-    base = baselines.get((rows[0].phase, rows[0].i.get("run_idx")))
-    if base is None:
+def make_window(steps, first, last, path, channel, scale_rad, baselines, dt):
+    """Scored rows steps[first..last]; the row before is the initial state, the commands of up to D_MAX engine steps
+    before feed the delay. None without a baseline, an initial value or enough values."""
+    if first < 1:
         return None
-    u = []
-    y = []
-    for step in rows:
-        cmd = step.f.get("cmd_steer")
-        val = path_value(step, path, channel)
-        u.append(cmd if cmd is not None else 0.0)
-        y.append(None if val is None else val - base)
-    if y[0] is None or sum(1 for v in y if v is not None) < 0.8 * len(y):
+    rows = steps[first:last + 1]
+    key = (rows[0].phase, rows[0].i.get("run_idx"))
+    base = baselines.get(key)
+    prev = steps[first - 1]
+    if base is None or (prev.phase, prev.i.get("run_idx")) != key:
+        return None
+    y0 = path_value(prev, path, channel, scale_rad)
+    if y0 is None:
         return None
     hist = []
-    for k in range(max(0, first - D_MAX), first):
-        prev = steps[k]
-        same = prev.phase == rows[0].phase and prev.i.get("run_idx") == rows[0].i.get("run_idx")
-        hist.append(prev.f.get("cmd_steer") or 0.0 if same else 0.0)
-    return {"u": u, "y": y, "y0": y[0], "u_hist": hist, "rows": rows}
+    k = first - 1
+    while k >= 0 and len(hist) < D_MAX:
+        row = steps[k]
+        if (row.phase, row.i.get("run_idx")) != key:
+            break
+        hist[0:0] = [row.f.get("cmd_steer") or 0.0] * sc.covered_steps(row, dt)
+        k -= 1
+    hist = hist[-D_MAX:]
+    u, n, y = [], [], []
+    for step in rows:
+        cmd = step.f.get("cmd_steer")
+        val = path_value(step, path, channel, scale_rad)
+        u.append(cmd if cmd is not None else 0.0)
+        n.append(sc.covered_steps(step, dt))
+        y.append(None if val is None else val - base)
+    if sum(1 for v in y if v is not None) < 0.8 * len(y):
+        return None
+    u_e = list(hist)
+    for cmd, steps_n in zip(u, n):
+        u_e.extend([cmd] * steps_n)
+    speeds = [s.f.get("vel_l_z") for s in rows if s.f.get("vel_l_z") is not None]
+    return {"u": u, "n": n, "y": y, "y0": y0 - base, "u_e": u_e, "offset": len(hist), "rows": rows,
+            "v": max(sc.mean(speeds) or 0.0, 0.1)}
 
 
-def event_windows(steps, events, path, channel):
-    """{(speed, |amplitude|): [window]} of the ok events: from PRE_STEPS before the onset to the event's end step,
-    in deviation from the run's hold baseline, the model state starting at the measured value (so what the previous
-    event left is the initial condition, not an error)."""
+def spec_speed_of(kmh):
+    """The spec speed a measured mean speed belongs to (within SPEED_BIN_SHARE), else None"""
+    for speed in SPEC_SPEEDS:
+        if abs(kmh - speed) <= SPEED_BIN_SHARE * speed:
+            return speed
+    return None
+
+
+def event_windows(steps, events, path, channel, scale_rad, dt):
+    """({(spec speed, |amplitude|): [window]}, {reason: count of events left out}): the ok events, each scored from
+    its onset to its end, binned by the measured mean speed of its scored rows"""
     by_step = {}
     for idx, step in enumerate(steps):
         number = step.i.get("physics_step")
         if number is not None:
             by_step[number] = idx
-    baselines = run_baselines(steps, path, channel)
+    baselines = run_baselines(steps, path, channel, scale_rad)
     bins = {}
+    dropped = {}
+
+    def drop(reason):
+        dropped[reason] = dropped.get(reason, 0) + 1
+
     for event in events:
         if event.get("result") != "ok":
+            drop("result_" + (event.get("result") or "none"))
             continue
         onset = probe_common.to_int(event.get("onset_step"))
         end = probe_common.to_int(event.get("end_step"))
-        speed = probe_common.to_float(event.get("target_kmh"))
         amplitude = probe_common.to_float(event.get("amplitude"))
-        if onset is None or end is None or speed is None or amplitude is None or onset not in by_step:
+        index = probe_common.to_int(event.get("event_idx"))
+        if onset is None or end is None or amplitude is None or index is None or onset not in by_step \
+                or end not in by_step or by_step[end] <= by_step[onset]:
+            drop("incomplete_row")
             continue
-        first = by_step[onset] - PRE_STEPS
-        last = by_step.get(end)
-        if first < 0 or last is None or last <= by_step[onset]:
-            continue
-        window = make_window(steps, first, last, path, channel, baselines)
+        window = make_window(steps, by_step[onset], by_step[end], path, channel, scale_rad, baselines, dt)
         if window is None:
+            drop("no_signal")
             continue
-        rows = window["rows"]
-        v_ms = rows[PRE_STEPS].f.get("vel_l_z") or speed / 3.6
-        window.update({"v": max(v_ms, 0.1), "step_size": abs(amplitude), "amplitude": amplitude,
-                       "onset_index": PRE_STEPS, "release_index": None})
+        speed_kmh = sc.mean([s.f.get("speed_kmh") for s in window["rows"] if s.f.get("speed_kmh") is not None])
+        spec = spec_speed_of(speed_kmh) if speed_kmh is not None else None
+        if spec is None:
+            drop("off_speed")
+            continue
         release = probe_common.to_int(event.get("release_step"))
-        if release is not None and release in by_step:
-            window["release_index"] = by_step[release] - first
-        key = (round(speed, 3), round(abs(amplitude), 3))
-        bins.setdefault(key, []).append(window)
-    return bins
+        window.update({"step_size": abs(amplitude), "amplitude": amplitude, "speed_kmh": speed_kmh,
+                       "release_index": by_step[release] - by_step[onset] if release in by_step else None,
+                       "doublet": (event.get("phase"), event.get("run_idx"), index // 2)})
+        bins.setdefault((spec, round(abs(amplitude), 3)), []).append(window)
+    return bins, dropped
 
 
-def prbs_windows(steps, path, channel):
-    """{speed: window} of the PRBS segments, like the event windows (the run's hold baseline, the measured initial
-    state)."""
+def prbs_windows(steps, path, channel, scale_rad, dt):
+    """{spec speed: window} of the PRBS segments (the measured mean speed within the bin share)"""
     out = {}
     index = {id(s): i for i, s in enumerate(steps)}
-    baselines = run_baselines(steps, path, channel)
+    baselines = run_baselines(steps, path, channel, scale_rad)
     for phase, run, segment, rows in sc.segments(steps):
         if segment != "prbs" or len(rows) < 20:
             continue
         begin = index.get(id(rows[0]), 0)
         end = index.get(id(rows[-1]), begin)
-        speed = rows[-1].f.get("seg_target")
-        window = make_window(steps, begin, end, path, channel, baselines)
-        if window is None or speed is None:
+        window = make_window(steps, begin, end, path, channel, scale_rad, baselines, dt)
+        if window is None:
             continue
-        window["v"] = max(rows[-1].f.get("vel_l_z") or speed / 3.6, 0.1)
-        window["step_size"] = 1.0
-        out[round(speed, 3)] = window
+        speed_kmh = sc.mean([s.f.get("speed_kmh") for s in rows if s.f.get("speed_kmh") is not None])
+        spec = spec_speed_of(speed_kmh) if speed_kmh is not None else None
+        if spec is None:
+            continue
+        amps = [abs(s.f.get("cmd_steer") or 0.0) for s in rows]
+        window["step_size"] = max(amps) if amps else 1.0
+        out[spec] = window
     return out
 
 
-def planned_bins(play):
-    """(speed, |amplitude|) bins of params m_sStepGrid."""
-    text = play.param("m_sStepGrid", "") or ""
-    out = []
-    for group in text.split(";"):
-        if ":" not in group:
-            continue
-        speed_text, specs = group.split(":", 1)
-        speed = probe_common.to_float(speed_text.strip())
-        for spec in specs.split(","):
-            if "x" not in spec:
-                continue
-            amp = probe_common.to_float(spec.split("x", 1)[0].strip())
-            if speed is not None and amp is not None:
-                out.append((round(speed, 3), round(abs(amp), 3)))
-    return sorted(set(out))
-
-
-def choose_channel(steps, events, requested):
-    """The wheel-angle channel: requested if given, else the first of rot / bone / ent with data on >= 90% of the
-    event rows"""
-    if requested and requested != "auto":
-        return requested
-    rows = steps
-    for key, left, right in sc.CHANNELS:
-        if right is None:
-            continue
-        valid = sum(1 for s in rows if s.f.get(left) is not None and s.f.get(right) is not None)
-        if rows and valid >= 0.9 * len(rows):
-            return key
-    return None
-
-
-def base_value(window, values=None):
-    """The output just before the onset (the reference of the plateau and of the centering)"""
-    values = values or window["y"]
-    for k in range(window["onset_index"] - 1, -1, -1):
-        if values[k] is not None:
-            return values[k]
-    return None
-
-
-def plateau(window, values=None):
-    """Mean output over the last 3 steps before the release, minus the output before the onset (None without a
+def plateau(window):
+    """Mean output over the last 3 rows before the release, minus the output before the onset (None without a
     release index)."""
     rel = window.get("release_index")
-    values = values or window["y"]
-    base = base_value(window, values)
-    if rel is None or base is None or rel - 3 < window["onset_index"]:
+    if rel is None or rel < 3:
         return None
-    tail = [v for v in values[rel - 3:rel] if v is not None]
-    return sum(tail) / len(tail) - base if tail else None
+    tail = [v for v in window["y"][rel - 3:rel] if v is not None]
+    return sum(tail) / len(tail) - window["y0"] if tail else None
 
 
 def centering(window):
@@ -582,19 +663,18 @@ def centering(window):
     remaining share of the plateau at the window end."""
     p = plateau(window)
     rel = window.get("release_index")
-    base = base_value(window)
-    if p is None or rel is None or base is None or abs(p) < 1e-9:
+    if p is None or rel is None or abs(p) < 1e-9:
         return None, None
-    rows = window["rows"]
-    dt = sum((r.f.get("timeslice_s") or 0.0) for r in rows) / max(1, len(rows))
     t10 = None
+    elapsed = 0.0
     for k in range(rel, len(window["y"])):
         val = window["y"][k]
-        if val is not None and abs(val - base) <= 0.1 * abs(p):
-            t10 = (k - rel) * dt
+        if val is not None and abs(val - window["y0"]) <= 0.1 * abs(p):
+            t10 = elapsed
             break
+        elapsed += window["rows"][k].f.get("timeslice_s") or 0.0
     last = [v for v in window["y"][-3:] if v is not None]
-    residual = (sum(last) / len(last) - base) / p if last else None
+    residual = (sum(last) / len(last) - window["y0"]) / p if last else None
     return t10, residual
 
 
@@ -602,144 +682,262 @@ def centering(window):
 # analysis
 
 
+def analyse_bin(windows, dt, args, step_size):
+    """{'state', 'selected', 'params', 'rate', 'detail', 'windows'} of one bin"""
+    out = {"state": None, "selected": None, "params": None, "rate": None, "windows": windows}
+    signs = sorted(set(1 if w["amplitude"] > 0 else -1 for w in windows))
+    if len(windows) < args.min_events:
+        out["detail"] = "%d events (< %d)" % (len(windows), args.min_events)
+        return out
+    fit = fit_bin(windows, dt)
+    selected = fit["selected"]
+    if selected is None:
+        out["detail"] = "%d events in %d + %d doublets (needs %d on each side of the split)" % (
+            len(windows), fit["train_doublets"], fit["test_doublets"], MIN_DOUBLETS)
+        return out
+    info = fit["structures"][selected]
+    params = info["params"]
+    per_event = per_event_params(windows, dt, selected, params)
+    stable = stability(selected, params, per_event, windows, dt, step_size, args.max_cv)
+    r2_ok = info["test_r2"] is not None and info["test_r2"] >= args.min_r2
+    state = sc.combine([r2_ok] + [s for s, _ in stable.values()])
+    rate = params.q * abs(params.g) * step_size if clamped(selected, params) else None
+    others = ", ".join("%s R2 %s BIC %s" % (s, sc.fmt(v["test_r2"], 4), sc.fmt(v["bic"], 6))
+                       for s, v in fit["structures"].items())
+    out.update({"state": state, "selected": selected, "params": params, "rate": rate, "test_r2": info["test_r2"],
+                "per_event": per_event})
+    out["detail"] = ("%s (%s): held-out R2 %s (>= %g) on %d doublets (trained on %d), d %d steps, g %s, tau %s s, "
+                     "rate limit %s /s, sigma %s m; %s (<= %g); %d events, signs %s; others: %s" % (
+                         selected, STRUCTURE_NAMES[selected], sc.fmt(info["test_r2"], 4), args.min_r2,
+                         fit["test_doublets"], fit["train_doublets"], params.d, sc.fmt(params.g, 4),
+                         sc.fmt(params.tau, 3), sc.fmt(rate, 4) if rate is not None else "none",
+                         sc.fmt(params.sigma, 3) if selected == "M4" else "-",
+                         "; ".join(text for _, text in stable.values()), args.max_cv, len(windows),
+                         "/".join("%+d" % s for s in signs), others))
+    return out
+
+
+def channel_for(args, play, verdict):
+    """(channel, scale_rad): the channel CC-07 step 0 validates on the e22 play (complete footer), with the signal
+    scale; (None, None) otherwise"""
+    if not args.e22:
+        verdict.info("channel", "no --e22: the wheel-angle channel is not validated (the wheel bins are INCOMPLETE)")
+        return None, None
+    import e21_selfsteer  # noqa: E402  (step 0 lives with CC-07)
+    load = probe_common.Play(args.e22)
+    selection = e21_selfsteer.step0_selection(load, args, extra_play=play)
+    verdict.info("channel", "step 0 (e22 %s): %s" % (load.dir, selection.get("detail")))
+    ok, detail = sc.play_evidence(load, "e22")
+    if not ok:
+        verdict.info("channel_evidence", detail + ": the channel is not used")
+        return None, None
+    return selection.get("selected"), selection.get("scale_rad")
+
+
+def prbs_check(results, path, speed, dt, args):
+    window = results[(path, "prbs")].get(speed)
+    if window is None:
+        return None, "no PRBS segment at %g km/h (measured speed within %d%%)" % (speed, SPEED_BIN_SHARE * 100)
+    models = [(abs(amplitude - window["step_size"]), amplitude, results[(path, (speed, amplitude))])
+              for amplitude, _ in SPEC_STEPS
+              if (path, (speed, amplitude)) in results and results[(path, (speed, amplitude))]["selected"]]
+    if not models:
+        return None, "no bin model at %g km/h to predict the PRBS with" % speed
+    models.sort(key=lambda m: m[0])
+    _, amplitude, res = models[0]
+    scored = dict(window)
+    scored["step_size"] = amplitude       # the bin's rate limit in absolute units
+    value = r2([scored], res["params"], dt, res["selected"])
+    state = None if value is None else value >= args.min_r2
+    return state, "held-out PRBS (amplitude %s, %d rows) predicted by the %g km/h x %g model %s: R2 %s (>= %g)" % (
+        sc.fmt(window["step_size"], 3), len(window["rows"]), speed, amplitude, res["selected"], sc.fmt(value, 4),
+        args.min_r2)
+
+
 def analyse(play, args, verdict):
+    plays = [("e23", play)]
+    if args.e22:
+        plays.append(("e22", probe_common.Play(args.e22)))
+    sc.check_identity(plays)
     steps = sc.load_steps(play, "e23")
     events = play.csv("e23_events", EVENT_COLUMNS)
-    dt = probe_common.to_float(play.param("dt_s"), None) or sc.median([s.f.get("timeslice_s") for s in steps
-                                                                         if s.f.get("timeslice_s")]) or 1.0 / 30
-    planned = planned_bins(play)
-    channel = None
-    validated = False
-    if args.e22:
-        import e21_selfsteer  # noqa: E402  (step 0 lives with CC-07)
-        load = probe_common.Play(args.e22)
-        selection = e21_selfsteer.step0_selection(load, args, extra_play=play)
-        channel = selection.get("selected")
-        validated = channel is not None
-        verdict.info("channel", "step 0 (e22 %s): %s" % (load.dir, selection.get("detail")))
-    if channel is None:
-        channel = choose_channel(steps, events, args.channel)
-        verdict.info("channel", "%s (%s)" % (channel, "requested" if args.channel not in (None, "auto")
-                                             else "first candidate with data; NOT validated by CC-07 step 0, pass "
-                                                  "--e22"))
-    ok_events = [e for e in events if e.get("result") == "ok"]
-    verdict.info("events", "%d rows, %d ok; planned bins %s" % (
-        len(events), len(ok_events), ", ".join("%g km/h x %g" % b for b in planned) or "-"))
-    if not planned:
-        verdict.check("bins", False, "no planned bin (params m_sStepGrid missing or empty)")
+    dt = sc.step_dt(play)
+    if dt is None:
+        raise probe_common.InputError("%s: no physics step in the run header (dt_s, clock.step_dt_s)" % play.dir)
+    states = [sc.play_evidence(p, name) for name, p in plays]
+    verdict.check("evidence", sc.combine([s for s, _ in states]), "; ".join(d for _, d in states))
+    channel, scale_rad = channel_for(args, play, verdict)
 
-    selected_info = {}
-    all_ok = True
-    for path in PATHS:
+    results = {}
+    dropped_all = {}
+    for path in RAW_PATHS + ("kappa",):
         if path == "wheel" and channel is None:
-            verdict.check("path_wheel", False, "no wheel-angle channel with data (no data -> FAIL)")
-            all_ok = False
             continue
-        bins = event_windows(steps, events, path, channel)
-        for key in planned:
-            windows = bins.get(key, [])
-            name = "%s_%gkmh_%g" % (path, key[0], key[1])
-            if len(windows) < args.min_events:
-                verdict.check(name, False, "%d ok events with a %s signal (< %d): no data" % (
-                    len(windows), path, args.min_events))
-                all_ok = False
+        bins, dropped = event_windows(steps, events, path, channel, scale_rad, dt)
+        if path == "input":
+            dropped_all = dropped
+            input_bins = bins
+        for speed in SPEC_SPEEDS:
+            for amplitude, _ in SPEC_STEPS:
+                results[(path, (speed, amplitude))] = analyse_bin(bins.get((speed, amplitude), []), dt, args,
+                                                                  amplitude)
+        results[(path, "prbs")] = prbs_windows(steps, path, channel, scale_rad, dt)
+
+    # coverage against the spec grid (the input path's binning; the counts per sign)
+    coverage_ok = True
+    parts = []
+    for speed in SPEC_SPEEDS:
+        for amplitude, signs in SPEC_STEPS:
+            windows = input_bins.get((speed, amplitude), [])
+            for sign in signs:
+                count = sum(1 for w in windows if (w["amplitude"] > 0) == (sign > 0))
+                coverage_ok = coverage_ok and count >= SPEC_REPS
+                parts.append("%g km/h %+g: %d" % (speed, sign * amplitude, count))
+        has_prbs = speed in results[("input", "prbs")]
+        coverage_ok = coverage_ok and has_prbs
+        parts.append("%g km/h PRBS: %s" % (speed, "yes" if has_prbs else "no"))
+    left_out = ", ".join("%s %d" % item for item in sorted(dropped_all.items())) or "none"
+    verdict.check("coverage", True if coverage_ok else None, "%s against the spec grid (>= %d ok events per step "
+                                                             "and sign, PRBS at every speed): %s; events left out: %s"
+                  % ("FULL" if coverage_ok else "PREVIEW", SPEC_REPS, "; ".join(parts), left_out))
+    verdict.check("llc_path", None, "not measured by e23: the full llc path (kappa target -> kappa_realised with "
+                                    "llc_v1 in the loop), the llc limiter rule (identity or slower than the engine "
+                                    "limit) and the 10 Hz ZOH kappa tracking are DD-7 checks; CC-08 stays "
+                                    "INCOMPLETE until they exist")
+
+    raw_states = []
+    for path in RAW_PATHS:
+        for speed in SPEC_SPEEDS:
+            for amplitude, _ in SPEC_STEPS:
+                name = "%s_%gkmh_%g" % (path, speed, amplitude)
+                if path == "wheel" and channel is None:
+                    verdict.check(name, None, "no wheel-angle channel validated by CC-07 step 0 (--e22)")
+                    raw_states.append(None)
+                    continue
+                res = results[(path, (speed, amplitude))]
+                verdict.check(name, res["state"], "PARTIAL (raw engine path): " + res["detail"])
+                raw_states.append(res["state"])
+        for speed in SPEC_SPEEDS:
+            name = "prbs_%s_%gkmh" % (path, speed)
+            if path == "wheel" and channel is None:
+                verdict.check(name, None, "no validated wheel-angle channel")
+                raw_states.append(None)
                 continue
-            fit = fit_bin(windows, dt)
-            selected = fit["selected"]
-            if selected is None:
-                verdict.check(name, False, "no held-out events")
-                all_ok = False
-                continue
-            info = fit["structures"][selected]
-            params = info["params"]
-            per_event = per_event_params(windows, dt, selected, params)
-            cvs = {"g": cv([p.g for p in per_event])}
-            if selected != "M1" and params.tau >= dt:
-                cvs["tau"] = cv([max(p.tau, dt * 0.5) for p in per_event])
-            if selected in ("M3", "M4") and params.q is not None:
-                cvs["R"] = cv([p.q * abs(p.g) for p in per_event if p.q is not None])
-            if selected == "M4" and params.sigma > 0:
-                cvs["sigma"] = cv([max(p.sigma, 0.01) for p in per_event])
-            delays = [p.d for p in per_event]
-            worst_cv = max([c for c in cvs.values() if c is not None], default=None)
-            r2_ok = info["test_r2"] is not None and info["test_r2"] >= args.min_r2
-            cv_ok = worst_cv is not None and worst_cv <= args.max_cv
-            if cvs.get("g") is None:
-                cv_ok = False
-            rate = None
-            if selected in ("M3", "M4") and params.q is not None:
-                rate = params.q * abs(params.g) * key[1]
-            others = ", ".join("%s R2 %s BIC %s" % (s, sc.fmt(v["test_r2"], 4), sc.fmt(v["bic"], 6))
-                               for s, v in fit["structures"].items())
-            detail = ("%s (%s): held-out R2 %s (>= %g), d %d steps (events %d..%d), g %s, tau %s s, rate limit %s "
-                      "/s, sigma %s m; CV %s (<= %g); %d events; others: %s" % (
-                          selected, STRUCTURE_NAMES[selected], sc.fmt(info["test_r2"], 4), args.min_r2, params.d,
-                          min(delays), max(delays), sc.fmt(params.g, 4), sc.fmt(params.tau, 3),
-                          sc.fmt(rate, 4) if rate is not None else "none",
-                          sc.fmt(params.sigma, 3) if selected == "M4" else "-",
-                          ", ".join("%s %s" % (k, sc.fmt(v, 3)) for k, v in cvs.items()), args.max_cv,
-                          len(windows), others))
-            verdict.check(name, r2_ok and cv_ok, detail)
-            all_ok = all_ok and r2_ok and cv_ok
-            selected_info[(path, key)] = (selected, params, rate, windows)
-
-    report_extras(play, steps, channel, dt, selected_info, verdict, args)
-    verdict.info("mode", "CC-08 %s" % ("PASS: every bin of every path" if all_ok else "FAIL (see the bins)"))
-    verdict.info("llc_limiter_rule", "llc_v1's limiter vs the identified engine limit and the 10 Hz ZOH kappa "
-                                     "tracking are DD-7 checks (they need llc_v1 in the loop); the engine limit per "
-                                     "speed is the rate_limit_vs_speed line")
-    verdict.info("channel_validated", "yes (CC-07 step 0)" if validated else "no")
+            state, text = prbs_check(results, path, speed, dt, args)
+            verdict.check(name, state, text)
+            raw_states.append(state)
+    for speed in SPEC_SPEEDS:
+        for amplitude, _ in SPEC_STEPS:
+            res = results[("kappa", (speed, amplitude))]
+            verdict.info("cmd_kappa_%gkmh_%g" % (speed, amplitude), "PARTIAL (cmd -> kappa_realised, not the llc "
+                                                                   "path; not gated): %s, %s" % (
+                                                                       STATE_TEXT[res["state"]], res["detail"]))
+    report_extras(channel, results, verdict)
+    verdict.info("raw_engine_path", "PARTIAL %s (cmd -> steer_input -> wheel_angle; coverage %s); CC-08 as a whole "
+                                    "is INCOMPLETE until the llc checks exist" % (
+                                        STATE_TEXT[sc.combine(raw_states)], "FULL" if coverage_ok else "PREVIEW"))
+    verdict.info("channel_validated", "yes: %s (CC-07 step 0)" % channel if channel else "no")
+    return results
 
 
-def report_extras(play, steps, channel, dt, selected_info, verdict, args):
-    """steer_sign, rate limit vs speed, centering, L/R ratio, the script-setter limit and the PRBS held-out."""
-    # steer_sign: sign of the kappa plateau over the command
+def input_model(play, args):
+    """The CC-08 cmd -> steer_input model for CC-07 (a)'s deterministic-dynamics exception: (state, model, detail).
+    state True: every input bin with events passes (R2, every parameter stable and resolved), they select the same
+    structure and no input PRBS fails; model = that structure with the median parameters (R absolute, units / s).
+    False: an input bin or PRBS fails. None: no usable bin, an unresolved parameter, structures that differ."""
+    ok, detail = sc.play_evidence(play, "e23")
+    if not ok:
+        return None, None, detail
+    steps = sc.load_steps(play, "e23")
+    events = play.csv("e23_events", EVENT_COLUMNS)
+    dt = sc.step_dt(play)
+    if dt is None:
+        return None, None, "e23: no physics step in the run header"
+    bins, _ = event_windows(steps, events, "input", None, None, dt)
+    fitted = []
+    for key in sorted(bins):
+        if len(bins[key]) >= args.min_events:
+            fitted.append((key, analyse_bin(bins[key], dt, args, key[1])))
+    if not fitted:
+        return None, None, "e23: no input bin with >= %d events" % args.min_events
+    texts = ["%g km/h x %g: %s %s" % (key[0], key[1], STATE_TEXT[res["state"]], res["detail"].split(";")[0])
+             for key, res in fitted]
+    states = [res["state"] for _, res in fitted]
+    results = {("input", key): res for key, res in fitted}
+    results[("input", "prbs")] = prbs_windows(steps, "input", None, None, dt)
+    for speed in sorted(set(key[0] for key, _ in fitted)):
+        state, _ = prbs_check(results, "input", speed, dt, args)
+        if state is False:
+            states.append(False)
+            texts.append("PRBS %g km/h fails" % speed)
+    state = sc.combine(states)
+    if state is not True:
+        return state, None, "; ".join(texts)
+    structures = set(res["selected"] for _, res in fitted)
+    if len(structures) != 1:
+        return None, None, "the input bins select different structures (%s)" % ", ".join(sorted(structures))
+    structure = structures.pop()
+    if structure == "M4":
+        return None, None, "M4 on the input path: the one-step check needs the hidden relaxation state"
+    model = {"structure": structure, "dt": dt,
+             "d": int(round(sc.median([res["params"].d for _, res in fitted]))),
+             "g": sc.median([res["params"].g for _, res in fitted]),
+             "tau": sc.median([res["params"].tau for _, res in fitted]),
+             "rate": sc.median([res["rate"] for _, res in fitted]) if structure == "M3" else None}
+    return True, model, "%s d %d g %s tau %s s rate %s, from %d e23 input bins" % (
+        structure, model["d"], sc.fmt(model["g"], 4), sc.fmt(model["tau"], 3), sc.fmt(model["rate"], 4), len(fitted))
+
+
+def report_extras(channel, results, verdict):
+    """steer_sign, rate limit vs speed, centering, L/R ratio and the script-setter limit."""
     signs = []
-    for (path, key), (selected, params, rate, windows) in selected_info.items():
-        if path != "kappa":
+    for (path, key), res in results.items():
+        if path != "kappa" or key == "prbs":
             continue
-        for w in windows:
+        for w in res["windows"]:
             p = plateau(w)
             if p is not None and w["amplitude"] != 0:
                 signs.append(1 if p / w["amplitude"] > 0 else -1)
-    if signs:
+    if len(signs) >= 6:
         positive = sum(1 for s in signs if s > 0)
         sign = 1 if positive * 2 >= len(signs) else -1
         verdict.check("steer_sign", sign == 1, "%+d (%d of %d kappa plateaus with the command's sign; 1.8.0.13 and "
                                                "1.9.0.37 e01 measured +1: positive steering turns right)" % (
                                                    sign, positive, len(signs)))
     else:
-        verdict.check("steer_sign", False, "no kappa plateau (no data)")
+        verdict.check("steer_sign", None, "%d kappa plateaus (< 6)" % len(signs))
+
+    def bins_of(path):
+        return sorted((key, res) for (p, key), res in results.items() if p == path and key != "prbs")
 
     rates = []
-    for (path, key), (selected, params, rate, windows) in sorted(selected_info.items()):
-        rates.append("%s %g km/h x %g: %s" % (path, key[0], key[1], sc.fmt(rate, 4) + "/s" if rate else "none"))
+    for path in RAW_PATHS + ("kappa",):
+        for key, res in bins_of(path):
+            if res["selected"]:
+                rates.append("%s %g km/h x %g: %s" % (path, key[0], key[1],
+                                                      sc.fmt(res["rate"], 4) + "/s" if res["rate"] else "none"))
     verdict.info("rate_limit_vs_speed", "; ".join(rates) or "-")
-    setter = [(key, rate) for (path, key), (selected, params, rate, windows) in selected_info.items()
-              if path == "input" and rate]
+    setter = [(key, res["rate"]) for key, res in bins_of("input") if res["rate"]]
     verdict.info("script_setter_rate_limit", "yes, cmd -> input is rate-limited (Maximum Steering Speed acts on "
                                              "the script setter): %s" % ", ".join(
                                                  "%g km/h x %g: %s/s" % (k[0], k[1], sc.fmt(r, 4)) for k, r in setter)
                  if setter else "no rate limit selected on cmd -> input")
-
     lines = []
-    for (path, key), (selected, params, rate, windows) in sorted(selected_info.items()):
-        if path == "kappa":
-            continue
-        t10 = [centering(w)[0] for w in windows]
-        res = [centering(w)[1] for w in windows]
-        lines.append("%s %g km/h x %g: t10 %s s, residual %s" % (
-            path, key[0], key[1], sc.fmt(sc.median([v for v in t10 if v is not None]), 3),
-            sc.fmt(sc.median([v for v in res if v is not None]), 3)))
+    for path in RAW_PATHS:
+        for key, res in bins_of(path):
+            if not res["windows"]:
+                continue
+            t10 = [centering(w)[0] for w in res["windows"]]
+            residual = [centering(w)[1] for w in res["windows"]]
+            lines.append("%s %g km/h x %g: t10 %s s, residual %s" % (
+                path, key[0], key[1], sc.fmt(sc.median([v for v in t10 if v is not None]), 3),
+                sc.fmt(sc.median([v for v in residual if v is not None]), 3)))
     verdict.info("centering_on_release", "; ".join(lines) or "-")
-
     ratios = []
     if channel and channel != "sig":
-        for (path, key), (selected, params, rate, windows) in sorted(selected_info.items()):
-            if path != "wheel":
-                continue
+        for key, res in bins_of("wheel"):
             per = []
-            for w in windows:
+            for w in res["windows"]:
                 rel = w.get("release_index")
                 if rel is None or rel < 3:
                     continue
@@ -753,44 +951,31 @@ def report_extras(play, steps, channel, dt, selected_info, verdict, args):
                 inner, outer = (dr, dl) if w["amplitude"] > 0 else (dl, dr)
                 if abs(outer) > 1e-4:
                     per.append(abs(inner) / abs(outer))
-            ratios.append("%g km/h x %g: inner/outer %s" % (key[0], key[1], sc.fmt(sc.median(per), 4)))
+            if per:
+                ratios.append("%g km/h x %g: inner/outer %s" % (key[0], key[1], sc.fmt(sc.median(per), 4)))
     verdict.info("lr_angle_ratio", "; ".join(ratios) or "- (no wheel pair)")
 
-    prbs_lines = []
-    for path in PATHS:
-        if path == "wheel" and channel is None:
-            continue
-        for speed, window in sorted(prbs_windows(steps, path, channel).items()):
-            choices = [(abs(key[1] - window["step_size"]), key, info) for (p, key), info in selected_info.items()
-                       if p == path and key[0] == speed]
-            if not choices:
-                continue
-            choices.sort(key=lambda c: c[0])
-            _, key, (selected, params, rate, _) = choices[0]
-            window = dict(window)
-            window["step_size"] = key[1]          # the bin's rate limit in absolute units
-            prbs_lines.append("%s %g km/h (model of x %g, %s): R2 %s" % (
-                path, speed, key[1], selected, sc.fmt(r2([window], params, dt, selected), 4)))
-    verdict.info("prbs_held_out", "; ".join(prbs_lines) or "- (no PRBS segment)")
+
+def add_step0_args(parser):
+    parser.add_argument("--signal-scale-deg", type=float, default=33.75)
+    parser.add_argument("--max-step0-error", type=float, default=0.05)
+    parser.add_argument("--max-lag-steps", type=float, default=1.0)
+    parser.add_argument("--max-unmeasurable", type=float, default=0.2)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("play_dir")
     parser.add_argument("--e22", help="e22 play dir: the wheel-angle channel validated by CC-07 step 0")
-    parser.add_argument("--channel", default="auto", choices=("auto", "rot", "bone", "ent"))
     parser.add_argument("--min-r2", type=float, default=0.9)
     parser.add_argument("--max-cv", type=float, default=0.2)
     parser.add_argument("--min-events", type=int, default=6)
-    parser.add_argument("--signal-scale-deg", type=float, default=33.75)
-    parser.add_argument("--max-step0-error", type=float, default=0.05)
-    parser.add_argument("--max-lag-steps", type=float, default=1.0)
+    add_step0_args(parser)
     args = parser.parse_args(argv)
     play = probe_common.Play(args.play_dir)
-    verdict = probe_common.Verdict("CC-08 steering actuator structure (e23)", play.dir)
-    verdict.check_footer(play)
     if play.probe and play.probe != "e23":
         raise probe_common.InputError("%s is a %s play, not e23" % (play.dir, play.probe))
+    verdict = sc.StrictVerdict("CC-08 steering actuator structure (e23)", play.dir)
     analyse(play, args, verdict)
     return verdict.report()
 

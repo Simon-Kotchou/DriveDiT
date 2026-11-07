@@ -1287,6 +1287,13 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! GetSteering after the last step (column input_post_steer; DD-14b axle choice at zero steer)
+	float GetPostSteer()
+	{
+		return m_fPostSteer;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! GetAccelerationLocal of the last ReadPost (column acc_l_*)
 	vector GetAccelerationLocal()
 	{

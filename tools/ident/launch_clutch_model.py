@@ -89,6 +89,7 @@ class LaunchClutch:
     DROP_GUARD_RPM_PER_S = 12000.0          # coupled under a brake: a fall faster than this opens (a full brake in
                                             # first gear is about 8000)
     BRAKE_LAG_S = 0.016667                  # the brake rule's horizon beyond this call: half a step (the readback)
+    BRAKE_FULL_FALL_COMMAND = 0.8           # the brake rule's full fall rate from this brake on, brake / this below
     GAIN_STEP_S = 0.033333                  # slip_kp / slip_ki are per call of this length (the fixed time slice)
     CALL_STEPS_DECAY = 0.05                 # the held call length (in GAIN_STEP_S) decays by this per call
 
@@ -186,8 +187,8 @@ class LaunchClutch:
         engage = cfg["engage_rpm"]
         braking = brake > 0
         drive = throttle > 0 and not braking
-        # an upshift: its synchronisation drop is no fall to predict without a brake (the history stays, so a brake
-        # during the synchronisation still predicts)
+        # an upshift: its synchronisation drop is no fall for the lookahead and the drop guard unless the brake could
+        # lock the wheels (the history stays, so a brake during the synchronisation still predicts)
         if gear >= 0 and self.last_gear >= 0 and gear > self.last_gear:
             self.sync_left_s = self.SYNC_S
             self.agree_calls = 0
@@ -210,7 +211,8 @@ class LaunchClutch:
         self.prev_slice_s = self.last_slice_s
         self.last_slice_s = slice_s
         self.call_steps = max(slice_s / self.GAIN_STEP_S, 1.0, self.call_steps - self.CALL_STEPS_DECAY)
-        guarded = braking or self.sync_left_s <= 0
+        syncing = self.sync_left_s > 0
+        guarded = (braking and brake >= self.BRAKE_FULL_FALL_COMMAND) or not syncing
         self.sync_left_s = max(self.sync_left_s - slice_s, 0.0)
         predicted = rpm + self.RELEASE_LOOKAHEAD_CALLS * slice_s * min(rate, 0.0)
         if not driving:
@@ -221,9 +223,20 @@ class LaunchClutch:
                 self.guard_drops += 1
             self.open_clutch()
             return
-        # a brake: open now if the worst coupled fall (locked wheels drag the engine at clutch capacity / inertia)
-        # over this call and the readback's lag could reach engage_rpm, before the brake acts (one step later)
-        if braking and rpm - cfg["brake_drop_rpm_per_s"] * (slice_s + self.BRAKE_LAG_S) <= engage:
+        # a brake: open now if the drop it could cause over this call and the readback's lag reaches engage_rpm,
+        # before the brake acts (one step later). The fall rate: locked wheels drag the engine at clutch capacity /
+        # inertia, a lighter brake (below BRAKE_FULL_FALL_COMMAND) proportionally less; inside an upshift's wait also
+        # the fall to the new gear's driveline rpm (the full rate when unknown). A drop within the band between
+        # engage_rpm and the lug rpm is left to the coupled floor at engage_rpm
+        share = min(brake / self.BRAKE_FULL_FALL_COMMAND, 1.0)
+        landing = rpm
+        if syncing:
+            if driveline_rpm > 0:
+                landing = min(rpm, driveline_rpm)
+            else:
+                share = 1.0
+        drop = rpm - landing + cfg["brake_drop_rpm_per_s"] * share * (slice_s + self.BRAKE_LAG_S)
+        if braking and drop > engage - self.lug_rpm() and rpm - drop <= engage:
             self.open_clutch()
             return
         if self.locked:
@@ -236,7 +249,7 @@ class LaunchClutch:
             if guarded and rpm < self.lookahead_ceiling_rpm() and predicted <= open_rpm:
                 self.open_clutch()
                 return
-            if braking and rate < -self.DROP_GUARD_RPM_PER_S:
+            if braking and guarded and rate < -self.DROP_GUARD_RPM_PER_S:
                 self.open_clutch()
                 return
             self.coupling = 1.0

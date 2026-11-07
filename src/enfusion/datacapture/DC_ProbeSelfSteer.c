@@ -6,13 +6,14 @@
 // The first 1.9.0.37 Play (launch 20261106T194516Z-wb-ab6a, e01) read input_post_steer != cmd_steer on 714 of 3567
 // steps, nonzero on 355 of 2218 driving steps at a zero command (max 0.037). This probe measures it where CC-07 asks:
 //
-//   flat_<v>            on the flat site (the runway, DC_ProbeSteerBase), for each speed of m_sFlatSpeedsKmh (20, 40):
-//                       reset, settle, accel with SetSteering(0), hold (m_fSpeedSettleS at the speed, still held),
-//                       measure (SetSteering(0) every step for m_fFlatHeldM, >= 200 m for CC-07 b), nocall (no
-//                       SetSteering call at all for m_fFlatNocallM: the engine keeps its own input), stop;
-//   flat_<v>_assist<m>  the same with the driving-assistance mode set to m_iAssistVariantMode (0 NONE) for the phase
-//                       and set back after it (m_bAssistVariant; shorter segments, m_fAssistHeldM / m_fAssistNocallM):
-//                       does the global assistance mode change what a driverless car does with its steering input;
+//   flat_<v>            on the flat site (the runway, DC_ProbeSteerBase; area +-15 m), for each speed of m_sFlatSpeedsKmh
+//                       (20, 40), at driving-assistance FULL (set explicitly): reset, settle, accel with
+//                       SetSteering(0), hold (m_fSpeedSettleS at the speed, still held), measure (SetSteering(0) every
+//                       step for m_fFlatHeldM, >= 200 m for CC-07 b), nocall (no SetSteering call at all for
+//                       m_fFlatNocallM: the engine keeps its own input), stop;
+//   flat_<v>_none       the same at assistance NONE (set explicitly; m_bAssistVariant; shorter segments,
+//                       m_fAssistHeldM / m_fAssistNocallM): FULL against NONE whatever the original mode was. The
+//                       original mode is set back after every phase and at every probe stop;
 //   cross_<v>           on the cross-slope site (>= 5%, found at run time, below) for each speed of m_sCrossSpeedsKmh:
 //                       the same segments with m_fCrossHeldM / m_fCrossNocallM (CC-07 c: heading drift per 100 m);
 //                       the hold lasts until the car reaches the site's measure zone, so measure and nocall lie in it.
@@ -41,7 +42,11 @@ class DC_ProbeSelfSteerClass : DC_ProbeSteerBaseClass
 class DC_ProbeSelfSteer : DC_ProbeSteerBase
 {
 	static const string PROBE_E21 = "e21";
-	static const float TIMEOUT_E21_S = 900;
+	//! e21 + e22 + e23 stay within 15 min of Play: 420 + 240 + 240 s (a timeout ends the probe, footer stopped)
+	static const float TIMEOUT_E21_S = 420;
+	//! Assistance modes of the comparison (EVehicleDrivingAssistanceMode: 0 NONE, 2 FULL), set explicitly
+	static const int ASSIST_FULL = 2;
+	static const int ASSIST_NONE = 0;
 
 	// === S1 FLAT ===
 	[Attribute("20,40", UIWidgets.EditBox, "S1 flat: speeds [km/h], one phase each (CC-07 b: 20 and 40)", category: "S1 flat")]
@@ -57,11 +62,8 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	protected float m_fSpeedSettleS;
 
 	// === ASSISTANCE ===
-	[Attribute("1", UIWidgets.CheckBox, "S1 flat once more with another driving-assistance mode for the phase (set back after it; an engine global, no settings file)", category: "Assistance")]
+	[Attribute("1", UIWidgets.CheckBox, "S1 flat once more at driving-assistance NONE (flat_<v>_none); the main flat phases run at FULL. Both modes are set explicitly for the phase and the original mode is set back after it (an engine global, no settings file)", category: "Assistance")]
 	protected bool m_bAssistVariant;
-
-	[Attribute("0", UIWidgets.Slider, "Mode of the variant: 0 NONE, 1 PARTIAL, 2 FULL (EVehicleDrivingAssistanceMode)", "0 2 1", category: "Assistance")]
-	protected int m_iAssistVariantMode;
 
 	[Attribute("100", UIWidgets.Slider, "Variant: held distance [m]", "20 1000 10", category: "Assistance")]
 	protected float m_fAssistHeldM;
@@ -146,36 +148,79 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The flat runs are straight: +-15 m leaves 12 m of drift room, enough for |kappa| up to 1.5e-4 over 400 m
+	override float GetFlatHalfWidthM()
+	{
+		return 15;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override float GetMaxSpeedKmh()
+	{
+		float top = 40;
+		array<float> speeds = {};
+		if (ParseSteerFloats(m_sFlatSpeedsKmh, speeds, 1, 120))
+		{
+			foreach (float speed : speeds)
+			{
+				top = Math.Max(top, speed);
+			}
+		}
+
+		if (ParseSteerFloats(m_sCrossSpeedsKmh, speeds, 1, 120))
+		{
+			foreach (float crossSpeed : speeds)
+			{
+				top = Math.Max(top, crossSpeed);
+			}
+		}
+
+		return top;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every list non-empty and every value in range (the comparisons also refuse a NaN); then the phases
 	override bool BuildSteerPlan(out string failure)
 	{
 		failure = string.Empty;
 		m_aFlatSpeeds = {};
 		m_aCrossSpeeds = {};
 		m_bCrossFallbackUsed = false;
-		if (!ParseSteerFloats(m_sFlatSpeedsKmh, m_aFlatSpeeds, 1, 120))
+		if (!ParseSteerFloats(m_sFlatSpeedsKmh, m_aFlatSpeeds, 5, 120) || m_aFlatSpeeds.IsEmpty())
 		{
-			failure = "m_sFlatSpeedsKmh '" + m_sFlatSpeedsKmh + "' is not a list of speeds in 1..120 km/h";
+			failure = "m_sFlatSpeedsKmh '" + m_sFlatSpeedsKmh + "' is not a non-empty list of speeds in 5..120 km/h";
 			return false;
 		}
 
-		if (!ParseSteerFloats(m_sCrossSpeedsKmh, m_aCrossSpeeds, 1, 120))
+		if (m_bCross && (!ParseSteerFloats(m_sCrossSpeedsKmh, m_aCrossSpeeds, 5, 120) || m_aCrossSpeeds.IsEmpty()))
 		{
-			failure = "m_sCrossSpeedsKmh '" + m_sCrossSpeedsKmh + "' is not a list of speeds in 1..120 km/h";
+			failure = "m_sCrossSpeedsKmh '" + m_sCrossSpeedsKmh + "' is not a non-empty list of speeds in 5..120 km/h";
+			return false;
+		}
+
+		if (!InRange(m_fFlatHeldM, 20, 1000) || !InRange(m_fFlatNocallM, 0, 1000) || !InRange(m_fAssistHeldM, 20, 1000) || !InRange(m_fAssistNocallM, 0, 1000) || !InRange(m_fSpeedSettleS, 0, 20))
+		{
+			failure = "a flat or assistance distance / time attribute is out of range";
+			return false;
+		}
+
+		if (m_bCross && (!InRange(m_fCrossMin, 0.01, 0.3) || !InRange(m_fCrossMax, m_fCrossMin, 0.3) || !InRange(m_fCrossHeldM, 20, 500) || !InRange(m_fCrossNocallM, 0, 500) || !InRange(m_fCrossHalfWidthM, 4, 50) || !InRange(m_fCrossRunupM, 10, 300) || !InRange(m_fCrossStopM, 10, 200)))
+		{
+			failure = "a cross-slope attribute is out of range (m_fCrossMin 0.01..0.3 <= m_fCrossMax, distances, half width 4..50 m)";
 			return false;
 		}
 
 		m_iSettleAtSpeedSteps = DC_ProbeSequences.StepsFor(m_fSpeedSettleS, m_fDt);
 		foreach (float flatKmh : m_aFlatSpeeds)
 		{
-			AddZeroPhase(DC_ESteerPhaseKind.FLAT, "flat_" + flatKmh.ToString(-1, 0), SITE_FLAT, flatKmh, -1, m_fFlatHeldM, m_fFlatNocallM);
+			AddZeroPhase(DC_ESteerPhaseKind.FLAT, "flat_" + flatKmh.ToString(-1, 0), SITE_FLAT, flatKmh, ASSIST_FULL, m_fFlatHeldM, m_fFlatNocallM);
 		}
 
 		if (m_bAssistVariant)
 		{
-			int mode = Math.ClampInt(m_iAssistVariantMode, 0, 2);
 			foreach (float assistKmh : m_aFlatSpeeds)
 			{
-				AddZeroPhase(DC_ESteerPhaseKind.FLAT, "flat_" + assistKmh.ToString(-1, 0) + "_assist" + mode.ToString(), SITE_FLAT, assistKmh, mode, m_fAssistHeldM, m_fAssistNocallM);
+				AddZeroPhase(DC_ESteerPhaseKind.FLAT, "flat_" + assistKmh.ToString(-1, 0) + "_none", SITE_FLAT, assistKmh, ASSIST_NONE, m_fAssistHeldM, m_fAssistNocallM);
 			}
 		}
 
@@ -183,7 +228,7 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 		{
 			foreach (float crossKmh : m_aCrossSpeeds)
 			{
-				AddZeroPhase(DC_ESteerPhaseKind.CROSS, "cross_" + crossKmh.ToString(-1, 0), SITE_CROSS, crossKmh, -1, m_fCrossHeldM, m_fCrossNocallM);
+				AddZeroPhase(DC_ESteerPhaseKind.CROSS, "cross_" + crossKmh.ToString(-1, 0), SITE_CROSS, crossKmh, ASSIST_FULL, m_fCrossHeldM, m_fCrossNocallM);
 			}
 		}
 
@@ -218,7 +263,7 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 		DC_SteerSiteCriteria c = new DC_SteerSiteCriteria();
 		c.m_sKind = SITE_CROSS;
 		c.m_fLengthM = m_fCrossRunupM + heldM + nocallM + m_fCrossStopM;
-		c.m_fHalfWidthM = m_fCrossHalfWidthM;
+		SetSiteGeometry(c, m_fCrossHalfWidthM);
 		c.m_fZoneFromM = m_fCrossRunupM;
 		c.m_fZoneToM = m_fCrossRunupM + heldM + nocallM;
 		c.m_fGradeMax = m_fCrossGradeMax;
@@ -360,7 +405,6 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 		outKeyValues.Insert("m_fFlatNocallM=" + m_fFlatNocallM.ToString(-1, 2));
 		outKeyValues.Insert("m_fSpeedSettleS=" + m_fSpeedSettleS.ToString(-1, 3));
 		outKeyValues.Insert("m_bAssistVariant=" + DC_LaunchGuard.BoolText(m_bAssistVariant));
-		outKeyValues.Insert("m_iAssistVariantMode=" + m_iAssistVariantMode.ToString());
 		outKeyValues.Insert("m_fAssistHeldM=" + m_fAssistHeldM.ToString(-1, 2));
 		outKeyValues.Insert("m_fAssistNocallM=" + m_fAssistNocallM.ToString(-1, 2));
 		outKeyValues.Insert("m_bCross=" + DC_LaunchGuard.BoolText(m_bCross));

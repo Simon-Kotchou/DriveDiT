@@ -475,7 +475,7 @@ class AtomicPublishTests(V2Case):
         with self.assertRaises(pinlib.PinError):
             pinlib.write_json_once(target, {"a": 2}, self.roots)
         self.assertEqual(read_json(target), {"a": 1})
-        # the no-link fallbacks keep the no-replace rule too
+        # without link(), renameat2(RENAME_NOREPLACE) keeps the no-replace rule
         real_link = os.link
         os.link = lambda a, b: (_ for _ in ()).throw(OSError(1, "Operation not permitted"))
         try:
@@ -485,6 +485,20 @@ class AtomicPublishTests(V2Case):
         finally:
             os.link = real_link
         self.assertEqual((read_json(target), read_json(os.path.join(self.tmp, "y.json"))), ({"a": 1}, {"b": 1}))
+
+    def test_fails_closed_without_an_atomic_no_replace(self):
+        # Codex round 2 N6: no check-then-rename fallback; nothing is written and no temp file is left
+        real_link, real_rn = os.link, pinlib._rename_noreplace
+        os.link = lambda a, b: (_ for _ in ()).throw(OSError(1, "Operation not permitted"))
+        pinlib._rename_noreplace = lambda a, b: False
+        try:
+            with self.assertRaises(pinlib.PinError) as cm:
+                pinlib.write_json_once(os.path.join(self.tmp, "z.json"), {"c": 1}, self.roots)
+        finally:
+            os.link, pinlib._rename_noreplace = real_link, real_rn
+        self.assertIn("cannot be published atomically", str(cm.exception))
+        self.assertFalse(os.path.lexists(os.path.join(self.tmp, "z.json")))
+        self.assertEqual([n for n in os.listdir(self.tmp) if ".tmp-" in n], [])
 
 
 class EngineSidecarTests(V2Case):

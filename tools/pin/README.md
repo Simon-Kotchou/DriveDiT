@@ -64,7 +64,10 @@ launcher started against the wrong install, a pin or index of another build, a f
 slipped in, a deploy into the wrong addon root, a write cut short by a full disk or a killed process. They do **not**
 defend against a malicious local user with write access to E:: such a user can rewrite a pin, its sidecars, a
 SHA256SUMS file or the tools themselves. Hashes and bindings here catch accidents (a changed exe, a moved tag, a
-different launch), not a forger.
+different launch), not a forger. One known limit of that kind: the trust in a cold copy's SHA256SUMS starts when it
+is first used. A copy whose exe was replaced and whose SHA256SUMS was regenerated before the first sidecar or cold pin
+is accepted; from then on the recorded sha256 of that SHA256SUMS catches any change (Codex round 2, LOW,
+forgery-only).
 
 ## Write safety
 
@@ -457,7 +460,9 @@ python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_sidecar.py engine 1.9.0.37 --run-hea
   `engine.fixed_time_slice_s`. Apply the build-key sidecar first, so the engine sidecar names the build_key.
 - A sidecar is written atomically and never replaced (`pinlib.publish_new`: a uniquely named temp file, fsync, then
   a hard link to the final name, or `renameat2(RENAME_NOREPLACE)`, and a directory fsync), so a reader sees no file
-  or the whole file, and a write cut short never blocks a retry. One that exists but does not validate (another
+  or the whole file, and a write cut short never blocks a retry. A filesystem with neither refuses (nothing
+  written): there is no check-then-rename fallback. E: supports `link()` (uv's hard-linked venvs on E: show
+  `st_nlink > 1`). One that exists but does not validate (another
   pin's bytes, a build_key that does not match its inputs, a `--from-sums` sidecar whose SHA256SUMS changed since)
   is a config error everywhere (exit 2), never ignored.
 

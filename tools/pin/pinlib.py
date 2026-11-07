@@ -764,8 +764,8 @@ def publish_new(path: str, data: bytes, allowed_roots=DEFAULT_WRITE_ROOTS) -> st
 
     The bytes go to a uniquely named temp file in the same directory (O_EXCL|O_NOFOLLOW), are fsynced, and are then
     published without replacement: a hard link to the final name (link() fails if it exists), else
-    renameat2(RENAME_NOREPLACE), else, on a filesystem with neither, a check then rename (a window only another
-    writer racing on the same name could use: not an accident this guards). The temp file is always removed and the
+    renameat2(RENAME_NOREPLACE); a filesystem with neither refuses (PinError, nothing written). E: (drvfs) supports
+    link(): uv's hard-linked venvs on E: have st_nlink > 1 (checked 2026-11-07). The temp file is always removed and the
     directory fsynced (best effort). A reader sees no file or the whole file, a crash leaves at most a temp file under
     its own name, and a retry is never blocked by a partial write. PinError if the target exists.
     """
@@ -798,9 +798,9 @@ def publish_new(path: str, data: bytes, allowed_roots=DEFAULT_WRITE_ROOTS) -> st
             except FileExistsError:
                 raise PinError("refusing to overwrite existing file: %s" % target)
             if not done:
-                if os.path.lexists(target):
-                    raise PinError("refusing to overwrite existing file: %s" % target)
-                os.rename(tmp, target)
+                # Fail closed (Codex round 2): no check-then-rename, which could replace another publication.
+                raise PinError("this filesystem supports neither link() nor renameat2(RENAME_NOREPLACE), so %s cannot "
+                               "be published atomically without replacement; nothing written" % target)
     finally:
         try:
             os.unlink(tmp)

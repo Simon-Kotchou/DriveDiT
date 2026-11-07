@@ -19,13 +19,19 @@
 //     candidate: the Arland main runway of e01, with the grid as fallback; no trust override, a blocking hit rejects
 //     it like any candidate), and the subclass's other sites (e21: the cross-slope site). Each probe searches with its
 //     own area half width (GetFlatHalfWidthM: e21 15 m, e22 22 m, e23 10 m) and the stopping envelope of its top speed
-//     (GetMaxSpeedKmh; v^2 / 2 m_fEnvelopeDecelMs2 + v m_fEnvelopeReactS along, x sin m_fEnvelopeAngleDeg sideways).
-//     Phases on a site that was not found are skipped (result skipped, note no_site);
+//     (GetMaxSpeedKmh; v^2 / 2 m_fEnvelopeDecelMs2 + v m_fEnvelopeReactS along, x sin GetEnvelopeAngleDeg sideways;
+//     e22's circles may exit in any direction: the full stopping distance sideways and backwards). The motion is held
+//     to those assumptions: a driving segment ends with overspeed above GetMaxSpeedKmh() + 3 km/h and, outside
+//     circle probes, with aborted_heading beyond GetEnvelopeAngleDeg() off the strip direction; it ends with
+//     aborted_area outside the area. The searches share one native-call budget per frame (DC_SteerBudget). Each found
+//     site is written with site.<kind>.reuse, the attribute values that make the 1.8 cold baseline drive the same
+//     strip. Phases on a site that was not found are skipped (result skipped, note no_site);
 //   - the wheel-angle axle choice (DC_SteerChannels.ArmAxleSelection) is armed only in a settle segment, from half
 //     the settle on, at a standstill with the steering readback within 1e-3 of 0, and disarmed when the settle ends;
 //   - phases with segments: reset (teleport in OnProbeFrame, never inside a physics step), settle (brake 1 +
 //     handbrake), accel (speed hold, steering 0), the subclass's segments, stop (brake 1). A driving segment ends early
-//     with engine_off, aborted_area (outside the site area shrunk by the margin), no_speed (accel timeout) or spin
+//     with engine_off, aborted_area (outside the site area shrunk by the margin), overspeed, aborted_heading, no_speed
+//     (accel timeout) or spin
 //     (|yaw rate| above m_fSpinYawRateRadS for SPIN_STEPS steps);
 //   - the driving-assistance mode (BaseVehicleControllerComponent.Get/SetDrivingAssistanceMode, a global static of
 //     the engine, BaseVehicleControllerComponent.c:36-39 of 1.8.0.13 and 1.9.0.37; vanilla sets it only from the
@@ -101,7 +107,7 @@ class DC_ProbeSteerPhase
 	int m_iEndStep = -1;
 	float m_fStartWorldMs = -1;
 	float m_fEndWorldMs = -1;
-	string m_sResult;						//!< ok aborted_area no_speed engine_off spin stop_cap skipped stopped error
+	string m_sResult;						//!< ok aborted_area overspeed aborted_heading no_speed engine_off spin stop_cap skipped stopped error
 	string m_sNote;
 	float m_fMaxSpeedKmh;
 	float m_fTurnDeg;
@@ -152,6 +158,8 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	static const float STOP_CAP_S = 60;
 	//! Steps with |yaw rate| above m_fSpinYawRateRadS that end a run with spin
 	static const int SPIN_STEPS = 8;
+	//! A driving segment ends with overspeed above GetMaxSpeedKmh() + this [km/h]
+	static const float OVERSPEED_KMH = 3;
 
 	// === SITE (flat; the explicit candidate is the e01 test area) ===
 	[Attribute("659.6 0 2572.4", UIWidgets.Coords, "Flat site, explicit candidate: start (x, z used): the e01 test area on the Arland main runway (engine road 83, 60 m x 1217 m)", category: "Site")]
@@ -165,9 +173,6 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 
 	[Attribute("5", UIWidgets.Slider, "Site terrain sample step along the strip [m]", "1 50 0.5", category: "Site")]
 	protected float m_fSiteStepM;
-
-	[Attribute("4", UIWidgets.Slider, "Tyre-track check: largest spacing of the corridor positions [m]", "0.5 20 0.5", category: "Site")]
-	protected float m_fCorridorStepM;
 
 	[Attribute("0.005", UIWidgets.EditBox, "Flat site: max |mean grade| (centre-line regression)", category: "Site")]
 	protected float m_fFlatGradeMax;
@@ -203,10 +208,10 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	[Attribute("50", UIWidgets.Slider, "Grid spacing [m]", "10 500 5", category: "Search")]
 	protected float m_fGridSpacingM;
 
-	[Attribute("6000", UIWidgets.Slider, "GetSurfaceY calls per render frame of the terrain search (an exact bound; the probe refuses to start when one strip costs more)", "100 50000 100", category: "Search")]
+	[Attribute("6000", UIWidgets.Slider, "GetSurfaceY calls per render frame, shared by every search of the probe (terrain samples and sweep end points; a strip continues in the next frame)", "100 50000 100", category: "Search")]
 	protected int m_iSiteSamplesPerFrame;
 
-	[Attribute("120", UIWidgets.Slider, "Obstacle traces per render frame of the search", "1 5000 1", category: "Search")]
+	[Attribute("120", UIWidgets.Slider, "TracePosition / TraceMove calls per render frame, shared by every search of the probe (benign retries included)", "1 5000 1", category: "Search")]
 	protected int m_iSiteTracesPerFrame;
 
 	[Attribute("3000", UIWidgets.Slider, "Max strips the grid generates per search", "10 50000 10", category: "Search")]
@@ -314,6 +319,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	protected int m_iEventIdx = -1;			//!< column event_idx
 	protected int m_iSpinSteps;
 	protected int m_iLastCovered = 1;		//!< engine steps the last dispatched step covered (CoveredSteps)
+	protected ref DC_SteerBudget m_Budget = new DC_SteerBudget();
 	protected float m_fSteerSignSum;		//!< sum of cmd_steer x heading rate on the steering segments
 	protected int m_iSteerSignSamples;
 	protected int m_iMeasuredSteerSign;
@@ -353,10 +359,28 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The probe's top speed [km/h] (the stopping envelope)
+	//! The probe's top speed [km/h]: the stopping envelope, and a driving segment ends with overspeed above it + 3
 	float GetMaxSpeedKmh()
 	{
 		return 40;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The largest heading off the strip direction the probe drives at [deg]: the lateral envelope, and (unless
+	//! AllowsAnyHeading) a driving segment ends with aborted_heading beyond it
+	float GetEnvelopeAngleDeg()
+	{
+		if (AllowsAnyHeading())
+			return 90;
+
+		return m_fEnvelopeAngleDeg;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true for probes that drive circles (e22): the envelope then covers every exit direction, no heading guard
+	bool AllowsAnyHeading()
+	{
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -504,7 +528,6 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		outKeyValues.Insert("m_fFlatHeadingDeg=" + m_fFlatHeadingDeg.ToString(-1, 4));
 		outKeyValues.Insert("m_fFlatLengthM=" + m_fFlatLengthM.ToString(-1, 2));
 		outKeyValues.Insert("m_fSiteStepM=" + m_fSiteStepM.ToString(-1, 2));
-		outKeyValues.Insert("m_fCorridorStepM=" + m_fCorridorStepM.ToString(-1, 2));
 		float flatHalfWidth = GetFlatHalfWidthM();
 		float maxKmh = GetMaxSpeedKmh();
 		outKeyValues.Insert("flat_half_width_m=" + flatHalfWidth.ToString(-1, 2));
@@ -614,12 +637,6 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		flatSearch.SetGrid(m_vGridMin[0], m_vGridMin[2], m_vGridMax[0], m_vGridMax[2], m_fGridSpacingM, 15, 0);
 		AddSearch(SITE_FLAT, flatSearch);
 		AddExtraSearches();
-		foreach (int searchIdx, DC_SteerSiteSearch configured : m_aSearches)
-		{
-			int stripCost = configured.GetStripCost();
-			if (stripCost > m_iSiteSamplesPerFrame)
-				return RefuseStart(string.Format("the %1 site search needs %2 GetSurfaceY calls per strip, more than m_iSiteSamplesPerFrame %3 - probe not started", m_aSearchKinds[searchIdx], stripCost, m_iSiteSamplesPerFrame));
-		}
 
 		m_Row = new DC_ProbeRow();
 		array<string> stepColumns = {"physics_step", "world_time_ms", "timeslice_s", "phase", "segment", "phase_step", "run_idx"};
@@ -683,6 +700,26 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The attribute values that make a later run (the 1.8 cold baseline) drive exactly this site as its explicit
+	//! candidate (site.<kind>.reuse)
+	string SiteReuseText(string kind, notnull DC_SteerSite site)
+	{
+		float x = site.m_vStart[0];
+		float z = site.m_vStart[2];
+		if (kind == SITE_FLAT)
+			return "m_vFlatStart=" + x.ToString(-1, 3) + " 0 " + z.ToString(-1, 3) + "; m_fFlatHeadingDeg=" + site.m_fHeadingDeg.ToString(-1, 4);
+
+		return ExtraSiteReuseText(kind, site);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The reuse text of the subclass's own site kinds (e21: the cross site)
+	string ExtraSiteReuseText(string kind, notnull DC_SteerSite site)
+	{
+		return string.Empty;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! The flat site's criteria from the Site attributes (zone = the whole strip; the probe's area half width)
 	protected DC_SteerSiteCriteria BuildFlatCriteria()
 	{
@@ -704,19 +741,25 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Area half width, the tyre-track corridor (the area minus the margin, positions at most m_fCorridorStepM
-	//! apart), the sample step, the stopping envelope of the probe's top speed and the benign colliders
+	//! Area half width; the tyre-track corridor (the area minus the margin): an odd number of positions, the centre one
+	//! on the centre line, at most 2 x track_half apart (the tyre samples then cover the corridor without gaps); the
+	//! sample step; the stopping envelope of the probe's capped top speed (GetMaxSpeedKmh) along, x sin of the largest
+	//! heading the probe allows (GetEnvelopeAngleDeg) sideways, and backwards too when any heading is allowed; the
+	//! benign colliders
 	protected void SetSiteGeometry(notnull DC_SteerSiteCriteria c, float halfWidthM)
 	{
 		c.m_fHalfWidthM = halfWidthM;
 		c.m_fCorridorHalfM = Math.Max(halfWidthM - m_fAreaMarginM, 0);
-		int intervals = Math.Ceil(2 * c.m_fCorridorHalfM / Math.Max(m_fCorridorStepM, 0.5));
-		c.m_iCorridorPoints = Math.MaxInt(intervals + 1, 1);
+		int half = Math.Ceil(c.m_fCorridorHalfM / (2 * c.m_fTrackHalfM));
+		c.m_iCorridorPoints = 2 * half + 1;
 		c.m_fStepM = m_fSiteStepM;
 		float v = GetMaxSpeedKmh() / 3.6;
 		float stopping = v * v / (2 * Math.Max(m_fEnvelopeDecelMs2, 0.5)) + v * m_fEnvelopeReactS;
 		c.m_fEnvelopeLongM = stopping;
-		c.m_fEnvelopeLatM = stopping * Math.Sin(m_fEnvelopeAngleDeg * Math.DEG2RAD);
+		c.m_fEnvelopeLatM = stopping * Math.Sin(GetEnvelopeAngleDeg() * Math.DEG2RAD);
+		c.m_fEnvelopeBackM = 0;
+		if (AllowsAnyHeading())
+			c.m_fEnvelopeBackM = stopping;
 		c.m_aBenign = {};
 		array<string> names = {};
 		m_sBenignColliders.Split(";", names, true);
@@ -855,13 +898,15 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (!world)
 			return;
 
+		// one budget for this frame, shared: each unfinished search takes what the ones before it left
+		m_Budget.Reset(m_iSiteSamplesPerFrame, m_iSiteTracesPerFrame);
 		bool allDone = true;
 		foreach (DC_SteerSiteSearch search : m_aSearches)
 		{
 			if (search.IsDone())
 				continue;
 
-			if (!search.StepSearch(world, m_iSiteSamplesPerFrame, m_iSiteTracesPerFrame))
+			if (!search.StepSearch(world, m_Budget))
 				allDone = false;
 		}
 
@@ -878,6 +923,9 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 			done.AppendHeaderLines(lines, "site." + kind);
 			LogInfo(done.DescribeSearch());
 			DC_SteerSite selected = done.GetSelected();
+			if (selected)
+				lines.Insert("site." + kind + ".reuse=" + SiteReuseText(kind, selected));
+
 			if (selected && selected.m_iBenignHits > 0)
 				LogInfo(string.Format("the %1 site was swept with %2 benign hits (m_sBenignColliders)", kind, selected.m_iBenignHits));
 
@@ -1370,6 +1418,23 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (!inArea)
 		{
 			EndRun(phase, "aborted_area");
+			return;
+		}
+
+		// the motion the obstacle envelope assumed: the capped speed (+3 km/h) and, outside circle probes, the heading
+		float speedNow = m_Actuator.GetSpeedKmh();
+		if (speedNow > GetMaxSpeedKmh() + OVERSPEED_KMH)
+		{
+			phase.AddNote("overspeed_kmh:" + speedNow.ToString(-1, 1));
+			EndRun(phase, "overspeed");
+			return;
+		}
+
+		float headingOff = Math.AbsFloat(WrapDeg(m_Actuator.GetHeadingDeg() - m_Area.m_fHeadingDeg));
+		if (!AllowsAnyHeading() && headingOff > GetEnvelopeAngleDeg())
+		{
+			phase.AddNote("heading_off_deg:" + headingOff.ToString(-1, 1));
+			EndRun(phase, "aborted_heading");
 			return;
 		}
 

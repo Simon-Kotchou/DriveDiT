@@ -5,24 +5,17 @@ and tools/probes/t0eng/e23_steer_steps.py (CC-08), and the Enforce site arithmet
     TMPDIR=/dev/shm/<x> PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
         tests/test_t0eng_steer.py
 
-Every case writes synthetic e21 / e22 / e23 plays (run_header.txt, the probe CSVs, run_footer.txt) with
-probe_common.write_synthetic_play into a fresh probe_common.make_temp_dir() directory (RAM or E:, never /tmp) and
-removes it afterwards. The plays come from a small vehicle model (SteerCar): a steering actuator cmd -> input
-(delay, first order, rate limit), the input -> wheel angle (0.5 rad per unit, an Ackermann pair, optional lag of the
-bone channels, toe, a load or slope term), and a kinematic bicycle with a speed-dependent curvature lag. The step-CSV
-header is built from the Enforce source (DC_ProbeSteerBase.OnProbeStart, DC_ProbeActuator.AddStepColumns,
-DC_SteerChannels.AddColumns), so a reader / producer name mismatch fails here.
+Every case writes synthetic e21 / e22 / e23 plays (run_header.txt with the build / pin / prefab / map / addon
+identity, the probe CSVs, run_footer.txt) with probe_common.write_synthetic_play into a fresh
+probe_common.make_temp_dir() directory (RAM or E:, never /tmp) and removes it afterwards. The plays come from a small
+vehicle model (SteerCar), written independently of the analyses: a steering actuator cmd -> input (delay, first
+order, rate limit, gain), the input -> a bicycle wheel angle (0.5 rad per unit plus optional load and slope terms),
+an exact Ackermann pair from it (plus toe), the path curvature tan(angle) / L with a speed-dependent lag (never the
+analysis's delta_eff), optional merged physics steps (a row covering n engine steps). The step-CSV header is built
+from the Enforce source, so a reader / producer name mismatch fails here.
 
-  - CC-07: a clean S1 / step-0 / load fixture passes every item; the 1.9.0.37-like readback at zero command fails
-    (a); a 3e-4 1/m drift fails (b); wrong-sign wheel channels fail step 0 (and with it c and d); a lagged bone
-    channel is skipped for an unlagged one; a missing e22 play, a missing cross site or an angle that follows the
-    load fail; nothing passes without data;
-  - CC-08: the selected structure is the true one on the cmd -> input path (delay, first order, rate limit), every
-    bin reaches R2 >= 0.9; a planned bin without events and a wrong-sign kappa fail;
-  - delta_eff inverts an Ackermann pair; the site search's contour heading puts the downhill on the requested side;
-    DC_SteerTerrainMath (translated from the Enforce source) accepts a flat runway and a 6% cross-slope on the right
-    side, refuses the wrong side, a bumpy strip and a short one, and agrees with a Python reference;
-  - every header key and CSV name the analyses read is written by the Enforce producer.
+Each counterexample of the Codex round-1 review (PR #27 @ 9fdc360) is a test here; the missing-evidence cases must
+come out INCOMPLETE (never PASS, never a production mode), the physical failures FAIL.
 """
 
 import contextlib
@@ -44,8 +37,11 @@ import steer_common  # noqa: E402
 
 
 def load_tool(name, path):
+    if name in sys.modules:
+        return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -68,6 +64,7 @@ DT = 1.0 / 30.0
 WHEELBASE = 2.42
 TRACK = 1.30
 DMAX = 0.5
+PREFAB = "{DA79E34823120087}Prefabs/Vehicles/Wheeled/S105/S105_base.et"
 
 
 def read(path):
@@ -107,10 +104,10 @@ def clamp(v, lo, hi):
 
 
 class Actuator:
-    """cmd -> steering input: delay (steps), first order (tau s), rate limit (units / s)"""
+    """cmd -> steering input per engine step: delay (steps), first order (tau s), rate limit (units / s), gain"""
 
-    def __init__(self, delay=0, tau=0.0, rate=None):
-        self.delay, self.tau, self.rate = delay, tau, rate
+    def __init__(self, delay=0, tau=0.0, rate=None, gain=1.0):
+        self.delay, self.tau, self.rate, self.gain = delay, tau, rate, gain
         self.hist = []
         self.y = 0.0
 
@@ -118,7 +115,7 @@ class Actuator:
         if not call:
             return self.y
         self.hist.append(cmd)
-        target = self.hist[-1 - self.delay] if len(self.hist) > self.delay else 0.0
+        target = self.gain * (self.hist[-1 - self.delay] if len(self.hist) > self.delay else 0.0)
         a = math.exp(-DT / self.tau) if self.tau > 0 else 0.0
         step = (1.0 - a) * (target - self.y)
         if self.rate is not None:
@@ -128,32 +125,39 @@ class Actuator:
 
 
 def ackermann(delta):
-    """(left, right) of a bicycle angle (positive right: the right wheel is the inner one)"""
-    if abs(delta) < 1e-6:
+    """(left, right) of a bicycle angle by the exact Ackermann geometry (positive right: the right wheel is inner)"""
+    if abs(delta) < 1e-9:
         return delta, delta
     cot = 1.0 / math.tan(delta)
     half = TRACK / (2.0 * WHEELBASE)
-    if delta > 0:
-        return math.atan(1.0 / (cot + half)), math.atan(1.0 / (cot - half))
     return math.atan(1.0 / (cot + half)), math.atan(1.0 / (cot - half))
 
 
 class SteerCar:
-    """The fixture vehicle. Options: actuator (cmd -> input), wheel_sign (the channels' sign), bone_lag (steps of
-    lag of the rot and bone channels; ent stays unlagged), toe (rad, left + / right -), kappa_bias (1/m added to the
-    path), zero_noise (readback deviations at zero command, the 1.9.0.37 pattern), load_gain (rad of extra wheel
-    angle per m/s2 of a_lat), slope_gain (rad of wheel angle per unit cross-slope), sigma (relaxation length m)."""
+    """The fixture vehicle. Options: actuator (cmd -> input), wheel_sign (the channels' sign), bone_lag (rows of lag
+    of the rot and bone channels), late_changes (every command change k with k % 5 in (1, 3) lags the rot / bone
+    channels by late_changes rows until the next change: 4 of 10), toe (rad), kappa_bias (1/m on the path),
+    kappa_wave ((amplitude 1/m, wavelength m) on the path), slope_kappa (1/m of path curvature per unit cross-slope,
+    wheels straight), zero_noise (readback deviations at zero command after >= 60 zero rows, the 1.9.0.37 e01
+    pattern), stair_error (added to the readback of every non-zero command), load_gain (rad of wheel angle per m/s2
+    of a_lat), slope_gain (rad of wheel angle per unit cross-slope), sigma (relaxation length m), kappa_sign, merge
+    (engine steps per row)."""
 
-    def __init__(self, actuator=None, wheel_sign=1.0, bone_lag=0, toe=0.0, kappa_bias=0.0, zero_noise=False,
-                 load_gain=0.0, slope_gain=0.0, sigma=0.6, kappa_sign=1.0, seed=3):
+    def __init__(self, actuator=None, wheel_sign=1.0, bone_lag=0, late_changes=0, toe=0.0, kappa_bias=0.0,
+                 kappa_wave=None, slope_kappa=0.0, zero_noise=False, stair_error=0.0, load_gain=0.0, slope_gain=0.0,
+                 sigma=0.6, kappa_sign=1.0, merge=1, seed=3):
         self.act = actuator or Actuator()
-        self.wheel_sign, self.bone_lag, self.toe = wheel_sign, bone_lag, toe
-        self.kappa_bias, self.zero_noise, self.load_gain = kappa_bias, zero_noise, load_gain
-        self.slope_gain, self.sigma, self.kappa_sign = slope_gain, sigma, kappa_sign
+        self.wheel_sign, self.bone_lag, self.late_changes, self.toe = wheel_sign, bone_lag, late_changes, toe
+        self.kappa_bias, self.kappa_wave, self.slope_kappa = kappa_bias, kappa_wave, slope_kappa
+        self.zero_noise, self.stair_error, self.load_gain = zero_noise, stair_error, load_gain
+        self.slope_gain, self.sigma, self.kappa_sign, self.merge = slope_gain, sigma, kappa_sign, merge
         self.rng = random.Random(seed)
         self.step_no = 100
         self.rows = []
         self.lag_hist = []
+        self.changes = 0
+        self.last_cmd = 0.0
+        self.zero_rows = 0
         self.reset(0.0, 0.0, 0.0)
 
     def reset(self, x, z, heading_deg):
@@ -166,38 +170,51 @@ class SteerCar:
         self.lag_hist = []
 
     def run(self, phase, segment, run_idx, cmd, v_target, steer_call=1, seg_target=-1.0, seg_flag=0, event_idx=-1,
-            site="flat", assist=2, mode="hold", slope=0.0, acc=None):
-        self.step_no += 1
-        if mode == "accel":
-            self.v = min(v_target, self.v + 2.5 * DT)
-        elif mode == "stop":
-            self.v = max(0.0, self.v - 4.0 * DT)
-        elif mode == "brake":
-            self.v = max(0.0, self.v - 3.0 * DT)
-        elif mode == "park":
-            self.v = 0.0
-        else:
-            self.v = v_target
-        steer_input = self.act.step(cmd, call=bool(steer_call))
+            site="flat", assist=2, mode="hold", slope=0.0, acc=None, merge=None):
+        n = merge or self.merge
+        if abs(cmd - self.last_cmd) >= 0.04:
+            self.changes += 1
+        self.last_cmd = cmd
+        for _ in range(n):
+            self.step_no += 1
+            if mode == "accel":
+                self.v = min(v_target, self.v + 2.5 * DT)
+            elif mode == "stop":
+                self.v = max(0.0, self.v - 4.0 * DT)
+            elif mode == "brake":
+                self.v = max(0.0, self.v - 3.0 * DT)
+            elif mode == "park":
+                self.v = 0.0
+            else:
+                self.v = v_target
+            steer_input = self.act.step(cmd, call=bool(steer_call))
+            delta = steer_input * DMAX + self.load_gain * abs(self.a_lat) * (1 if cmd >= 0 else -1) + \
+                self.slope_gain * slope
+            target_kappa = self.kappa_sign * math.tan(delta) / WHEELBASE + self.kappa_bias + self.slope_kappa * slope
+            if self.kappa_wave:
+                target_kappa += self.kappa_wave[0] * math.sin(2.0 * math.pi * self.dist / self.kappa_wave[1])
+            tau = max(DT, self.sigma / max(self.v, 0.5))
+            self.kappa += (target_kappa - self.kappa) * (1.0 - math.exp(-DT / tau))
+            r = self.kappa * self.v
+            self.a_lat = self.v * r
+            self.heading += math.degrees(r * DT)
+            rad = math.radians(self.heading)
+            self.x += self.v * math.sin(rad) * DT
+            self.z += self.v * math.cos(rad) * DT
+            self.dist += self.v * DT
         post = steer_input
-        if self.zero_noise and abs(cmd) < 1e-9 and self.v > 2 and self.rng.random() < 0.16:
-            post += self.rng.choice((-1, 1)) * self.rng.uniform(0.0002, 0.037)
-        delta = steer_input * DMAX + self.load_gain * abs(self.a_lat) * (1 if cmd >= 0 else -1) + \
-            self.slope_gain * slope
+        self.zero_rows = self.zero_rows + 1 if abs(cmd) < 1e-9 and steer_call else 0
+        if self.zero_noise and self.zero_rows >= 60 and self.v > 2 and self.rng.random() < 0.16:
+            post += self.rng.choice((-1, 1)) * self.rng.uniform(0.002, 0.0146)
+        if self.stair_error and abs(cmd) > 1e-9:
+            post += self.stair_error
         left, right = ackermann(delta)
         left, right = left + self.toe, right - self.toe
         self.lag_hist.append((left, right))
-        lagged = self.lag_hist[-1 - self.bone_lag] if len(self.lag_hist) > self.bone_lag else (0.0, 0.0)
-        target_kappa = self.kappa_sign * math.tan(steer_common.delta_eff(left, right)) / WHEELBASE + self.kappa_bias
-        tau = max(DT, self.sigma / max(self.v, 0.5))
-        self.kappa += (target_kappa - self.kappa) * (1.0 - math.exp(-DT / tau))
-        r = self.kappa * self.v
-        self.a_lat = self.v * r
-        self.heading += math.degrees(r * DT)
-        rad = math.radians(self.heading)
-        self.x += self.v * math.sin(rad) * DT
-        self.z += self.v * math.cos(rad) * DT
-        self.dist += self.v * DT
+        lag = self.bone_lag
+        if self.late_changes and self.changes % 5 in (1, 3):
+            lag = self.late_changes
+        lagged = self.lag_hist[-1 - lag] if len(self.lag_hist) > lag else (0.0, 0.0)
         h0 = math.radians(self.h0)
         along = (self.x - self.x0) * math.sin(h0) + (self.z - self.z0) * math.cos(h0)
         lateral = (self.x - self.x0) * math.cos(h0) - (self.z - self.z0) * math.sin(h0)
@@ -206,16 +223,16 @@ class SteerCar:
         row = {c: "" for c in STEP_COLUMNS}
         row.update({
             "physics_step": self.step_no, "world_time_ms": "%.3f" % (self.step_no * DT * 1000.0),
-            "timeslice_s": "%.6f" % DT, "phase": phase, "segment": segment, "phase_step": 0, "run_idx": run_idx,
+            "timeslice_s": "%.6f" % (n * DT), "phase": phase, "segment": segment, "phase_step": 0, "run_idx": run_idx,
             "force_sim": 0, "cmd_steer": "%.4f" % cmd, "cmd_throttle": "0.3000", "cmd_brake": "0.0000",
             "cmd_clutch": "1.0000", "cmd_gear": 2, "cmd_handbrake": 0, "speed_hold_kmh": "%.3f" % (v_target * 3.6),
-            "input_pre_steer": "%.4f" % cmd, "input_post_steer": "%.4f" % post, "engine_on": 1,
+            "input_pre_steer": "%.4f" % cmd, "input_post_steer": "%.5f" % post, "engine_on": 1,
             "speed_kmh": "%.3f" % (self.v * 3.6), "vel_l_x": "0.000", "vel_l_y": "0.000", "vel_l_z": "%.3f" % self.v,
-            "angvel_l_x": "0.000000", "angvel_l_y": "%.6f" % r, "angvel_l_z": "0.000000",
+            "angvel_l_x": "0.000000", "angvel_l_y": "%.7f" % r, "angvel_l_z": "0.000000",
             "acc_l_x": "%.4f" % self.a_lat, "acc_l_y": "0.0000", "acc_l_z": "%.4f" % acc_z,
-            "pos_x": "%.3f" % self.x, "pos_y": "39.000", "pos_z": "%.3f" % self.z,
+            "pos_x": "%.4f" % self.x, "pos_y": "39.000", "pos_z": "%.4f" % self.z,
             "fwd_x": "%.6f" % math.sin(rad), "fwd_y": "0.000000", "fwd_z": "%.6f" % math.cos(rad),
-            "heading_deg": "%.5f" % self.heading, "ground_contact": 1, "wheels_contact": 4,
+            "heading_deg": "%.6f" % self.heading, "ground_contact": 1, "wheels_contact": 4,
             "steer_call": int(steer_call), "assist_mode": assist, "site": site, "along_m": "%.3f" % along,
             "lateral_m": "%.3f" % lateral, "in_area": 1, "seg_target": "%.4f" % seg_target, "seg_flag": seg_flag,
             "event_idx": event_idx,
@@ -242,54 +259,59 @@ def drive_stop(car, phase, run, site="flat", assist=2):
         car.run(phase, "stop", run, 0.0, 0.0, mode="stop", site=site, assist=assist)
 
 
-def common_header(probe):
+def common_header(probe, build="1.9.0.37"):
     return {"schema": "dc-probe-run/1", "probe": probe, "params.dt_s": "%.6f" % DT, "steer.wheelbase_m": WHEELBASE,
+            "engine.build_version": build, "launch.pin_id": build, "launch.build_key": "", "ego.prefab": PREFAB,
+            "world.map_id": "arland", "addon.git_sha": "0123456789abcdef0123456789abcdef01234567",
             "steer.wheel_index_l": 0, "steer.wheel_index_r": 1, "steer.wheel_count": 4, "steer.sign_used": 1,
             "assist.original": 2, "assist.original_name": "FULL", "assist.sets": 2, "assist.restores": 2,
             "assist.at_stop": 2, "vehicle.noise_steer_sensitivity": "0.0000", "site.flat.found": 1,
             "site.flat.source": "explicit", "site.flat.heading_deg": "75.110", "site.flat.grade": "0.00001",
-            "site.flat.cross_mean": "0.00010", "site.flat.obstacle_hits": 0}
+            "site.flat.cross_mean": "0.00010", "site.flat.benign_hits": 0}
 
 
 FOOTER = {"schema": "dc-probe-run/1", "status": "complete", "reason": "done"}
 
 
-def build_e21(play_dir, car=None, cross_found=True, cross_min=0.06, flat_m=200.0):
+def build_e21(play_dir, car=None, cross_found=True, cross_min=0.06, flat_m=200.0, flat_kmh=None, build="1.9.0.37",
+              cross_start="2000.0 0.0 1500.0", footer=FOOTER, header_extra=None):
     car = car or SteerCar()
     phases = []
 
-    def zero_phase(name, kmh, held, nocall, site="flat", assist=2, slope=0.0):
-        v = kmh / 3.6
+    def zero_phase(name, kmh, held, nocall, site="flat", assist=2, slope=0.0, drive_kmh=None):
+        v = (drive_kmh or kmh) / 3.6
         drive_start(car, name, 1, v, site, assist)
         for _ in range(60):
             car.run(name, "hold", 1, 0.0, v, site=site, assist=assist, slope=slope, seg_target=kmh)
         for segment, length, call in (("measure", held, 1), ("nocall", nocall, 0)):
             start = car.dist
-            while car.dist - start < length:
+            while car.dist - start < length + 0.5:      # the probe ends the segment past the distance (along)
                 car.run(name, segment, 1, 0.0, v, steer_call=call, seg_flag=1, site=site, assist=assist,
                         slope=slope, seg_target=kmh)
         drive_stop(car, name, 1, site, assist)
         phases.append([len(phases), name, site, site, "", "", "", "", kmh, 0, assist, 1, "ok", ""])
 
     for kmh in (20, 40):
-        zero_phase("flat_%d" % kmh, kmh, flat_m, 200.0)
+        zero_phase("flat_%d" % kmh, kmh, flat_m, 200.0, drive_kmh=(flat_kmh or {}).get(kmh))
     for kmh in (20, 40):
-        zero_phase("flat_%d_assist0" % kmh, kmh, 100.0, 100.0, assist=0)
+        zero_phase("flat_%d_none" % kmh, kmh, 100.0, 100.0, assist=0)
     if cross_found:
         for kmh in (20, 40):
             zero_phase("cross_%d" % kmh, kmh, 100.0, 100.0, site="cross", slope=0.06)
-    header = common_header("e21")
+    header = common_header("e21", build)
     header.update({"params.m_sFlatSpeedsKmh": "20,40", "params.m_sCrossSpeedsKmh": "20,40",
                    "site.cross.found": int(cross_found), "site.cross.cross_min_signed": "%.5f" % cross_min,
                    "site.cross.cross_max_signed": "0.07000", "site.cross.cross_mean": "0.06500",
-                   "site.cross.start": "2000.0 0.0 1500.0", "site.cross.heading_deg": "33.0",
+                   "site.cross.start": cross_start, "site.cross.heading_deg": "33.0",
                    "site.cross.grade": "0.004", "site.cross.fallback": 0})
+    header.update(header_extra or {})
     probe_common.write_synthetic_play(play_dir, header, {"e21_steps": (STEP_COLUMNS, car.rows),
-                                                         "e21_phases": (PHASE_COLUMNS, phases)}, FOOTER)
+                                                         "e21_phases": (PHASE_COLUMNS, phases)}, footer)
     return play_dir
 
 
-def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.5)):
+def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.5), steady_rows=110,
+              header_extra=None):
     car = car or SteerCar()
     phases = []
     for kmh, levels in ((12, (0.1, -0.1, 0.2, -0.2, 0.3, -0.3)), (18, (0.05, -0.05, 0.1, -0.1, 0.15, -0.15))):
@@ -310,7 +332,7 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
         kappa = abs(math.tan(steer * DMAX) / WHEELBASE)
         for level, target in enumerate(targets):
             vt = math.sqrt(target / kappa)
-            for k in range(150):
+            for k in range(40 + steady_rows):
                 car.run(name, "alat", 1, steer, vt, seg_flag=int(k >= 40), event_idx=level, seg_target=target)
         while car.v > 5.0 / 3.6:
             car.run(name, "brake", 1, steer, car.v, mode="brake", seg_flag=1, seg_target=3.0)
@@ -318,17 +340,21 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
         phases.append([len(phases), name, "load", "flat", "", "", "", "", 10, steer, -1, 1, "ok", ""])
     header = common_header("e22")
     header.update({"params.m_sALatTargets": ",".join("%g" % t for t in targets), "params.m_fBrakeDecelMs2": "3.000"})
+    header.update(header_extra or {})
     probe_common.write_synthetic_play(play_dir, header, {"e22_steps": (STEP_COLUMNS, car.rows),
                                                          "e22_phases": (PHASE_COLUMNS, phases)}, FOOTER)
     return play_dir
 
 
-def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6", drop_speed=None, seed=5):
+def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6", seed=5, prbs=True,
+              prbs_gain=None, slow_kmh=None, alt_tau=None):
+    """slow_kmh: {speed: the speed the phase decays to while its train runs}; alt_tau: (tau_a, tau_b) alternating per
+    event; prbs_gain: the actuator gain during the PRBS (a PRBS the step model cannot predict)"""
     car = car or SteerCar()
     rng = random.Random(seed)
     events = []
     phases = []
-    prbs = e23_prbs_bits(5, 11, 31)
+    prbs_bits = e23_prbs_bits(5, 11, 31)
     for group in grid.split(";"):
         speed_text, specs = group.split(":")
         kmh = float(speed_text)
@@ -338,12 +364,10 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6",
             amps.append([float(amp), int(count)])
         order = []
         while any(c > 0 for _, c in amps):
-            for item in amps:
-                if item[1] > 0:
-                    order += [item[0], -item[0]]
-                    item[1] -= 1
-        if drop_speed is not None and kmh == drop_speed:
-            continue
+            for item_ in amps:
+                if item_[1] > 0:
+                    order += [item_[0], -item_[0]]
+                    item_[1] -= 1
         name = "steps_%d" % kmh
         v = kmh / 3.6
         drive_start(car, name, 1, v)
@@ -351,10 +375,14 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6",
             car.run(name, "hold", 1, 0.0, v, seg_target=kmh)
         open_event = -1
         pending = None
+        end_v = (slow_kmh or {}).get(kmh, kmh) / 3.6
         for idx, amp in enumerate(order):
+            vt = v + (end_v - v) * idx / max(1, len(order) - 1)
+            if alt_tau:
+                car.act.tau = alt_tau[idx % 2]
             gap = 18 + rng.randint(0, 9)
             for k in range(gap):
-                car.run(name, "train", 1, 0.0, v, event_idx=open_event, seg_target=kmh)
+                car.run(name, "train", 1, 0.0, vt, event_idx=open_event, seg_target=kmh)
                 if k == 0 and pending is not None:
                     pending["release_step"] = car.step_no
             if pending is not None:
@@ -362,22 +390,27 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6",
                 events.append(pending)
             open_event = idx
             for k in range(12):
-                car.run(name, "train", 1, amp, v, seg_flag=1, event_idx=idx, seg_target=kmh)
+                car.run(name, "train", 1, amp, vt, seg_flag=1, event_idx=idx, seg_target=kmh)
                 if k == 0:
                     pending = {"event_idx": idx, "phase": name, "target_kmh": "%.3f" % kmh, "amplitude": "%.4f" % amp,
                                "run_idx": 1, "jitter_steps": gap - 18, "onset_step": car.step_no,
-                               "release_step": "", "end_step": "", "onset_kmh": "%.3f" % kmh,
+                               "release_step": "", "end_step": "", "onset_kmh": "%.3f" % (vt * 3.6),
                                "onset_along_m": "0.0", "result": "ok"}
         for k in range(18):
-            car.run(name, "train", 1, 0.0, v, event_idx=open_event, seg_target=kmh)
+            car.run(name, "train", 1, 0.0, end_v, event_idx=open_event, seg_target=kmh)
             if k == 0:
                 pending["release_step"] = car.step_no
         pending["end_step"] = car.step_no
         events.append(pending)
-        amp = {10.0: 0.5, 30.0: 0.3, 60.0: 0.2}.get(kmh, 0.0)
-        for bit in prbs:
-            for _ in range(4):
-                car.run(name, "prbs", 1, amp if bit else -amp, v, seg_flag=1, seg_target=kmh)
+        if prbs:
+            gain = car.act.gain
+            if prbs_gain is not None:
+                car.act.gain = prbs_gain
+            amp = {10.0: 0.5, 30.0: 0.3, 60.0: 0.2}.get(kmh, 0.2)
+            for bit in prbs_bits:
+                for _ in range(4):
+                    car.run(name, "prbs", 1, amp if bit else -amp, end_v, seg_flag=1, seg_target=kmh)
+            car.act.gain = gain
         drive_stop(car, name, 1)
         phases.append([len(phases), name, "steps", "flat", "", "", "", "", kmh, 0, -1, 1, "ok", ""])
     header = common_header("e23")
@@ -414,168 +447,420 @@ def item(text, name):
     return m.group(1) if m else None
 
 
-class SteerFixtureTests(unittest.TestCase):
+def detail(text, name):
+    m = re.search(r"\[(?:PASS|FAIL|INCOMPLETE|INFO)\] %s: (.*)" % re.escape(name), text)
+    return m.group(1) if m else ""
+
+
+def drop_footer(play_dir):
+    os.remove(os.path.join(play_dir, "run_footer.txt"))
+
+
+def blank_columns(play_dir, probe, columns):
+    path = os.path.join(play_dir, probe + "_steps.csv")
+    with open(path, "r", encoding="ascii") as handle:
+        lines = handle.read().splitlines()
+    header = lines[0].split(",")
+    index = [header.index(c) for c in columns]
+    out = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split(",")
+        for i in index:
+            cells[i] = ""
+        out.append(",".join(cells))
+    with open(path, "w", encoding="ascii") as handle:
+        handle.write("\n".join(out) + "\n")
+
+
+def no_mode(test, text):
+    test.assertNotIn("Mode A stays the production default", text)
+    test.assertNotIn("Mode B (seated driver, CC-14) becomes", text)
+    test.assertIn("mode_decision: none", text)
+
+
+class Cc07Tests(unittest.TestCase):
     def setUp(self):
         self.base = probe_common.make_temp_dir("t0eng_steer_")
         self.addCleanup(shutil.rmtree, self.base, True)
 
-    def plays(self, e21_car=None, e22_car=None, **kw):
-        a = build_e21(os.path.join(self.base, "e21", "play_01"), e21_car, **kw)
-        b = build_e22(os.path.join(self.base, "e22", "play_01"), e22_car)
-        return a, b
+    def path(self, *parts):
+        return os.path.join(self.base, *parts)
 
-    # --- CC-07 -------------------------------------------------------------------------------------------------
-    def test_clean_fixture_passes_cc07(self):
-        a, b = self.plays()
-        code, text = run_main(e21, [a, "--e22", b])
-        for name in ("step0_channel", "a_readback", "b_flat", "c_cross", "d_load"):
+    def session(self, e21_car=None, e22_car=None, baseline_car=None, baseline=True, **kw):
+        a = build_e21(self.path("e21", "play_01"), e21_car, **kw)
+        b = build_e22(self.path("e22", "play_01"), e22_car)
+        argv = [a, "--e22", b]
+        if baseline:
+            base = build_e21(self.path("base", "play_01"), baseline_car, build="1.8.0.13")
+            argv += ["--baseline", base]
+        return argv
+
+    def test_clean_session_with_baseline_passes_cc07(self):
+        code, text = run_main(e21, self.session())
+        for name in ("evidence", "step0_channel", "a_readback", "b_flat", "c_cross", "d_load"):
             self.assertEqual(item(text, name), "PASS", "%s in\n%s" % (name, text))
         self.assertEqual(code, 0, text)
         self.assertIn("selected rot", text)
         self.assertIn("Mode A stays the production default", text)
 
-    def test_zero_command_readback_like_1_9_fails_a(self):
-        a, b = self.plays(e21_car=SteerCar(zero_noise=True))
-        code, text = run_main(e21, [a, "--e22", b])
+    def test_without_a_baseline_c_is_incomplete_and_no_mode_is_chosen(self):
+        code, text = run_main(e21, self.session(baseline=False))
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+        self.assertEqual(item(text, "b_flat"), "PASS", text)
+        self.assertEqual(code, 3, text)
+        no_mode(self, text)
+
+    # (a) readback
+    def test_first_order_input_lag_is_explained_by_the_cc08_model(self):
+        def act():
+            return Actuator(tau=0.014)       # the 1.9.0.37 e01 reversal fit
+
+        argv = self.session(e21_car=SteerCar(actuator=act()), e22_car=SteerCar(actuator=act()))
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertIn("needs the CC-08 input model", text)
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(item(text, "a_readback"), "PASS", text)
+        self.assertIn(" 0 rows not explained", text)
+
+    def test_unexplained_zero_command_deviations_fail_a(self):
+        # Codex: 71 deviations > 1e-3 after >= 60 zero-command rows (max 0.0146) that the short lag cannot explain
+        def act():
+            return Actuator(tau=0.014)
+
+        argv = self.session(e21_car=SteerCar(actuator=act(), zero_noise=True), e22_car=SteerCar(actuator=act()))
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
+        code, text = run_main(e21, argv + ["--e23", e23_play])
         self.assertEqual(item(text, "a_readback"), "FAIL", text)
-        self.assertEqual(code, 1)
-        self.assertIn("Mode B (seated driver, CC-14)", text)
+        self.assertRegex(detail(text, "a_readback"), r" [1-9]\d* rows not explained")
+        self.assertRegex(detail(text, "a_readback"), r"[1-9]\d* of them after >= 60 zero-command rows")
+        self.assertEqual(code, 1, text)
+        self.assertIn("Mode B (seated driver, CC-14) becomes", text)
 
-    def test_straight_line_drift_fails_b(self):
-        a, b = self.plays(e21_car=SteerCar(kappa_bias=3e-4))
-        code, text = run_main(e21, [a, "--e22", b])
+    def test_nonzero_command_readback_error_never_passes(self):
+        # Codex: staircase rows with a 0.1 readback error left a PASS (only zero-command rows were read)
+        argv = self.session(e22_car=SteerCar(stair_error=0.1))
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertIn("e22/stair", text)
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(), grid="10:0.5x6;30:0.5x6")
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(item(text, "a_readback"), "FAIL", text)
+
+    # (b) flat
+    def test_alternating_curvature_fails_b_despite_zero_net_drift(self):
+        # Codex: peak 8e-4 1/m alternating left / right, net heading change zero, passed the old net check
+        code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_wave=(8e-4, 100.0))))
         self.assertEqual(item(text, "b_flat"), "FAIL", text)
-        self.assertEqual(code, 1)
+        self.assertRegex(detail(text, "b_flat"), r"net -?\d")
 
-    def test_short_flat_segment_is_no_data(self):
-        a, b = self.plays(flat_m=120.0)
-        code, text = run_main(e21, [a, "--e22", b])
+    def test_baseline_allowance_admits_a_matching_drift(self):
+        # Codex: current and baseline both 3e-4 1/m failed although the printed bound was 4.5e-4
+        argv = self.session(e21_car=SteerCar(kappa_bias=3e-4), baseline_car=SteerCar(kappa_bias=3e-4))
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "b_flat"), "PASS", text)
+        self.assertIn("allowance 0.00045", text)
+        code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_bias=3e-4), baseline=False))
+        self.assertEqual(item(text, "b_flat"), "INCOMPLETE", text)
+
+    def test_drift_beyond_the_baseline_allowance_fails_b(self):
+        code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_bias=3e-4)))
         self.assertEqual(item(text, "b_flat"), "FAIL", text)
-        self.assertIn("no data", text)
 
-    def test_wrong_sign_wheel_channels_fail_step0(self):
-        a, b = self.plays(e21_car=SteerCar(wheel_sign=-1.0), e22_car=SteerCar(wheel_sign=-1.0))
-        code, text = run_main(e21, ["--signal-scale-deg", "1", a, "--e22", b])
-        self.assertEqual(item(text, "step0_channel"), "FAIL", text)
-        self.assertEqual(item(text, "c_cross"), "FAIL", text)
-        self.assertEqual(item(text, "d_load"), "FAIL", text)
-        self.assertEqual(code, 1)
+    def test_a_baseline_from_the_same_build_is_not_used(self):
+        a = build_e21(self.path("e21", "play_01"), SteerCar(kappa_bias=3e-4))
+        b = build_e22(self.path("e22", "play_01"))
+        base = build_e21(self.path("base", "play_01"), SteerCar(kappa_bias=3e-4))
+        code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
+        self.assertIn("baseline: not usable", text)
+        self.assertEqual(item(text, "b_flat"), "INCOMPLETE", text)
 
-    def test_lagged_bones_select_the_entity_channel(self):
-        a, b = self.plays(e22_car=SteerCar(bone_lag=3))
-        code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(item(text, "step0_channel"), "PASS", text)
-        self.assertIn("selected ent", text)
-        self.assertRegex(text, r"rot: median error [^;]*lag 3 steps[^;]*-> no")
+    def test_short_or_off_speed_flat_segments_are_incomplete(self):
+        code, text = run_main(e21, self.session(flat_m=120.0))
+        self.assertEqual(item(text, "b_flat"), "INCOMPLETE", text)
+        self.assertIn("< 200 m", text)
+        code, text = run_main(e21, self.session(flat_kmh={40: 30}))
+        self.assertEqual(item(text, "b_flat"), "INCOMPLETE", text)
+        self.assertIn("not within 10% of 40", text)
 
-    def test_without_e22_step0_and_load_fail(self):
-        a = build_e21(os.path.join(self.base, "e21", "play_01"))
-        code, text = run_main(e21, [a])
-        self.assertEqual(item(text, "step0_channel"), "FAIL")
-        self.assertEqual(item(text, "d_load"), "FAIL")
-        self.assertEqual(item(text, "c_cross"), "FAIL")
-        self.assertEqual(code, 1)
-
-    def test_missing_cross_site_fails_c(self):
-        a, b = self.plays(cross_found=False)
-        code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(item(text, "c_cross"), "FAIL", text)
-        self.assertIn("no cross-slope site", text)
-
-    def test_shallow_cross_site_fails_c(self):
-        a, b = self.plays(cross_min=0.03)
-        code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(item(text, "c_cross"), "FAIL", text)
-
-    def test_slope_self_steer_fails_c(self):
-        a, b = self.plays(e21_car=SteerCar(slope_gain=0.2))
-        code, text = run_main(e21, [a, "--e22", b])
+    # (c) cross
+    def test_cross_drift_with_straight_wheels_fails_c(self):
+        # Codex: > 2 deg / 100 m of heading drift with straight wheels passed on the wheel-angle criterion
+        code, text = run_main(e21, self.session(e21_car=SteerCar(slope_kappa=7e-3)))
         self.assertEqual(item(text, "c_cross"), "FAIL", text)
         self.assertEqual(item(text, "b_flat"), "PASS", text)
+        self.assertRegex(detail(text, "c_cross"), r"heading drift 2\.\d")
+        code, text = run_main(e21, self.session(e21_car=SteerCar(slope_kappa=7e-3), baseline=False))
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+        no_mode(self, text)
 
-    def test_angle_that_follows_the_load_fails_d(self):
-        e22_car = SteerCar(load_gain=math.radians(0.5))
-        a, b = self.plays(e22_car=e22_car)
+    def test_a_baseline_on_another_cross_site_is_not_a_reference(self):
+        a = build_e21(self.path("e21", "play_01"))
+        b = build_e22(self.path("e22", "play_01"))
+        base = build_e21(self.path("base", "play_01"), build="1.8.0.13", cross_start="2100.0 0.0 1500.0")
+        code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+        self.assertIn("baseline site 100 m", text)
+
+    def test_missing_or_shallow_cross_site_is_incomplete_not_mode_b(self):
+        # Codex: no cross site printed "Mode B ... becomes the production candidate"
+        code, text = run_main(e21, self.session(cross_found=False))
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+        self.assertIn("no_site", text)
+        no_mode(self, text)
+        code, text = run_main(e21, self.session(cross_min=0.03))
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+
+    # evidence and identity
+    def test_an_interrupted_play_prints_no_mode(self):
+        # Codex: without the e21 footer the result was INCOMPLETE but still printed "Mode A stays"
+        argv = self.session()
+        drop_footer(argv[0])
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "evidence"), "INCOMPLETE", text)
+        self.assertIn("[the play is not complete]", text)
+        self.assertEqual(code, 3, text)
+        no_mode(self, text)
+
+    def test_contradictory_identities_are_refused(self):
+        # Codex: e21 and e22 with contradictory build and prefab identities still produced CC-07 PASS
+        a = build_e21(self.path("e21", "play_01"))
+        b = build_e22(self.path("e22", "play_01"), header_extra={"ego.prefab": "{0000}Prefabs/Other.et"})
         code, text = run_main(e21, [a, "--e22", b])
+        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+        self.assertIn("differ in ego.prefab", text)
+        c = build_e22(self.path("e22b", "play_01"), header_extra={"engine.build_version": "1.8.0.13"})
+        code, text = run_main(e21, [a, "--e22", c])
+        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+
+    def test_a_play_without_identity_stamps_is_refused(self):
+        a = build_e21(self.path("e21", "play_01"), header_extra={"launch.pin_id": ""})
+        b = build_e22(self.path("e22", "play_01"))
+        code, text = run_main(e21, [a, "--e22", b])
+        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+        self.assertIn("lacks the identity field(s) launch.pin_id", text)
+
+    # step 0
+    def test_wrong_sign_wheel_channels_fail_step0(self):
+        argv = self.session(e21_car=SteerCar(wheel_sign=-1.0), e22_car=SteerCar(wheel_sign=-1.0))
+        code, text = run_main(e21, ["--signal-scale-deg", "1"] + argv)
+        self.assertEqual(item(text, "step0_channel"), "FAIL", text)
+        self.assertEqual(item(text, "d_load"), "INCOMPLETE", text)
+        self.assertEqual(code, 3, text)
+        no_mode(self, text)
+
+    def test_intermittently_lagged_bones_are_not_validated(self):
+        # Codex: 4 of 10 transitions delayed by 4 steps still selected rot (the median lag stayed 0)
+        code, text = run_main(e21, self.session(e22_car=SteerCar(late_changes=4)))
+        self.assertEqual(item(text, "step0_channel"), "PASS", text)
+        self.assertIn("selected ent", text)
+        self.assertRegex(text, r"rot: median error [^;]*; lag <= 1 steps on \d+ of \d+ measurable changes \(max 4\)"
+                               r"[^;]*-> FAIL")
+
+    def test_merged_steps_leave_the_one_step_lag_unresolved(self):
+        code, text = run_main(e21, self.session(e22_car=SteerCar(merge=2)))
+        self.assertEqual(item(text, "step0_channel"), "INCOMPLETE", text)
+        self.assertIn("merged", detail(text, "step0_channel"))
+
+    # (d) load
+    def test_angle_that_follows_the_load_fails_d(self):
+        code, text = run_main(e21, self.session(e22_car=SteerCar(load_gain=math.radians(0.5))))
         self.assertEqual(item(text, "d_load"), "FAIL", text)
 
-    def test_empty_steps_are_no_data(self):
-        a = probe_common.write_synthetic_play(os.path.join(self.base, "e21_empty", "play_01"), common_header("e21"),
+    def test_missing_load_conditions_are_incomplete(self):
+        # Codex: the negative-steer phase removed, one sample per condition, no lateral-load rows and an empty
+        # target list all passed
+        a = build_e21(self.path("e21", "play_01"))
+        base = build_e21(self.path("base", "play_01"), build="1.8.0.13")
+        cases = {"no_negative": dict(steer_load=(0.3,)), "one_row": dict(steady_rows=1),
+                 "no_targets": dict(targets=())}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                b = build_e22(self.path("e22_" + name, "play_01"), **kw)
+                code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
+                self.assertEqual(item(text, "d_load"), "INCOMPLETE", text)
+                self.assertNotIn("Mode A stays", text)
+
+    def test_empty_plays_never_pass(self):
+        a = probe_common.write_synthetic_play(self.path("e21_empty", "play_01"), common_header("e21"),
                                               {"e21_steps": (STEP_COLUMNS, []), "e21_phases": (PHASE_COLUMNS, [])},
                                               FOOTER)
-        b = probe_common.write_synthetic_play(os.path.join(self.base, "e22_empty", "play_01"), common_header("e22"),
+        b = probe_common.write_synthetic_play(self.path("e22_empty", "play_01"), common_header("e22"),
                                               {"e22_steps": (STEP_COLUMNS, []), "e22_phases": (PHASE_COLUMNS, [])},
                                               FOOTER)
         code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(code, 1, text)
-        self.assertNotIn("[PASS] step0", text)
-        self.assertNotIn("[PASS] a_readback", text)
-        self.assertNotIn("[PASS] b_flat", text)
+        self.assertEqual(code, 3, text)
+        self.assertNotIn("] step0_channel: L", text.replace("[INCOMPLETE] step0_channel: L", ""))
+        for name in ("step0_channel", "a_readback", "b_flat", "c_cross", "d_load"):
+            self.assertNotEqual(item(text, name), "PASS", text)
+        no_mode(self, text)
 
     def test_missing_column_is_input_error(self):
         columns = [c for c in STEP_COLUMNS if c != "wa_rot_l"]
-        a = probe_common.write_synthetic_play(os.path.join(self.base, "e21_col", "play_01"), common_header("e21"),
+        a = probe_common.write_synthetic_play(self.path("e21_col", "play_01"), common_header("e21"),
                                               {"e21_steps": (columns, [])}, FOOTER)
         code, text = run_main(e21, [a])
         self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
 
-    # --- CC-08 -------------------------------------------------------------------------------------------------
-    def selected_on_input(self, text, kmh, amp):
-        m = re.search(r"\[(PASS|FAIL)\] input_%gkmh_%g: (M\d)" % (kmh, amp), text)
+
+class Cc08Tests(unittest.TestCase):
+    def setUp(self):
+        self.base = probe_common.make_temp_dir("t0eng_steer_")
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def path(self, *parts):
+        return os.path.join(self.base, *parts)
+
+    def selected(self, text, name):
+        m = re.search(r"\[(PASS|FAIL|INCOMPLETE)\] %s: PARTIAL \(raw engine path\): (M\d)" % re.escape(name), text)
         self.assertIsNotNone(m, text)
         return m.group(1), m.group(2)
 
-    def test_steps_select_the_true_structure(self):
+    def test_steps_select_the_true_structure_but_cc08_stays_incomplete(self):
         cases = (("M1", Actuator(delay=2)), ("M2", Actuator(tau=0.12)), ("M3", Actuator(rate=2.0)))
         for expected, actuator in cases:
             with self.subTest(expected=expected):
-                play = build_e23(os.path.join(self.base, "e23_" + expected, "play_01"), SteerCar(actuator=actuator),
+                play = build_e23(self.path("e23_" + expected, "play_01"), SteerCar(actuator=actuator),
                                  grid="10:0.5x6,1.0x4;30:0.5x6")
                 code, text = run_main(e23, [play])
-                for kmh, amp in ((10, 0.5), (10, 1.0), (30, 0.5)):
-                    tag, structure = self.selected_on_input(text, kmh, amp)
+                for name in ("input_10kmh_0.5", "input_10kmh_1", "input_30kmh_0.5"):
+                    tag, structure = self.selected(text, name)
                     self.assertEqual(structure, expected, text)
-                    self.assertEqual(tag, "PASS", text)
+                    if expected == "M3" and name == "input_10kmh_1":
+                        # 2 /s never reaches 1.0 in the 0.4 s on-time: the gain is not identified, not a pass
+                        self.assertEqual(tag, "INCOMPLETE", text)
+                        self.assertIn("g unresolved", detail(text, name))
+                    else:
+                        self.assertEqual(tag, "PASS", text)
                 self.assertEqual(item(text, "steer_sign"), "PASS", text)
+                self.assertEqual(item(text, "coverage"), "INCOMPLETE", text)
+                self.assertIn("PREVIEW", detail(text, "coverage"))
+                self.assertEqual(item(text, "llc_path"), "INCOMPLETE", text)
+                self.assertEqual(code, 3, text)
 
-    def test_full_grid_passes_with_validated_channel(self):
-        play = build_e23(os.path.join(self.base, "e23", "play_01"), SteerCar(actuator=Actuator(tau=0.05)))
-        e22_play = build_e22(os.path.join(self.base, "e22", "play_01"))
-        code, text = run_main(e23, [play, "--e22", e22_play])
-        self.assertEqual(code, 0, text)
-        self.assertIn("channel_validated: yes", text)
-        self.assertEqual(item(text, "wheel_60kmh_0.5"), "PASS", text)
-        self.assertEqual(item(text, "kappa_30kmh_1"), "PASS", text)
-        self.assertIn("prbs_held_out", text)
-
-    def test_missing_speed_bin_fails(self):
-        play = build_e23(os.path.join(self.base, "e23", "play_01"), drop_speed=60.0)
+    def test_an_unvalidated_channel_without_prbs_is_not_a_pass(self):
+        # Codex: an unvalidated wheel channel and no PRBS returned exit 0 and "CC-08 PASS"
+        play = build_e23(self.path("e23", "play_01"), prbs=False, grid="10:0.5x6;30:0.5x6")
         code, text = run_main(e23, [play])
-        self.assertEqual(item(text, "input_60kmh_0.5"), "FAIL", text)
-        self.assertIn("no data", text)
-        self.assertEqual(code, 1)
+        self.assertEqual(item(text, "wheel_10kmh_0.5"), "INCOMPLETE", text)
+        self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
+        self.assertEqual(code, 3, text)
+        self.assertNotIn("RESULT CC-08: PASS", text)
+
+    def test_a_poorly_predicted_prbs_fails(self):
+        # Codex: arbitrarily poor PRBS predictions were informational only
+        play = build_e23(self.path("e23", "play_01"), prbs_gain=-0.6, grid="10:0.5x6;30:0.5x6")
+        code, text = run_main(e23, [play])
+        self.assertEqual(item(text, "prbs_input_10kmh"), "FAIL", text)
+        self.assertIn("PARTIAL FAIL", detail(text, "raw_engine_path"))
+
+    def test_a_reduced_grid_is_preview_coverage(self):
+        # Codex: a 10:0.5x6 experiment alone returned CC-08 PASS
+        play = build_e23(self.path("e23", "play_01"), grid="10:0.5x6")
+        code, text = run_main(e23, [play])
+        self.assertEqual(item(text, "input_10kmh_0.5"), "PASS", text)
+        self.assertEqual(item(text, "input_30kmh_0.5"), "INCOMPLETE", text)
+        self.assertEqual(item(text, "coverage"), "INCOMPLETE", text)
+        self.assertEqual(code, 3, text)
+
+    def test_a_slowing_run_is_binned_by_its_measured_speed(self):
+        # Codex: a slowing 60 km/h run stayed in the 60 km/h bin
+        play = build_e23(self.path("e23", "play_01"), grid="10:0.5x6;60:0.5x6", slow_kmh={60.0: 30.0})
+        code, text = run_main(e23, [play])
+        self.assertRegex(detail(text, "coverage"), r"off_speed [1-9]")
+        self.assertEqual(item(text, "input_60kmh_0.5"), "INCOMPLETE", text)
+
+    def test_scored_windows_are_disjoint_and_both_signs_are_held_out(self):
+        # Codex: the next window included 3 already-scored rows; even / odd split = + trains, - tests
+        play = build_e23(self.path("e23", "play_01"), grid="10:0.5x6")
+        steps = steer_common.load_steps(probe_common.Play(play), "e23")
+        events = probe_common.Play(play).csv("e23_events", e23.EVENT_COLUMNS)
+        bins, _ = e23.event_windows(steps, events, "input", None, None, DT)
+        windows = bins[(10.0, 0.5)]
+        train, test, n_train, n_test = e23.split_doublets(windows)
+        scored = [id(r) for w in windows for r in w["rows"]]
+        self.assertEqual(len(scored), len(set(scored)))
+        train_rows = set(id(r) for w in train for r in w["rows"])
+        self.assertFalse(train_rows & set(id(r) for w in test for r in w["rows"]))
+        for side in (train, test):
+            self.assertEqual(sorted(set(w["amplitude"] > 0 for w in side)), [False, True])
+        self.assertEqual((n_train, n_test), (3, 3))
+
+    def test_an_alternating_lag_fails_the_parameter_cv(self):
+        # Codex: an alternating-lag case selected M2 at R2 0.995; tau CV about 70% passed (only the gain was gated)
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.05)), grid="10:0.5x8",
+                         alt_tau=(0.04, 0.2))
+        code, text = run_main(e23, [play, "--min-r2", "0.5"])
+        self.assertEqual(item(text, "input_10kmh_0.5"), "FAIL", text)
+        self.assertRegex(detail(text, "input_10kmh_0.5"), r"tau CV (0\.[3-9]|[1-9])")
+
+    def test_rate_limited_gain_comes_from_the_full_simulation(self):
+        # Codex: an exact rate-limited trace with a non-zero initial state and gain 0.6 fitted g 0.9454, SSE 0.265
+        truth = e23.Params(d=1, g=0.6, tau=0.05, q=3.0)
+        windows = []
+        for k, amp in enumerate((0.5, -0.5, 0.5, -0.5)):
+            u = [amp] * 12 + [0.0] * 18
+            w = {"u": u, "n": [1] * 30, "y0": 0.08 * (k + 1), "u_e": [0.0] * 8 + u, "offset": 8, "v": 3.0,
+                 "step_size": 0.5}
+            w["y"] = e23.simulate(w, truth, DT, "M3")
+            windows.append(w)
+        params, total, _ = e23.fit_structure(windows, DT, "M3")
+        self.assertAlmostEqual(params.g, 0.6, delta=0.01)
+        self.assertLess(total, 1e-4)
+
+    def test_merged_steps_fit_the_true_tau(self):
+        # Codex: with two physics steps per row a true tau 0.10 s fitted as 0.050 s
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.10), merge=2),
+                         grid="10:0.5x6")
+        code, text = run_main(e23, [play])
+        m = re.search(r"input_10kmh_0.5: PARTIAL \(raw engine path\): M2 [^;]* tau ([0-9.]+) s", text)
+        self.assertIsNotNone(m, text)
+        self.assertAlmostEqual(float(m.group(1)), 0.10, delta=0.01)
+
+    def test_the_validated_wheel_channel_and_its_signal_scale_are_used(self):
+        e22_play = build_e22(self.path("e22", "play_01"))
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.05)), grid="10:0.5x6;30:0.5x6")
+        code, text = run_main(e23, [play, "--e22", e22_play])
+        self.assertIn("channel_validated: yes: rot", text)
+        self.assertEqual(item(text, "wheel_30kmh_0.5"), "PASS", text)
+        self.assertEqual(item(text, "prbs_wheel_10kmh"), "PASS", text)
+        # Codex: a validated steering0 channel could not be fitted (the reader dropped the signal scale)
+        bones = ("wa_rot_l", "wa_rot_r", "wa_bone_l", "wa_bone_r", "wa_ent_l", "wa_ent_r")
+        blank_columns(e22_play, "e22", bones)
+        blank_columns(play, "e23", bones)
+        code, text = run_main(e23, [play, "--e22", e22_play, "--signal-scale-deg", "%g" % math.degrees(DMAX)])
+        self.assertIn("channel_validated: yes: sig", text)
+        self.assertEqual(item(text, "wheel_30kmh_0.5"), "PASS", text)
 
     def test_wrong_kappa_sign_fails_steer_sign(self):
-        play = build_e23(os.path.join(self.base, "e23", "play_01"), SteerCar(kappa_sign=-1.0),
-                         grid="10:0.5x6;30:0.5x6")
+        play = build_e23(self.path("e23", "play_01"), SteerCar(kappa_sign=-1.0), grid="10:0.5x6;30:0.5x6")
         code, text = run_main(e23, [play])
         self.assertEqual(item(text, "steer_sign"), "FAIL", text)
-        self.assertEqual(code, 1)
 
-    def test_no_events_is_no_data(self):
-        play = build_e23(os.path.join(self.base, "e23", "play_01"), grid="10:0.5x6")
-        events = os.path.join(play, "e23_events.csv")
-        with open(events, "w", encoding="ascii") as handle:
+    def test_no_events_never_pass(self):
+        play = build_e23(self.path("e23", "play_01"), grid="10:0.5x6")
+        with open(os.path.join(play, "e23_events.csv"), "w", encoding="ascii") as handle:
             handle.write(",".join(EVENT_COLUMNS) + "\n")
         code, text = run_main(e23, [play])
-        self.assertEqual(code, 1, text)
+        self.assertEqual(code, 3, text)
         self.assertNotIn("[PASS] input_", text)
 
-    # --- math and contracts ------------------------------------------------------------------------------------
+
+class ContractTests(unittest.TestCase):
     def test_delta_eff_inverts_ackermann(self):
         for delta in (-0.4, -0.1, -0.01, 0.0, 0.003, 0.05, 0.2, 0.45):
             left, right = ackermann(delta)
             self.assertAlmostEqual(steer_common.delta_eff(left, right), delta, delta=max(2e-4, abs(delta) * 0.003))
+
+    def test_strict_verdict_and_combine(self):
+        self.assertIsNone(steer_common.combine([True, None]))
+        self.assertIs(steer_common.combine([True, False, None]), False)
+        self.assertIsNone(steer_common.combine([]))
+        v = steer_common.StrictVerdict("X")
+        v.check("a", False, "")
+        v.check("b", None, "")
+        self.assertEqual(v.result(), probe_common.INCOMPLETE)
 
     def test_contour_heading_puts_the_downhill_on_the_side(self):
         # DC_SteerSiteSearch.GenerateStrips: heading = atan2(side gz/g, -side gx/g); right(h) = (cos h, -sin h)
@@ -584,12 +869,10 @@ class SteerFixtureTests(unittest.TestCase):
             for side in (1, -1):
                 h = math.atan2(side * gz / g, -side * gx / g)
                 right = (math.cos(h), -math.sin(h))
-                # moving to the right goes downhill when side is +1: the gradient . right < 0
                 self.assertAlmostEqual(side * (gx * right[0] + gz * right[1]), -g, places=9)
                 forward = (math.sin(h), math.cos(h))
                 self.assertAlmostEqual(gx * forward[0] + gz * forward[1], 0.0, places=9)
-        source = read(SITE_SOURCE)
-        self.assertIn("Math.Atan2(side * gz / g, -side * gx / g)", source)
+        self.assertIn("Math.Atan2(side * gz / g, -side * gx / g)", read(SITE_SOURCE))
 
     def test_header_keys_and_files_come_from_the_enforce_producer(self):
         sources = "\n".join(read(p) for p in (BASE_SOURCE, SITE_SOURCE, CHANNEL_SOURCE, SELF_SOURCE, LOAD_SOURCE,
@@ -597,13 +880,14 @@ class SteerFixtureTests(unittest.TestCase):
         for key in ("steer.wheelbase_m", "steer.wheel_index_l", "steer.wheel_count", "assist.original",
                     "assist.original_name", "assist.sets", "assist.restores", "assist.at_stop", "steer.sign_used",
                     "site.cross.fallback", "vehicle.noise_steer_sensitivity"):
-            tail = key.split(".")[-1]
-            self.assertIn(tail + "=", sources, key)
+            self.assertIn(key.split(".")[-1] + "=", sources, key)
         for name in (".found=", ".cross_min_signed=", ".cross_max_signed=", ".cross_mean=", ".heading_deg=",
-                     ".grade=", ".obstacle_hits=", ".start=", "first_terrain_reject=", "first_obstacle="):
+                     ".grade=", ".benign_hits=", ".start=", "first_terrain_reject=", "first_obstacle="):
             self.assertIn(name, sources, name)
-        for param in ("m_sFlatSpeedsKmh", "m_sCrossSpeedsKmh", "m_sALatTargets", "m_fBrakeDecelMs2", "m_sStepGrid"):
-            self.assertIn('"%s="' % param, sources, param)
+        runner = read(os.path.join(SOURCES, "DC_ProbeRunner.c")) + read(os.path.join(SOURCES, "DC_LaunchGuard.c"))
+        for key in steer_common.IDENTITY_KEYS:
+            self.assertIn('"%s="' % key, runner, key)
+        self.assertIn('"dt_s="', sources)
         for csv_name in ('probeId + "_steps"', 'probeId + "_phases"', 'PROBE_E23 + "_events"'):
             self.assertIn(csv_name, sources)
         for column in steer_common.STEP_COLUMNS:
@@ -612,6 +896,13 @@ class SteerFixtureTests(unittest.TestCase):
             self.assertIn(column, EVENT_COLUMNS, column)
         for segment in ("hold", "measure", "nocall", "stair", "ref", "alat", "brake", "train", "prbs"):
             self.assertIn('return "%s";' % segment, sources, segment)
+        # the phase names the analysis requires come from the producer, with the explicit assistance modes
+        selfsteer = read(SELF_SOURCE)
+        self.assertIn('"flat_" + flatKmh.ToString(-1, 0), SITE_FLAT, flatKmh, ASSIST_FULL', selfsteer)
+        self.assertIn('"flat_" + assistKmh.ToString(-1, 0) + "_none", SITE_FLAT, assistKmh, ASSIST_NONE', selfsteer)
+        self.assertIn('"cross_" + crossKmh.ToString(-1, 0), SITE_CROSS, crossKmh, ASSIST_FULL', selfsteer)
+        self.assertIn("static const int ASSIST_FULL = 2;", selfsteer)
+        self.assertIn("static const int ASSIST_NONE = 0;", selfsteer)
 
     def test_manifest_and_layer_carry_the_probes(self):
         manifest = read(os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt"))
@@ -620,7 +911,7 @@ class SteerFixtureTests(unittest.TestCase):
             self.assertIn("script src/enfusion/datacapture/" + name, manifest)
         layer = read(os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC_Probes_Arland_Layers",
                                   "default.layer"))
-        self.assertIn('m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e05,e06a,e21,e22,e23"', layer)
+        self.assertIn('m_sPlan "e10,e04,e20,e19,e08a,e01,e02a,e21,e22,e23,e05,e06a"', layer)
         for cls in ("DC_ProbeSelfSteer", "DC_ProbeSteerLoad", "DC_ProbeSteerSteps"):
             self.assertRegex(layer, r'  %s "\{DC4A50B30000000[789]\}" \{' % cls)
 
@@ -628,11 +919,50 @@ class SteerFixtureTests(unittest.TestCase):
         # the overlay convention: GetHandbrake, EngineGetRPMRedline, Update*Configuration and
         # VehicleWheelEffectComponent stay out of every script that reaches a 1.8.0.13 target
         for path in (BASE_SOURCE, SITE_SOURCE, CHANNEL_SOURCE, SELF_SOURCE, LOAD_SOURCE, STEPS_SOURCE):
-            text = read(path)
-            code = "\n".join(line.split("//", 1)[0] for line in text.split("\n"))
+            code = "\n".join(line.split("//", 1)[0] for line in read(path).split("\n"))
             for member in ("GetHandbrake(", "EngineGetRPMRedline(", "Configuration(", "VehicleWheelEffectComponent",
                            "TraceDisplacement("):
                 self.assertNotIn(member, code, "%s in %s" % (member, path))
+
+    def test_site_safety_rules_in_the_source(self):
+        sites = read(SITE_SOURCE)
+        base = read(BASE_SOURCE)
+        code = "\n".join(line.split("//", 1)[0] for line in (sites + base).split("\n"))
+        # Codex: a trusted explicit candidate turned a blocking hit into a warning
+        self.assertNotIn("Trust", code)
+        self.assertIn("IsBenign(", code)
+        self.assertRegex(base, r'\[Attribute\("", UIWidgets\.EditBox, "Obstacle sweeps: [^"]*"[^\]]*\]\s*'
+                               r'protected string m_sBenignColliders;')
+        # vehicle-sized volume sweeps with an initial-overlap check and the stopping envelope
+        for needle in ("new TraceOBB()", "TracePosition(", "TraceMove(", "c.m_fEnvelopeLongM = stopping;"):
+            self.assertIn(needle, code)
+        # the exact per-frame terrain budget and the refusal when one strip costs more
+        self.assertIn("GetStripCost()", code)
+        self.assertIn("more than m_iSiteSamplesPerFrame", code)
+
+    def test_probe_rules_in_the_source(self):
+        base = read(BASE_SOURCE)
+        steps = read(STEPS_SOURCE)
+        load = read(LOAD_SOURCE)
+        channels = read(CHANNEL_SOURCE)
+        # Codex: the axle choice latched before the zero-steer settle; rejected axes stayed unusable
+        settle = base[base.index("case DC_ESteerSegment.SETTLE:"):]
+        settle = settle[:settle.index("EnterSegment(DC_ESteerSegment.ACCEL)")]
+        for needle in ("m_Channels.ArmAxleSelection();", "m_Channels.DisarmAxleSelection();", "GetPostSteer()"):
+            self.assertIn(needle, settle)
+        self.assertIn("AXLE_MAX_TRIES", channels)
+        # Codex: unbounded doublet counts reached BuildEvents before any check
+        plan = steps[steps.index("override bool BuildSteerPlan"):]
+        self.assertLess(plan.index("MAX_EVENTS"), plan.index("BuildEvents("))
+        self.assertIn("!InRange(count, 1, MAX_DOUBLETS)", steps)
+        self.assertIn("m_aALatTargets.IsEmpty()", load)
+        # Codex: load counters counted callbacks, not engine steps
+        self.assertIn("m_iLevelSteps += covered;", load)
+        self.assertIn("m_fBrakeIntegral += error * m_fDt * m_iLastCovered;", load)
+        # the steering probes stay within 15 min of Play together
+        timeouts = [float(re.search(r"TIMEOUT_E2%d_S = (\d+)" % k, read(path)).group(1))
+                    for k, path in ((1, SELF_SOURCE), (2, LOAD_SOURCE), (3, STEPS_SOURCE))]
+        self.assertLessEqual(sum(timeouts), 900)
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -640,10 +970,14 @@ class SteerFixtureTests(unittest.TestCase):
 
 
 class CriteriaStub:
-    def __init__(self, kind, **values):
+    def __init__(self, kind, half_width=22.0, corridor_half=19.0, corridor_points=11, **values):
         self.m_sKind = kind
         self.m_fStepM = enforce_subset.f32(5.0)
         self.m_fGradeWindowM = enforce_subset.f32(20.0)
+        self.m_fHalfWidthM = enforce_subset.f32(half_width)
+        self.m_fCorridorHalfM = enforce_subset.f32(corridor_half)
+        self.m_iCorridorPoints = corridor_points
+        self.m_fTrackHalfM = enforce_subset.f32(0.65)
         defaults = {"m_fGradeMax": 0.005, "m_fGradeWindowMax": 0.01, "m_fGradeWindowMaxAll": 0.02,
                     "m_fCrossMin": 0.0, "m_fCrossMax": 0.01, "m_fCrossAbsMaxAll": 0.02, "m_fCrossTarget": 0.0,
                     "m_fRmsMax": 0.1, "m_fMinSurfaceY": 3.0}
@@ -654,17 +988,28 @@ class CriteriaStub:
     def IsCross(self):
         return self.m_sKind == "cross"
 
+    def offsets(self):
+        """DC_SteerSiteCriteria.OffsetAt for every sample index (0 / 1 the edges, 2 the centre, then the tracks)"""
+        out = [-float(self.m_fHalfWidthM), float(self.m_fHalfWidthM), 0.0]
+        points = max(1, self.m_iCorridorPoints)
+        for k in range(points):
+            position = 0.0
+            if points > 1:
+                position = -float(self.m_fCorridorHalfM) + k * (2 * float(self.m_fCorridorHalfM) / (points - 1))
+            out += [position - float(self.m_fTrackHalfM), position + float(self.m_fTrackHalfM)]
+        return out
+
 
 class SiteStub:
-    def __init__(self, length, half_width, zone_from, zone_to, side=1, min_y=39.0):
+    def __init__(self, length, half_width, zone_from, zone_to, side=1):
         self.m_fLengthM = enforce_subset.f32(length)
         self.m_fHalfWidthM = enforce_subset.f32(half_width)
         self.m_fZoneFromM = enforce_subset.f32(zone_from)
         self.m_fZoneToM = enforce_subset.f32(zone_to)
         self.m_iSide = side
-        self.m_fMinY = enforce_subset.f32(min_y)
         for name in ("m_fGrade", "m_fGradeWindowMax", "m_fGradeWindowMaxAll", "m_fCrossMean", "m_fCrossMin",
-                     "m_fCrossMax", "m_fCrossAbsMaxAll", "m_fRmsM", "m_fScore"):
+                     "m_fCrossMax", "m_fCrossAbsMaxAll", "m_fWideCrossAbsMax", "m_fRmsM", "m_fScore", "m_fMinY",
+                     "m_fMaxY"):
             setattr(self, name, enforce_subset.f32(0.0))
         self.m_bTerrainOk = False
         self.m_sTerrainReason = ""
@@ -680,28 +1025,27 @@ def translated_terrain_math():
     return classes["DC_SteerTerrainMath"]()
 
 
-def strip_samples(length, w, height_fn, step=5.0):
-    n = int(length // step) + 1
-    along = [i * step for i in range(n)]
-    left = [height_fn(a, -w) for a in along]
-    centre = [height_fn(a, 0.0) for a in along]
-    right = [height_fn(a, w) for a in along]
-
-    def arr(values):
-        return enforce_subset.EArray(values, "float")
-
-    return arr(along), arr(left), arr(centre), arr(right)
-
-
 class TerrainMathTests(unittest.TestCase):
     def setUp(self):
         self.math = translated_terrain_math()
 
     def apply(self, site, criteria, height_fn):
-        along, left, centre, right = strip_samples(float(site.m_fLengthM), float(site.m_fHalfWidthM), height_fn)
-        site.m_fMinY = enforce_subset.f32(min(min(left), min(centre), min(right)))
-        self.math.Apply(site, criteria, along, left, centre, right)
+        lateral = criteria.offsets()
+        n = int(float(site.m_fLengthM) // 5.0) + 1
+        along = [i * 5.0 for i in range(n)]
+        heights = [height_fn(a, lat) for a in along for lat in lateral]
+
+        def arr(values):
+            return enforce_subset.EArray([enforce_subset.f32(v) for v in values], "float")
+
+        self.math.Apply(site, criteria, arr(along), arr(lateral), arr(heights))
         return site
+
+    def cross_criteria(self, **kw):
+        values = dict(m_fGradeMax=0.02, m_fGradeWindowMax=0.035, m_fGradeWindowMaxAll=0.06, m_fCrossMin=0.05,
+                      m_fCrossMax=0.12, m_fCrossAbsMaxAll=0.15, m_fCrossTarget=0.065, m_fRmsMax=0.5)
+        values.update(kw)
+        return CriteriaStub("cross", half_width=8.0, corridor_half=5.0, corridor_points=4, **values)
 
     def test_flat_runway_passes(self):
         site = self.apply(SiteStub(1000, 22, 0, 1000), CriteriaStub("flat"), lambda a, lat: 39.0 + 0.00002 * a)
@@ -710,23 +1054,38 @@ class TerrainMathTests(unittest.TestCase):
         self.assertLess(float(site.m_fRmsM), 0.01)
 
     def test_cross_slope_on_the_right_passes_and_the_left_does_not(self):
-        crit = CriteriaStub("cross", m_fGradeMax=0.02, m_fGradeWindowMax=0.035, m_fGradeWindowMaxAll=0.06,
-                            m_fCrossMin=0.05, m_fCrossMax=0.12, m_fCrossAbsMaxAll=0.15, m_fCrossTarget=0.065,
-                            m_fRmsMax=0.5)
-
         def slope(a, lat):          # right side (lateral +) lower by 6%
             return 50.0 - 0.06 * lat + 0.005 * a
 
-        site = self.apply(SiteStub(310, 8, 75, 275, side=1), crit, slope)
+        site = self.apply(SiteStub(310, 8, 75, 275, side=1), self.cross_criteria(), slope)
         self.assertTrue(site.m_bTerrainOk, site.m_sTerrainReason)
-        self.assertAlmostEqual(float(site.m_fCrossMean), 0.06, places=5)
-        self.assertAlmostEqual(float(site.m_fCrossMin), 0.06, places=5)
+        self.assertAlmostEqual(float(site.m_fCrossMean), 0.06, places=4)
+        self.assertAlmostEqual(float(site.m_fCrossMin), 0.06, places=4)
         self.assertAlmostEqual(float(site.m_fGrade), 0.005, places=5)
-        wrong = self.apply(SiteStub(310, 8, 75, 275, side=-1), crit, slope)
+        wrong = self.apply(SiteStub(310, 8, 75, 275, side=-1), self.cross_criteria(), slope)
         self.assertFalse(wrong.m_bTerrainOk)
         self.assertEqual(wrong.m_sTerrainReason, "cross_zone")
 
-    def test_bumpy_and_short_strips_are_refused(self):
+    def test_a_flat_road_between_sloping_shoulders_is_not_a_cross_site(self):
+        # Codex: a 6 m flat road with sloping shoulders passed as a 6% cross-slope (three lateral samples)
+        def road(a, lat):
+            excess = max(0.0, abs(lat) - 3.0)
+            return 50.0 - 0.12 * excess * (1 if lat > 0 else -1) + 0.004 * a
+
+        site = self.apply(SiteStub(310, 8, 75, 275, side=1), self.cross_criteria(), road)
+        self.assertFalse(site.m_bTerrainOk)
+        self.assertIn(site.m_sTerrainReason, ("cross_zone", "cross_all", "rms"))
+        self.assertLess(float(site.m_fCrossMin), 0.05)
+
+    def test_a_sloping_shoulder_inside_the_flat_corridor_is_refused(self):
+        def road(a, lat):
+            return 39.0 - 0.05 * max(0.0, lat - 10.0)
+
+        site = self.apply(SiteStub(1000, 22, 0, 1000), CriteriaStub("flat"), road)
+        self.assertFalse(site.m_bTerrainOk)
+        self.assertIn(site.m_sTerrainReason, ("cross_all", "cross_zone"))
+
+    def test_bumpy_short_and_low_strips_are_refused(self):
         lax = CriteriaStub("flat", m_fGradeWindowMax=1, m_fGradeWindowMaxAll=1, m_fCrossMax=1, m_fCrossAbsMaxAll=1)
         bumpy = self.apply(SiteStub(1000, 22, 0, 1000), lax, lambda a, lat: 39.0 + 0.5 * math.sin(a / 7.0))
         self.assertFalse(bumpy.m_bTerrainOk)
@@ -737,23 +1096,29 @@ class TerrainMathTests(unittest.TestCase):
         low = self.apply(SiteStub(1000, 22, 0, 1000), CriteriaStub("flat"), lambda a, lat: 1.0)
         self.assertEqual(low.m_sTerrainReason, "below_min_surface_y")
 
-    def test_matches_a_python_reference(self):
+    def test_track_cross_matches_a_python_reference(self):
         rng = random.Random(9)
-        crit = CriteriaStub("cross", m_fGradeMax=0.05, m_fGradeWindowMax=0.1, m_fGradeWindowMaxAll=0.1,
-                            m_fCrossMin=0.0, m_fCrossMax=0.2, m_fCrossAbsMaxAll=0.2, m_fCrossTarget=0.065,
-                            m_fRmsMax=5.0)
+        crit = self.cross_criteria(m_fGradeMax=0.05, m_fGradeWindowMax=0.1, m_fGradeWindowMaxAll=0.1,
+                                   m_fCrossMin=0.0, m_fCrossMax=0.2, m_fCrossAbsMaxAll=0.3, m_fRmsMax=5.0)
         coeffs = [rng.uniform(-0.02, 0.02) for _ in range(3)]
 
         def h(a, lat):
-            return 60.0 + coeffs[0] * a - (0.07 + coeffs[1]) * lat + 0.3 * math.sin(a / 40.0 + coeffs[2])
+            return 60.0 + coeffs[0] * a - (0.07 + coeffs[1]) * lat - 0.004 * lat * lat + \
+                0.3 * math.sin(a / 40.0 + coeffs[2])
 
-        site = self.apply(SiteStub(300, 6, 60, 260), crit, h)
-        along, left, centre, right = strip_samples(300.0, 6.0, h)
-        n = len(along)
-        ma = sum(along) / n
-        my = sum(centre) / n
+        site = self.apply(SiteStub(300, 8, 60, 260), crit, h)
+        lateral = crit.offsets()
+        along = [i * 5.0 for i in range(61)]
+        zone = []
+        for a in along:
+            if 60 <= a <= 260:
+                for k in range(crit.m_iCorridorPoints):
+                    left, right = lateral[3 + 2 * k], lateral[4 + 2 * k]
+                    zone.append((h(a, left) - h(a, right)) / (right - left))
+        centre = [h(a, 0.0) for a in along]
+        ma = sum(along) / len(along)
+        my = sum(centre) / len(centre)
         grade = sum((a - ma) * (c - my) for a, c in zip(along, centre)) / sum((a - ma) ** 2 for a in along)
-        zone = [(l_ - r_) / 12.0 for a, l_, r_ in zip(along, left, right) if 60 <= a <= 260]
         self.assertAlmostEqual(float(site.m_fGrade), grade, places=4)
         self.assertAlmostEqual(float(site.m_fCrossMean), sum(zone) / len(zone), places=4)
         self.assertAlmostEqual(float(site.m_fCrossMin), min(zone), places=4)

@@ -1493,7 +1493,8 @@ class FitTests(unittest.TestCase):
         self.assertEqual(launch, fit.PLACEHOLDER_SLIP_LAUNCH_CLUTCH)
         self.assertEqual(fit.enforce_load_check(card), [])
         for change in ({"slip_kp": -0.0001}, {"slip_kp": 0.0101}, {"slip_ki": 0.0}, {"slip_ki": 0.11},
-                       {"brake_drop_rpm_per_s": 0.0}, {"brake_drop_rpm_per_s": 200000.5},
+                       {"brake_drop_rpm_per_s": 0.0}, {"brake_drop_rpm_per_s": 1.0},
+                       {"brake_drop_rpm_per_s": 23999.0}, {"brake_drop_rpm_per_s": 58000.5},
                        {"lock_tolerance_rpm": -1.0}, {"lock_tolerance_rpm": 1000.5}, {"slip_kp": True},
                        {"slip_ki": "0.001"}, {"full_rpm": 1750.0}, {"engage_rpm": 800.0, "stall_guard_rpm": 600.0},
                        {"engage_rpm": 1300.0}):                         # 2600 rpm: above the 2525 rpm upshift
@@ -1501,7 +1502,7 @@ class FitTests(unittest.TestCase):
             bad["gearbox"]["launch_clutch"] = dict(launch, **change)
             self.assertTrue(fit.enforce_load_check(bad), change)
         for edge in ({"slip_kp": 0.0}, {"slip_kp": 0.01}, {"slip_ki": 0.1}, {"lock_tolerance_rpm": 0.0},
-                     {"brake_drop_rpm_per_s": 200000.0}, {"brake_drop_rpm_per_s": 1.0},
+                     {"brake_drop_rpm_per_s": 24000.0}, {"brake_drop_rpm_per_s": 58000.0},
                      {"lock_tolerance_rpm": 1000.0}, {"engage_rpm": 1260.0}, {"full_rpm": 1748.0}):
             ok = json.loads(json.dumps(card))
             ok["gearbox"]["launch_clutch"] = dict(launch, **edge)
@@ -1544,6 +1545,7 @@ class FitTests(unittest.TestCase):
         self.assertIn("return RELEASE_LOOKAHEAD_ENGAGE_FACTOR * m_fEngageRpm;", helper)
         for name, value in (("SLIP_KP_MAX", fit.LAUNCH_SLIP_KP_MAX), ("SLIP_KI_MAX", fit.LAUNCH_SLIP_KI_MAX),
                             ("LOCK_TOLERANCE_MAX_RPM", fit.LAUNCH_LOCK_TOLERANCE_MAX_RPM),
+                            ("BRAKE_DROP_MIN_RPM_PER_S", fit.LAUNCH_BRAKE_DROP_MIN_RPM_PER_S),
                             ("BRAKE_DROP_MAX_RPM_PER_S", fit.LAUNCH_BRAKE_DROP_MAX_RPM_PER_S)):
             self.assertIn("static const float %s = %g;" % (name, value), helper)
         # Codex round 1, LOW: the slip fields outside mode slip. Python refused them while Enforce read past them; now

@@ -43,9 +43,12 @@ deploy is for. The pin (tools/pin, sidecars included) gives its launch path, and
 path's addon, pinlib.DEPLOY_ROOTS[launch path]/DataCapture: /mnt/e/DriveDiT/addons/DataCapture for a stable pin,
 /mnt/e/DriveDiT/addons_c18/DataCapture for the cold pin 1.8.0.13-cold (wb_C18.bat loads it), so a 1.8 Workbench never
 re-saves the 1.9 addon. A cold or experimental pin is refused at the production root, and an experimental pin has no
-deploy root at all. DC_BuildInfo then also stamps TARGET_PIN, TARGET_BUILD_KEY and TARGET_LAUNCH_PATH, and the state
-records target_pin; a target deployed for another pin is refused. Without --target-pin nothing changes: the default
-target, the stamp and every check are as before.
+deploy root at all. The production root takes a --target-pin deploy only for the ACTIVE pin, and the protected roots
+(pinlib.DEPLOY_ROOTS) are checked before --allow-root, so a scratch root that covers one never reaches it; the cold
+root takes only a --target-pin deploy of its own launch path. DC_BuildInfo then also stamps TARGET_PIN,
+TARGET_BUILD_KEY and TARGET_LAUNCH_PATH, and the state records target_pin; a target deployed for another pin is
+refused. Without --target-pin a deploy to the production root is as before: the default target, the stamp bytes and
+every check are unchanged.
 
 Exit codes: 0 success (or dry run), 2 refused, 1 unexpected I/O error.
 """
@@ -70,6 +73,9 @@ ALLOW_ROOT_PREFIXES = ("/mnt/e/", "/dev/shm/")
 # Paths whose device must never receive a deploy: the C: drive, and / (the WSL disk image, which lives on C:).
 FORBIDDEN_DEVICE_PATHS = (("/mnt/c", "the C: drive"), ("/", "the WSL disk image, which lives on the C: drive"))
 DEFAULT_MANIFEST = os.path.join(REPO_ROOT, "addons", "DataCapture", "deploy_manifest.txt")
+# The protected per-pin roots (DD-14a), the same as tools/pin/pinlib.py DEPLOY_ROOTS (the self-test compares them); used
+# only when this file runs without tools/pin next to it, so the protection holds there too.
+DEFAULT_DEPLOY_ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
 
 ADDON_SRC_DIR = "addons/DataCapture/"
 SCRIPT_SRC_DIR = "src/enfusion/datacapture/"
@@ -379,24 +385,48 @@ def load_pin_tools():
     return tuple(mods)
 
 
-def target_pin_reason(real_target, launch_path_id, deploy_roots, allow_roots=()):
-    """Why a deploy for a pin of launch_path_id may not go to real_target, or None (DD-14a).
+def isolation_reason(real_target, deploy_roots, allow_roots=(), target=None):
+    """Why a deploy may not go to real_target under the per-pin root rules, or None (DD-14a; Codex round 1).
 
-    The target must be deploy_roots[launch_path_id]/DataCapture, or lie inside an --allow-root (scratch deploys and
-    the self-test). A non-stable pin is never deployed into the stable (production) root."""
+    deploy_roots is pinlib.DEPLOY_ROOTS ({launch path: root}); target is None (no --target-pin) or
+    {"pin_id", "launch_path_id", "is_active"}. The protected roots are checked FIRST, so an --allow-root that covers
+    one (for example --allow-root /mnt/e/DriveDiT) never reaches it:
+      - the stable (production) root: a deploy without --target-pin is as before; with --target-pin the pin must be
+        a stable pin AND the active one (ACTIVE), and the target its DataCapture;
+      - any other root (the cold addons_c18): only <root>/DataCapture, and only with --target-pin of a pin of that
+        launch path.
+    Outside every protected root: an --allow-root target is a scratch deploy (the self-test); a --target-pin deploy
+    must otherwise go to its launch path's root (an experimental pin has none)."""
+    protected = sorted(((lp, os.path.realpath(r)) for lp, r in deploy_roots.items()), key=lambda kv: -len(kv[1]))
+    for lp, root in protected:
+        if not inside(real_target, root):
+            continue
+        want = os.path.join(root, "DataCapture")
+        if lp == "stable" and target is None:
+            return None
+        if real_target != want:
+            return "%s is inside the protected %s root %s, whose only deploy target is %s" % (real_target, lp, root,
+                                                                                          want)
+        if target is None:
+            return ("the %s root %s takes only a deploy with --target-pin of a %s pin (the stable root is production)"
+                    % (lp, root, lp))
+        if target["launch_path_id"] != lp:
+            return ("%s belongs to %s pins; pin %s is a %s pin and deploys to %s" % (
+                root, lp, target["pin_id"], target["launch_path_id"],
+                os.path.join(deploy_roots.get(target["launch_path_id"], "(no deploy root)"), "DataCapture")))
+        if lp == "stable" and not target["is_active"]:
+            return ("the production root %s takes only the ACTIVE pin; pin %s is not active (an old stable pin runs as "
+                    "a cold pin from its own root)" % (root, target["pin_id"]))
+        return None
     if any(real_target != os.path.realpath(r) and inside(real_target, os.path.realpath(r)) for r in allow_roots):
         return None
-    root = deploy_roots.get(launch_path_id)
-    if root is None:
-        return ("pins of launch path %r have no deploy root (pinlib.DEPLOY_ROOTS; the Experimental Workbench launcher "
-                "is moot since 1.9 stable)" % launch_path_id)
-    stable = deploy_roots.get("stable")
-    if launch_path_id != "stable" and stable and inside(real_target, os.path.realpath(stable)):
-        return ("target %s is in the production root %s, which belongs to the stable pins; a %s pin deploys to %s/"
-                "DataCapture" % (real_target, stable, launch_path_id, root))
-    want = os.path.realpath(os.path.join(root, "DataCapture"))
-    if real_target != want:
-        return "a pin of launch path %s deploys to %s, not %s" % (launch_path_id, want, real_target)
+    if target is not None:
+        root = deploy_roots.get(target["launch_path_id"])
+        if root is None:
+            return ("pins of launch path %r have no deploy root (pinlib.DEPLOY_ROOTS; the Experimental Workbench "
+                    "launcher is moot since 1.9 stable)" % target["launch_path_id"])
+        return "a pin of launch path %s deploys to %s, not %s" % (target["launch_path_id"],
+                                                                os.path.join(root, "DataCapture"), real_target)
     return None
 
 
@@ -585,21 +615,34 @@ def main(argv=None):
             allow_roots.append(root)
     target_info = None
     pin_roots = ()
+    target = None
+    try:
+        pinlib, preflight = load_pin_tools()
+        deploy_roots = dict(pinlib.DEPLOY_ROOTS)
+    except Exception as e:  # a copy of this tool without tools/pin (the self-test's scratch repo)
+        if args.target_pin:
+            return refuse(["--target-pin needs tools/pin, which cannot be loaded: %s" % e])
+        deploy_roots = dict(DEFAULT_DEPLOY_ROOTS)
     if args.target_pin:
         try:
-            pinlib, preflight = load_pin_tools()
-            src = preflight.load_pin_by_id(os.path.abspath(pinlib.win_to_wsl(args.pin_dir)), args.target_pin)
+            pin_dir = os.path.abspath(pinlib.win_to_wsl(args.pin_dir))
+            src = preflight.load_pin_by_id(pin_dir, args.target_pin)
             ident = preflight.pin_identity(src)
+            try:
+                active = pinlib.read_active(pin_dir)
+            except pinlib.PinError:
+                active = None
         except Exception as e:  # PinError, or a pin tool that cannot load: refuse, never deploy unpinned
             return refuse(["--target-pin %s: %s" % (args.target_pin, e)])
         target_info = {"target_pin": src["pin_id"], "target_build_key": ident["build_key"],
                        "target_launch_path": ident["launch_path_id"]}
-        why = target_pin_reason(os.path.realpath(os.path.abspath(args.target)), ident["launch_path_id"],
-                                pinlib.DEPLOY_ROOTS, allow_roots)
-        if why:
-            refusals.append("--target-pin %s: %s" % (args.target_pin, why))
-        elif ident["launch_path_id"] in pinlib.DEPLOY_ROOTS:
-            pin_roots = (pinlib.DEPLOY_ROOTS[ident["launch_path_id"]],)
+        target = {"pin_id": src["pin_id"], "launch_path_id": ident["launch_path_id"],
+                  "is_active": active == src["pin_id"]}
+        if ident["launch_path_id"] in deploy_roots:
+            pin_roots = (deploy_roots[ident["launch_path_id"]],)
+    why = isolation_reason(os.path.realpath(os.path.abspath(args.target)), deploy_roots, allow_roots, target)
+    if why:
+        refusals.append(("--target-pin %s: %s" % (args.target_pin, why)) if args.target_pin else why)
     reason = target_reason(args.target, tuple(allow_roots) + pin_roots)
     if reason:
         refusals.append(reason)

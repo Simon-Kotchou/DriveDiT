@@ -550,19 +550,37 @@ class TargetPinTest(unittest.TestCase):
 
     ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
 
-    def test_target_pin_reason(self):
-        r = deploy_addon.target_pin_reason
-        self.assertIsNone(r("/mnt/e/DriveDiT/addons/DataCapture", "stable", self.ROOTS))
-        self.assertIsNone(r("/mnt/e/DriveDiT/addons_c18/DataCapture", "cold-1.8.0.13", self.ROOTS))
-        self.assertIn("production root", r("/mnt/e/DriveDiT/addons/DataCapture", "cold-1.8.0.13", self.ROOTS))
-        self.assertIn("deploys to /mnt/e/DriveDiT/addons_c18/DataCapture",
-                      r("/mnt/e/DriveDiT/addons_c18/Other", "cold-1.8.0.13", self.ROOTS))
-        self.assertIn("no deploy root", r("/mnt/e/DriveDiT/addons_x19/DataCapture", "experimental", self.ROOTS))
-        self.assertIsNone(r(self.target, "experimental", self.ROOTS, (self.tmp,)))  # scratch deploys
+    def test_isolation_rules(self):
+        r = deploy_addon.isolation_reason
+        roots = {"stable": os.path.join(self.tmp, "addons"), "cold-1.8.0.13": os.path.join(self.tmp, "addons_c18")}
+        prod = os.path.join(roots["stable"], "DataCapture")
+        cold = os.path.join(roots["cold-1.8.0.13"], "DataCapture")
+        active = {"pin_id": "1.9.0.37", "launch_path_id": "stable", "is_active": True}
+        old_stable = {"pin_id": "1.8.0.13", "launch_path_id": "stable", "is_active": False}
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        exp_pin = {"pin_id": "1.9.0.10-exp", "launch_path_id": "experimental", "is_active": False}
+        self.assertIsNone(r(prod, roots))                       # the default deploy, unchanged
+        self.assertIsNone(r(prod, roots, (), active))
+        self.assertIn("takes only the ACTIVE pin", r(prod, roots, (), old_stable))
+        self.assertIn("belongs to stable pins", r(prod, roots, (), cold_pin))
+        self.assertIsNone(r(cold, roots, (), cold_pin))
+        self.assertIn("belongs to cold-1.8.0.13 pins", r(cold, roots, (), active))
+        self.assertIn("only deploy target is", r(os.path.join(roots["cold-1.8.0.13"], "Other"), roots, (), cold_pin))
+        # an --allow-root that covers the protected roots never reaches them
+        wide = (self.tmp,)
+        self.assertIn("takes only a deploy with --target-pin", r(cold, roots, wide))
+        self.assertIn("takes only the ACTIVE pin", r(prod, roots, wide, old_stable))
+        self.assertIn("belongs to stable pins", r(prod, roots, wide, cold_pin))
+        # outside every protected root
+        scratch = os.path.join(self.tmp, "scratch", "DataCapture")
+        self.assertIsNone(r(scratch, roots, wide, exp_pin))
+        self.assertIn("no deploy root", r(scratch, roots, (), exp_pin))
+        self.assertIn("deploys to %s" % cold, r(scratch, roots, (), cold_pin))
 
     def test_pinlib_and_launchers_agree(self):
         pinlib, _ = deploy_addon.load_pin_tools()
         self.assertEqual(pinlib.DEPLOY_ROOTS, self.ROOTS)
+        self.assertEqual(deploy_addon.DEFAULT_DEPLOY_ROOTS, self.ROOTS)
 
     def buildinfo(self):
         with open(os.path.join(self.target, SCRIPT_DST, "DC_BuildInfo.c"), encoding="ascii") as f:
@@ -591,6 +609,28 @@ class TargetPinTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertNotIn("TARGET_", self.buildinfo())
         self.assertNotIn("target pin", out)
+
+    def test_active_pointer_is_read_with_a_target_pin(self):
+        pins = os.path.join(self.tmp, "pins")
+        os.makedirs(pins)
+        minimal_pin(pins, "9.9.0.1")
+        minimal_pin(pins, "9.9.0.2")
+        with open(os.path.join(pins, "ACTIVE"), "w") as f:
+            f.write("9.9.0.2\n")
+        # inside the scratch root the active flag does not matter; the pure rule is tested above. Here: the stamp
+        # records the pin, and an ACTIVE file is read without error.
+        rc, out = self.run_tool("--target-pin", "9.9.0.1", "--pin-dir", pins)
+        self.assertEqual(rc, 0, out)
+
+    def test_wide_allow_root_cannot_reach_the_cold_root(self):
+        # Runs only where E: is mounted; --dry-run, and the cold root's parent need not exist (nothing is written).
+        if deploy_addon.forbidden_device_reason(os.path.realpath("/mnt/e/DriveDiT"), "target") or \
+                not os.path.isdir("/mnt/e/DriveDiT"):
+            self.skipTest("/mnt/e/DriveDiT is not on a mounted E: drive here")
+        rc, out = self.run_tool("--dry-run", "--allow-root", "/mnt/e/DriveDiT",
+                                target="/mnt/e/DriveDiT/addons_c18/DataCapture", allow_root=False)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("takes only a deploy with --target-pin", out)
 
     def test_bad_target_pin_refused_before_writing(self):
         for args in (("--target-pin", "../x", "--pin-dir", self.tmp), ("--target-pin", "9.9.0.3", "--pin-dir", self.tmp)):

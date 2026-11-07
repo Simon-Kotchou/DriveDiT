@@ -218,6 +218,25 @@ class LauncherTests(unittest.TestCase):
         for name in ("client_R1_i01.bat", "wb_R1.bat", "wb_C18.bat"):
             self.assertNotIn("-noBackend", resolved_start(name), name)
 
+    def test_temp_and_tmp_on_e_before_wsl_and_start(self):
+        # R1: a normal Windows environment points TEMP/TMP at the C: profile.
+        for name, want in (("wb_C18.bat", "E:\\DriveDiT\\tmp\\wb_c18"), ("client_C18_i01.bat", "E:\\DriveDiT\\tmp\\c18_i01")):
+            text, env = bat(name), bat_vars(name)
+            self.assertEqual((env["TEMP"], env["TMP"]), (want, want), name)
+            self.assertLess(text.index('set "TEMP='), text.index("wsl.exe -d"), name)
+            self.assertLess(text.index('set "TMP='), text.index('start "" '), name)
+            self.assertIn('if not exist "%DD_TEMP%\\" mkdir "%DD_TEMP%"', text)
+            self.assertIn('if /I not "%DD_TEMP:~0,3%"=="E:\\" (', text)
+            self.assertLess(text.index('if not exist "%DD_TEMP%\\" ('), text.index('set "TEMP='))
+
+    def test_client_copies_the_record_into_its_profile(self):
+        text = bat("client_C18_i01.bat")
+        self.assertIn('set "DC_DC_LAUNCH=%DC_PROFILE%\\profile\\dc_launch"', text)
+        fc = 'fc /b "%DD_LAUNCHES%\\launch_%LID%.json" "%DC_DC_LAUNCH%\\launch_%LID%.json"'
+        self.assertIn(fc, text)
+        self.assertLess(text.index(fc), text.index('start "" '))
+        self.assertEqual(bat_vars("client_C18_i01.bat")["DC_DC_LAUNCH"], "E:\\DriveDiT\\client_profiles\\c18_i01\\profile\\dc_launch")
+
     def test_crlf(self):
         for name in ("wb_C18.bat", "client_C18_i01.bat"):
             with open(os.path.join(LAUNCH_DIR, name), "rb") as fh:

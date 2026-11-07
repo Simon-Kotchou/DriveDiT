@@ -16,7 +16,8 @@ rem    path. On success it writes E:\DriveDiT\pin\launches\launch_ID.json (dd-la
 rem    stable, pin_channel cold, the 1.8.0.13 build_key) and prints only the launch id.
 rem 3. Copies that record to WB_PROFILE\profile\dc_launch\launch_ID.json and checks the copy
 rem    byte for byte, as wb_R1.bat does, for DC_LaunchGuard.
-rem 4. Starts the copy's Workbench exe directly with its own profile and its own addon copy
+rem 4. Sets TEMP and TMP to E:\DriveDiT\tmp\wb_c18 (before WSL and the exe start).
+rem 5. Starts the copy's Workbench exe directly with its own profile and its own addon copy
 rem    (E:\DriveDiT\addons_c18, deployed with deploy_addon.py --target-pin 1.8.0.13-cold), so a
 rem    1.8 Workbench never re-saves the 1.9 addon in E:\DriveDiT\addons.
 rem
@@ -37,6 +38,7 @@ set "GAME_ADDONS=E:\DriveDiT\pin\1.8.0.13-run\game\addons"
 set "DD_PIN=/mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json"
 set "DD_LAUNCH_PATH=cold-1.8.0.13"
 set "DD_LAUNCHES=E:\DriveDiT\pin\launches"
+set "DD_TEMP=E:\DriveDiT\tmp\wb_c18"
 set "DD_ERR="
 
 rem /FO CSV: the default table format truncates image names to 25 characters.
@@ -57,6 +59,20 @@ if not exist "%WB_GPROJ%" (
   set "DD_ERR=Missing %WB_GPROJ%. Deploy the addon with deploy_addon.py --target-pin 1.8.0.13-cold first."
   goto :fail
 )
+
+rem TEMP and TMP on E: (R1: a cold run writes nothing to C:, and a normal Windows environment points both at
+rem the user's C: profile). The directory is created if missing; the launch stops unless it exists and is on E:.
+if not exist "%DD_TEMP%\" mkdir "%DD_TEMP%"
+if not exist "%DD_TEMP%\" (
+  set "DD_ERR=Cannot create the temp dir %DD_TEMP%. Nothing was started."
+  goto :fail
+)
+if /I not "%DD_TEMP:~0,3%"=="E:\" (
+  set "DD_ERR=The temp dir %DD_TEMP% is not on E:. Nothing was started."
+  goto :fail
+)
+set "TEMP=%DD_TEMP%"
+set "TMP=%DD_TEMP%"
 
 rem WSL_UTF8=1 and the two findstr filters: see wb_R1.bat. Only a well-formed wb launch id reaches LID.
 set "WSL_UTF8=1"

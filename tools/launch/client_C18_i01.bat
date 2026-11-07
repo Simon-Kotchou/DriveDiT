@@ -9,6 +9,8 @@ rem   - the preflight checks the EXPLICIT cold pin E:\DriveDiT\pin\pin_1.8.0.13-
 rem     --launch-path cold-1.8.0.13 (the copy, checked against its pin and SHA256SUMS hashes);
 rem   - GAME_DIR is the working copy E:\DriveDiT\pin\1.8.0.13-run\game; profile, logs and the
 rem     addon copy (E:\DriveDiT\addons_c18) are its own;
+rem   - TEMP and TMP are E:\DriveDiT\tmp\c18_i01, and the launch record is copied into the profile's
+rem     dc_launch\ folder and byte-checked before the start, as wb_R1.bat does;
 rem   - -noBackend is ALWAYS passed: after 1.9 is live a 1.8 client may be refused or degraded by
 rem     the production backend (7.1 [inference, UNVERIFIED]); the cold pin records it in
 rem     client_args_required.
@@ -29,6 +31,7 @@ set "DC_CFG=E:\DriveDiT\tools\cfg\engine_R1.conf"
 set "DD_PIN=/mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json"
 set "DD_LAUNCH_PATH=cold-1.8.0.13"
 set "DD_LAUNCHES=E:\DriveDiT\pin\launches"
+set "DD_TEMP=E:\DriveDiT\tmp\%DD_INSTANCE%"
 rem ---- per-build settings (trial-ladder.md 8.2) ----
 set "DC_ADDONS_DIR=E:\DriveDiT\addons_c18"
 set "DC_ADDON_GUID=88BEF4187E0D2DFC"
@@ -53,6 +56,20 @@ if not exist "%DC_ADDONS_DIR%\" (
   goto :fail
 )
 
+rem TEMP and TMP on E: (R1: a cold run writes nothing to C:, and a normal Windows environment points both at
+rem the user's C: profile). The directory is created if missing; the launch stops unless it exists and is on E:.
+if not exist "%DD_TEMP%\" mkdir "%DD_TEMP%"
+if not exist "%DD_TEMP%\" (
+  set "DD_ERR=Cannot create the temp dir %DD_TEMP%. Nothing was started."
+  goto :fail
+)
+if /I not "%DD_TEMP:~0,3%"=="E:\" (
+  set "DD_ERR=The temp dir %DD_TEMP% is not on E:. Nothing was started."
+  goto :fail
+)
+set "TEMP=%DD_TEMP%"
+set "TMP=%DD_TEMP%"
+
 rem WSL_UTF8=1 and the two findstr filters: see client_R1_i01.bat. Only a well-formed client launch id reaches LID.
 set "WSL_UTF8=1"
 set "LID="
@@ -65,6 +82,27 @@ if not defined LID (
 )
 if not exist "%DD_LAUNCHES%\launch_%LID%.json" (
   set "DD_ERR=PIN CHECK FAILED. No launch record for id %LID% in %DD_LAUNCHES%."
+  goto :fail
+)
+
+rem Copy the record into the client profile for DC_LaunchGuard, as wb_R1.bat does for Workbench: $profile is the
+rem -profile folder plus \profile (measured for Workbench; UNVERIFIED for the client until its first start, when the
+rem run header's launch.profile_abs shows it). The id is new for every launch, so an existing copy is refused, and
+rem fc /b proves the copy is identical.
+set "DC_DC_LAUNCH=%DC_PROFILE%\profile\dc_launch"
+if not exist "%DC_DC_LAUNCH%\" mkdir "%DC_DC_LAUNCH%"
+if not exist "%DC_DC_LAUNCH%\" (
+  set "DD_ERR=Cannot create %DC_DC_LAUNCH%. The client was not started."
+  goto :fail
+)
+if exist "%DC_DC_LAUNCH%\launch_%LID%.json" (
+  set "DD_ERR=A copy of launch record %LID% already exists in %DC_DC_LAUNCH%. The client was not started."
+  goto :fail
+)
+copy "%DD_LAUNCHES%\launch_%LID%.json" "%DC_DC_LAUNCH%\launch_%LID%.json" >nul
+fc /b "%DD_LAUNCHES%\launch_%LID%.json" "%DC_DC_LAUNCH%\launch_%LID%.json" >nul 2>nul
+if errorlevel 1 (
+  set "DD_ERR=Could not copy launch record %LID% to %DC_DC_LAUNCH% - the copy is missing or differs. The client was not started."
   goto :fail
 )
 

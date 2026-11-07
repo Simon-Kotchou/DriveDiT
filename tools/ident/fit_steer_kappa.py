@@ -67,10 +67,11 @@ WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c 
                an automatic card on an ego with a manual gearbox (DC_LLCv1.CheckEgoGearbox). gearbox.launch_clutch
                (DD-14c, optional; DC_LaunchClutch.c) is the launch clutch E-01 drove with, read from its run header's
                launch_clutch.* block (DC_ProbeActuator.AppendGearboxLines) when the play has one and the gearbox is
-               scripted: llc_v1 ramps the clutch the same way. With it go the scripted gears' measured m/s per 1000
-               rpm (gearbox.scripted_mps_per_krpm, from speed_per_krpm), which a ramp needs: each downshift speed must
-               be at least full_rpm + 50 rpm in the gear it shifts down from. A play before DD-14c has none, and the
-               card then has none (mode off, the 1.8 sequence).
+               scripted: llc_v1 drives the clutch the same way. With it go the scripted gears' measured m/s per 1000
+               rpm (gearbox.scripted_mps_per_krpm, from speed_per_krpm), which a ramp or slip needs: each downshift
+               speed must be at least full_rpm + 50 rpm in the gear it shifts down from, and for slip (DD-14d) each
+               upshift speed at least 2 x engage_rpm in the gear it shifts up into. A play before DD-14c has none, and
+               the card then has none (mode off, the 1.8 sequence).
   llc_v1       the controller parameters of DC_LLCv1 (LLC_DEFAULTS) with the fitted throttle and brake gains; the llc
                steering rate limiter is the identity (CC-08: it never stacks with an engine limit).
 
@@ -78,8 +79,8 @@ THE CARD (drivedit.vehicle_card/1): card_id, vehicle, prefab, status (identified
 identification_sessions (<probe>/<launch_id>/<play>), signs, gear_indices_forward / gear_index_neutral /
 gear_index_reverse (read by the DD-5-min reader for dir_state), gearbox, kappa_ss, actuator {raw_engine_path,
 full_llc_path}, longitudinal, llc_v1, mode_a, fit. llc_v1 (DC_VehicleCard) reads signs, gearbox.mode and
-clutch_dip_s, the optional gearbox.launch_clutch object (LAUNCH_CLUTCH_KEYS, every one required when it is present;
-absent = mode off; ramp only with a scripted gearbox), the kappa_ss and gearbox arrays, actuator.raw_engine_path
+clutch_dip_s, the optional gearbox.launch_clutch object (LAUNCH_CLUTCH_KEYS, every one required when it is present, and
+in mode slip LAUNCH_CLUTCH_SLIP_KEYS too; absent = mode off; ramp and slip only with a scripted gearbox), the kappa_ss and gearbox arrays, actuator.raw_engine_path
 input_echo, input_shaping and steer_rate_limit_per_s, and llc_v1; the keys it scans by name (ENGINE_SCANNED_KEYS: the
 number arrays, identification_sessions, build_key and input_echo) occur once in the file, launch_clutch
 (ENGINE_OPTIONAL_SCANNED_KEYS) at most once, and no number uses an exponent (string.ToFloat).
@@ -98,8 +99,10 @@ llc_v1 accepts it only for qualification (use_class dev or probe) and refuses it
 included. Under a pin other than PLACEHOLDER_MEASURED_PIN (1.8.0.13, where those values were measured) the same values
 are marked carried over and provisional (note and a "provisional" object: re-fit them from E-01 / E-02a on that pin).
 --launch-clutch ramp adds gearbox.launch_clutch in mode ramp with DC_LaunchClutchConfig's defaults (DD-14c;
-PLACEHOLDER_LAUNCH_CLUTCH, not identified: the 1.9.0.37 powertrain stalls at a clutch-1 drive-off): the provisional
-1.9.0.37 card. The 1.8.0.13 card has none, so its bytes stay those its sessions are stamped with.
+PLACEHOLDER_LAUNCH_CLUTCH, not identified: the 1.9.0.37 powertrain stalls at a clutch-1 drive-off); --launch-clutch slip
+adds it in mode slip with DC_LaunchClutchConfig.Slip()'s values (DD-14d; PLACEHOLDER_SLIP_LAUNCH_CLUTCH, designed on
+the model fitted to the first 1.9.0.37 ramp Play, where the ramp chattered): the provisional 1.9.0.37 card. The 1.8.0.13
+card has none, so its bytes stay those its sessions are stamped with.
 
 Sealed map: any path or run header naming eden / everon is refused with exit 2 before anything is fitted.
 Exit codes: 0 card built (and written or equal), 1 --check found a difference, 2 refused (input, fit or path).
@@ -164,12 +167,31 @@ INPUT_SHAPINGS = ("echo", "rate_limit", "lag", "unknown")
 # 0 <= stall_guard_rpm < engage_rpm < full_rpm <= LAUNCH_RPM_MAX, couple_time_s and uncouple_time_s in
 # (0, LAUNCH_TIME_MAX_S], restart_cooldown_s in [0, LAUNCH_TIME_MAX_S], restart_on_stall a bool; mode ramp only with a
 # scripted gearbox, and there every downshift outside the band (below). Absent = mode off (the 1.8 sequence). The
-# E-01 run header carries the same fields as launch_clutch.*
-LAUNCH_CLUTCH_MODES = ("off", "ramp")
+# E-01 run header carries the same fields as launch_clutch.*. Mode slip (DD-14d) adds LAUNCH_CLUTCH_SLIP_KEYS, required
+# in mode slip and absent otherwise: slip_kp in [0, LAUNCH_SLIP_KP_MAX], slip_ki in (0, LAUNCH_SLIP_KI_MAX],
+# lock_tolerance_rpm in [0, LAUNCH_LOCK_TOLERANCE_MAX_RPM], brake_drop_rpm_per_s in [LAUNCH_BRAKE_DROP_MIN_RPM_PER_S,
+# LAUNCH_BRAKE_DROP_MAX_RPM_PER_S] (DC_LaunchClutchConfig SLIP_KP_MAX, SLIP_KI_MAX, LOCK_TOLERANCE_MAX_RPM,
+# BRAKE_DROP_MIN_RPM_PER_S, BRAKE_DROP_MAX_RPM_PER_S); full_rpm is the
+# rpm a slipping clutch holds
+LAUNCH_CLUTCH_MODES = ("off", "ramp", "slip")
+LAUNCH_CLUTCH_ACTIVE_MODES = ("ramp", "slip")
 LAUNCH_CLUTCH_KEYS = ("mode", "engage_rpm", "full_rpm", "couple_time_s", "uncouple_time_s", "stall_guard_rpm",
                       "restart_on_stall", "restart_cooldown_s")
+LAUNCH_CLUTCH_SLIP_KEYS = ("slip_kp", "slip_ki", "lock_tolerance_rpm", "brake_drop_rpm_per_s")
 LAUNCH_RPM_MAX = 10000.0
 LAUNCH_TIME_MAX_S = 10.0
+LAUNCH_SLIP_KP_MAX = 0.01
+LAUNCH_SLIP_KI_MAX = 0.1
+LAUNCH_LOCK_TOLERANCE_MAX_RPM = 1000.0
+# brake_drop_rpm_per_s in [MIN, MAX] (DC_LaunchClutchConfig, DD-14d round 4): the nominal plant's brake sweep stalls
+# below 16000 rpm/s and keeps stall_guard_rpm + 100 from 22000; the floor is 1.5 x the stall edge, the ceiling 2 x
+# the fit
+LAUNCH_BRAKE_DROP_MIN_RPM_PER_S = 24000.0
+LAUNCH_BRAKE_DROP_MAX_RPM_PER_S = 58000.0
+# Mode slip on a scripted gearbox: each upshift speed, in the gear it shifts up into, at least this x engage_rpm (the
+# release lookahead ceiling, DC_LaunchClutchConfig.RELEASE_LOOKAHEAD_ENGAGE_FACTOR), so an upshift's synchronisation
+# never opens the coupled clutch
+LAUNCH_LOOKAHEAD_ENGAGE_FACTOR = 2.0
 # Mode ramp on a scripted gearbox (DC_VehicleCard.CheckLaunchDownshifts): the card's form of the probe kit's
 # full_rpm < downshift rpm. llc_v1 shifts by speed, so gearbox.scripted_mps_per_krpm holds each scripted gear's measured
 # m/s per 1000 rpm, and each downshift speed, in the gear it shifts down from, must be at least full_rpm +
@@ -250,6 +272,36 @@ PLACEHOLDER_CLUTCH_DIP_S = 0.0
 PLACEHOLDER_LAUNCH_CLUTCH = {"mode": "ramp", "engage_rpm": 1100.0, "full_rpm": 1700.0, "couple_time_s": 0.85,
                              "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
                              "restart_cooldown_s": 1.0}
+# The launch clutch of the 1.9.0.37 placeholder since DD-14d (--launch-clutch slip): DC_LaunchClutchConfig.Slip(). The
+# first 1.9.0.37 Play with the ramp (launch 20261106T194516Z-wb-ab6a, e01 play_01) launched without a stall but opened
+# the clutch 2 times at throttle 0.5, 4 at 0.3 and 3 at 0.4 before c = 1. Fitted on its launches
+# (tools/ident/fit_launch_clutch.py), the clutch moves the rpm by about 965 rpm per step at c = 1, so the ramp's band is a
+# loop gain of 1.6 per step. Mode slip holds 1400 rpm while slipping (PI kp 0.0003 per rpm, ki 0.001 per rpm s within
+# the couple / uncouple rates 0.85 / 0.45 s), couples fully within 100 rpm of the driveline rpm and opens at 1100 rpm;
+# a brake opens it when 29000 rpm/s (117.6 Nm / 0.0388 kg m2, the worst fall of a coupled engine; x the brake / 0.8
+# below a brake of 0.3) over the call could reach 1100 rpm.
+PLACEHOLDER_SLIP_LAUNCH_CLUTCH = {"mode": "slip", "engage_rpm": 1100.0, "full_rpm": 1400.0, "couple_time_s": 0.85,
+                                  "uncouple_time_s": 0.45, "stall_guard_rpm": 600.0, "restart_on_stall": True,
+                                  "restart_cooldown_s": 1.0, "slip_kp": 0.0003, "slip_ki": 0.001,
+                                  "lock_tolerance_rpm": 100.0, "brake_drop_rpm_per_s": 29000.0}
+PLACEHOLDER_SLIP_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14d, --launch-clutch slip): mode slip with the "
+                                        "DC_LaunchClutchConfig.Slip() values, designed on the powertrain model "
+                                        "fitted to the first 1.9.0.37 ramp Play (launch 20261106T194516Z-wb-ab6a, "
+                                        "e01 play_01; tools/ident/fit_launch_clutch.py), where the DD-14c ramp "
+                                        "launched without a stall but chattered (2 openings at throttle 0.5, 4 at "
+                                        "0.3); not identified. It holds full_rpm 1400 while slipping and couples "
+                                        "fully once the engine is within 100 rpm of the driveline rpm (speed / "
+                                        "scripted_mps_per_krpm) on two callbacks under drive, or once c reaches 1 "
+                                        "without a brake; a brake opens it when "
+                                        "the fall it could cause over the callback could reach engage_rpm: the "
+                                        "worst fall of a coupled engine, brake_drop_rpm_per_s 29000 (117.6 Nm / "
+                                        "0.0388 kg m2, the fit) at a brake of 0.3 or more, x the brake / 0.8 below. "
+                                        "scripted_mps_per_krpm: E-01 run 3's measured "
+                                        "1.54871 / 2.772066 / 4.169103 m/s per 1000 rpm in gears 2..4 (1.8.0.13, the "
+                                        "run-3 fit's gearbox.detail.speed_per_krpm; 1.9.0.37 measured 1.540 / 2.755 "
+                                        "/ 4.13 in that Play), carried over with the shift speeds; the downshifts lie "
+                                        "at about 1804 and 1799 rpm, above full_rpm 1400 + 50, the upshifts at about "
+                                        "2525 and 2998 rpm, above 2 x engage_rpm 2200")
 PLACEHOLDER_LAUNCH_CLUTCH_BASIS = (". launch_clutch (DD-14c, --launch-clutch ramp): mode ramp with the "
                                    "DC_LaunchClutchConfig defaults, not identified, because the 1.9.0.37 powertrain "
                                    "stalls at a clutch-1 drive-off (launch 20261106T052424Z-wb-addc) where 1.8.0.13 "
@@ -480,17 +532,19 @@ def clutch_dip(play):
 
 def launch_clutch_of(play):
     """The launch clutch E-01 drove with (DD-14c): its run header's launch_clutch.* block (the probe kit's
-    DC_ProbeActuator.AppendGearboxLines, the card's field names), as the card's gearbox.launch_clutch, so llc_v1 ramps
-    the clutch the same way. None for a play before DD-14c (no block): the card then has none, mode off."""
+    DC_ProbeActuator.AppendGearboxLines, the card's field names), as the card's gearbox.launch_clutch, so llc_v1 drives
+    the clutch the same way: the keys of its mode (launch_clutch_keys; a DD-14c header has no slip fields, and a ramp
+    needs none). None for a play before DD-14c (no block): the card then has none, mode off."""
     header = play.header
     prefix = HEADER_LAUNCH_CLUTCH + "."
     if prefix + "mode" not in header:
         return None
-    missing = [k for k in LAUNCH_CLUTCH_KEYS if prefix + k not in header]
+    keys = launch_clutch_keys(header[prefix + "mode"])
+    missing = [k for k in keys if prefix + k not in header]
     if missing:
         raise Refusal("%s: the run header's launch_clutch block misses %s" % (play.dir, ", ".join(missing)))
     out = {"mode": header[prefix + "mode"]}
-    for key in LAUNCH_CLUTCH_KEYS[1:]:
+    for key in keys[1:]:
         text = header[prefix + key]
         if key == "restart_on_stall":
             if text not in ("0", "1"):
@@ -1048,9 +1102,10 @@ def build_identified(args):
             # the scripted gears' measured m/s per 1000 rpm, which a ramp is checked against (CheckLaunchDownshifts)
             per_krpm = gear_detail.get("speed_per_krpm") or {}
             missing = [g for g in gearbox["scripted_gears"] if str(g) not in per_krpm]
-            if missing and launch_clutch["mode"] == "ramp":
-                raise Refusal("E-01's launch clutch is a ramp, but E-01 measured no speed per 1000 rpm in scripted "
-                              "gear(s) %s: a ramp card needs it for every scripted gear" % missing)
+            if missing and launch_clutch["mode"] in LAUNCH_CLUTCH_ACTIVE_MODES:
+                raise Refusal("E-01's launch clutch is in mode %s, but E-01 measured no speed per 1000 rpm in scripted "
+                              "gear(s) %s: a %s card needs it for every scripted gear"
+                              % (launch_clutch["mode"], missing, launch_clutch["mode"]))
             if not missing:
                 gearbox["scripted_mps_per_krpm"] = [per_krpm[str(g)] for g in gearbox["scripted_gears"]]
             gearbox["launch_clutch"] = launch_clutch
@@ -1099,11 +1154,12 @@ def build_placeholder(args):
     card = placeholder_base(args)
     if args.pin_id != PLACEHOLDER_MEASURED_PIN:
         card = carried_over(card, args.pin_id)
-    if args.launch_clutch == "ramp":
+    if args.launch_clutch in LAUNCH_CLUTCH_ACTIVE_MODES:
+        slip = args.launch_clutch == "slip"
         gearbox = card["gearbox"]
-        gearbox["basis"] += PLACEHOLDER_LAUNCH_CLUTCH_BASIS
+        gearbox["basis"] += PLACEHOLDER_SLIP_LAUNCH_CLUTCH_BASIS if slip else PLACEHOLDER_LAUNCH_CLUTCH_BASIS
         gearbox["scripted_mps_per_krpm"] = list(PLACEHOLDER_MPS_PER_KRPM)
-        gearbox["launch_clutch"] = dict(PLACEHOLDER_LAUNCH_CLUTCH)
+        gearbox["launch_clutch"] = dict(PLACEHOLDER_SLIP_LAUNCH_CLUTCH if slip else PLACEHOLDER_LAUNCH_CLUTCH)
     return card
 
 
@@ -1264,20 +1320,29 @@ def enforce_load_check(card):
     return out
 
 
+def launch_clutch_keys(mode):
+    """The keys of a gearbox.launch_clutch object (and of the run header block) in a mode: LAUNCH_CLUTCH_KEYS, and in
+    mode slip (DD-14d) LAUNCH_CLUTCH_SLIP_KEYS after them."""
+    return LAUNCH_CLUTCH_KEYS + (LAUNCH_CLUTCH_SLIP_KEYS if mode == "slip" else ())
+
+
 def launch_clutch_violations(launch, mode):
-    """DC_LaunchClutchConfig.Check and DC_VehicleCard.CheckGearbox's launch clutch rules (DD-14c) on a
+    """DC_LaunchClutchConfig.Check and DC_VehicleCard.CheckGearbox's launch clutch rules (DD-14c, DD-14d) on a
     gearbox.launch_clutch object as written; mode is the card's gearbox.mode. None = absent (mode off): none. Every key
-    of LAUNCH_CLUTCH_KEYS is required (DC_VehicleCard.ReadLaunchClutch) and no other key is allowed (a misspelt key
-    would be ignored by the engine)."""
+    of its mode (launch_clutch_keys) is required (DC_VehicleCard.ReadLaunchClutch) and no other key is allowed (a
+    misspelt key would be ignored by the engine, and the slip fields outside mode slip too)."""
     if launch is None:
         return []
-    if not isinstance(launch, dict) or sorted(launch) != sorted(LAUNCH_CLUTCH_KEYS):
-        return ["gearbox.launch_clutch must be an object with exactly the keys %s" % ", ".join(LAUNCH_CLUTCH_KEYS)]
-    if launch["mode"] not in LAUNCH_CLUTCH_MODES:
-        return ["gearbox.launch_clutch.mode %r is neither off nor ramp" % (launch["mode"],)]
+    if not isinstance(launch, dict) or launch.get("mode") not in LAUNCH_CLUTCH_MODES:
+        return ["gearbox.launch_clutch.mode %r is none of off, ramp and slip"
+                % ((launch.get("mode") if isinstance(launch, dict) else launch),)]
+    keys = launch_clutch_keys(launch["mode"])
+    if sorted(launch) != sorted(keys):
+        return ["gearbox.launch_clutch in mode %s must be an object with exactly the keys %s"
+                % (launch["mode"], ", ".join(keys))]
     if not isinstance(launch["restart_on_stall"], bool):
         return ["gearbox.launch_clutch.restart_on_stall %r is not a bool" % (launch["restart_on_stall"],)]
-    numbers = [k for k in LAUNCH_CLUTCH_KEYS if k not in ("mode", "restart_on_stall")]
+    numbers = [k for k in keys if k not in ("mode", "restart_on_stall")]
     if any(isinstance(launch[k], bool) or not isinstance(launch[k], (int, float)) or not math.isfinite(launch[k])
            for k in numbers):
         return ["gearbox.launch_clutch: %s must be numbers" % ", ".join(numbers)]
@@ -1293,27 +1358,41 @@ def launch_clutch_violations(launch, mode):
                 % (couple, uncouple, LAUNCH_TIME_MAX_S)]
     if not 0 <= cooldown <= LAUNCH_TIME_MAX_S:
         return ["gearbox.launch_clutch restart_cooldown_s %s is outside [0, %s] s" % (cooldown, LAUNCH_TIME_MAX_S)]
-    if launch["mode"] == "ramp" and mode == "automatic":
-        return ["gearbox.launch_clutch mode ramp applies to a scripted gearbox only (an automatic gearbox keeps clutch "
-                "1)"]
+    if launch["mode"] == "slip":
+        if not (0 <= launch["slip_kp"] <= LAUNCH_SLIP_KP_MAX and 0 < launch["slip_ki"] <= LAUNCH_SLIP_KI_MAX):
+            return ["gearbox.launch_clutch slip_kp %s and slip_ki %s must lie in [0, %s] and (0, %s]"
+                    % (launch["slip_kp"], launch["slip_ki"], LAUNCH_SLIP_KP_MAX, LAUNCH_SLIP_KI_MAX)]
+        if not 0 <= launch["lock_tolerance_rpm"] <= LAUNCH_LOCK_TOLERANCE_MAX_RPM:
+            return ["gearbox.launch_clutch lock_tolerance_rpm %s is outside [0, %s]"
+                    % (launch["lock_tolerance_rpm"], LAUNCH_LOCK_TOLERANCE_MAX_RPM)]
+        if not LAUNCH_BRAKE_DROP_MIN_RPM_PER_S <= launch["brake_drop_rpm_per_s"] <= LAUNCH_BRAKE_DROP_MAX_RPM_PER_S:
+            return ["gearbox.launch_clutch brake_drop_rpm_per_s %s is outside [%s, %s]"
+                    % (launch["brake_drop_rpm_per_s"], LAUNCH_BRAKE_DROP_MIN_RPM_PER_S,
+                       LAUNCH_BRAKE_DROP_MAX_RPM_PER_S)]
+    if launch["mode"] in LAUNCH_CLUTCH_ACTIVE_MODES and mode == "automatic":
+        return ["gearbox.launch_clutch mode %s applies to a scripted gearbox only (an automatic gearbox keeps clutch "
+                "1)" % launch["mode"]]
     return []
 
 
 def launch_card_violations(card):
-    """The launch clutch rules that need the rest of the card (DD-14c), for mode ramp on a scripted gearbox: every
-    downshift outside the band (DC_VehicleCard.CheckLaunchDownshifts) and the band against the vehicle's recorded
-    engine (DC_LaunchClutchConfig.CheckEngine at llc_v1 Init, VEHICLE_ENGINE_RPM)."""
+    """The launch clutch rules that need the rest of the card (DD-14c, DD-14d), for mode ramp or slip on a scripted
+    gearbox: every downshift outside the band, and for slip every upshift at or above the release lookahead ceiling
+    (DC_VehicleCard.CheckLaunchDownshifts), and the band against the vehicle's recorded engine
+    (DC_LaunchClutchConfig.CheckEngine at llc_v1 Init, VEHICLE_ENGINE_RPM)."""
     gearbox = card.get("gearbox") or {}
     launch = gearbox.get("launch_clutch")
-    if not isinstance(launch, dict) or launch.get("mode") != "ramp" or gearbox.get("mode") != "scripted":
+    if not isinstance(launch, dict) or launch.get("mode") not in LAUNCH_CLUTCH_ACTIVE_MODES \
+            or gearbox.get("mode") != "scripted":
         return []
     out = []
     gears, down = gearbox.get("scripted_gears") or [], gearbox.get("downshift_mps") or []
+    up = gearbox.get("upshift_mps") or []
     per_krpm = gearbox.get("scripted_mps_per_krpm")
     if not isinstance(per_krpm, list) or len(per_krpm) != len(gears) \
             or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0 for v in per_krpm):
-        return ["gearbox.launch_clutch mode ramp on a scripted gearbox needs gearbox.scripted_mps_per_krpm: one "
-                "measured m/s per 1000 rpm > 0 per scripted gear (got %r)" % (per_krpm,)]
+        return ["gearbox.launch_clutch mode %s on a scripted gearbox needs gearbox.scripted_mps_per_krpm: one "
+                "measured m/s per 1000 rpm > 0 per scripted gear (got %r)" % (launch["mode"], per_krpm)]
     minimum = launch["full_rpm"] + LAUNCH_DOWNSHIFT_RPM_MARGIN
     for slot, speed in enumerate(down):
         rpm = speed / per_krpm[slot + 1] * 1000.0
@@ -1321,6 +1400,14 @@ def launch_card_violations(card):
             out.append("gearbox downshift_mps %s is %.0f rpm in scripted gear %s, below full_rpm %s + %s: the clutch "
                        "would slip in that gear" % (speed, rpm, gears[slot + 1], launch["full_rpm"],
                                                      LAUNCH_DOWNSHIFT_RPM_MARGIN))
+    if launch["mode"] == "slip":
+        ceiling = LAUNCH_LOOKAHEAD_ENGAGE_FACTOR * launch["engage_rpm"]
+        for slot, speed in enumerate(up):
+            rpm = speed / per_krpm[slot + 1] * 1000.0
+            if rpm < ceiling:
+                out.append("gearbox upshift_mps %s is %.0f rpm in scripted gear %s, below the slip release lookahead "
+                           "ceiling %s rpm (2 x engage_rpm): the upshift could open the coupled clutch"
+                           % (speed, rpm, gears[slot + 1], ceiling))
     engine = VEHICLE_ENGINE_RPM.get(card.get("vehicle"))
     if engine:
         if launch["engage_rpm"] <= engine["idle"]:
@@ -1403,9 +1490,10 @@ def main(argv=None):
     ap.add_argument("--e04", help="E-04 play directory (optional: has_automatic_gearbox)")
     ap.add_argument("--placeholder", action="store_true", help="write the PLACEHOLDER card (no plays)")
     ap.add_argument("--pin-id", help="pin of the placeholder card")
-    ap.add_argument("--launch-clutch", choices=("off", "ramp"), default="off",
+    ap.add_argument("--launch-clutch", choices=LAUNCH_CLUTCH_MODES, default="off",
                     help="placeholder only: ramp adds gearbox.launch_clutch with the DC_LaunchClutchConfig defaults "
-                         "(DD-14c); off (default) leaves it out (mode off)")
+                         "(DD-14c), slip with DC_LaunchClutchConfig.Slip()'s (DD-14d, the 1.9.0.37 card); off "
+                         "(default) leaves it out (mode off)")
     ap.add_argument("--vehicle", default=DEFAULT_VEHICLE, help="card id and vehicle (default %(default)s)")
     ap.add_argument("--build-key", help="build_key of the plays when their run headers carry none (dd-launch/1)")
     ap.add_argument("--scripted-gears", help="forward gear indices of a scripted gearbox, comma-separated")
@@ -1444,7 +1532,7 @@ def main(argv=None):
         card["gearbox"]["clutch_dip_s"], card["gear_indices_forward"]))
     launch = card["gearbox"].get("launch_clutch")
     print("  launch clutch (DD-14c): %s" % ("none (mode off, the 1.8 sequence)" if launch is None else ", ".join(
-        "%s %s" % (k, launch[k]) for k in LAUNCH_CLUTCH_KEYS)))
+        "%s %s" % (k, launch[k]) for k in launch_clutch_keys(launch["mode"]))))
     detail = card["gearbox"].get("detail") or {}
     print("  gearbox basis: %s; neutral %s, reverse %s; scripted gears %s (up %s, down %s m/s); speed per 1000 rpm "
           "%s" % (

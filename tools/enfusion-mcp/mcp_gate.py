@@ -16,8 +16,8 @@ enfusion-mcp-wsl.sh execs this instead of node. Before the server starts:
   - ENFUSION_GAME_PATH and ENFUSION_WORKBENCH_PATH are the pin's installs.
 Any refusal exits 2 before the server starts, with the reason on stderr.
 
-Also before the server starts: ENFUSION_WORKBENCH_HOST must be loopback or the WSL default gateway (this machine's
-Windows host), and the index stamp's source must be the dump tag and commit index_sources.json maps the pin to, with
+Also before the server starts: ENFUSION_WORKBENCH_HOST must be loopback or the proven WSL NAT gateway (this machine's
+Windows host; endpoint_handshake.nat_gateway, which runs ipconfig.exe), and the index stamp's source must be the dump tag and commit index_sources.json maps the pin to, with
 the tag equal to the pin's engine_version_expected (api_index.verify_source).
 
 During the session it forwards every JSON-RPC line both ways, except tools/call requests it refuses itself (an MCP
@@ -25,11 +25,11 @@ error result, the request is never forwarded). The policy is bk_tools.py, deny b
 round 2: the runbook never uses MCP mutations):
   - every write-class tool and action, every unknown tool, every unknown or missing action: denied;
   - the sealed-map guard on every call (identifier tokens eden/everon, the Everon root world GUID);
-  - read tools (api_search, wiki, assets, game and project reads): forwarded, after a small read-path check (no
-    absolute, UNC, drive-relative or '..' path outside the pin's project root and game install);
-  - wb_* read actions (wb_state, wb_entity_list/inspect, ...): forwarded only after endpoint_handshake.handshake()
-    passes right before the call.
-Enabling any write tool later needs its own reviewed per-tool destination policy.
+  - read tools (api_search, component_search, wiki_search, wiki_read, wb_knowledge): forwarded;
+  - wb_* getters (wb_state, wb_entity_list/inspect, ...): forwarded only after endpoint_handshake.handshake() passes
+    right before the call;
+  - no allowed entry takes a filesystem, resource or mod path, and each has an explicit set of argument keys.
+Enabling any write tool, or any path-taking read tool, later needs its own reviewed per-tool policy.
 
     mcp_gate.py --print-config            resolve and print the config, start nothing
     mcp_gate.py -- NODE DIST [ARGS...]    what the wrapper runs
@@ -147,12 +147,21 @@ def resolve_config(env: dict) -> dict:
         target_pin = None
     if target_pin and target_pin != src["pin_id"]:
         raise GateRefusal("project root %s was deployed for pin %s, not %s" % (project, target_pin, src["pin_id"]))
-    gateway, gw_why = eh.nat_gateway(env.get("EMCP_TEST_ROUTE"), env.get("EMCP_TEST_RESOLV"))
     host = env.get("ENFUSION_WORKBENCH_HOST") or "127.0.0.1"
+    win_temp = env.get("EMCP_WIN_TEMP") or eh.MCP_WIN_TEMP
+    gateway, gw_why = None, "not needed for a loopback host"
+    if host not in eh.LOOPBACK:
+        # A non-loopback host must be the proven WSL NAT gateway (ipconfig.exe runs with an E: TEMP/TMP).
+        if env.get("EMCP_TEST_IPCONFIG") is None:
+            try:
+                os.makedirs(pinlib.check_write_path(win_temp), exist_ok=True)
+            except (pinlib.PinError, OSError) as exc:
+                raise GateRefusal("the helper temp dir %s: %s" % (win_temp, exc))
+        gateway, gw_why = eh.nat_gateway(env.get("EMCP_TEST_ROUTE"), env.get("EMCP_TEST_RESOLV"),
+                                         env.get("EMCP_TEST_IPCONFIG"), win_temp)
     why = eh.endpoint_host_reason(host, gateway, gw_why)
     if why:
         raise GateRefusal(why)
-    win_temp = env.get("EMCP_WIN_TEMP") or eh.MCP_WIN_TEMP
     try:
         port = int(env.get("ENFUSION_WORKBENCH_PORT") or eh.DEFAULT_PORT)
     except ValueError:
@@ -173,13 +182,12 @@ def server_env(env: dict, cfg: dict) -> dict:
 
 
 class Gate:
-    """The tools/call policy (bk_tools.py, deny by default). handshake_fn() -> {ok, reasons, facts}; read_roots for
-    the read-path check (the pin's project root and game install)."""
+    """The tools/call policy (bk_tools.py, deny by default; no allowed entry takes a path). handshake_fn() ->
+    {ok, reasons, facts}."""
 
-    def __init__(self, handshake_fn, log=None, read_roots=()):
+    def __init__(self, handshake_fn, log=None):
         self.handshake_fn = handshake_fn
         self.log = log or (lambda msg: print("[mcp_gate] %s" % msg, file=sys.stderr, flush=True))
-        self.read_roots = tuple(read_roots)
         self.handshakes = 0
 
     def decide(self, name: str, arguments) -> str:
@@ -190,9 +198,6 @@ class Gate:
         sealed = bk.sealed_reason(arguments if arguments is not None else {})
         if sealed:
             return sealed + "; the sealed-map guard refuses the call"
-        rp = bk.read_path_reason(name, arguments, self.read_roots, pinlib.win_to_wsl)
-        if rp:
-            return rp
         if kind == "read":
             return None
         self.handshakes += 1
@@ -311,7 +316,7 @@ def main(argv=None, env=None) -> int:
     cache = {}
     probes = eh.WindowsProbes(win_temp=cfg["win_temp"])
     gate = Gate(lambda: eh.handshake(cfg["pin_src"], cfg["ident"], cfg["port"], probes, cache, cfg["host"],
-                                     cfg["gateway"]), read_roots=(cfg["project"], cfg["game_path"]))
+                                     cfg["gateway"]))
     return proxy(gate, cmd, server_env(env, cfg))
 
 

@@ -8,12 +8,14 @@ actions. Enabling any write tool later needs its own reviewed, per-tool destinat
 each generated subdirectory really lands, as BK computes it); none is implemented here.
 
 Classes of what is allowed:
-  read     index, wiki and file reads; forwarded without the handshake (BK reads, never writes)
-  wb_read  Workbench reads; forwarded only after the endpoint handshake passes
+  read     index, wiki and knowledge-base reads; forwarded without the handshake
+  wb_read  Workbench getters; forwarded only after the endpoint handshake passes
 
-Read tools that take a path pass one small check (read_path_reason): no absolute, UNC, drive-relative or '..' path
-outside the allowed read roots (the pin's project root and the pin's game install), compared case-insensitively on
-/mnt/<drive> (drvfs is case-insensitive).
+Coordinator decision (Codex round 3): no allowed entry takes a filesystem, resource or mod path. project, workshop_info,
+wb_read_props, asset_search, game_browse and game_read (the game install holds the sealed Everon world),
+wb_resources, wb_prefabs and wb_projects are denied, and so is wb_validate (material validation can change shared
+Workbench state). Each allowed tool and action also has an explicit set of argument keys; any other key is denied.
+Re-enabling any path-taking tool needs a reviewed per-field read policy first.
 
 The table is BK at the pinned commit (README "Pinned versions"); a BK update must re-check it.
 
@@ -25,75 +27,93 @@ Workbench" covers that.
 """
 from __future__ import annotations
 
-import os
 import re
 
 BK_COMMIT = "0acfa884228477043c6b4c2b8c7f0c270d648398"
 
-# tool -> None (the tool has no action argument) or the set of allowed actions (any other or a missing one: denied)
-READ = {
-    "api_search": None, "wiki_search": None, "wiki_read": None, "asset_search": None, "component_search": None,
-    "game_browse": None, "game_read": None, "workshop_info": None, "wb_knowledge": None,
-    "project": {"browse", "read"},
+# tool -> (class, {action or None: allowed argument keys}). None as the action: the tool has no action argument. Any
+# other tool, action or argument key is denied. No allowed entry takes a filesystem, resource or mod path (Codex
+# round 3: re-enabling any path-taking tool needs a reviewed per-field read policy first).
+_GETTER_KEYS = {"action", "name", "propertyPath", "propertyKey", "memberIndex"}
+ALLOW = {
+    "api_search": ("read", {None: {"query", "type", "source", "limit", "format"}}),
+    "component_search": ("read", {None: {"query", "category", "event", "source", "limit"}}),
+    "wiki_search": ("read", {None: {"query", "limit"}}),
+    "wiki_read": ("read", {None: {"title"}}),
+    "wb_knowledge": ("read", {None: {"query", "max_files"}}),
+    "wb_connect": ("wb_read", {None: set()}),
+    "wb_diagnose": ("wb_read", {None: set()}),
+    "wb_state": ("wb_read", {None: set()}),
+    "wb_entity_list": ("wb_read", {None: {"offset", "limit", "nameFilter"}}),
+    "wb_entity_inspect": ("wb_read", {None: {"name", "index"}}),
+    "wb_entity_modify": ("wb_read", {a: _GETTER_KEYS for a in ("getProperty", "listProperties", "listArrayItems",
+                                                                 "getWorldTransform")}),
+    "wb_entity_select": ("wb_read", {"getSelected": {"action"}}),
+    "wb_script_editor": ("wb_read", {"getCurrentFile": {"action"}, "getLine": {"action", "line"},
+                                     "getLinesCount": {"action"}}),
+    "wb_layers": ("wb_read", {"list": {"action", "subScene"}, "isVisible": {"action", "subScene", "layerPath"},
+                              "getInfo": {"action", "subScene", "layerPath"}}),
+    "wb_localization": ("wb_read", {"getTable": {"action"}, "listLanguages": {"action"}}),
+    "wb_component": ("wb_read", {"list": {"action", "entityName"}}),
+    "wb_terrain": ("wb_read", {"getHeight": {"action", "x", "z"}, "getBounds": {"action"}}),
 }
-WB_READ = {
-    "wb_connect": None, "wb_diagnose": None, "wb_state": None, "wb_entity_list": None, "wb_entity_inspect": None,
-    "wb_read_props": None,
-    "wb_validate": {"material", "texture"},
-    "wb_terrain": {"getHeight", "getBounds"},
-    "wb_resources": {"getInfo"},
-    "wb_projects": {"list", "locate"},
-    "wb_layers": {"list", "isVisible", "getInfo"},
-    "wb_prefabs": {"getGuid", "locate", "getAncestor"},
-    "wb_localization": {"getTable", "listLanguages"},
-    "wb_script_editor": {"getCurrentFile", "getLine", "getLinesCount"},
-    "wb_entity_select": {"getSelected"},
-    "wb_entity_modify": {"getProperty", "listProperties", "listArrayItems", "getWorldTransform"},
-    "wb_component": {"list"},
-}
-# Every other BK tool at the pinned commit, for the record and the tests; all denied (the gate denies any unlisted
-# name anyway). Actions of the tools above that are not allowed are denied too.
+READ = {k: v[1] for k, v in ALLOW.items() if v[0] == "read"}
+WB_READ = {k: v[1] for k, v in ALLOW.items() if v[0] == "wb_read"}
+# Every other BK tool at the pinned commit, for the record and the tests; all denied (any unlisted name is denied
+# anyway), with the reason.
+_PATH = "takes a filesystem, resource or mod path (no reviewed per-field read policy)"
 DENIED = {
-    "script_create": "writes files", "prefab": "create writes files", "config_create": "writes files",
-    "layout_create": "writes files", "layout_recipe": "create writes files", "menu_create": "create writes files",
-    "gamemode_scaffold": "create writes files", "mod": "create and build write; validate is not needed",
-    "scenario_create_conflict": "writes files", "server_config": "writes server.json",
-    "building_setup": "writes files", "game_duplicate": "writes files", "animation_graph": "author/setup write files",
-    "wb_launch": "launches Workbench (README Rules)", "wb_cleanup": "deletes handler files (README Rules)",
-    "mod_build": "spawns a second Workbench (an old npm name)", "wb_play": "the user presses Play",
-    "wb_stop": "the user stops Play", "wb_save": "saves the world", "wb_undo_redo": "changes the world",
-    "wb_open_resource": "opens a resource", "wb_entity_create": "changes the world",
+    "project": _PATH, "workshop_info": _PATH, "wb_read_props": _PATH, "asset_search": _PATH + "; the game install "
+    "holds the sealed Everon world", "game_browse": _PATH + "; the game install holds the sealed Everon world",
+    "game_read": _PATH + "; the game install holds the sealed Everon world",
+    "wb_validate": "material validation can change shared Workbench state (Codex round 3), texture validation's "
+                   "contract is unverified",
+    "wb_resources": _PATH, "wb_prefabs": _PATH, "wb_projects": "locate takes a resource name; open switches projects",
+    "script_create": "writes files", "prefab": "writes files", "config_create": "writes files",
+    "layout_create": "writes files", "layout_recipe": "writes files", "menu_create": "writes files",
+    "gamemode_scaffold": "writes files", "mod": "create and build write", "scenario_create_conflict": "writes files",
+    "server_config": "writes server.json", "building_setup": "writes files", "game_duplicate": "writes files",
+    "animation_graph": "writes files", "wb_launch": "launches Workbench (README Rules)",
+    "wb_cleanup": "deletes handler files (README Rules)", "mod_build": "spawns a second Workbench (an old npm name)",
+    "wb_play": "the user presses Play", "wb_stop": "the user stops Play", "wb_save": "saves the world",
+    "wb_undo_redo": "changes the world", "wb_open_resource": "opens a resource", "wb_entity_create": "changes the world",
     "wb_entity_delete": "changes the world", "wb_entity_duplicate": "writes files and changes the world",
     "wb_execute_action": "runs any editor action", "wb_reload": "reloads scripts", "wb_clipboard": "changes the world",
     "scenario_create": "changes the world",
 }
-READ_PATH_KEYS = ("projectPath", "path")
 SEALED_TOKENS = {"eden", "everon"}
 SEALED_GUIDS = ("853E92315D1D9EFE",)
 
 
 def known_tools() -> set:
-    return set(READ) | set(WB_READ) | set(DENIED)
+    return set(ALLOW) | set(DENIED)
 
 
 def classify(name: str, arguments) -> tuple:
     """(class, reason): read or wb_read (allowed, reason None), or deny with the reason."""
-    args = arguments if isinstance(arguments, dict) else {}
-    for table, kind in ((READ, "read"), (WB_READ, "wb_read")):
-        if name in table:
-            allowed = table[name]
-            if allowed is None:
-                return kind, None
-            action = args.get("action")
-            if action is None:
-                return "deny", "%s needs an action; a missing action is denied" % name
-            if action not in allowed:
-                return "deny", "%s action %r is not on the read allow-list (%s); every write is denied" % (
-                    name, action, ", ".join(sorted(allowed)))
-            return kind, None
-    if name in DENIED:
-        return "deny", "%s is a write-class tool (%s); the gate denies every write" % (name, DENIED[name])
-    return "deny", "tool %r is not on the gate's allow-list (BK %s)" % (name, BK_COMMIT[:7])
+    if name not in ALLOW:
+        if name in DENIED:
+            return "deny", "%s is not allowed: %s" % (name, DENIED[name])
+        return "deny", "tool %r is not on the gate's allow-list (BK %s)" % (name, BK_COMMIT[:7])
+    if arguments is not None and not isinstance(arguments, dict):
+        return "deny", "%s arguments are not an object" % name
+    args = arguments or {}
+    kind, actions = ALLOW[name]
+    if None in actions:
+        allowed_keys = actions[None]
+    else:
+        action = args.get("action")
+        if action is None:
+            return "deny", "%s needs an action; a missing action is denied" % name
+        if action not in actions:
+            return "deny", "%s action %r is not on the read allow-list (%s); every write is denied" % (
+                name, action, ", ".join(sorted(actions)))
+        allowed_keys = actions[action]
+    extra = sorted(set(args) - set(allowed_keys))
+    if extra:
+        return "deny", "%s does not take %s here (allowed arguments: %s)" % (
+            name, ", ".join(extra), ", ".join(sorted(allowed_keys)) or "none")
+    return kind, None
 
 
 # --------------------------------------------------------------------------- sealed map
@@ -134,51 +154,4 @@ def sealed_reason(arguments):
         hit = SEALED_TOKENS.intersection(identifier_tokens(s))
         if hit:
             return "the arguments name the sealed test map (%s)" % ", ".join(sorted(hit))
-    return None
-
-
-# --------------------------------------------------------------------------- the read-path check
-
-
-_WIN_ABS = re.compile(r"^[A-Za-z]:[\\/]")
-_DRIVE_REL = re.compile(r"^[A-Za-z]:(?![\\/])")
-
-
-def fold(path: str) -> str:
-    """Case-folded on /mnt/<drive> (drvfs is case-insensitive), unchanged elsewhere."""
-    return path.lower() if re.match(r"^/mnt/[A-Za-z](/|$)", path) else path
-
-
-def inside(path: str, root: str) -> bool:
-    p, r = fold(os.path.normpath(path)), fold(os.path.normpath(root))
-    return p == r or p.startswith(r.rstrip("/") + "/")
-
-
-def read_path_reason(name: str, arguments, roots, win_to_wsl):
-    """Why a read tool's path argument could read outside the allowed roots, or None. Relative resource paths
-    ('Prefabs/x.et', '{GUID}x.et') are BK's to resolve inside the project or the game data; '..' is refused in any
-    form, and so are UNC and drive-relative paths. An absolute path (POSIX or X:\\) must lie inside a root; a relative
-    projectPath is refused (BK would resolve it against its own cwd)."""
-    args = arguments if isinstance(arguments, dict) else {}
-    for key in READ_PATH_KEYS:
-        v = args.get(key)
-        if v is None:
-            continue
-        if not isinstance(v, str):
-            return "%s: %s %r is not a path" % (name, key, v)
-        s = v.strip()
-        if not s:
-            continue
-        if s.startswith("\\\\") or s.startswith("//") or _DRIVE_REL.match(s):
-            return "%s: %s %r is a UNC or drive-relative path" % (name, key, v)
-        if ".." in re.split(r"[\\/]+", s):
-            return "%s: %s %r contains '..'" % (name, key, v)
-        if s.startswith("/") or _WIN_ABS.match(s):
-            p = win_to_wsl(s.replace("/", "\\")) if _WIN_ABS.match(s) else s
-            real = os.path.realpath(p)
-            if not any(inside(real, os.path.realpath(r)) for r in roots if r):
-                return "%s: %s %s resolves to %s, outside the allowed read roots %s" % (
-                    name, key, v, real, ", ".join(r for r in roots if r))
-        elif key == "projectPath":
-            return "%s: a relative projectPath %r is refused (BK would resolve it against its cwd)" % (name, v)
     return None

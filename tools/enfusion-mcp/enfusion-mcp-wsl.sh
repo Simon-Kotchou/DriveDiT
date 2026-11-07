@@ -130,6 +130,8 @@ export XDG_CACHE_HOME="$ROOT/xdg/cache" XDG_CONFIG_HOME="$ROOT/xdg/config"
 export XDG_STATE_HOME="$ROOT/xdg/state" XDG_DATA_HOME="$ROOT/xdg/data"
 # Inherited node settings could write elsewhere (diagnostic reports, coverage, caches).
 unset NODE_OPTIONS NODE_V8_COVERAGE NODE_COMPILE_CACHE
+# The gate's test hooks (fixture route, resolver and ipconfig text) never reach a real session.
+unset EMCP_TEST_ROUTE EMCP_TEST_RESOLV EMCP_TEST_IPCONFIG
 # The server's cwd: BK resolves relative tool arguments (projectPath, wb_cleanup modDir, mod outputPath)
 # against it, so it must not stay the caller's cwd.
 WORK_CWD="$ROOT/cwd"

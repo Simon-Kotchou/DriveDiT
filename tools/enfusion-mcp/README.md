@@ -32,11 +32,11 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | `claude-mcp-entry.json` | the user-scope MCP entry (same as the `claude mcp add` command below) |
 | `mcp_gate.py` | DD-14a. What the wrapper execs: picks the pin (`EMCP_PIN`, else ACTIVE), serves only that pin's index and project root, binds the endpoint host, and proxies the stdio session through the `bk_tools.py` policy (deny by default: reads, and wb reads after the handshake; every write denied; sealed-map guard) |
 | `endpoint_handshake.py`, `wb_proc.js` | DD-14a. The read-only endpoint handshake of MIGRATION_1_9 6.3 (also a CLI); `wb_proc.js` is its WMI process query, run by cscript.exe (no PowerShell) |
-| `bk_tools.py` | DD-14a. The gate's deny-by-default allow-list of BK read tools and wb read actions, the read-path check and the sealed-map guard |
+| `bk_tools.py` | DD-14a. The gate's deny-by-default allow-list (path-free BK read tools and wb getters, each with its allowed argument keys) and the sealed-map guard |
 | `index_sources.json` | DD-14a. Pin id to dump tag and commit, for the index provenance check |
 | `api_index.py` | DD-14a. Builds a per-pin API index in BK's JSON shape from the official script dump at the pin's tag, stamped with the pin (`api/INDEX_PIN.json`) |
 | `api_index_diff.py`, `expect_1.8.0.13_to_1.9.0.37.txt` | DD-14a, CC-05. Diffs two per-pin indexes and checks them against the API delta (API_DELTA 2-3, G19-0) and the planned surface (`tools/compat19/planned_surface.txt`) |
-| `tests/test_handshake.py`, `tests/fixtures/` | DD-14a tests: index, provenance, diff, gate config, policy (every write tool and action denied, reads allowed), handshake (stub Windows probes), proxy (stub server). The fixture dumps are synthetic classes, not game scripts |
+| `tests/test_handshake.py`, `tests/fixtures/` | DD-14a tests: index, provenance, diff, gate config, policy (every write and path-taking tool denied, the path-free reads allowed), handshake (stub Windows probes), proxy (stub server). The fixture dumps are synthetic classes, not game scripts |
 | `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `457d5e46…1c92`) |
 | `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `09803bae…dc9ba`) |
 
@@ -127,27 +127,38 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
 - **The project root** is `pinlib.DEPLOY_ROOTS[launch path]`; an `ENFUSION_PROJECT_PATH` set by hand must be it, and
   a deploy stamped for another pin (`.deploy_state.json` `target_pin`) refuses. `ENFUSION_GAME_PATH` and
   `ENFUSION_WORKBENCH_PATH` are the pin's installs.
-- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback, or the WSL NAT gateway (the Windows host,
-  `172.19.208.1` today) when NAT mode is established: exactly one IPv4 default route, via `eth0`, and
-  `/etc/resolv.conf` carrying WSL's generated header with that gateway as its only nameserver. Anything else (a LAN or
-  VPN gateway such as `192.168.1.1`) refuses: the handshake can only vouch for the local Workbench. The gate passes the
+- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback, or the WSL NAT gateway proven to be this machine's
+  Windows host (`172.19.208.1` today). All three are required: exactly one up IPv4 default route of any kind (a
+  device-only `tun0` default route counts, Codex round 3), with a gateway, via `eth0`; `/etc/resolv.conf` carrying
+  WSL's generated header with that gateway as its only nameserver; and `ipconfig.exe` (read-only, Windows `TEMP`/`TMP`
+  on E: as for the helpers below) showing a `vEthernet (WSL...)` adapter whose IPv4 address is that gateway. The route
+  and resolver files alone can describe a stale or bridged setup; the adapter address is the Windows side of the WSL
+  NAT switch. Anything else (a LAN or VPN gateway such as `192.168.1.1`, or no such adapter) refuses, and only
+  loopback is accepted: the handshake can only vouch for the local Workbench. `ipconfig.exe` runs only for a
+  non-loopback host. The gate passes the
   checked host and port to the server, and the listener must serve that address (`0.0.0.0`, `[::]` or the host).
-- **Deny by default** (coordinator decision, Codex round 2: the runbook never uses MCP mutations; agents never call
-  MCP tools to change anything, the user presses Play). `bk_tools.py` allows only these, and denies every other tool,
-  every other action, unknown tools, unknown actions and a missing action:
+- **Deny by default** (coordinator decisions, Codex rounds 2-3: the runbook never uses MCP mutations; agents never
+  call MCP tools to change anything, the user presses Play; and the allow-list holds only what we need). `bk_tools.py`
+  allows only these, each with an explicit set of argument keys, and denies every other tool, every other action,
+  unknown tools, unknown actions, a missing action and any other argument key:
 
   | Class | Tools and actions |
   |---|---|
-  | read (no handshake) | `api_search`, `wiki_search`, `wiki_read`, `asset_search`, `component_search`, `game_browse`, `game_read`, `workshop_info`, `wb_knowledge`, `project` with `browse` or `read` |
-  | wb read (after the handshake) | `wb_connect`, `wb_diagnose`, `wb_state`, `wb_entity_list`, `wb_entity_inspect`, `wb_read_props`; `wb_validate` material/texture; `wb_terrain` getHeight/getBounds; `wb_resources` getInfo; `wb_projects` list/locate; `wb_layers` list/isVisible/getInfo; `wb_prefabs` getGuid/locate/getAncestor; `wb_localization` getTable/listLanguages; `wb_script_editor` getCurrentFile/getLine/getLinesCount; `wb_entity_select` getSelected; `wb_entity_modify` getProperty/listProperties/listArrayItems/getWorldTransform; `wb_component` list |
+  | read (no handshake) | `api_search`, `component_search`, `wiki_search`, `wiki_read`, `wb_knowledge` |
+  | wb read (after the handshake) | `wb_connect`, `wb_diagnose`, `wb_state`, `wb_entity_list`, `wb_entity_inspect`; `wb_entity_modify` getProperty/listProperties/listArrayItems/getWorldTransform; `wb_entity_select` getSelected; `wb_script_editor` getCurrentFile/getLine/getLinesCount (no `path`); `wb_layers` list/isVisible/getInfo; `wb_localization` getTable/listLanguages; `wb_component` list; `wb_terrain` getHeight/getBounds |
 
   Denied, among others: every file writer (`project` write, `script_create`, `prefab`, `config_create`,
   `layout_create`, `mod` create/build/validate, ...), `wb_projects` open, `wb_play`, `wb_stop`, `wb_save`, every
   entity, layer, component, clipboard, localization and script-editor write, `wb_undo_redo`, `wb_execute_action`,
-  `wb_reload`, `wb_open_resource`, `wb_launch` and `wb_cleanup`. Read tools that take a path pass one small check: no
-  absolute, UNC, drive-relative or `..` path outside the pin's project root and game install (case-insensitive on
-  `/mnt/<drive>`), and no relative `projectPath`. **Enabling any write tool later needs its own reviewed per-tool
-  destination policy** (where each argument and each generated subdirectory really lands, as BK computes it).
+  `wb_reload`, `wb_open_resource`, `wb_launch` and `wb_cleanup`. Also denied (Codex round 3): `wb_validate`
+  (`MaterialValidator.CheckTextures()` can remove an item from Workbench's shared texture queue, and BK's request
+  fields do not match the handlers'), and every tool that takes a filesystem, resource or mod path: `project`,
+  `workshop_info`, `wb_read_props`, `asset_search`, `game_browse`, `game_read` (the game install holds the sealed
+  Everon world), `wb_resources`, `wb_prefabs` and `wb_projects`. There is no read-path check any more: no allowed
+  entry takes a path. **Enabling any write tool, or re-enabling any path-taking read tool, needs its own reviewed
+  per-tool policy first** (for writes, where each argument and generated subdirectory really lands, as BK computes it;
+  for reads, every read-location field per action, resolved against its real base, symlinks followed, rooted and
+  resource namespaces handled).
 - **The sealed-map guard** runs on every call: an identifier token `eden` or `everon` (split on non-alphanumerics and
   camelCase, so `EdenTerrain` is caught and `foreverOnline` is not) or the Everon root world GUID
   `853E92315D1D9EFE` refuses. Not detected: a read on a sealed world already open in Workbench without naming it; the
@@ -166,12 +177,13 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   bound by its creation time, is read instead. A Workbench started by hand (no `-dcLaunchId`, a OneDrive profile, a
   C: project) fails by design. Residual, documented: a replacement process that writes no log of its own within the
   same second, and a project changed inside a running Workbench, are not detected (we never do either).
-- **R1.** Both Windows helpers run with Windows `TEMP` and `TMP` set to `E:\DriveDiT\tmp\mcp` (`WSLENV=TEMP/p:TMP/p`
-  path translation; the gate creates the dir through the tools/pin write guard), and `wb_proc.js --env` proves it once
-  per session before any query (measured: it reports `E:\...`). The claim is **no tool-owned C: file writes**. WMI's
+- **R1.** The Windows helpers (`ipconfig.exe`, `netstat.exe`, `cscript.exe`) run with Windows `TEMP` and `TMP` set
+  to `E:\DriveDiT\tmp\mcp` (`WSLENV=TEMP/p:TMP/p` path translation; the gate creates the dir through the tools/pin
+  write guard), and `wb_proc.js --env` proves it once per session before any query (measured: it reports `E:\...`). The claim is **no tool-owned C: file writes**. WMI's
   own repository and event-log activity is Windows service behaviour, outside these tools and outside R1; it is not
   claimed to be zero.
-- **Cost, measured 2026-11-07:** `netstat.exe -ano` 0.03 s, `wb_proc.js --env` 0.08 s once, a process query 0.16 s;
+- **Cost, measured 2026-11-07:** `ipconfig.exe` 0.04 s once per session (non-loopback host only), `netstat.exe -ano`
+  0.03 s, `wb_proc.js --env` 0.08 s once, a process query 0.16 s;
   the exe hash (68 MB) once per path, size and mtime; the log heads (256 KiB each, only dirs touched since the
   record). About 0.2 s per wb read.
 
@@ -204,6 +216,9 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
     `cannot determine the Windows host IP ...`. Then set `ENFUSION_WORKBENCH_HOST` in the MCP entry's `env` to the IPv4
     address of the `vEthernet (WSL)` adapter (Windows `ipconfig`).
   - It does this per start because the NAT subnet can change after a reboot. Keep `env` in the MCP entry empty unless discovery fails.
+  - The gate then accepts that host only if `endpoint_handshake.nat_gateway` proves it is the Windows side of the WSL
+    NAT switch (one default route, WSL's resolver, and the `vEthernet (WSL...)` adapter address from `ipconfig.exe`;
+    see "The endpoint" above); otherwise it refuses before the server starts.
 - Workbench's NET API listens on `0.0.0.0:5775`, so no `netsh portproxy` is needed. `enfusion-mcp-wsl.sh --check` tests TCP reachability without sending a request.
 - Security: `0.0.0.0:5775` exposes editor actions to the LAN, as far as Windows Firewall allows. Consider scoping the inbound rule for 5775 to the WSL vEthernet subnet (`172.16.0.0/12`). That is a Windows change for the user.
 

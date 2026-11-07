@@ -234,17 +234,23 @@ def check_app(app: str, pin_app: dict, steam_policy: dict, acf_path: str, root: 
         _fmt_list(pak_diff) if pak_diff else "%d paks match (size + mtime)" % len(pinned_paks))
 
     if verify_hashes:
+        import time
+        t0 = time.monotonic()
         hashed = {rel: p["sha256"] for rel, p in pinned_paks.items() if isinstance(p, dict) and "sha256" in p}
         hash_diff = [] if hashed else ["the pin records no pak sha256 (only a cold pin does)"]
+        nbytes = 0
         for rel, want in sorted(hashed.items()):
+            full = os.path.join(root, *rel.split("/"))
             try:
-                have = pinlib.sha256_file(os.path.join(root, *rel.split("/")))
+                have = pinlib.sha256_file(full)
+                nbytes += os.path.getsize(full)
             except OSError:
                 have = None
             if have != want:
                 hash_diff.append("%s: sha256 %s != pin %s" % (rel, (have or "missing")[:16], str(want)[:16]))
         add("pak_sha256", not hash_diff,
-            _fmt_list(hash_diff) if hash_diff else "%d pak sha256 match" % len(hashed))
+            _fmt_list(hash_diff) if hash_diff else "%d pak sha256 match (%.2f GB hashed in %.1f s)"
+            % (len(hashed), nbytes / 1e9, time.monotonic() - t0))
 
     lp = launch_path or {}
     have = (_pinned_path(pin_app, "acf"), _pinned_path(pin_app, "install"))
@@ -411,6 +417,12 @@ def pin_identity(src: dict, dir_fd=None) -> dict:
         if key != side.get("build_key"):
             raise pinlib.PinError("%s: build_key %s does not match its inputs (%s)"
                                   % (side["_path"], str(side.get("build_key"))[:16], key[:16]))
+        ev = side.get("evidence") if isinstance(side.get("evidence"), dict) else {}
+        if ev.get("source") == "sums" and ev.get("sums") and os.path.exists(ev["sums"]):
+            # The SHA256SUMS the exe hashes came from must not have changed since (Codex round 1, item 19).
+            if pinlib.sha256_file(ev["sums"]) != ev.get("sums_sha256"):
+                raise pinlib.PinError("%s: the SHA256SUMS it was made from (%s) changed since" % (side["_path"],
+                                                                                                  ev["sums"]))
         ident.update(build_key=key, build_key_source="sidecar", exe_sha256=exe,
                      physics_hz_expected=side.get("physics_hz_expected"))
     engine = load_sidecar(src, "engine", dir_fd)
@@ -425,14 +437,45 @@ def pin_identity(src: dict, dir_fd=None) -> dict:
     return ident
 
 
+def cold_anchor_problem(pin: dict):
+    """For a cold pin: why the reference SHA256SUMS it was verified against has changed since, or None (Codex round 1,
+    item 19: the sha256 of that file is recorded in the pin as cold_of.sums_sha256)."""
+    cold_of = pin.get("cold_of") if isinstance(pin.get("cold_of"), dict) else {}
+    path, want = cold_of.get("sums"), cold_of.get("sums_sha256")
+    if not path or not want:
+        return "the cold pin records no SHA256SUMS anchor (cold_of.sums, cold_of.sums_sha256)"
+    try:
+        have = pinlib.sha256_file(path)
+    except OSError as exc:
+        return "cannot read the reference SHA256SUMS %s: %s" % (path, exc)
+    if have != want:
+        return "the reference SHA256SUMS %s changed since the cold pin was made (sha256 %s, pin %s)" % (
+            path, have[:16], want[:16])
+    return None
+
+
 def full_checks(src: dict, ident: dict, acf_paths=None, roots=None, mtime_resolution_s: int = 0,
                 launch_path_id=None, verify_hashes: bool = False):
-    """run_checks on the pinned paths (or overrides) with the pin's exe hashes, for launch, check and activation."""
+    """run_checks on the pinned paths (or overrides) with the pin's exe hashes, for launch, check and activation.
+
+    A cold pin always hashes every pak against its recorded sha256 (Codex round 1, MIGRATION_1_9 7.1): a pak changed
+    with its size and mtime preserved is refused at launch too. No cache: a cache keyed by size, mtime and path could
+    not see that change. About 6.5 min for the 28 GB of 1.8.0.13 at the 73 MB/s measured on E: (2026-11-07). It also
+    checks the reference SHA256SUMS anchor."""
     pin_acf, pin_roots = pinned_paths(src["pin"])
     acf_paths = {app: (acf_paths or {}).get(app) or pin_acf[app] for app in pinlib.APPS}
     roots = {app: (roots or {}).get(app) or pin_roots[app] for app in pinlib.APPS}
-    return run_checks(src["pin"], acf_paths, roots, mtime_resolution_s, exe_sha256=ident["exe_sha256"],
-                      launch_path_id=launch_path_id, verify_hashes=verify_hashes)
+    cold = ident["channel"] == "cold"
+    checks, observed = run_checks(src["pin"], acf_paths, roots, mtime_resolution_s, exe_sha256=ident["exe_sha256"],
+                                  launch_path_id=launch_path_id, verify_hashes=verify_hashes or cold)
+    if cold:
+        why = cold_anchor_problem(src["pin"])
+        if why:
+            for c in checks:
+                if c["name"].endswith(".pak_sha256"):
+                    c["ok"] = False
+                    c["detail"] = why + "; " + c["detail"]
+    return checks, observed
 
 
 def load_pin_by_id(pin_dir: str, pin_id: str, dir_fd=None) -> dict:
@@ -582,8 +625,8 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
                          "%s; production is refused until DD-14b's G19 admission record)"
                          % (", ".join(pinlib.USE_CLASSES), pinlib.DEFAULT_USE_CLASS, pinlib.EXPERIMENTAL_USE_CLASS))
     ap.add_argument("--verify-hashes", action="store_true",
-                    help="with --check only: also hash every pak the pin records a sha256 for (a cold pin; reads "
-                         "the whole install)")
+                    help="with --check only: also hash every pak the pin records a sha256 for (a cold pin always "
+                         "does, at every launch too; reads the whole install)")
     cli_argv = list(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(cli_argv)
     if args.verify_hashes and not args.check:

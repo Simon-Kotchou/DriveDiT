@@ -57,6 +57,15 @@ E:\DriveDiT\pin\1.8.0.13\{game,tools,meta,SHA256SUMS}  cold copy (only after col
 
 To update the installed copies, copy the files from the repo. Do not edit them on E:.
 
+## Threat model (DD-14a)
+
+These tools defend against accidental misuse, stale state, wrong-build or wrong-root mistakes and partial writes: a
+launcher started against the wrong install, a pin or index of another build, a forgotten sidecar, an update Steam
+slipped in, a deploy into the wrong addon root, a write cut short by a full disk or a killed process. They do **not**
+defend against a malicious local user with write access to E:: such a user can rewrite a pin, its sidecars, a
+SHA256SUMS file or the tools themselves. Hashes and bindings here catch accidents (a changed exe, a moved tag, a
+different launch), not a forger.
+
 ## Write safety
 
 Every write goes through `pinlib.check_write_path`, which resolves symlinks first. It accepts only paths under
@@ -417,7 +426,7 @@ record and the harvester agree. Pins with equal `build_key` are one build (`1.8.
 **dd-pin/2.** `make_pin.py --channel stable|experimental|cold` writes schema `dd-pin/2`: `channel`, `release_channel`
 (what sessions carry as `pin.channel`: stable or experimental; a cold pin runs a stable build), `launch_path_id`, the
 sha256 of every launched exe (`<app>.exe_sha256`), `build_key` with its `build_key_inputs`, and `physics_hz_expected`
-(default 60, `--physics-hz-expected`). Without `--channel`, make_pin writes DD-0's dd-pin/1 pin, unchanged. Use
+(default 30, the measured fixed slice of 1/30 s on 1.8.0.13 and 1.9.0.37; MIGRATION_1_9 8.2 planned 60; `--physics-hz-expected` states another rate). Without `--channel`, make_pin writes DD-0's dd-pin/1 pin, unchanged. Use
 `--channel stable` for the next re-pin. `--dry-run` prints the pin and writes nothing. With `--restore-of`, a dd-pin/2
 re-pin must also have the reference pin's build_key.
 
@@ -446,8 +455,11 @@ python3 -I -B /mnt/e/DriveDiT/tools/pin/pin_sidecar.py engine 1.9.0.37 --run-hea
 - `engine` writes `pin_<id>.engine.json` with `engine_version_expected`, the `engine.build_version` of a probe run
   header that names this pin id and pin sha256 (SURFACE 5 row 2: the first E-11). It also records the measured
   `engine.fixed_time_slice_s`. Apply the build-key sidecar first, so the engine sidecar names the build_key.
-- A sidecar is never replaced (O_EXCL). One that exists but does not validate (another pin's bytes, a build_key that
-  does not match its inputs) is a config error everywhere (exit 2), never ignored.
+- A sidecar is written atomically and never replaced (`pinlib.publish_new`: a uniquely named temp file, fsync, then
+  a hard link to the final name, or `renameat2(RENAME_NOREPLACE)`, and a directory fsync), so a reader sees no file
+  or the whole file, and a write cut short never blocks a retry. One that exists but does not validate (another
+  pin's bytes, a build_key that does not match its inputs, a `--from-sums` sidecar whose SHA256SUMS changed since)
+  is a config error everywhere (exit 2), never ignored.
 
 **What the preflight does with it.** When the exe hashes are known (dd-pin/2, or a dd-pin/1 pin with its build_key
 sidecar), every launch, `--check` and activation also runs `<app>.exe_sha256`: each pinned exe is hashed (about 147 MB,
@@ -474,7 +486,11 @@ python3 -I -B /mnt/e/DriveDiT/tools/pin/freeze_check.py after --before /mnt/e/Dr
 `before` runs the full preflight check, then records both appmanifests (identity fields, file size, mtime and
 sha256; never `LastOwner`) and the pinned exes. `after` re-reads them and lists the launch records of this pin written
 in between. PASS: no identity field changed (buildid, TargetBuildID, StateFlags, AutoUpdateBehavior, depot manifests,
-LastUpdated), the full preflight check passes again, and at least one launch record lies in between. An appmanifest
+LastUpdated), the full preflight check passes again, and at least one **real** launch lies in between: a launch
+record of this pin (a JSON object with the dd-launch fields) and that launch's own `console.log` under the launch
+path's Workbench profile, naming its `-dcLaunchId`, started after the before-record and reporting the build (the
+pin's `engine_version_expected` once it has one). A preflight run alone never passes. Only `--steam online`
+qualifies for 5.5: an offline run ends `PASS_UNQUALIFIED`, which CC-01 does not accept. An appmanifest
 rewrite that changes none of them (Steam updating `LastPlayed` on a launch, measured 2026-11-07) is a note, not a
 failure. Steam's online state cannot be read from WSL, so `--steam` records what the user says. The records live in
 `<pin dir>/freeze/`; `tools/compat19/p19_build.py` reads them for CC-01.
@@ -513,8 +529,11 @@ python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin /mnt/e/DriveDiT/pin/p
 pin's app ids, buildids and depot manifests, the copy holds exactly the reference pin's paks and exes with their sizes,
 every one of them matches SHA256SUMS, `steam_appid.txt` is unchanged, and the build_key equals the reference pin's. It
 refuses the reference copy itself as `--from-copy`, and any directory that is not a `COLD_RUN_ROOTS` entry (a pin from
-there could never launch). The pin records each pak's sha256, so `preflight --check --verify-hashes` can re-hash the
-whole copy; a launch checks sizes and mtimes and hashes the exes. The acf checks read the saved appmanifests: on a
+there could never launch). The pin records each pak's sha256, and every launch, `--check` and activation of a cold pin re-hashes every pak
+against it (`<app>.pak_sha256`, mandatory), so a pak changed with its size and mtime kept is refused. There is no
+cache (one keyed by size and mtime could not see that change): about 6.5 min per cold launch for the 28 GB of 1.8.0.13
+at the 73 MB/s measured on E: (2026-11-07). The pin also records the sha256 of the reference SHA256SUMS
+(`cold_of.sums_sha256`), checked at every launch. The acf checks read the saved appmanifests: on a
 copy nothing moves them, so they catch tampering only. `pin_activate.py 1.8.0.13-cold` works (the preferred rollback,
 MIGRATION_1_9 7 step 16); while it is active, `wb_R1.bat` and `client_R1_i01.bat` refuse (launch path mismatch) and
 the cold launchers are the ones to use.

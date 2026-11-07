@@ -13,15 +13,20 @@ drift before a launch, not during or after it. So, once per app pair, with Steam
 
 PASS: the build identity in both appmanifests is unchanged (buildid, TargetBuildID, StateFlags, AutoUpdateBehavior,
 depot manifests, LastUpdated), every pinned exe and pak is unchanged (the full preflight check passes again), and at
-least one launch record (status ok) of this pin was written between the two steps. A rewrite of an appmanifest that
-changes none of those fields (Steam updating LastPlayed, for example) is reported, not failed. Steam's online state
-cannot be read from WSL: --steam online|offline records what the user says.
+least one REAL launch of this pin happened between the two steps (Codex round 1): a launch record of this pin file
+(a JSON object with the dd-launch fields, status ok, exe wb) AND that launch's own console.log, under the launch
+path's Workbench profile, naming its -dcLaunchId, started after the before-record and showing "Creating game
+instance(...), version X" (equal to the pin's engine_version_expected once it has one). A preflight run alone (the
+launcher refused after it, or no exe started) never passes. A rewrite of an appmanifest that changes none of the
+identity fields (Steam updating LastPlayed at exit, measured 2026-11-07) is reported, not failed. Steam's online state
+cannot be read from WSL: --steam online|offline records what the user says, and only online qualifies for 5.5; an
+offline run ends PASS_UNQUALIFIED, which CC-01 does not accept.
 
     python3 -I -B freeze_check.py before --pin-active --steam online [--dry-run]
     python3 -I -B freeze_check.py after --before /mnt/e/DriveDiT/pin/freeze/freeze_<id>_<UTC>.before.json [--dry-run]
 
-Exit codes: 0 written (before), PASS (after) or dry run; 1 refused (the pin does not pass before) or FAIL (after);
-2 usage, config or path error. Writes only under /mnt/e, and only the freeze/ records.
+Exit codes: 0 written (before), PASS (after) or dry run; 1 refused (the pin does not pass before), FAIL or
+PASS_UNQUALIFIED (after); 2 usage, config or path error. Writes only under /mnt/e, and only the freeze/ records.
 """
 from __future__ import annotations
 
@@ -80,7 +85,8 @@ def snapshot(src: dict) -> dict:
 
 
 def launches_between(src: dict, start_utc: str, end_utc: str) -> list:
-    """Launch records of this pin (same pin file sha256) with start_utc <= utc <= end_utc, oldest first."""
+    """Launch records of this pin (same pin file sha256) with start_utc <= utc <= end_utc, oldest first. A record that
+    is not a JSON object with the dd-launch fields is skipped (never counted)."""
     ldir = os.path.join(src["pin_dir"], "launches")
     found = []
     if not os.path.isdir(ldir):
@@ -92,12 +98,39 @@ def launches_between(src: dict, start_utc: str, end_utc: str) -> list:
             rec = json.loads(pinlib.read_regular_file(os.path.join(ldir, name), "launch record", 1 << 22))
         except (pinlib.PinError, ValueError):
             continue
+        if not isinstance(rec, dict) or rec.get("schema") not in ("dd-launch/1", "dd-launch/2"):
+            continue
         pin = rec.get("pin") if isinstance(rec.get("pin"), dict) else {}
         utc = rec.get("utc")
-        if (isinstance(utc, str) and start_utc <= utc <= end_utc and pin.get("pin_id") == src["pin_id"]
+        lid = rec.get("launch_id")
+        if (isinstance(utc, str) and pinlib.iso_utc_to_unix(utc) is not None and start_utc <= utc <= end_utc
+                and isinstance(lid, str) and name == "launch_%s.json" % lid and pin.get("pin_id") == src["pin_id"]
                 and pin.get("sha256") == src["sha256"] and rec.get("status") == "ok"):
-            found.append({"launch_id": rec.get("launch_id"), "exe": rec.get("exe"), "utc": utc})
+            found.append({"launch_id": lid, "exe": rec.get("exe"), "utc": utc})
     return found
+
+
+def launch_evidence(src: dict, ident: dict, launch: dict, before_unix: int):
+    """(evidence or None, why not): the console.log of a wb launch, under the launch path's Workbench profile, that
+    names its -dcLaunchId, started after the before-record and reports the build."""
+    if launch.get("exe") != "wb":
+        return None, "launch %s is a %s launch; only Workbench starts leave a log here" % (launch["launch_id"],
+                                                                                         launch.get("exe"))
+    wb = pinlib.WB_LAUNCH.get(ident["launch_path_id"])
+    if wb is None:
+        return None, "launch path %s has no Workbench launcher" % ident["launch_path_id"]
+    logs = pinlib.launch_logs(pinlib.win_to_wsl(wb["profile"]), launch["launch_id"], before_unix)
+    if not logs:
+        return None, ("launch %s has no console.log under %s\\logs started after the before-record (the preflight "
+                      "ran, but no Workbench start was observed)" % (launch["launch_id"], wb["profile"]))
+    log = logs[-1]
+    if log["version"] is None:
+        return None, "the console.log of launch %s shows no 'Creating game instance' line" % launch["launch_id"]
+    want = ident.get("engine_version_expected")
+    if want and log["version"] != want:
+        return None, "launch %s reports version %s, the pin expects %s" % (launch["launch_id"], log["version"], want)
+    return {"launch_id": launch["launch_id"], "exe": launch["exe"], "console_log": log["path"],
+            "log_start_unix": log["start_unix"], "build_version": log["version"]}, None
 
 
 def compare(before: dict, after: dict) -> tuple:
@@ -152,7 +185,7 @@ def cmd_before(args, write_roots) -> int:
         return 0
     try:
         _out_dir(src, write_roots, create=True)
-        written = pinlib.write_json_new(path, rec, write_roots)
+        written = pinlib.write_json_once(path, rec, write_roots)
     except (pinlib.PinError, OSError) as exc:
         print("freeze_check: %s" % exc, file=sys.stderr)
         return 2
@@ -181,30 +214,40 @@ def cmd_after(args, write_roots) -> int:
     checks, _ = preflight.full_checks(src, ident)
     failed = [c["name"] for c in checks if not c["ok"]]
     launches = launches_between(src, before["utc"], pinlib.utc_iso(now))
+    before_unix = pinlib.iso_utc_to_unix(before["utc"])
+    evidence, missing = [], []
+    for launch in launches:
+        ev, why = launch_evidence(src, ident, launch, before_unix)
+        (evidence.append(ev) if ev else missing.append(why))
     problems = list(diffs)
     if failed:
         problems.append("preflight checks fail now: %s" % ", ".join(failed))
     if not launches:
         problems.append("no launch record of pin %s between %s and now: start the app through its launcher between "
                         "the two steps" % (src["pin_id"], before["utc"]))
-    verdict = "FAIL" if problems else "PASS"
+    elif not evidence:
+        problems.append("no launch between the two steps left evidence of a real start: %s" % "; ".join(missing))
+    qualified = before.get("steam_state_user") == "online"
+    verdict = "FAIL" if problems else ("PASS" if qualified else "PASS_UNQUALIFIED")
     rec = {"schema": SCHEMA, "step": "after", "utc": pinlib.utc_iso(now), "pin_id": src["pin_id"],
            "pin_sha256": src["sha256"], "build_key": ident["build_key"], "app_pair": before["app_pair"],
            "before": {"path": os.path.abspath(args.before), "utc": before["utc"],
                       "sha256": pinlib.sha256_file(os.path.abspath(args.before))},
-           "steam_state_user": before.get("steam_state_user"), "launches": launches,
-           "apps_launched": sorted({"tools" if r["exe"] == "wb" else "game" for r in launches}),
+           "steam_state_user": before.get("steam_state_user"), "qualified_5_5": qualified, "launches": launches,
+           "launch_evidence": evidence, "launches_without_evidence": missing,
+           "apps_launched": sorted({"tools" if r["exe"] == "wb" else "game" for r in evidence}),
            "identity_diffs": diffs, "notes": notes, "problems": problems, "verdict": verdict, "snapshot": after}
     path = os.path.join(out_dir, os.path.basename(args.before).replace(".before.json", ".after.json"))
     print(json.dumps(rec, indent=2))
-    print("FREEZE %s (pin %s, app pair %s): %s" % (verdict, src["pin_id"], before["app_pair"],
-                                                   "; ".join(problems) or "nothing changed across %d launch(es)"
-                                                   % len(launches)), file=sys.stderr)
+    print("FREEZE %s (pin %s, app pair %s): %s%s" % (
+        verdict, src["pin_id"], before["app_pair"], "; ".join(problems) or "nothing changed across %d real launch(es)"
+        % len(evidence), "" if qualified or problems else "; Steam was offline, so this does not qualify for 5.5"),
+        file=sys.stderr)
     if args.dry_run:
         print("DRY RUN: would write %s; nothing written" % path, file=sys.stderr)
         return 0 if verdict == "PASS" else 1
     try:
-        written = pinlib.write_json_new(path, rec, write_roots)
+        written = pinlib.write_json_once(path, rec, write_roots)
     except (pinlib.PinError, OSError) as exc:
         print("freeze_check: %s" % exc, file=sys.stderr)
         return 2
@@ -213,7 +256,8 @@ def cmd_after(args, write_roots) -> int:
 
 
 def find_pass(pin_dir: str, pin_sha256: str, build_key) -> list:
-    """after records with verdict PASS for this pin file (or, when given, this build_key): the CC-01 evidence."""
+    """after records with verdict PASS (Steam online, at least one launch with log evidence) for this pin file (or,
+    when given, this build_key): the CC-01 evidence."""
     d = os.path.join(pin_dir, FREEZE_DIR)
     out = []
     if not os.path.isdir(d):
@@ -225,7 +269,8 @@ def find_pass(pin_dir: str, pin_sha256: str, build_key) -> list:
             rec = json.loads(pinlib.read_regular_file(os.path.join(d, name), "freeze record", 1 << 22))
         except (pinlib.PinError, ValueError):
             continue
-        if rec.get("schema") == SCHEMA and rec.get("verdict") == "PASS" and (
+        if rec.get("schema") == SCHEMA and rec.get("verdict") == "PASS" and rec.get("qualified_5_5") is True \
+                and rec.get("launch_evidence") and (
                 rec.get("pin_sha256") == pin_sha256 or (build_key and rec.get("build_key") == build_key)):
             out.append(os.path.join(d, name))
     return out

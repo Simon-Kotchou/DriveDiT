@@ -36,24 +36,8 @@ p19_build = _load("dd_compat19_p19_build", os.path.join(REPO, "tools", "compat19
 p19_api = _load("dd_compat19_p19_api", os.path.join(REPO, "tools", "compat19", "p19_api.py"))
 
 
-class CC01Tests(dd14a.V2Case):
-    def setUp(self):
-        super().setUp()
-        self.put_active(b"1.8.0.13\n")
-
-    def before(self):
-        rc, out, err = run_main(freeze_check.main, ["before", "--pin-active", "--pin-dir", self.pin_dir, "--steam",
-                                                    "online"], self.roots)
-        self.assertEqual(rc, 0, err)
-        return os.path.join(self.pin_dir, "freeze", [n for n in os.listdir(os.path.join(self.pin_dir, "freeze"))
-                                                     if n.endswith(".before.json")][-1])
-
-    def after(self, before):
-        return run_main(freeze_check.main, ["after", "--before", before], self.roots)
-
-    def user_launch(self):
-        rc, out, err = self.preflight_active("--exe", "wb")
-        self.assertEqual(rc, 0, err)
+class CC01Tests(dd14a.FreezeCase):
+    """CC-01 on the freeze check's fixtures (a real launch is a preflight record plus that start's console.log)."""
 
     def cc01(self):
         return run_main(p19_build.main, ["--pin-dir", self.pin_dir], self.roots)

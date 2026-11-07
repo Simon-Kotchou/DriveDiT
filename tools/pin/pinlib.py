@@ -98,8 +98,10 @@ BUILD_KEY_SIDECAR_SCHEMA = "dd-pin-build-key/1"
 # (SURFACE 5 row 2). pin_sidecar.py engine writes it; the preflight copies it into the launch record, where DC_Session
 # compares it with GetBuildVersion().
 ENGINE_SIDECAR_SCHEMA = "dd-pin-engine/1"
-# MIGRATION_1_9 8.2 component 1 (CC-11 compares GetFixedTimeSlice() with it). Not part of build_key.
-PHYSICS_HZ_EXPECTED = 60
+# CC-11 compares GetFixedTimeSlice() with it; not part of build_key. MIGRATION_1_9 8.2 asks for 60, but every probe
+# run header on 1.8.0.13 and on 1.9.0.37 measured engine.fixed_time_slice_s = 0.033333 (Workbench Play, 2026-10-23 and
+# 2026-11-06), so the default is the measured 30 Hz (Codex round 1); pass --physics-hz-expected to state another rate.
+PHYSICS_HZ_EXPECTED = 30
 
 # use_class is set at launch time (MIGRATION_1_9 3.3; dc-2.0 section 11). An experimental pin always launches as
 # compat-preview. production needs a qualified G19 admission record (DD-14b), so the preflight refuses it for now.
@@ -730,6 +732,94 @@ def utc_iso(dt: _dt.datetime) -> str:
 
 def utc_compact(dt: _dt.datetime) -> str:
     return dt.strftime("%Y%m%dT%H%M%SZ")
+
+
+_RENAME_NOREPLACE = 1
+_AT_FDCWD = -100
+
+
+def _rename_noreplace(src: str, dst: str) -> bool:
+    """renameat2(RENAME_NOREPLACE): True when done; False when the call or the flag is not supported here. Raises
+    FileExistsError when dst exists (never replaced)."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc.renameat2
+    except (OSError, AttributeError):
+        return False
+    rc = fn(_AT_FDCWD, os.fsencode(src), _AT_FDCWD, os.fsencode(dst), _RENAME_NOREPLACE)
+    if rc == 0:
+        return True
+    err = ctypes.get_errno()
+    if err == errno.EEXIST:
+        raise FileExistsError(errno.EEXIST, "exists", dst)
+    if err in (errno.EINVAL, errno.ENOSYS, errno.EPERM, getattr(errno, "ENOTSUP", errno.EINVAL),
+               getattr(errno, "EOPNOTSUPP", errno.EINVAL)):
+        return False
+    raise OSError(err, os.strerror(err), dst)
+
+
+def publish_new(path: str, data: bytes, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+    """Write a new file atomically and never replace one (DD-14a; Codex round 1).
+
+    The bytes go to a uniquely named temp file in the same directory (O_EXCL|O_NOFOLLOW), are fsynced, and are then
+    published without replacement: a hard link to the final name (link() fails if it exists), else
+    renameat2(RENAME_NOREPLACE), else, on a filesystem with neither, a check then rename (a window only another
+    writer racing on the same name could use: not an accident this guards). The temp file is always removed and the
+    directory fsynced (best effort). A reader sees no file or the whole file, a crash leaves at most a temp file under
+    its own name, and a retry is never blocked by a partial write. PinError if the target exists.
+    """
+    target = check_write_path(path, allowed_roots)
+    parent = os.path.dirname(target)
+    if not os.path.isdir(parent):
+        raise PinError("output directory does not exist (create it first): %s" % parent)
+    if os.path.lexists(target):
+        raise PinError("refusing to overwrite existing file: %s" % target)
+    tmp = os.path.join(parent, ".%s.tmp-%d-%s" % (os.path.basename(target), os.getpid(), os.urandom(4).hex()))
+    check_write_path(tmp, allowed_roots)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(tmp, flags, 0o644)
+        try:
+            _write_all(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            raise PinError("refusing to overwrite existing file: %s" % target)
+        except OSError as exc:
+            if exc.errno not in (errno.EPERM, errno.EXDEV, errno.ENOSYS, errno.EMLINK,
+                                 getattr(errno, "ENOTSUP", errno.EPERM), getattr(errno, "EOPNOTSUPP", errno.EPERM)):
+                raise
+            try:
+                done = _rename_noreplace(tmp, target)
+            except FileExistsError:
+                raise PinError("refusing to overwrite existing file: %s" % target)
+            if not done:
+                if os.path.lexists(target):
+                    raise PinError("refusing to overwrite existing file: %s" % target)
+                os.rename(tmp, target)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    try:
+        dfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+    return target
+
+
+def write_json_once(path: str, obj, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+    """JSON through publish_new: atomic, write-once (sidecars, freeze records, check results)."""
+    return publish_new(path, (json.dumps(obj, indent=2) + "\n").encode("utf-8"), allowed_roots)
 
 
 def write_json_new(path: str, obj, allowed_roots=DEFAULT_WRITE_ROOTS, overwrite: bool = False) -> str:

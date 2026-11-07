@@ -234,7 +234,7 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
         print("DRY RUN: would write %s; nothing written" % out, file=sys.stderr)
         return 0
     try:
-        written = pinlib.write_json_new(out, side, write_roots)
+        written = pinlib.write_json_once(out, side, write_roots)
     except (pinlib.PinError, OSError) as exc:
         print("pin_sidecar: %s" % exc, file=sys.stderr)
         return 2

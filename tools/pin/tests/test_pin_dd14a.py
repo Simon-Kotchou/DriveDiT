@@ -104,7 +104,7 @@ class BuildKeyTests(V2Case):
         pin = self.make_v2()
         self.assertEqual((pin["schema"], pin["channel"], pin["release_channel"], pin["launch_path_id"]),
                          ("dd-pin/2", "stable", "stable", "stable"))
-        self.assertEqual(pin["physics_hz_expected"], 60)
+        self.assertEqual(pin["physics_hz_expected"], 30)   # the measured fixed slice (1/30 s), not the planned 60
         self.assertEqual(pin["game"]["exe_sha256"], {"ArmaReforgerSteam.exe": sha(b"MZ game"),
                                                      "ArmaReforgerSteamDiag.exe": sha(b"MZ game diag")})
         self.assertEqual(pin["tools"]["exe_sha256"], {"Workbench/ArmaReforgerWorkbenchSteamDiag.exe": sha(b"MZ wb")})
@@ -156,7 +156,7 @@ class LaunchRecordV2Tests(V2Case):
         self.assertEqual((rec["build_key"], rec["build_key_source"]), (pin["build_key"], "pin"))
         self.assertEqual((rec["channel"], rec["pin_channel"], rec["launch_path_id"], rec["use_class"]),
                          ("stable", "stable", "stable", "probe"))
-        self.assertEqual(rec["physics_hz_expected"], 60)
+        self.assertEqual(rec["physics_hz_expected"], 30)
         names = sorted(c["name"] for c in rec["checks"])
         self.assertEqual(names, sorted(preflight.CHECK_NAMES + ("game.exe_sha256", "tools.exe_sha256")))
         self.assertTrue(all(c["ok"] for c in rec["checks"]))
@@ -401,6 +401,16 @@ class SidecarTests(V2Case):
         self.assertEqual(side["build_key"], spec_build_key(1874880, 24903726, sha(b"MZ game"), 1874910, 24870687,
                                                            sha(b"MZ wb")))
 
+    def test_from_sums_sidecar_is_anchored_to_its_sha256sums(self):
+        copy = self.make_copy()
+        self.assertEqual(self.sidecar("1.8.0.13", "--from-sums", "--apply")[0], 0)
+        self.assertEqual(run_main(preflight.main, ["--pin", self.pin_file("1.8.0.13"), "--check"], self.roots)[0], 0)
+        with open(os.path.join(copy, "SHA256SUMS"), "a") as fh:
+            fh.write("%s  game/extra.txt\n" % ("0" * 64))
+        rc, out, err = run_main(preflight.main, ["--pin", self.pin_file("1.8.0.13"), "--check"], self.roots)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("changed since", err)
+
     def test_from_sums_refuses_a_copy_that_does_not_match(self):
         self.make_copy(corrupt=True)
         rc, _, err = self.sidecar("1.8.0.13", "--from-sums", "--apply")
@@ -427,6 +437,54 @@ class SidecarTests(V2Case):
 
 
 # --------------------------------------------------------------------------- engine sidecar
+
+
+class AtomicPublishTests(V2Case):
+    """Codex round 1: a write-once sidecar is published atomically; a partial write never blocks a retry."""
+
+    def side_path(self):
+        return os.path.join(self.pin_dir, "pin_1.8.0.13.build_key.json")
+
+    def test_short_write_leaves_nothing_and_a_retry_works(self):
+        real = pinlib._write_all
+
+        def short(fd, data):
+            real(fd, data[:9])
+            raise OSError(28, "No space left on device (simulated)")
+        pinlib._write_all = short
+        try:
+            rc, _, err = self.sidecar("1.8.0.13", "--from-live", "--apply")
+        finally:
+            pinlib._write_all = real
+        self.assertEqual(rc, 2, err)
+        self.assertFalse(os.path.lexists(self.side_path()))
+        self.assertEqual([n for n in os.listdir(self.pin_dir) if ".tmp-" in n], [])
+        rc, _, err = self.sidecar("1.8.0.13", "--from-live", "--apply")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(read_json(self.side_path())["pin_id"], "1.8.0.13")
+
+    def test_leftover_temp_file_does_not_block(self):
+        with open(os.path.join(self.pin_dir, ".pin_1.8.0.13.build_key.json.tmp-1-deadbeef"), "w") as fh:
+            fh.write("{partial")
+        rc, _, err = self.sidecar("1.8.0.13", "--from-live", "--apply")
+        self.assertEqual(rc, 0, err)
+
+    def test_never_replaces(self):
+        target = os.path.join(self.tmp, "x.json")
+        pinlib.write_json_once(target, {"a": 1}, self.roots)
+        with self.assertRaises(pinlib.PinError):
+            pinlib.write_json_once(target, {"a": 2}, self.roots)
+        self.assertEqual(read_json(target), {"a": 1})
+        # the no-link fallbacks keep the no-replace rule too
+        real_link = os.link
+        os.link = lambda a, b: (_ for _ in ()).throw(OSError(1, "Operation not permitted"))
+        try:
+            with self.assertRaises(pinlib.PinError):
+                pinlib.write_json_once(target, {"a": 3}, self.roots)
+            pinlib.write_json_once(os.path.join(self.tmp, "y.json"), {"b": 1}, self.roots)
+        finally:
+            os.link = real_link
+        self.assertEqual((read_json(target), read_json(os.path.join(self.tmp, "y.json"))), ({"a": 1}, {"b": 1}))
 
 
 class EngineSidecarTests(V2Case):
@@ -468,14 +526,37 @@ class EngineSidecarTests(V2Case):
 # --------------------------------------------------------------------------- freeze check
 
 
-class FreezeTests(V2Case):
+def write_launch_log(profile, launch_id, start_unix, version="1.8.0.13", name=None):
+    """A fixture console.log of a Workbench start (the evidence a real launch leaves), not a preflight run."""
+    import datetime
+    t = datetime.datetime.fromtimestamp(start_unix, datetime.timezone.utc)
+    d = os.path.join(profile, "logs", name or "logs_" + t.strftime("%Y-%m-%d_%H-%M-%S"))
+    os.makedirs(d, exist_ok=True)
+    lines = ["---", "Log %s/console.log started at %s (%s UTC)" % (d, t.strftime("%Y-%m-%d %H:%M:%S"),
+                                                                  t.strftime("%Y-%m-%d %H:%M:%S")),
+             "00:00:01.000   ENGINE       : CLI Params: -profile %s -gproj x.gproj -dcLaunchId %s" % (profile, launch_id)]
+    if version:
+        lines.append("00:00:08.000   INIT         : Creating game instance(ArmaReforgerScripted), version %s built "
+                     "2026-08-21 14:30:18 UTC." % version)
+    with open(os.path.join(d, "console.log"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return d
+
+
+class FreezeCase(V2Case):
+    """Helpers of the freeze-check tests (no tests here; tests/test_compat19_static.py reuses them)."""
+
     def setUp(self):
         super().setUp()
         self.put_active(b"1.8.0.13\n")
+        self.profile = os.path.join(self.tmp, "wb_profile")
+        saved = pinlib.WB_LAUNCH
+        pinlib.WB_LAUNCH = {"stable": {"profile": self.profile, "gproj": "x.gproj", "launcher": "wb_R1.bat"}}
+        self.addCleanup(setattr, pinlib, "WB_LAUNCH", saved)
 
-    def before(self):
+    def before(self, steam="online"):
         rc, out, err = run_main(freeze_check.main, ["before", "--pin-active", "--pin-dir", self.pin_dir, "--steam",
-                                                    "online"], self.roots)
+                                                    steam], self.roots)
         self.assertEqual(rc, 0, err)
         return os.path.join(self.pin_dir, "freeze", [n for n in os.listdir(os.path.join(self.pin_dir, "freeze"))
                                                      if n.endswith(".before.json")][-1])
@@ -483,10 +564,20 @@ class FreezeTests(V2Case):
     def after(self, before):
         return run_main(freeze_check.main, ["after", "--before", before], self.roots)
 
-    def user_launch(self):
+    def preflight_only(self):
         rc, out, err = self.preflight_active("--exe", "wb")
         self.assertEqual(rc, 0, err)
+        return out.strip()
 
+    def user_launch(self, version="1.8.0.13"):
+        """What the launcher and a real Workbench start leave: the preflight record, then the start's console.log."""
+        lid = self.preflight_only()
+        rec = read_json(os.path.join(self.launches, "launch_%s.json" % lid))
+        write_launch_log(self.profile, lid, pinlib.iso_utc_to_unix(rec["utc"]) + 2, version)
+        return lid
+
+
+class FreezeTests(FreezeCase):
     def test_pass_with_a_launch_in_between(self):
         b = self.before()
         self.user_launch()
@@ -494,10 +585,58 @@ class FreezeTests(V2Case):
         rc, out, err = self.after(b)
         self.assertEqual(rc, 0, err)
         rec = json.loads(out)
-        self.assertEqual((rec["verdict"], rec["apps_launched"]), ("PASS", ["tools"]))
+        self.assertEqual((rec["verdict"], rec["apps_launched"], rec["qualified_5_5"]), ("PASS", ["tools"], True))
+        self.assertEqual(len(rec["launch_evidence"]), 1)
         self.assertEqual(len(rec["notes"]), 1)
         self.assertIn("LastPlayed", rec["notes"][0])
         self.assertTrue(os.path.exists(b.replace(".before.json", ".after.json")))
+
+    def test_preflight_only_launch_fails(self):
+        # Codex round 1: a preflight record without a real start (the launcher stopped after it) never passes
+        b = self.before()
+        self.preflight_only()
+        rc, out, err = self.after(b)
+        self.assertEqual(rc, 1, err)
+        rec = json.loads(out)
+        self.assertEqual(rec["verdict"], "FAIL")
+        self.assertIn("no Workbench start was observed", rec["problems"][0])
+
+    def test_log_from_before_the_before_record_is_no_evidence(self):
+        b = self.before()
+        lid = self.preflight_only()
+        write_launch_log(self.profile, lid, pinlib.iso_utc_to_unix(read_json(b)["utc"]) - 30)
+        rc, out, err = self.after(b)
+        self.assertEqual(rc, 1, err)
+
+    def test_offline_is_unqualified(self):
+        b = self.before(steam="offline")
+        self.user_launch()
+        rc, out, err = self.after(b)
+        self.assertEqual(rc, 1, err)
+        rec = json.loads(out)
+        self.assertEqual((rec["verdict"], rec["qualified_5_5"]), ("PASS_UNQUALIFIED", False))
+        self.assertEqual(freeze_check.find_pass(self.pin_dir, pinlib.sha256_file(self.pin_file("1.8.0.13")), None), [])
+
+    def test_wrong_build_in_the_log(self):
+        rc, _, err = run_main(pin_sidecar.main, ["engine", "1.8.0.13", "--pin-dir", self.pin_dir, "--run-header",
+                                                 EngineSidecarTests.header(self), "--apply"], self.roots)
+        self.assertEqual(rc, 0, err)
+        b = self.before()
+        self.user_launch(version="1.9.0.37")
+        rc, out, err = self.after(b)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("reports version 1.9.0.37, the pin expects 1.8.0.13", json.loads(out)["problems"][0])
+
+    def test_malformed_launch_records_are_skipped(self):
+        b = self.before()
+        os.makedirs(self.launches, exist_ok=True)
+        with open(os.path.join(self.launches, "launch_20261106T000000Z-wb-0000.json"), "w") as fh:
+            fh.write("[]")
+        with open(os.path.join(self.launches, "launch_20261106T000001Z-wb-0001.json"), "w") as fh:
+            json.dump({"launch_id": "20261106T000001Z-wb-0001", "status": "ok"}, fh)
+        rc, out, err = self.after(b)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(json.loads(out)["launches"], [])
 
     def test_fail_without_a_launch(self):
         b = self.before()

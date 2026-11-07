@@ -97,7 +97,7 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS, compat_root=COMPAT_R
         try:
             d = pinlib.check_write_path(os.path.join(compat_root, res["pin_id"]), write_roots)
             os.makedirs(d, exist_ok=True)
-            path = pinlib.write_json_new(os.path.join(d, "cc01_%s.json" % res["utc"].replace("-", "").replace(":", "")),
+            path = pinlib.write_json_once(os.path.join(d, "cc01_%s.json" % res["utc"].replace("-", "").replace(":", "")),
                                          res, write_roots)
             print("wrote %s" % path)
         except (pinlib.PinError, OSError) as exc:

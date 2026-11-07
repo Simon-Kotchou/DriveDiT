@@ -501,6 +501,13 @@ def _make_cold(args, out, write_roots) -> int:
         sums_path = os.path.abspath(args.sums or os.path.join(reference_copy, "SHA256SUMS"))
         sums_raw = pinlib.read_regular_file(sums_path, "SHA256SUMS", 64 * 1024 * 1024)
         sums = pinlib.parse_sha256sums(sums_raw)
+        # The reference's build_key sidecar, when made from SHA256SUMS, recorded that file's sha256: it must not have
+        # changed since (Codex round 1, item 19).
+        side = preflight.load_sidecar(ref, "build_key")
+        anchor = ((side or {}).get("evidence") or {}).get("sums_sha256")
+        if anchor and anchor != hashlib.sha256(sums_raw).hexdigest():
+            raise pinlib.PinError("SHA256SUMS %s is not the one the reference pin's build_key sidecar was made from "
+                                  "(sha256 %s)" % (sums_path, anchor[:16]))
     except pinlib.PinError as exc:
         print("make_pin: %s" % exc, file=sys.stderr)
         return 2

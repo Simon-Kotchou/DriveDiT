@@ -86,7 +86,8 @@ class ColdPinTests(V2Case):
         rc, _, err, rec = self.launch(self.pin_file("1.8.0.13-cold"), "--launch-path", self.LP, exe="client")
         self.assertEqual(rc, 0, err)
         self.assertEqual((rec["channel"], rec["pin_channel"], rec["launch_path_id"]), ("stable", "cold", self.LP))
-        self.assertEqual(len(rec["checks"]), 24)
+        self.assertEqual(len(rec["checks"]), 26)   # the 22, exe_sha256 and the mandatory pak_sha256 of both apps
+        self.assertIn("pak sha256 match", [c for c in rec["checks"] if c["name"] == "game.pak_sha256"][0]["detail"])
         # a stable launcher refuses it
         rc, out, err, _ = self.launch(self.pin_file("1.8.0.13-cold"))
         self.assertEqual((rc, out), (1, ""), err)
@@ -129,6 +130,23 @@ class ColdPinTests(V2Case):
                               self.roots)
         self.assertEqual(rc, 2, err)
         self.assertIn("pristine restore source", err)
+
+    def test_pak_changed_with_size_and_mtime_kept_refused_at_launch(self):
+        # Codex round 1: the size and mtime are preserved, so only the hash can tell
+        self.assertEqual(self.make_cold()[0], 0)
+        self.fs.write(os.path.join(self.run_root, "game"), "addons/data/data.pak", b"data-X", base.PIN_MTIME_NS)
+        rc, out, err, _ = self.launch(self.pin_file("1.8.0.13-cold"), "--launch-path", self.LP)
+        self.assertEqual((rc, out), (1, ""), err)
+        self.assertIn("FAIL game.pak_sha256", err)
+        self.assertNotIn("FAIL game.paks", err)
+
+    def test_changed_reference_sums_refused(self):
+        self.assertEqual(self.make_cold()[0], 0)
+        with open(os.path.join(self.ref_copy, "SHA256SUMS"), "a") as fh:
+            fh.write("%s  game/extra.txt\n" % ("0" * 64))
+        rc, out, err, _ = self.launch(self.pin_file("1.8.0.13-cold"), "--launch-path", self.LP)
+        self.assertEqual((rc, out), (1, ""), err)
+        self.assertIn("changed since the cold pin was made", err)
 
     def test_changed_copy_after_pinning_refused_at_launch(self):
         self.assertEqual(self.make_cold()[0], 0)

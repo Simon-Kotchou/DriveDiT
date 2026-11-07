@@ -12,7 +12,9 @@
 //      the point with the downhill on the configured side (and +-a heading spread), a flat strip in four headings;
 //   3. TERRAIN. Every strip is sampled every step_m at lateral offsets: the two TYRE TRACKS (+-track_half_m) around
 //      each of corridor_points positions spread over the driving corridor (+-corridor_half_m, the part of the area the
-//      car may drive in), the centre line, and the area edges (+-half_width_m, surrounding-terrain safety only). The
+//      car may drive in; an odd count, so the centre tyre pair is always sampled, at most 2 x track_half_m apart, so
+//      no tyre position of the corridor is farther than track_half_m from a sample), the centre line, and the area
+//      edges (+-half_width_m, surrounding-terrain safety only). The
 //      cross-slope that counts is the one between the two tyre tracks, at every corridor position and every station:
 //      track cross = (y(p - h) - y(p + h)) / 2h, positive = the right side lower. Criteria (DC_SteerTerrainMath): mean
 //      and windowed grade of the centre line; side x track cross within cross_min..cross_max at every corridor
@@ -29,10 +31,13 @@
 //      entity's class or prefab is listed as benign (the probe's m_sBenignColliders, empty by default): then that one
 //      entity is excluded and the same sweep is traced again, so every remaining check still runs. The first clean
 //      strip is the site.
-// The work is spread over render frames with exact budgets: StepSearch never makes more GetSurfaceY calls for the
-// terrain than its sample budget (a strip is evaluated only when its whole cost fits; the probe refuses to start
-// when one strip costs more than the budget, GetStripCost) and never more sweeps than its trace budget.
-// The chosen site, its measured slopes and the search counts go into the run header (site.<kind>.*).
+// The work is spread over render frames with one budget per frame shared by every search of the probe
+// (DC_SteerBudget): each GetSurfaceY takes one sample and each TracePosition / TraceMove, benign retries included,
+// one trace, taken before the call; a strip's terrain and a candidate's sweeps continue in the next frame where they
+// stopped (DC_SteerSweepPlan keeps the pending call).
+// The chosen site, its measured slopes, its centre tyre-pair height profile (track_profile, for the same-ground check
+// of a baseline), its definition as an explicit candidate (explicit = x z heading) and the search counts go into the
+// run header (site.<kind>.*).
 //
 // BUILD-AGNOSTIC: GetSurfaceY, TraceMove, TracePosition, TraceOBB (Mins, Maxs, Mat), TraceParam (Start, End, Flags,
 // LayerMask, ExcludeArray, TraceEnt), TraceFlags.ENTS, EPhysicsLayerPresets.Vehicle, IEntity.GetPrefabData and
@@ -49,7 +54,7 @@ class DC_SteerSiteCriteria
 	float m_fLengthM = 1000;
 	float m_fHalfWidthM = 20;			//!< the area: edge samples at +-this, the run aborts outside it (minus the margin)
 	float m_fCorridorHalfM = 17;		//!< the tyre-track check covers positions within +-this
-	int m_iCorridorPoints = 9;			//!< corridor positions (>= 1; spread evenly, the ends at +-m_fCorridorHalfM)
+	int m_iCorridorPoints = 9;			//!< corridor positions (odd, >= 1; spread evenly, the ends at +-m_fCorridorHalfM)
 	float m_fTrackHalfM = 0.65;			//!< half the track width (S105 front track about 1.3 m)
 	float m_fZoneFromM = 0;				//!< measure zone along the strip (cross criteria; flat: the whole strip)
 	float m_fZoneToM = 1000;
@@ -68,6 +73,7 @@ class DC_SteerSiteCriteria
 	// obstacle sweeps
 	float m_fEnvelopeLatM = 0;			//!< lateral stopping envelope beyond the area [m]
 	float m_fEnvelopeLongM = 0;			//!< longitudinal stopping envelope beyond the strip end [m]
+	float m_fEnvelopeBackM = 0;			//!< stopping envelope before the strip start [m] (probes that may exit backwards)
 	float m_fBoxHalfWidthM = 1.0;		//!< S105 about 1.6 m wide, plus a margin
 	float m_fBoxHalfLengthM = 0.5;		//!< the box is swept along the line, its own length only overlaps the segments
 	float m_fBoxBottomM = 0.25;			//!< above the surface: lower obstructions (kerbs) are not obstacles
@@ -177,6 +183,7 @@ class DC_SteerSiteCriteria
 		lines.Insert(p + "side=" + m_iSide.ToString());
 		lines.Insert(p + "envelope_lat_m=" + m_fEnvelopeLatM.ToString(-1, 2));
 		lines.Insert(p + "envelope_long_m=" + m_fEnvelopeLongM.ToString(-1, 2));
+		lines.Insert(p + "envelope_back_m=" + m_fEnvelopeBackM.ToString(-1, 2));
 		lines.Insert(p + "box_half_width_m=" + m_fBoxHalfWidthM.ToString(-1, 2));
 		lines.Insert(p + "box_heights_m=" + m_fBoxBottomM.ToString(-1, 2) + "," + m_fBoxTopM.ToString(-1, 2));
 		lines.Insert(p + "sweep_line_step_m=" + m_fSweepLineStepM.ToString(-1, 2));
@@ -227,6 +234,7 @@ class DC_SteerSite
 	int m_iObstacleHits = -1;			//!< -1 = not checked
 	int m_iBenignHits;
 	string m_sObstacle;
+	ref array<float> m_aTrackProfile = {};	//!< centre tyre pair heights per station: left, right, left, ...
 
 	//------------------------------------------------------------------------------------------------
 	void DC_SteerSite(string source, vector start, float headingDeg, notnull DC_SteerSiteCriteria criteria)
@@ -289,6 +297,16 @@ class DC_SteerSite
 		lines.Insert(prefix + ".obstacle_traces=" + m_iObstacleTraces.ToString());
 		lines.Insert(prefix + ".obstacle_hits=" + m_iObstacleHits.ToString());
 		lines.Insert(prefix + ".benign_hits=" + m_iBenignHits.ToString());
+		float startX = m_vStart[0];
+		float startZ = m_vStart[2];
+		lines.Insert(prefix + ".explicit=" + startX.ToString(-1, 3) + " " + startZ.ToString(-1, 3) + " " + m_fHeadingDeg.ToString(-1, 4));
+		string profile;
+		foreach (float height : m_aTrackProfile)
+		{
+			profile += height.ToString(-1, 3) + " ";
+		}
+
+		lines.Insert(prefix + ".track_profile=" + profile.Trim());
 		lines.Insert(prefix + ".cross_rule=the tyre-track cross over the driving corridor (criteria line rule); *_signed = side x track cross over the measure zone");
 	}
 
@@ -301,8 +319,173 @@ class DC_SteerSite
 }
 
 //------------------------------------------------------------------------------------------------
-//! Incremental search for one site of one kind (see the file header). Configure, AddExplicit, optionally SetGrid,
-//! then StepSearch once per render frame until it returns true; GetSelected is null when nothing passed.
+//! The native-call budget of one render frame, shared by every search of the probe in that frame (the probe resets it
+//! once per frame and hands the same object to each unfinished search in turn). Every GetSurfaceY of the terrain and
+//! of a sweep's end points takes one sample, every TracePosition / TraceMove (also each benign retry) one trace,
+//! taken before the call. Pure arithmetic: tests/enforce_subset.py runs it
+class DC_SteerBudget
+{
+	int m_iSamples;
+	int m_iTraces;
+	int m_iSamplesUsed;
+	int m_iTracesUsed;
+
+	//------------------------------------------------------------------------------------------------
+	void Reset(int samples, int traces)
+	{
+		m_iSamples = samples;
+		m_iTraces = traces;
+		m_iSamplesUsed = 0;
+		m_iTracesUsed = 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true (and charged) when count samples are left in this frame
+	bool TakeSamples(int count)
+	{
+		if (count > m_iSamples)
+			return false;
+
+		m_iSamples -= count;
+		m_iSamplesUsed += count;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true (and charged) when one trace is left in this frame
+	bool TakeTrace()
+	{
+		if (m_iTraces < 1)
+			return false;
+
+		m_iTraces -= 1;
+		m_iTracesUsed += 1;
+		return true;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+//! The obstacle sweeps of one candidate as a sequence of single native calls (pure arithmetic: tests/enforce_subset.py
+//! runs it with a mock tracer). Sweep i covers line i / segments, segment i % segments; segment 0 of every line first
+//! checks the start box for an initial overlap (CALL_POSITION), then every sweep traces its move (CALL_MOVE). The
+//! caller makes the pending call (charging one trace first) and reports it: a benign hit repeats the same call (the
+//! entity is excluded by then), at most MAX_BENIGN_RETRIES times per sweep; a blocking hit ends the plan. Nothing
+//! is lost when the frame's traces run out between two calls: the next frame continues with the pending one
+class DC_SteerSweepPlan
+{
+	static const int CALL_POSITION = 1;
+	static const int CALL_MOVE = 2;
+	static const int RESULT_CLEAR = 0;
+	static const int RESULT_BENIGN = 1;
+	static const int RESULT_BLOCKED = 2;
+	static const int MAX_BENIGN_RETRIES = 8;
+
+	int m_iLines = 1;
+	int m_iSegments = 1;
+	int m_iSweep;
+	int m_iCall = 1;
+	int m_iRetries;
+	int m_iCalls;
+	int m_iBenign;
+	bool m_bBlocked;
+	bool m_bRetryCap;
+
+	//------------------------------------------------------------------------------------------------
+	void Reset(int lines, int segments)
+	{
+		m_iLines = lines;
+		if (m_iLines < 1)
+			m_iLines = 1;
+
+		m_iSegments = segments;
+		if (m_iSegments < 1)
+			m_iSegments = 1;
+
+		m_iSweep = 0;
+		m_iCall = CALL_POSITION;
+		m_iRetries = 0;
+		m_iCalls = 0;
+		m_iBenign = 0;
+		m_bBlocked = false;
+		m_bRetryCap = false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetTotal()
+	{
+		return m_iLines * m_iSegments;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool IsDone()
+	{
+		return m_bBlocked || m_bRetryCap || m_iSweep >= GetTotal();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every sweep traced without a blocking hit
+	bool IsClear()
+	{
+		return !m_bBlocked && !m_bRetryCap && m_iSweep >= GetTotal();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetLine()
+	{
+		return m_iSweep / m_iSegments;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	int GetSegment()
+	{
+		return m_iSweep % m_iSegments;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The pending native call (CALL_POSITION or CALL_MOVE)
+	int GetCall()
+	{
+		return m_iCall;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The pending call was made: RESULT_CLEAR, RESULT_BENIGN or RESULT_BLOCKED
+	void Report(int result)
+	{
+		m_iCalls += 1;
+		if (result == RESULT_BLOCKED)
+		{
+			m_bBlocked = true;
+			return;
+		}
+
+		if (result == RESULT_BENIGN)
+		{
+			m_iBenign += 1;
+			m_iRetries += 1;
+			if (m_iRetries > MAX_BENIGN_RETRIES)
+				m_bRetryCap = true;
+
+			return;
+		}
+
+		if (m_iCall == CALL_POSITION)
+		{
+			m_iCall = CALL_MOVE;
+			return;
+		}
+
+		m_iSweep += 1;
+		m_iRetries = 0;
+		m_iCall = CALL_MOVE;
+		if (m_iSweep < GetTotal() && GetSegment() == 0)
+			m_iCall = CALL_POSITION;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+//! The search for one site kind: explicit candidates, then the grid; the terrain of a strip is sampled across as many
+//! frames as it needs, the passing strips are ranked and swept for obstacles one native call at a time
 class DC_SteerSiteSearch
 {
 	static const int STAGE_EXPLICIT = 0;
@@ -311,8 +494,6 @@ class DC_SteerSiteSearch
 	static const int STAGE_DONE = 3;
 	//! Strips kept for the obstacle stage (the best by score)
 	static const int MAX_RANKED = 64;
-	//! A sweep is traced again at most this often after benign hits
-	static const int MAX_BENIGN_RETRIES = 8;
 
 	protected ref DC_SteerSiteCriteria m_Criteria;
 	protected ref array<ref DC_SteerSite> m_aExplicit = {};
@@ -321,6 +502,7 @@ class DC_SteerSiteSearch
 	protected ref array<IEntity> m_aExcludes = {};
 	protected ref DC_SteerSite m_Selected;
 	protected ref TraceOBB m_Box;
+	protected ref DC_SteerSweepPlan m_Plan = new DC_SteerSweepPlan();
 
 	protected bool m_bGrid;
 	protected bool m_bGridDone;
@@ -338,7 +520,27 @@ class DC_SteerSiteSearch
 
 	protected int m_iStage = STAGE_EXPLICIT;
 	protected int m_iExplicitCursor;
-	protected int m_iObstacleIndex;			//!< sweep index inside the current candidate (line x segment)
+
+	// the strip whose terrain is being sampled (across frames)
+	protected ref DC_SteerSite m_Sampling;
+	protected ref DC_ProbeArea m_SamplingStrip;
+	protected ref array<float> m_aAlong = {};
+	protected ref array<float> m_aLateral = {};
+	protected ref array<float> m_aHeights = {};
+	protected int m_iSampleIndex;
+	protected bool m_bSamplingExplicit;
+
+	// the candidate being swept
+	protected bool m_bPlanReady;
+	protected int m_iCachedSweep = -1;
+	protected float m_fSweepCorridor;
+	protected float m_fSweepFrom;
+	protected float m_fSweepSegmentLength;
+	protected float m_fSweepLateral;
+	protected float m_fSweepA0;
+	protected float m_fSweepA1;
+	protected vector m_vSweepStart;
+	protected vector m_vSweepEnd;
 
 	// Counters (site.<kind>.search.*)
 	protected int m_iGridPoints;
@@ -351,7 +553,8 @@ class DC_SteerSiteSearch
 	protected int m_iTraces;
 	protected int m_iCalls;
 	protected int m_iRankedDropped;
-	protected int m_iMaxCallSamples;		//!< the largest terrain GetSurfaceY count of one StepSearch call (<= the budget)
+	protected int m_iMaxCallSamples;		//!< the most GetSurfaceY calls of one StepSearch call (<= the frame budget)
+	protected int m_iMaxCallTraces;			//!< the most trace calls of one StepSearch call (<= the frame budget)
 	protected string m_sFirstReject;		//!< first terrain refusal reason of an explicit candidate
 	protected string m_sFirstObstacle;		//!< first blocking obstacle
 
@@ -379,7 +582,7 @@ class DC_SteerSiteSearch
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! GetSurfaceY calls of one strip (the probe refuses to start when this exceeds its per-frame sample budget)
+	//! GetSurfaceY calls of one strip (sampled across frames when it exceeds a frame's budget)
 	int GetStripCost()
 	{
 		return m_iStripCost;
@@ -412,31 +615,42 @@ class DC_SteerSiteSearch
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! One slice of work; true once the search is over (GetSelected). At most sampleBudget GetSurfaceY calls for
-	//! the terrain (exact: a strip starts only when its whole cost fits) and at most traceBudget sweeps
-	bool StepSearch(notnull BaseWorld world, int sampleBudget, int traceBudget)
+	//! One slice of work within the frame's shared budget; true once the search is over (GetSelected)
+	bool StepSearch(notnull BaseWorld world, notnull DC_SteerBudget budget)
 	{
 		if (m_iStage == STAGE_DONE)
 			return true;
 
 		m_iCalls++;
+		int samplesBefore = budget.m_iSamplesUsed;
+		int tracesBefore = budget.m_iTracesUsed;
+		StepStages(world, budget);
+		m_iMaxCallSamples = Math.MaxInt(m_iMaxCallSamples, budget.m_iSamplesUsed - samplesBefore);
+		m_iMaxCallTraces = Math.MaxInt(m_iMaxCallTraces, budget.m_iTracesUsed - tracesBefore);
+		return m_iStage == STAGE_DONE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void StepStages(notnull BaseWorld world, notnull DC_SteerBudget budget)
+	{
 		if (m_iStage == STAGE_EXPLICIT)
 		{
-			int samples = 0;
-			while (m_iExplicitCursor < m_aExplicit.Count() && samples + m_iStripCost <= sampleBudget)
+			while (true)
 			{
-				DC_SteerSite site = m_aExplicit[m_iExplicitCursor];
-				m_iExplicitCursor++;
-				samples += EvaluateTerrain(world, site);
-				if (site.m_bTerrainOk)
-					AddRanked(site);
-				else if (m_sFirstReject.IsEmpty())
-					m_sFirstReject = site.m_sTerrainReason;
-			}
+				if (m_Sampling)
+				{
+					if (!ContinueSampling(world, budget))
+						return;
 
-			m_iMaxCallSamples = Math.MaxInt(m_iMaxCallSamples, samples);
-			if (m_iExplicitCursor < m_aExplicit.Count())
-				return false;
+					continue;
+				}
+
+				if (m_iExplicitCursor >= m_aExplicit.Count())
+					break;
+
+				StartSampling(m_aExplicit[m_iExplicitCursor], true);
+				m_iExplicitCursor++;
+			}
 
 			if (!m_aRanked.IsEmpty())
 				m_iStage = STAGE_OBSTACLES;
@@ -445,58 +659,57 @@ class DC_SteerSiteSearch
 			else
 				m_iStage = STAGE_DONE;
 
-			return m_iStage == STAGE_DONE;
+			return;
 		}
 
 		if (m_iStage == STAGE_GRID)
 		{
-			StepGrid(world, sampleBudget);
+			StepGrid(world, budget);
 			if (!m_bGridDone)
-				return false;
+				return;
 
 			if (m_aRanked.IsEmpty())
 				m_iStage = STAGE_DONE;
 			else
 				m_iStage = STAGE_OBSTACLES;
 
-			return m_iStage == STAGE_DONE;
+			return;
 		}
 
-		// STAGE_OBSTACLES: the best remaining candidate, swept in slices
-		StepObstacles(world, traceBudget);
-		return m_iStage == STAGE_DONE;
+		// STAGE_OBSTACLES: the best remaining candidate, swept one native call at a time
+		StepObstacles(world, budget);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Grid points (gradient and strip generation, 4 samples each) and the generated strips' terrain, never more than
-	//! sampleBudget samples in one call
-	protected void StepGrid(notnull BaseWorld world, int sampleBudget)
+	//! Grid points (4 samples each) and the generated strips' terrain until the frame's samples run out
+	protected void StepGrid(notnull BaseWorld world, notnull DC_SteerBudget budget)
 	{
-		int samples = 0;
 		while (true)
 		{
+			if (m_Sampling)
+			{
+				if (!ContinueSampling(world, budget))
+					return;
+
+				continue;
+			}
+
 			if (!m_aPending.IsEmpty())
 			{
-				if (samples + m_iStripCost > sampleBudget)
-					break;
-
 				DC_SteerSite site = m_aPending[0];
-				m_aPending.Remove(0);
-				samples += EvaluateTerrain(world, site);
-				if (site.m_bTerrainOk)
-					AddRanked(site);
-
+				m_aPending.RemoveOrdered(0);
+				StartSampling(site, false);
 				continue;
 			}
 
 			if (m_iGridCursor >= m_iGridNx * m_iGridNz || m_iStrips >= m_iMaxStrips)
 			{
 				m_bGridDone = true;
-				break;
+				return;
 			}
 
-			if (samples + 4 > sampleBudget)
-				break;
+			if (!budget.TakeSamples(4))
+				return;
 
 			int ix = m_iGridCursor % m_iGridNx;
 			int iz = m_iGridCursor / m_iGridNx;
@@ -504,15 +717,14 @@ class DC_SteerSiteSearch
 			m_iGridPoints++;
 			float x = m_fGridMinX + ix * m_fGridSpacingM;
 			float z = m_fGridMinZ + iz * m_fGridSpacingM;
-			samples += GenerateStrips(world, x, z);
+			GenerateStrips(world, x, z);
 		}
-
-		m_iMaxCallSamples = Math.MaxInt(m_iMaxCallSamples, samples);
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Central-difference gradient at (x, z) and the strips centred there that it allows (pending); samples used
-	protected int GenerateStrips(notnull BaseWorld world, float x, float z)
+	//! Central-difference gradient at (x, z) (4 GetSurfaceY calls, charged by the caller) and the strips centred
+	//! there that it allows (pending)
+	protected void GenerateStrips(notnull BaseWorld world, float x, float z)
 	{
 		float d = m_fGradientHalfM;
 		float gx = (world.GetSurfaceY(x + d, z) - world.GetSurfaceY(x - d, z)) / (2 * d);
@@ -522,7 +734,7 @@ class DC_SteerSiteSearch
 		if (m_Criteria.IsCross())
 		{
 			if (g < 0.8 * m_Criteria.m_fCrossMin || g > 1.15 * m_Criteria.m_fCrossMax || g <= 0)
-				return 4;
+				return;
 
 			m_iGradientOk++;
 			// downhill (-gradient) on the side of the heading: right(h) = (cos h, -sin h) = -side x gradient / g
@@ -535,18 +747,17 @@ class DC_SteerSiteSearch
 				AddCentredStrip(x, z, heading - m_fHeadingSpreadDeg);
 			}
 
-			return 4;
+			return;
 		}
 
 		if (g > m_Criteria.m_fCrossMax)
-			return 4;
+			return;
 
 		m_iGradientOk++;
 		AddCentredStrip(x, z, 0);
 		AddCentredStrip(x, z, 45);
 		AddCentredStrip(x, z, 90);
 		AddCentredStrip(x, z, 135);
-		return 4;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -563,41 +774,65 @@ class DC_SteerSiteSearch
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Samples the strip at every offset of the criteria (DC_SteerSiteCriteria.OffsetAt) and applies the criteria
-	//! (DC_SteerTerrainMath); returns the GetSurfaceY calls used (= m_iStripCost)
-	protected int EvaluateTerrain(notnull BaseWorld world, notnull DC_SteerSite site)
+	//! Starts the terrain sampling of a strip at every offset of the criteria (DC_SteerSiteCriteria.OffsetAt)
+	protected void StartSampling(notnull DC_SteerSite site, bool isExplicit)
 	{
 		DC_SteerSiteCriteria c = m_Criteria;
-		DC_ProbeArea strip = site.MakeArea(site.m_fHalfWidthM);
-		int stations = c.StationCount();
+		m_Sampling = site;
+		m_bSamplingExplicit = isExplicit;
+		m_SamplingStrip = site.MakeArea(site.m_fHalfWidthM);
+		m_iSampleIndex = 0;
+		m_aAlong = {};
+		m_aLateral = {};
+		m_aHeights = {};
 		int offsets = c.OffsetCount();
-		array<float> along = {};
-		array<float> lateral = {};
-		array<float> heights = {};
 		for (int j = 0; j < offsets; j++)
 		{
-			lateral.Insert(c.OffsetAt(j));
+			m_aLateral.Insert(c.OffsetAt(j));
 		}
 
+		int stations = c.StationCount();
 		for (int i = 0; i < stations; i++)
 		{
-			float a = i * c.m_fStepM;
-			along.Insert(a);
-			for (int k = 0; k < offsets; k++)
-			{
-				vector point = strip.PointAt(a, lateral[k]);
-				heights.Insert(world.GetSurfaceY(point[0], point[2]));
-			}
+			m_aAlong.Insert(i * c.m_fStepM);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Samples the current strip one GetSurfaceY at a time while the frame has samples; when it is complete, applies the
+	//! criteria (DC_SteerTerrainMath) and ranks it. true when the strip is finished, false when the samples ran out
+	protected bool ContinueSampling(notnull BaseWorld world, notnull DC_SteerBudget budget)
+	{
+		int offsets = m_aLateral.Count();
+		int total = m_aAlong.Count() * offsets;
+		while (m_iSampleIndex < total)
+		{
+			if (!budget.TakeSamples(1))
+				return false;
+
+			int station = m_iSampleIndex / offsets;
+			int offset = m_iSampleIndex % offsets;
+			vector point = m_SamplingStrip.PointAt(m_aAlong[station], m_aLateral[offset]);
+			m_aHeights.Insert(world.GetSurfaceY(point[0], point[2]));
+			m_iSampleIndex++;
+			m_iSamples++;
 		}
 
-		int used = stations * offsets;
-		m_iSamples += used;
-		site.m_iStations = stations;
-		DC_SteerTerrainMath.Apply(site, c, along, lateral, heights);
+		DC_SteerSite site = m_Sampling;
+		m_Sampling = null;
+		site.m_iStations = m_aAlong.Count();
+		DC_SteerTerrainMath.Apply(site, m_Criteria, m_aAlong, m_aLateral, m_aHeights);
 		if (site.m_bTerrainOk)
+		{
 			m_iTerrainOk++;
+			AddRanked(site);
+		}
+		else if (m_bSamplingExplicit && m_sFirstReject.IsEmpty())
+		{
+			m_sFirstReject = site.m_sTerrainReason;
+		}
 
-		return used;
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -629,139 +864,156 @@ class DC_SteerSiteSearch
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Sweeps lines of the best ranked candidate's obstacle corridor in slices; a blocking hit rejects it, a clean
-	//! candidate is the site. When the ranked list runs out: the grid next (if not run yet), else no site
-	protected void StepObstacles(notnull BaseWorld world, int traceBudget)
+	//! The best ranked candidate's obstacle corridor, one native call at a time (DC_SteerSweepPlan): the area widened by
+	//! the lateral envelope, from the backward envelope before the start to the longitudinal envelope past the end. A
+	//! blocking hit rejects the candidate, a clean one is the site. When the ranked list runs out: the grid next (if
+	//! not run yet), else no site
+	protected void StepObstacles(notnull BaseWorld world, notnull DC_SteerBudget budget)
 	{
-		int traces = 0;
-		while (traces < traceBudget)
+		DC_SteerSiteCriteria c = m_Criteria;
+		while (true)
 		{
-			bool capped = m_iObstacleIndex == 0 && m_iObstacleChecked >= m_iMaxObstacleChecks;
-			if (m_aRanked.IsEmpty() || capped)
+			if (!m_bPlanReady)
 			{
-				if (m_bGrid && !m_bGridDone && m_iObstacleChecked < m_iMaxObstacleChecks)
+				bool capped = m_iObstacleChecked >= m_iMaxObstacleChecks;
+				if (m_aRanked.IsEmpty() || capped)
 				{
-					m_iStage = STAGE_GRID;
+					if (m_bGrid && !m_bGridDone && !capped)
+					{
+						m_iStage = STAGE_GRID;
+						return;
+					}
+
+					m_iStage = STAGE_DONE;
 					return;
 				}
 
-				m_iStage = STAGE_DONE;
-				return;
+				DC_SteerSite next = m_aRanked[0];
+				m_fSweepCorridor = next.m_fHalfWidthM + c.m_fEnvelopeLatM;
+				m_fSweepFrom = -c.m_fEnvelopeBackM;
+				float sweepLength = next.m_fLengthM + c.m_fEnvelopeLongM + c.m_fEnvelopeBackM;
+				int lineGaps = Math.Ceil(2 * m_fSweepCorridor / c.m_fSweepLineStepM);
+				int segments = Math.Ceil(sweepLength / c.m_fSweepSegmentM);
+				if (segments < 1)
+					segments = 1;
+
+				m_fSweepSegmentLength = sweepLength / segments;
+				m_Plan.Reset(lineGaps + 1, segments);
+				m_iCachedSweep = -1;
+				m_bPlanReady = true;
+				m_iObstacleChecked++;
+				next.m_iObstacleHits = 0;
+				next.m_iObstacleTraces = 0;
+				next.m_iBenignHits = 0;
 			}
 
 			DC_SteerSite site = m_aRanked[0];
-			DC_SteerSiteCriteria c = m_Criteria;
-			float corridor = site.m_fHalfWidthM + c.m_fEnvelopeLatM;
-			int lineGaps = Math.Ceil(2 * corridor / c.m_fSweepLineStepM);
-			int lines = lineGaps + 1;
-			float sweepLength = site.m_fLengthM + c.m_fEnvelopeLongM;
-			int segments = Math.Ceil(sweepLength / c.m_fSweepSegmentM);
-			if (segments < 1)
-				segments = 1;
-
-			int total = segments * lines;
-			if (m_iObstacleIndex == 0)
+			if (m_Plan.IsDone())
 			{
-				m_iObstacleChecked++;
-				site.m_iObstacleHits = 0;
-				site.m_iObstacleTraces = 0;
-				site.m_iBenignHits = 0;
-			}
+				m_bPlanReady = false;
+				site.m_iObstacleTraces = m_Plan.m_iCalls;
+				if (m_Plan.IsClear())
+				{
+					m_Selected = site;
+					m_iStage = STAGE_DONE;
+					return;
+				}
 
-			DC_ProbeArea strip = site.MakeArea(site.m_fHalfWidthM);
-			float segmentLength = sweepLength / segments;
-			while (m_iObstacleIndex < total && traces < traceBudget)
-			{
-				int line = m_iObstacleIndex / segments;
-				int segment = m_iObstacleIndex % segments;
-				m_iObstacleIndex++;
-				traces++;
-				float lateral = Math.Min(-corridor + line * c.m_fSweepLineStepM, corridor);
-				if (SweepClear(world, site, strip, lateral, segment * segmentLength, (segment + 1) * segmentLength, segment == 0))
-					continue;
+				if (m_Plan.m_bRetryCap)
+				{
+					int retries = DC_SteerSweepPlan.MAX_BENIGN_RETRIES;
+					site.m_sObstacle = "more than " + retries.ToString() + " benign hits on one sweep";
+				}
 
-				// a blocking hit rejects this candidate
 				site.m_iObstacleHits = 1;
 				m_iObstacleRejected++;
 				if (m_sFirstObstacle.IsEmpty())
 					m_sFirstObstacle = site.m_sObstacle;
 
 				m_aRanked.RemoveOrdered(0);
-				m_iObstacleIndex = 0;
-				break;
+				continue;
 			}
 
-			if (m_iObstacleIndex >= total)
+			int sweep = m_Plan.m_iSweep;
+			if (sweep != m_iCachedSweep)
 			{
-				m_Selected = site;
-				m_iStage = STAGE_DONE;
-				return;
+				if (!budget.TakeSamples(2))
+					return;
+
+				SweepEnds(world, site);
+				m_iCachedSweep = sweep;
 			}
+
+			if (!budget.TakeTrace())
+				return;
+
+			m_Plan.Report(TraceOnce(world, site));
 		}
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The car-sized box swept from a0 to a1 at a lateral offset (and, on the first segment of a line, checked for an
-	//! initial overlap); a benign hit excludes that entity and traces again. true when nothing blocks
-	protected bool SweepClear(notnull BaseWorld world, notnull DC_SteerSite site, notnull DC_ProbeArea strip, float lateral, float a0, float a1, bool checkStart)
+	//! The end points of the plan's current sweep, the box above the surface (2 GetSurfaceY calls, charged by the
+	//! caller), and the box orientation
+	protected void SweepEnds(notnull BaseWorld world, notnull DC_SteerSite site)
 	{
 		DC_SteerSiteCriteria c = m_Criteria;
+		DC_ProbeArea strip = site.MakeArea(site.m_fHalfWidthM);
+		int line = m_Plan.GetLine();
+		int segment = m_Plan.GetSegment();
+		m_fSweepLateral = Math.Min(-m_fSweepCorridor + line * c.m_fSweepLineStepM, m_fSweepCorridor);
+		m_fSweepA0 = m_fSweepFrom + segment * m_fSweepSegmentLength;
+		m_fSweepA1 = m_fSweepA0 + m_fSweepSegmentLength;
 		float lift = c.m_fBoxBottomM + (c.m_fBoxTopM - c.m_fBoxBottomM) * 0.5;
-		vector q0 = strip.PointAt(a0, lateral);
-		vector q1 = strip.PointAt(a1, lateral);
-		vector p0 = Vector(q0[0], world.GetSurfaceY(q0[0], q0[2]) + lift, q0[2]);
-		vector p1 = Vector(q1[0], world.GetSurfaceY(q1[0], q1[2]) + lift, q1[2]);
+		vector q0 = strip.PointAt(m_fSweepA0, m_fSweepLateral);
+		vector q1 = strip.PointAt(m_fSweepA1, m_fSweepLateral);
+		m_vSweepStart = Vector(q0[0], world.GetSurfaceY(q0[0], q0[2]) + lift, q0[2]);
+		m_vSweepEnd = Vector(q1[0], world.GetSurfaceY(q1[0], q1[2]) + lift, q1[2]);
+		m_iSamples += 2;
 		m_Box.Mat[0] = strip.GetRight();
 		m_Box.Mat[1] = Vector(0, 1, 0);
 		m_Box.Mat[2] = strip.GetDirection();
-		for (int retry = 0; retry <= MAX_BENIGN_RETRIES; retry++)
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The plan's pending native call (one trace, charged by the caller): DC_SteerSweepPlan.RESULT_*; a benign hit is
+	//! excluded for the retry, a blocking one described on the site
+	protected int TraceOnce(notnull BaseWorld world, notnull DC_SteerSite site)
+	{
+		m_iTraces++;
+		m_Box.Start = m_vSweepStart;
+		m_Box.End = m_vSweepEnd;
+		m_Box.TraceEnt = null;
+		bool blocked = false;
+		float fraction = 0;
+		if (m_Plan.GetCall() == DC_SteerSweepPlan.CALL_POSITION)
 		{
-			m_iTraces++;
-			site.m_iObstacleTraces++;
-			bool blocked = false;
-			float fraction = 1;
-			m_Box.Start = p0;
-			m_Box.End = p1;
-			m_Box.TraceEnt = null;
-			if (checkStart && world.TracePosition(m_Box, null) < 0)
-			{
-				blocked = true;
-				fraction = 0;
-			}
-
-			if (!blocked)
-			{
-				m_Box.Start = p0;
-				m_Box.End = p1;
-				m_Box.TraceEnt = null;
-				fraction = world.TraceMove(m_Box, null);
-				blocked = fraction < 1;
-			}
-
-			if (!blocked)
-				return true;
-
-			IEntity hit = m_Box.TraceEnt;
-			if (hit && c.IsBenign(hit))
-			{
-				site.m_iBenignHits++;
-				m_aExcludes.Insert(hit);
-				m_Box.ExcludeArray = m_aExcludes;
-				continue;
-			}
-
-			string what = "unknown";
-			if (hit)
-				what = hit.ClassName() + "@" + DC_ProbeArea.FormatVector(hit.GetOrigin(), 1);
-
-			float hitAlong = a0 + fraction * (a1 - a0);
-			site.m_sObstacle = string.Format("%1 at %2 m along, %3 m lateral (site %4)", what, hitAlong.ToString(-1, 1), lateral.ToString(-1, 1), DC_ProbeArea.FormatVector(site.m_vStart, 1));
-			return false;
+			blocked = world.TracePosition(m_Box, null) < 0;
+		}
+		else
+		{
+			fraction = world.TraceMove(m_Box, null);
+			blocked = fraction < 1;
 		}
 
-		int retries = MAX_BENIGN_RETRIES;
-		site.m_sObstacle = "more than " + retries.ToString() + " benign hits on one sweep";
-		return false;
+		if (!blocked)
+			return DC_SteerSweepPlan.RESULT_CLEAR;
+
+		IEntity hit = m_Box.TraceEnt;
+		if (hit && m_Criteria.IsBenign(hit))
+		{
+			site.m_iBenignHits++;
+			m_aExcludes.Insert(hit);
+			m_Box.ExcludeArray = m_aExcludes;
+			return DC_SteerSweepPlan.RESULT_BENIGN;
+		}
+
+		string what = "unknown";
+		if (hit)
+			what = hit.ClassName() + "@" + DC_ProbeArea.FormatVector(hit.GetOrigin(), 1);
+
+		float hitAlong = m_fSweepA0 + fraction * (m_fSweepA1 - m_fSweepA0);
+		site.m_sObstacle = string.Format("%1 at %2 m along, %3 m lateral (site %4)", what, hitAlong.ToString(-1, 1), m_fSweepLateral.ToString(-1, 1), DC_ProbeArea.FormatVector(site.m_vStart, 1));
+		return DC_SteerSweepPlan.RESULT_BLOCKED;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -796,6 +1048,7 @@ class DC_SteerSiteSearch
 		lines.Insert(s + "strips=" + m_iStrips.ToString());
 		lines.Insert(s + "strip_cost=" + m_iStripCost.ToString());
 		lines.Insert(s + "max_call_samples=" + m_iMaxCallSamples.ToString());
+		lines.Insert(s + "max_call_traces=" + m_iMaxCallTraces.ToString());
 		lines.Insert(s + "terrain_ok=" + m_iTerrainOk.ToString());
 		lines.Insert(s + "ranked_dropped=" + m_iRankedDropped.ToString());
 		lines.Insert(s + "obstacle_checked=" + m_iObstacleChecked.ToString());
@@ -948,6 +1201,15 @@ class DC_SteerTerrainMath
 		}
 
 		float rms = Math.Sqrt(sq / (n * m));
+		// the centre tyre pair (corridor position (points - 1) / 2) at every station: the same-ground check of a baseline
+		int centre = (points - 1) / 2;
+		site.m_aTrackProfile.Clear();
+		for (int t = 0; t < n; t++)
+		{
+			site.m_aTrackProfile.Insert(heights[t * m + 3 + 2 * centre]);
+			site.m_aTrackProfile.Insert(heights[t * m + 4 + 2 * centre]);
+		}
+
 		site.m_fGrade = grade;
 		site.m_fGradeWindowMax = gradeWindowMax;
 		site.m_fGradeWindowMaxAll = gradeWindowMaxAll;

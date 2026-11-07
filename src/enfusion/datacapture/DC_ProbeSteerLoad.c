@@ -39,7 +39,10 @@ class DC_ProbeSteerLoadClass : DC_ProbeSteerBaseClass
 class DC_ProbeSteerLoad : DC_ProbeSteerBase
 {
 	static const string PROBE_E22 = "e22";
-	static const float TIMEOUT_E22_S = 600;
+	static const float TIMEOUT_E22_S = 240;
+	//! Max stair groups and levels per group (validation before anything is built)
+	static const int MAX_STAIR_GROUPS = 6;
+	static const int MAX_STAIR_LEVELS = 20;
 	//! Cap of the brake segment [s]
 	static const float BRAKE_CAP_S = 10;
 	//! Smoothing of acc_l_z for the brake PI (weight of the new sample)
@@ -142,9 +145,33 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The circles at the fixed commands need +-20 m (radius about 16 m, the start 5 m inside the edge)
+	override float GetFlatHalfWidthM()
+	{
+		return 22;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! a_lat 3.5 m/s2 at kappa about 0.064 1/m is about 27 km/h; the margin covers the speed adaptation
+	override float GetMaxSpeedKmh()
+	{
+		return 35;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every list non-empty and in range (no zero command, a_lat targets 0.5..6 m/s2, the timing attributes
+	//! positive), the stair grid at most MAX_STAIR_GROUPS x MAX_STAIR_LEVELS; then the phases
 	override bool BuildSteerPlan(out string failure)
 	{
 		failure = string.Empty;
+		bool timing = InRange(m_fStairHoldS, 0.5, 20) && InRange(m_fStairSettleS, 0, m_fStairHoldS) && InRange(m_fRefKmh, 3, 30) && InRange(m_fRefHoldS, 1, 30) && InRange(m_fALatToleranceMs2, 0.01, 1) && InRange(m_fALatAdjustS, 0.1, 5) && InRange(m_fALatHoldS, 0.5, 30) && InRange(m_fALatMaxS, m_fALatHoldS, 60);
+		bool brake = InRange(m_fBrakeDecelMs2, 0.5, 8) && InRange(m_fBrakeFeedForward, 0, 1) && InRange(m_fBrakeKp, 0, 1) && InRange(m_fBrakeKi, 0, 2) && InRange(m_fBrakeEndKmh, 1, 30) && InRange(m_fCircleStartAlongM, 5, 500) && InRange(m_fCircleEdgeM, 1, 20);
+		if (!timing || !brake)
+		{
+			failure = "a stair, load, a_lat or brake attribute is out of range";
+			return false;
+		}
+
 		m_iStairHoldSteps = Math.MaxInt(1, DC_ProbeSequences.StepsFor(m_fStairHoldS, m_fDt));
 		m_iStairSettleSteps = DC_ProbeSequences.StepsFor(m_fStairSettleS, m_fDt);
 		m_iRefHoldSteps = Math.MaxInt(2, DC_ProbeSequences.StepsFor(m_fRefHoldS, m_fDt));
@@ -155,19 +182,25 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 
 		array<string> groups = {};
 		m_sStairGrid.Split(";", groups, true);
+		if (groups.IsEmpty() || groups.Count() > MAX_STAIR_GROUPS)
+		{
+			failure = string.Format("m_sStairGrid '%1' needs 1..%2 groups", m_sStairGrid, MAX_STAIR_GROUPS);
+			return false;
+		}
+
 		foreach (string groupText : groups)
 		{
 			array<string> parts = {};
 			groupText.Split(":", parts, false);
 			float speed;
-			if (parts.Count() != 2 || !ParseSteerFloat(parts[0], speed) || speed <= 0)
+			if (parts.Count() != 2 || !ParseSteerFloat(parts[0], speed) || !InRange(speed, 5, 30))
 			{
-				failure = "m_sStairGrid '" + m_sStairGrid + "' is not '<speed>:<steer>,...;...'";
+				failure = "m_sStairGrid '" + m_sStairGrid + "' is not '<speed 5..30>:<steer>,...;...'";
 				return false;
 			}
 
 			DC_ProbeSteerPhase stair = new DC_ProbeSteerPhase(DC_ESteerPhaseKind.STAIR, "stair_" + speed.ToString(-1, 0), SITE_FLAT, speed);
-			if (!ParseSteerFloats(parts[1], stair.m_aLevels, -1, 1) || stair.m_aLevels.IsEmpty())
+			if (!ParseSteerFloats(parts[1], stair.m_aLevels, -1, 1) || stair.m_aLevels.IsEmpty() || stair.m_aLevels.Count() > MAX_STAIR_LEVELS)
 			{
 				failure = "m_sStairGrid '" + m_sStairGrid + "': the levels of " + parts[0] + " are not steering values in -1..1";
 				return false;
@@ -179,15 +212,24 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 
 		m_aLoadSteers = {};
 		m_aALatTargets = {};
-		if (!ParseSteerFloats(m_sLoadSteers, m_aLoadSteers, -1, 1))
+		if (!ParseSteerFloats(m_sLoadSteers, m_aLoadSteers, -1, 1) || m_aLoadSteers.IsEmpty() || m_aLoadSteers.Count() > 4)
 		{
-			failure = "m_sLoadSteers '" + m_sLoadSteers + "' is not a list of steering values in -1..1";
+			failure = "m_sLoadSteers '" + m_sLoadSteers + "' is not a list of 1..4 steering values in -1..1";
 			return false;
 		}
 
-		if (!ParseSteerFloats(m_sALatTargets, m_aALatTargets, 0.1, 10))
+		foreach (float command : m_aLoadSteers)
 		{
-			failure = "m_sALatTargets '" + m_sALatTargets + "' is not a list of a_lat targets in 0.1..10 m/s2";
+			if (Math.AbsFloat(command) < 0.05)
+			{
+				failure = "m_sLoadSteers '" + m_sLoadSteers + "': a fixed command below 0.05 makes no circle";
+				return false;
+			}
+		}
+
+		if (!ParseSteerFloats(m_sALatTargets, m_aALatTargets, 0.5, 6) || m_aALatTargets.IsEmpty() || m_aALatTargets.Count() > 6)
+		{
+			failure = "m_sALatTargets '" + m_sALatTargets + "' is not a list of 1..6 a_lat targets in 0.5..6 m/s2";
 			return false;
 		}
 
@@ -233,7 +275,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 		if (phase.m_fSteer < 0)
 			turnSide = -turnSide;
 
-		float offset = Math.Max(m_fFlatAreaHalfWidthM - m_fCircleEdgeM, 0);
+		float offset = Math.Max(GetFlatHalfWidthM() - m_fCircleEdgeM, 0);
 		phase.m_fLateralM = -turnSide * offset;
 		m_fKappaRefSum = 0;
 		m_iKappaRefCount = 0;
@@ -375,12 +417,15 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	//! Window means of |v r|: adapt the speed target until converged, then hold; next level or the brake segment
 	protected void AdvanceLevel(notnull DC_ProbeSteerPhase phase, float aLat)
 	{
-		m_iLevelSteps++;
-		m_fALatSum += aLat;
-		m_iALatCount++;
-		m_iWindowSteps++;
+		// counted in engine steps (a dispatched step may cover several: DC_ProbeSteerBase m_iLastCovered), the mean
+		// weighted by them
+		int covered = m_iLastCovered;
+		m_iLevelSteps += covered;
+		m_fALatSum += aLat * covered;
+		m_iALatCount += covered;
+		m_iWindowSteps += covered;
 		if (m_bSegFlag)
-			m_iSteadySteps++;
+			m_iSteadySteps += covered;
 
 		if (m_iWindowSteps >= m_iALatWindowSteps)
 		{
@@ -445,7 +490,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 		}
 
 		float error = m_fAccSmooth + m_fBrakeDecelMs2;
-		m_fBrakeIntegral += error * m_fDt;
+		m_fBrakeIntegral += error * m_fDt * m_iLastCovered;
 		m_fBrakeCmd = Math.Clamp(m_fBrakeFeedForward + m_fBrakeKp * error + m_fBrakeKi * m_fBrakeIntegral, 0, 1);
 		m_bSegFlag = Math.AbsFloat(error) <= 0.5;
 		if (m_Actuator.GetSpeedKmh() <= m_fBrakeEndKmh || m_iSegStep >= m_iBrakeCapSteps)

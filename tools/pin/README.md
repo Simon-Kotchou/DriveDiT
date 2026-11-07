@@ -490,7 +490,7 @@ source; runs use a separate **working copy** `E:\DriveDiT\pin\1.8.0.13-run` (dec
 | Pin | `pin_1.8.0.13-cold.json`, dd-pin/2, channel `cold`, release channel `stable`, launch path `cold-1.8.0.13` |
 | Launch paths | `pinlib.COLD_LAUNCH_PATHS["cold-1.8.0.13"]`: installs `<run>/game`, `<run>/tools`; appmanifests `<run>/meta/appmanifest_<appid>.acf` (the saved ones) |
 | Launchers | `wb_C18.bat` (profile `E:\DriveDiT\wb_profile_c18`, gproj `E:\DriveDiT\addons_c18\DataCapture\addon.gproj`, `-addonsDir` the copy's game addons) and `client_C18_i01.bat` (always `-noBackend`). Both pass the explicit pin and `--launch-path cold-1.8.0.13`; neither reads ACTIVE, so a 1.8 baseline never switches the active 1.9 pin |
-| Addon | its own copy, `deploy_addon.py --target E:\DriveDiT\addons_c18\DataCapture --target-pin 1.8.0.13-cold`, so a 1.8 Workbench never re-saves the 1.9 addon |
+| Addon | its own copy, `mkdir /mnt/e/DriveDiT/addons_c18`, then `deploy_addon.py --target /mnt/e/DriveDiT/addons_c18/DataCapture --target-pin 1.8.0.13-cold --require-clean`, so a 1.8 Workbench never re-saves the 1.9 addon |
 | build_key | equal to 1.8.0.13's (`0d31b417…` from the reference copy's SHA256SUMS); `make_pin.py` refuses otherwise |
 
 **Make it** (agent, E: only; reads the whole copy, about 28 GB):

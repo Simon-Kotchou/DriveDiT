@@ -38,6 +38,15 @@ Safety rules:
     given, in which case the old content is first copied to <target>/.deploy_backup/<UTC>/<path>.bak.
   * FILE arguments deploy a subset of the manifest (plus the build stamp) and never delete anything.
 
+Per-pin targets (DD-14a; MIGRATION_1_9 8.2 component 4): --target-pin PIN_ID [--pin-dir DIR] names the pin the
+deploy is for. The pin (tools/pin, sidecars included) gives its launch path, and the target must then be that launch
+path's addon, pinlib.DEPLOY_ROOTS[launch path]/DataCapture: /mnt/e/DriveDiT/addons/DataCapture for a stable pin,
+/mnt/e/DriveDiT/addons_c18/DataCapture for the cold pin 1.8.0.13-cold (wb_C18.bat loads it), so a 1.8 Workbench never
+re-saves the 1.9 addon. A cold or experimental pin is refused at the production root, and an experimental pin has no
+deploy root at all. DC_BuildInfo then also stamps TARGET_PIN, TARGET_BUILD_KEY and TARGET_LAUNCH_PATH, and the state
+records target_pin; a target deployed for another pin is refused. Without --target-pin nothing changes: the default
+target, the stamp and every check are as before.
+
 Exit codes: 0 success (or dry run), 2 refused, 1 unexpected I/O error.
 """
 
@@ -353,6 +362,44 @@ def target_reason(raw, allow_roots=()):
     return None
 
 
+def load_pin_tools():
+    """(pinlib, preflight) of tools/pin in this repo, loaded by path (python -I does not put tools/ on sys.path)."""
+    import importlib.util
+    mods = []
+    for name in ("pinlib", "preflight"):
+        path = os.path.join(REPO_ROOT, "tools", "pin", name + ".py")
+        modname = "dd_pin_" + name
+        mod = sys.modules.get(modname)
+        if mod is None or getattr(mod, "__file__", None) != path:
+            spec = importlib.util.spec_from_file_location(modname, path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[modname] = mod
+            spec.loader.exec_module(mod)
+        mods.append(mod)
+    return tuple(mods)
+
+
+def target_pin_reason(real_target, launch_path_id, deploy_roots, allow_roots=()):
+    """Why a deploy for a pin of launch_path_id may not go to real_target, or None (DD-14a).
+
+    The target must be deploy_roots[launch_path_id]/DataCapture, or lie inside an --allow-root (scratch deploys and
+    the self-test). A non-stable pin is never deployed into the stable (production) root."""
+    if any(real_target != os.path.realpath(r) and inside(real_target, os.path.realpath(r)) for r in allow_roots):
+        return None
+    root = deploy_roots.get(launch_path_id)
+    if root is None:
+        return ("pins of launch path %r have no deploy root (pinlib.DEPLOY_ROOTS; the Experimental Workbench launcher "
+                "is moot since 1.9 stable)" % launch_path_id)
+    stable = deploy_roots.get("stable")
+    if launch_path_id != "stable" and stable and inside(real_target, os.path.realpath(stable)):
+        return ("target %s is in the production root %s, which belongs to the stable pins; a %s pin deploys to %s/"
+                "DataCapture" % (real_target, stable, launch_path_id, root))
+    want = os.path.realpath(os.path.join(root, "DataCapture"))
+    if real_target != want:
+        return "a pin of launch path %s deploys to %s, not %s" % (launch_path_id, want, real_target)
+    return None
+
+
 def escape_reason(target, rel):
     """Why writing or deleting <target>/<rel> could reach outside the target, or None.
 
@@ -434,6 +481,13 @@ def render_buildinfo(info):
         '\tstatic const string CONTENT_SHA256 = "%s";' % info["content_sha256"],
         "\tstatic const int CONTENT_FILE_COUNT = %d;" % info["content_file_count"],
         "\tstatic const bool DEPLOY_PARTIAL = %s;" % b(info["partial"]),
+    ]
+    if info.get("target_pin"):
+        # DD-14a, only with --target-pin: the pin (and build) this deploy is for.
+        lines += ['\tstatic const string TARGET_PIN = "%s";' % info["target_pin"],
+                  '\tstatic const string TARGET_BUILD_KEY = "%s";' % (info.get("target_build_key") or ""),
+                  '\tstatic const string TARGET_LAUNCH_PATH = "%s";' % info["target_launch_path"]]
+    lines += [
         "}",
         "",
     ]
@@ -515,6 +569,10 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true",
                     help="overwrite or delete files changed outside this tool, after backing them up")
     ap.add_argument("--require-clean", action="store_true", help="refuse when the git tree is dirty")
+    ap.add_argument("--target-pin", metavar="PIN_ID", default=None,
+                    help="the pin this deploy is for (DD-14a): the target must be its launch path's addon, and "
+                         "DC_BuildInfo stamps TARGET_PIN")
+    ap.add_argument("--pin-dir", default="/mnt/e/DriveDiT/pin", help="with --target-pin: where pin_<id>.json lives")
     args = ap.parse_args(argv)
 
     refusals = []
@@ -525,7 +583,24 @@ def main(argv=None):
             refusals.append(why)
         else:
             allow_roots.append(root)
-    reason = target_reason(args.target, allow_roots)
+    target_info = None
+    pin_roots = ()
+    if args.target_pin:
+        try:
+            pinlib, preflight = load_pin_tools()
+            src = preflight.load_pin_by_id(os.path.abspath(pinlib.win_to_wsl(args.pin_dir)), args.target_pin)
+            ident = preflight.pin_identity(src)
+        except Exception as e:  # PinError, or a pin tool that cannot load: refuse, never deploy unpinned
+            return refuse(["--target-pin %s: %s" % (args.target_pin, e)])
+        target_info = {"target_pin": src["pin_id"], "target_build_key": ident["build_key"],
+                       "target_launch_path": ident["launch_path_id"]}
+        why = target_pin_reason(os.path.realpath(os.path.abspath(args.target)), ident["launch_path_id"],
+                                pinlib.DEPLOY_ROOTS, allow_roots)
+        if why:
+            refusals.append("--target-pin %s: %s" % (args.target_pin, why))
+        elif ident["launch_path_id"] in pinlib.DEPLOY_ROOTS:
+            pin_roots = (pinlib.DEPLOY_ROOTS[ident["launch_path_id"]],)
+    reason = target_reason(args.target, tuple(allow_roots) + pin_roots)
     if reason:
         refusals.append(reason)
     target = os.path.realpath(os.path.abspath(args.target))
@@ -569,6 +644,9 @@ def main(argv=None):
     state = load_state(target, refusals) if not reason else {"schema": STATE_SCHEMA, "files": {}}
     old_files = state["files"]
     _, manifest_guid = gproj_identity([it for it in all_items if it["group"] == GROUP_ADDON])
+    if target_info and state.get("target_pin") and state["target_pin"] != target_info["target_pin"]:
+        refusals.append("the target was deployed for pin %s, not %s; refusing to mix two builds in one folder"
+                        % (state["target_pin"], target_info["target_pin"]))
     if state.get("addon_guid") and manifest_guid and state["addon_guid"] != manifest_guid:
         refusals.append("the target was deployed for addon GUID %s, but the manifest's addon.gproj has GUID %s; "
                         "refusing to mix two addons in one folder" % (state["addon_guid"], manifest_guid))
@@ -604,6 +682,8 @@ def main(argv=None):
         "manifest_sha256": sha256_file(manifest_path), "content_sha256": content_sha,
         "content_file_count": content_count, "partial": partial,
     }
+    if target_info:
+        info.update(target_info)
     payload[BUILDINFO_DST] = render_buildinfo(info)
     plan = [(it["group"], it["src_rel"], it["dst"]) for it in items]
     plan.append((GROUP_BUILDINFO, "(generated)", BUILDINFO_DST))
@@ -670,6 +750,10 @@ def main(argv=None):
     print("deploy %s -> %s%s" % (os.path.relpath(manifest_path, REPO_ROOT) if inside(manifest_path, REPO_ROOT)
                                  else manifest_path, target, "  (DRY RUN)" if args.dry_run else ""))
     print("git %s %s%s" % (sha or "<none>", branch or "<none>", " DIRTY" if dirty else ""))
+    if target_info:
+        print("target pin %s (launch path %s, build_key %s)" % (target_info["target_pin"],
+                                                                target_info["target_launch_path"],
+                                                                target_info["target_build_key"] or "unknown"))
     for op, rel, group, src, needs_backup in actions:
         print("  %-6s %-8s %s%s%s" % (op, group, rel, "  <- " + src if op in ("create", "update", "same") else "",
                                       "  (backup first)" if needs_backup else ""))
@@ -702,6 +786,8 @@ def main(argv=None):
         "manifest_sha256": info["manifest_sha256"], "content_sha256": content_sha, "partial": partial,
         "files": new_files,
     }
+    if target_info:
+        state_out.update(target_info)
     try:
         atomic_write(os.path.join(target, STATE_NAME),
                      (json.dumps(state_out, indent=1, sort_keys=True) + "\n").encode("utf-8"))

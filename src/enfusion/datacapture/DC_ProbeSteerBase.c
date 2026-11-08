@@ -101,6 +101,9 @@ class DC_ProbeSteerPhase
 	float m_fPrbsAmplitude;
 	int m_iEventCursor;						//!< e23: next event
 	bool m_bPrbsDone;
+	int m_iPrbsExpected = -1;				//!< e23: bits of one PRBS period (0 = no PRBS, -1 = not an e23 phase)
+	int m_iPrbsBits;						//!< e23: bits completed (the period once done, else the most an aborted run did)
+	int m_iPrbsBitSteps = 1;				//!< e23: steps per PRBS bit at this phase's speed and amplitude
 	int m_iRuns;							//!< runs (reset .. stop) started in this phase
 	int m_iSpins;
 	int m_iStartStep = -1;
@@ -625,6 +628,10 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (m_aPhases.IsEmpty())
 			return RefuseStart("the plan has no phase - probe not started");
 
+		// the smallest atomic units of the search: a grid gradient takes 4 samples, a sweep call 1 trace
+		if (m_iSiteSamplesPerFrame < 4 || m_iSiteTracesPerFrame < 1)
+			return RefuseStart(string.Format("m_iSiteSamplesPerFrame %1 / m_iSiteTracesPerFrame %2 below the atomic costs 4 / 1 - probe not started", m_iSiteSamplesPerFrame, m_iSiteTracesPerFrame));
+
 		// The obstacle traces ignore the car and everything attached to it
 		m_aExcludes = {};
 		CollectHierarchy(ego, m_aExcludes);
@@ -655,7 +662,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (!m_StepsCsv)
 			return RefuseStart(probeId + "_steps.csv could not be created");
 
-		array<string> phaseColumns = {"phase_idx", "phase", "kind", "site", "start_step", "end_step", "start_world_ms", "end_world_ms", "target_kmh", "steer", "assist", "runs", "result", "note"};
+		array<string> phaseColumns = {"phase_idx", "phase", "kind", "site", "start_step", "end_step", "start_world_ms", "end_world_ms", "target_kmh", "steer", "assist", "runs", "result", "note", "prbs_bits", "prbs_expected", "prbs_bit_steps", "prbs_result"};
 		m_PhasesCsv = ctx.OpenCsv(probeId + "_phases", phaseColumns);
 		if (!m_PhasesCsv)
 			return RefuseStart(probeId + "_phases.csv could not be created");
@@ -1558,6 +1565,27 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		row.AddInt(phase.m_iRuns);
 		row.AddString(phase.m_sResult);
 		row.AddString(phase.m_sNote);
+		// e23's PRBS completion (empty for the other probes): ok only when a run finished the whole period
+		string prbsResult;
+		if (phase.m_iPrbsExpected >= 0)
+		{
+			row.AddInt(phase.m_iPrbsBits);
+			row.AddInt(phase.m_iPrbsExpected);
+			row.AddInt(phase.m_iPrbsBitSteps);
+			prbsResult = "incomplete";
+			if (phase.m_iPrbsExpected == 0)
+				prbsResult = "none";
+			else if (phase.m_bPrbsDone && phase.m_iPrbsBits >= phase.m_iPrbsExpected)
+				prbsResult = "ok";
+		}
+		else
+		{
+			row.AddString(string.Empty);
+			row.AddString(string.Empty);
+			row.AddString(string.Empty);
+		}
+
+		row.AddString(prbsResult);
 		m_PhasesCsv.WriteRow(row);
 	}
 

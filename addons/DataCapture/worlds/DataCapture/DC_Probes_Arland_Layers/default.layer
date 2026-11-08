@@ -211,7 +211,7 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fCrossHeadingSpreadDeg 10
   }
   DC_ProbeSteerLoad "{DC4A50B300000008}" {
-   m_sStairGrid "12:0.1,-0.1,0.2,-0.2,0.3,-0.3;18:0.05,-0.05,0.1,-0.1,0.15,-0.15"
+   m_sStairGrid "10.5:0.1,-0.1,0.2,-0.2,0.3,-0.3,0.05,-0.05,0.15,-0.15,0.25,-0.25"
    m_fStairHoldS 3
    m_fStairSettleS 1
    m_sLoadSteers "0.3,-0.3"
@@ -226,18 +226,18 @@ SCR_BaseGameMode GameMode_DCProbes : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plain/G
    m_fBrakeFeedForward 0.2
    m_fBrakeKp 0.03
    m_fBrakeKi 0.1
-   m_fBrakeEndKmh 5
+   m_fBrakeEndKmh 10
    m_fCircleStartAlongM 40
    m_fCircleEdgeM 5
   }
   DC_ProbeSteerSteps "{DC4A50B300000009}" {
-   m_sStepGrid "10:0.5x12,1.0x8;30:0.5x12,1.0x6;60:0.5x10"
+   m_sStepGrid "10:0.5x12,1.0x8;20:0.5x4;30:0.5x12,1.0x6;40:0.5x4;60:0.5x10"
    m_fStepOnS 0.4
    m_fStepOffS 0.6
    m_fStepJitterS 0.3
    m_iStepSeed 77
    m_fCruiseS 1
-   m_sPrbsAmplitudes "10:0.5;30:0.3;60:0.2"
+   m_sPrbsAmplitudes "10:0.5;20:0.4;30:0.3;40:0.25;60:0.2"
    m_iPrbsOrder 5
    m_fPrbsBitS 0.15
    m_iPrbsSeed 11

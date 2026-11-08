@@ -27,7 +27,13 @@
 //
 // BUDGET (defaults): 10 km/h 12 doublets of 0.5 and 8 of 1.0, 30 km/h 12 of 0.5 and 6 of 1.0, 60 km/h 10 of 0.5. This
 // is PREVIEW coverage of CC-08 (the spec asks for 50 repetitions of each step and 0 -> 1.0 at 60 km/h); the analysis
-// reports it as such. 80 km/h and 0 -> 1.0 at 60 km/h are grid entries away ('80:0.3x6', '60:1.0x4').
+// reports it as such. 80 km/h and 0 -> 1.0 at 60 km/h are grid entries away ('80:0.3x6', '60:1.0x4'). 20 and 40 km/h
+// (4 doublets of 0.5 and a PRBS each) are outside the CC-08 grid: they make e21's speeds validated cells of the
+// cmd -> steer_input model that CC-07 (a) may use to explain a readback deviation (no gap filling between speeds).
+// HEADING: every hold and PRBS bit is cut to the HEADING_BUDGET_DEG budget (20 deg at 0.24 1/m per unit), under the
+// base's 30 deg heading guard: default holds 12 steps (10 and 20 km/h), 10 / 5 steps (30 km/h, 0.5 / 1.0), 7 steps
+// (40 km/h), 5 steps (60 km/h); PRBS bits 5 steps (4 at 60 km/h). The vehicle fixture of tests/test_t0eng_steer.py
+// keeps every bin of the default grid under 18 deg off the strip.
 // The analysis is tools/probes/t0eng/e23_steer_steps.py.
 // ============================================================================
 
@@ -46,10 +52,17 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	static const int MAX_DOUBLETS = 100;		//!< per amplitude of one speed
 	static const int MAX_EVENTS = 400;			//!< over the whole grid
 	static const int MAX_SPEEDS = 6;
+	//! Heading budget of one step or one PRBS excursion [deg]: under the base's 30 deg heading guard with margin.
+	//! The hold of an event is cut to the steps that keep KAPPA_PER_STEER x |A| x v x hold under it; the PRBS bit to
+	//! the steps that keep that x the sequence's largest running sum under it
+	static const float HEADING_BUDGET_DEG = 20;
+	//! Curvature per unit command assumed for the budget [1/m]: above the measured S105 steady value (e02a 1.8.0.13
+	//! 0.229, 1.9.0.37 0.215 at 15..50 km/h)
+	static const float KAPPA_PER_STEER = 0.24;
 	static const int JITTER_ORDER = 10;
 
 	// === S2 ===
-	[Attribute("10:0.5x12,1.0x8;30:0.5x12,1.0x6;60:0.5x10", UIWidgets.EditBox, "Step grid: groups '<speed km/h>:<amplitude>x<doublets>,...' separated by ';' (a doublet = 0 -> +A and 0 -> -A)", category: "S2")]
+	[Attribute("10:0.5x12,1.0x8;20:0.5x4;30:0.5x12,1.0x6;40:0.5x4;60:0.5x10", UIWidgets.EditBox, "Step grid: groups '<speed km/h>:<amplitude>x<doublets>,...' separated by ';' (a doublet = 0 -> +A and 0 -> -A)", category: "S2")]
 	protected string m_sStepGrid;
 
 	[Attribute("0.4", UIWidgets.Slider, "Hold of each step at its amplitude [s]", "0.05 5 0.05", category: "S2")]
@@ -67,7 +80,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	[Attribute("1", UIWidgets.Slider, "Cruise at the speed before the train [s]", "0 10 0.5", category: "S2")]
 	protected float m_fCruiseS;
 
-	[Attribute("10:0.5;30:0.3;60:0.2", UIWidgets.EditBox, "Held-out PRBS amplitude per speed '<km/h>:<amplitude>;...' (missing or 0 = no PRBS at that speed)", category: "S2")]
+	[Attribute("10:0.5;20:0.4;30:0.3;40:0.25;60:0.2", UIWidgets.EditBox, "Held-out PRBS amplitude per speed '<km/h>:<amplitude>;...' (missing or 0 = no PRBS at that speed)", category: "S2")]
 	protected string m_sPrbsAmplitudes;
 
 	[Attribute("5", UIWidgets.Slider, "PRBS LFSR order (5..10); one period = 2^order - 1 bits", "5 10 1", category: "S2")]
@@ -114,6 +127,8 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	protected float m_fOnsetAlongM;
 	protected int m_iOpenJitterSteps;
 	protected int m_iPrbsBitsDrawn;
+	protected int m_iPrbsMaxRun;			//!< the largest |running sum| of +-1 over one PRBS period
+	protected int m_iHoldSteps;				//!< the open event's hold (HoldStepsFor)
 	protected float m_fPrbsSteer;
 
 	//------------------------------------------------------------------------------------------------
@@ -187,6 +202,19 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		}
 
 		m_iPrbsPeriodBits = m_Prbs.GetPeriod();
+		m_iPrbsMaxRun = 1;
+		int runningSum = 0;
+		for (int bit = 0; bit < m_iPrbsPeriodBits; bit++)
+		{
+			if (m_Prbs.NextBit() == 1)
+				runningSum++;
+			else
+				runningSum--;
+
+			m_iPrbsMaxRun = Math.MaxInt(m_iPrbsMaxRun, Math.AbsInt(runningSum));
+		}
+
+		m_Prbs.Init(m_iPrbsOrder, m_iPrbsSeed);
 		array<string> groups = {};
 		m_sStepGrid.Split(";", groups, true);
 		if (groups.IsEmpty() || groups.Count() > MAX_SPEEDS)
@@ -239,6 +267,12 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 			phase.m_fPrbsAmplitude = prbs;
 			phase.m_bPrbsDone = prbs <= 0;
+			phase.m_iPrbsExpected = 0;
+			if (prbs > 0)
+				phase.m_iPrbsExpected = m_iPrbsPeriodBits;
+
+			phase.m_iPrbsBits = 0;
+			phase.m_iPrbsBitSteps = PrbsBitStepsFor(prbs, speed);
 			m_aPhases.Insert(phase);
 		}
 
@@ -328,7 +362,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	//------------------------------------------------------------------------------------------------
 	override bool OpenExtraCsvs(notnull DC_ProbeContext ctx)
 	{
-		array<string> columns = {"event_idx", "phase", "target_kmh", "amplitude", "run_idx", "jitter_steps", "onset_step", "release_step", "end_step", "onset_kmh", "onset_along_m", "result"};
+		array<string> columns = {"event_idx", "phase", "target_kmh", "amplitude", "run_idx", "jitter_steps", "onset_step", "release_step", "end_step", "onset_kmh", "onset_along_m", "hold_steps", "result"};
 		m_EventsCsv = ctx.OpenCsv(PROBE_E23 + "_events", columns);
 		return m_EventsCsv != null;
 	}
@@ -398,7 +432,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 		if (m_eSegment == DC_ESteerSegment.PRBS)
 		{
-			int bitIdx = m_iSegStep / m_iPrbsBitSteps;
+			int bitIdx = m_iSegStep / Math.MaxInt(1, phase.m_iPrbsBitSteps);
 			while (m_iPrbsBitsDrawn <= bitIdx)
 			{
 				if (m_Prbs.NextBit() == 1)
@@ -444,9 +478,10 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 		if (m_eSegment == DC_ESteerSegment.PRBS)
 		{
-			if (m_iSegStep >= m_iPrbsPeriodBits * m_iPrbsBitSteps)
+			if (m_iSegStep >= m_iPrbsPeriodBits * phase.m_iPrbsBitSteps)
 			{
 				phase.m_bPrbsDone = true;
+				phase.m_iPrbsBits = m_iPrbsPeriodBits;
 				phase.AddNote("prbs_run:" + phase.m_iRuns.ToString());
 				EnterSegment(DC_ESteerSegment.STOP);
 			}
@@ -515,7 +550,34 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			m_fOnsetAlongM = m_Area.AlongM(m_Actuator.GetPosition());
 
 		m_bOn = true;
-		m_iStateEndStep = m_iSegStep + m_iOnSteps;
+		m_iHoldSteps = HoldStepsFor(m_fEventSteer, Math.Max(m_Actuator.GetSpeedKmh(), phase.m_fTargetKmh));
+		m_iStateEndStep = m_iSegStep + m_iHoldSteps;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Hold steps of a step of amplitude at kmh: the configured on steps, cut so the heading change stays within
+	//! HEADING_BUDGET_DEG at KAPPA_PER_STEER (at least 1)
+	protected int HoldStepsFor(float amplitude, float kmh)
+	{
+		float perStep = KAPPA_PER_STEER * Math.AbsFloat(amplitude) * Math.Max(kmh, 1) / 3.6 * m_fDt;
+		if (perStep <= 0)
+			return m_iOnSteps;
+
+		int budget = Math.Floor(HEADING_BUDGET_DEG * Math.DEG2RAD / perStep);
+		return Math.MaxInt(1, Math.MinInt(m_iOnSteps, budget));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! PRBS bit steps at amplitude and kmh: the configured bit, cut so the largest running sum of the sequence keeps
+	//! the heading change within HEADING_BUDGET_DEG (at least 1)
+	protected int PrbsBitStepsFor(float amplitude, float kmh)
+	{
+		float perStep = KAPPA_PER_STEER * Math.AbsFloat(amplitude) * Math.Max(kmh, 1) / 3.6 * m_fDt * m_iPrbsMaxRun;
+		if (perStep <= 0)
+			return m_iPrbsBitSteps;
+
+		int budget = Math.Floor(HEADING_BUDGET_DEG * Math.DEG2RAD / perStep);
+		return Math.MaxInt(1, Math.MinInt(m_iPrbsBitSteps, budget));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -529,7 +591,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		}
 
 		float v = Math.Max(m_Actuator.GetSpeedKmh() / 3.6, 0);
-		float prbsS = m_iPrbsPeriodBits * m_iPrbsBitSteps * m_fDt;
+		float prbsS = m_iPrbsPeriodBits * phase.m_iPrbsBitSteps * m_fDt;
 		float need = v * (prbsS + m_fTrainReserveS) + v * v / (2 * m_fTrainDecelMs2);
 		if (RemainingAlongM() < need)
 		{
@@ -582,6 +644,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			row.AddInt(m_iLastStep);
 			row.AddFloat(m_fOnsetKmh, 3);
 			row.AddFloat(m_fOnsetAlongM, 3);
+			row.AddInt(m_iHoldSteps);
 			row.AddString(result);
 			m_EventsCsv.WriteRow(row);
 		}
@@ -594,6 +657,12 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	{
 		m_bOn = false;
 		CloseEvent(phase, result);
+		// an aborted PRBS: the bits it completed (the phases file shows it incomplete unless a later run completes it)
+		if (m_eSegment == DC_ESteerSegment.PRBS && !phase.m_bPrbsDone)
+		{
+			int bitsDone = m_iSegStep / Math.MaxInt(1, phase.m_iPrbsBitSteps);
+			phase.m_iPrbsBits = Math.MaxInt(phase.m_iPrbsBits, bitsDone);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -645,6 +714,10 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		lines.Insert("s2.jitter_max_steps=" + m_iJitterMaxSteps.ToString());
 		lines.Insert("s2.prbs_bit_steps=" + m_iPrbsBitSteps.ToString());
 		lines.Insert("s2.prbs_period_bits=" + m_iPrbsPeriodBits.ToString());
+		lines.Insert("s2.prbs_max_running_sum=" + m_iPrbsMaxRun.ToString());
+		float budgetDeg = HEADING_BUDGET_DEG;
+		float kappaPerSteer = KAPPA_PER_STEER;
+		lines.Insert("s2.heading_budget_deg=" + budgetDeg.ToString(-1, 1) + " at kappa " + kappaPerSteer.ToString(-1, 3) + " 1/m per unit (holds and PRBS bits cut to it; the phases file has the bit steps per phase)");
 		lines.Insert("s2.rule=train: per event a gap at 0 (off + jitter steps), then the amplitude for on_steps (seg_flag 1), released into the next gap; event_idx from the onset to the next onset; e23_events.csv onset_step / release_step = the first step with the new command; prbs: seg_flag 1, event_idx -1, the e01 generator with this probe's order and seed, one period");
 	}
 }

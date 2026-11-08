@@ -2,12 +2,12 @@
 """Synthetic-fixture tests for the G19-1 steering analyses (DD-14b): tools/probes/t0eng/e21_selfsteer.py (CC-07)
 and tools/probes/t0eng/e23_steer_steps.py (CC-08), and the Enforce site arithmetic DC_SteerTerrainMath.
 
-    TMPDIR=/dev/shm/<x> PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
         tests/test_t0eng_steer.py
 
 Every case writes synthetic e21 / e22 / e23 plays (run_header.txt with the build / pin / prefab / map / addon
 identity, the probe CSVs, run_footer.txt) with probe_common.write_synthetic_play into a fresh
-probe_common.make_temp_dir() directory (RAM or E:, never /tmp) and removes it afterwards. The plays come from a small
+probe_common.make_temp_dir() directory and removes it afterwards. The plays come from a small
 vehicle model (SteerCar), written independently of the analyses: a steering actuator cmd -> input (delay, first
 order, rate limit, gain), the input -> a bicycle wheel angle (0.5 rad per unit plus optional load and slope terms),
 an exact Ackermann pair from it (plus toe), the path curvature tan(angle) / L with a speed-dependent lag (never the
@@ -143,17 +143,24 @@ class SteerCar:
     of a_lat), slope_gain (rad of wheel angle per unit cross-slope), sigma (relaxation length m), kappa_sign, merge
     (engine steps per row: one row per dispatched step, physics_step + 1, timeslice n x dt, as DC_ProbeRunner writes
     it), heading_noise (rad rms on the written heading), readback_offset (added to the readback of every zero-command
-    measure row after 60 zero rows)."""
+    measure row after 60 zero rows), yaw_kappa_offset (1/m: a constant disagreement of the written yaw rate),
+    kappa_bump ((start m, length m, 1/m) on every measure segment), late_kappa ((from m, 1/m) on every measure
+    segment). The default slope_kappa gives the cross runs a steady drift of about 0.5 deg / 100 m (a reference
+    that a 10% margin can resolve)."""
 
     def __init__(self, actuator=None, wheel_sign=1.0, bone_lag=0, late_changes=0, toe=0.0, kappa_bias=0.0,
-                 kappa_wave=None, slope_kappa=0.0, zero_noise=False, stair_error=0.0, load_gain=0.0, slope_gain=0.0,
-                 sigma=0.6, kappa_sign=1.0, merge=1, heading_noise=0.0, readback_offset=0.0, seed=3):
+                 kappa_wave=None, slope_kappa=1.45e-3, zero_noise=False, stair_error=0.0, load_gain=0.0,
+                 slope_gain=0.0, sigma=0.6, kappa_sign=1.0, merge=1, heading_noise=0.0, readback_offset=0.0,
+                 yaw_kappa_offset=0.0, kappa_bump=None, late_kappa=None, seed=3):
         self.act = actuator or Actuator()
         self.wheel_sign, self.bone_lag, self.late_changes, self.toe = wheel_sign, bone_lag, late_changes, toe
         self.kappa_bias, self.kappa_wave, self.slope_kappa = kappa_bias, kappa_wave, slope_kappa
         self.zero_noise, self.stair_error, self.load_gain = zero_noise, stair_error, load_gain
         self.slope_gain, self.sigma, self.kappa_sign, self.merge = slope_gain, sigma, kappa_sign, merge
         self.heading_noise, self.readback_offset = heading_noise, readback_offset
+        self.yaw_kappa_offset, self.kappa_bump, self.late_kappa = yaw_kappa_offset, kappa_bump, late_kappa
+        self.segment_key = None
+        self.segment_start = 0.0
         self.offset_y = 0.0
         self.rng = random.Random(seed)
         self.step_no = 100
@@ -177,6 +184,9 @@ class SteerCar:
     def run(self, phase, segment, run_idx, cmd, v_target, steer_call=1, seg_target=-1.0, seg_flag=0, event_idx=-1,
             site="flat", assist=2, mode="hold", slope=0.0, acc=None, merge=None):
         n = merge or self.merge
+        if (phase, segment) != self.segment_key:
+            self.segment_key = (phase, segment)
+            self.segment_start = self.dist
         if abs(cmd - self.last_cmd) >= 0.04:
             self.changes += 1
         self.last_cmd = cmd
@@ -199,6 +209,12 @@ class SteerCar:
             target_kappa = self.kappa_sign * math.tan(delta) / WHEELBASE + self.kappa_bias + self.slope_kappa * slope
             if self.kappa_wave:
                 target_kappa += self.kappa_wave[0] * math.sin(2.0 * math.pi * self.dist / self.kappa_wave[1])
+            into = self.dist - self.segment_start
+            if self.kappa_bump and segment == "measure" and \
+                    self.kappa_bump[0] <= into < self.kappa_bump[0] + self.kappa_bump[1]:
+                target_kappa += self.kappa_bump[2]
+            if self.late_kappa and segment == "measure" and into >= self.late_kappa[0]:
+                target_kappa += self.late_kappa[1]
             tau = max(DT, self.sigma / max(self.v, 0.5))
             self.kappa += (target_kappa - self.kappa) * (1.0 - math.exp(-DT / tau))
             r = self.kappa * self.v
@@ -210,7 +226,7 @@ class SteerCar:
             self.dist += self.v * DT
         post = steer_input
         self.zero_rows = self.zero_rows + 1 if abs(cmd) < 1e-9 and steer_call else 0
-        if self.zero_noise and self.zero_rows >= 60 and self.v > 2 and self.rng.random() < 0.16:
+        if self.zero_noise and self.zero_rows >= 60 and segment == "measure" and self.rng.random() < 0.16:
             post += self.rng.choice((-1, 1)) * self.rng.uniform(0.002, 0.0146)
         if self.stair_error and abs(cmd) > 1e-9:
             post += self.stair_error
@@ -240,7 +256,8 @@ class SteerCar:
             "cmd_clutch": "1.0000", "cmd_gear": 2, "cmd_handbrake": 0, "speed_hold_kmh": "%.3f" % (v_target * 3.6),
             "input_pre_steer": "%.4f" % cmd, "input_post_steer": "%.5f" % post, "engine_on": 1,
             "speed_kmh": "%.3f" % (self.v * 3.6), "vel_l_x": "0.000", "vel_l_y": "0.000", "vel_l_z": "%.3f" % self.v,
-            "angvel_l_x": "0.000000", "angvel_l_y": "%.7f" % r, "angvel_l_z": "0.000000",
+            "angvel_l_x": "0.000000", "angvel_l_y": "%.7f" % (r + self.yaw_kappa_offset * self.v),
+            "angvel_l_z": "0.000000",
             "acc_l_x": "%.4f" % self.a_lat, "acc_l_y": "0.0000", "acc_l_z": "%.4f" % acc_z,
             "pos_x": "%.4f" % self.x, "pos_y": "39.000", "pos_z": "%.4f" % self.z,
             "fwd_x": "%.6f" % math.sin(rad), "fwd_y": "0.000000", "fwd_z": "%.6f" % math.cos(rad),
@@ -258,9 +275,10 @@ class SteerCar:
         self.rows.append(row)
 
 
-def phase_row(car, index, name, kind, site, kmh, steer, assist, first_step):
-    """A <probe>_phases.csv row as DC_ProbeSteerBase writes it (start / end = the phase's first and last physics_step)"""
-    return [index, name, kind, site, first_step, car.step_no, "", "", kmh, steer, assist, 1, "ok", ""]
+def phase_row(car, index, name, kind, site, kmh, steer, assist, first_step, result="ok", prbs=("", "", "", "")):
+    """A <probe>_phases.csv row as DC_ProbeSteerBase writes it (start / end = the phase's first and last physics_step;
+    prbs = bits, expected, bit steps, result: e23 only)"""
+    return [index, name, kind, site, first_step, car.step_no, "", "", kmh, steer, assist, 1, result, ""] + list(prbs)
 
 
 def drive_start(car, phase, run, v_target, site="flat", assist=2):
@@ -339,8 +357,8 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
               header_extra=None):
     car = car or SteerCar()
     phases = []
-    for kmh, levels in ((12, (0.1, -0.1, 0.2, -0.2, 0.3, -0.3)), (18, (0.05, -0.05, 0.1, -0.1, 0.15, -0.15))):
-        name = "stair_%d" % kmh
+    for kmh, levels in ((10.5, (0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.05, -0.05, 0.15, -0.15, 0.25, -0.25)),):
+        name = "stair_%g" % kmh
         first = car.step_no + 1
         v = kmh / 3.6
         drive_start(car, name, 1, v)
@@ -363,7 +381,7 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
                 if k < 40 and k % 8 == 7 and abs(car.a_lat) > 0.1:
                     vt *= math.sqrt(target / abs(car.a_lat))       # the probe adapts the speed to the measured a_lat
                 car.run(name, "alat", 1, steer, vt, seg_flag=int(k >= 40), event_idx=level, seg_target=target)
-        while car.v > 5.0 / 3.6:
+        while car.v > 10.0 / 3.6:
             car.run(name, "brake", 1, steer, car.v, mode="brake", seg_flag=1, seg_target=3.0)
         drive_stop(car, name, 1)
         phases.append(phase_row(car, len(phases), name, "load", "flat", 10, steer, -1, first))
@@ -375,10 +393,40 @@ def build_e22(play_dir, car=None, steer_load=(0.3, -0.3), targets=(2.0, 2.75, 3.
     return play_dir
 
 
-def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6", seed=5, prbs=True,
-              prbs_gain=None, slow_kmh=None, alt_tau=None):
+STEPS_TEXT = read(STEPS_SOURCE)
+HEADING_BUDGET_DEG = float(re.search(r"HEADING_BUDGET_DEG = ([0-9.]+);", STEPS_TEXT).group(1))
+KAPPA_PER_STEER = float(re.search(r"KAPPA_PER_STEER = ([0-9.]+);", STEPS_TEXT).group(1))
+ON_STEPS = 12          # m_fStepOnS 0.4 s at 30 Hz
+BIT_STEPS = 5          # m_fPrbsBitS 0.15 s at 30 Hz (DC_ProbeSequences.StepsFor rounds 4.5 up)
+PRBS_AMPLITUDES = {10.0: 0.5, 20.0: 0.4, 30.0: 0.3, 40.0: 0.25, 60.0: 0.2}
+
+
+def hold_steps(amplitude, kmh):
+    """DC_ProbeSteerSteps.HoldStepsFor"""
+    per_step = KAPPA_PER_STEER * abs(amplitude) * max(kmh, 1.0) / 3.6 * DT
+    return max(1, min(ON_STEPS, int(math.floor(math.radians(HEADING_BUDGET_DEG) / per_step))))
+
+
+def max_running_sum(bits):
+    total, top = 0, 1
+    for bit in bits:
+        total += 1 if bit else -1
+        top = max(top, abs(total))
+    return top
+
+
+def prbs_bit_steps(amplitude, kmh, bits):
+    """DC_ProbeSteerSteps.PrbsBitStepsFor"""
+    per_step = KAPPA_PER_STEER * abs(amplitude) * max(kmh, 1.0) / 3.6 * DT * max_running_sum(bits)
+    return max(1, min(BIT_STEPS, int(math.floor(math.radians(HEADING_BUDGET_DEG) / per_step))))
+
+
+def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;40:0.5x4;60:0.5x6", seed=5,
+              prbs=True, prbs_gain=None, slow_kmh=None, alt_tau=None, prbs_bits_done=None, phase_results=None):
     """slow_kmh: {speed: the speed the phase decays to while its train runs}; alt_tau: (tau_a, tau_b) alternating per
-    event; prbs_gain: the actuator gain during the PRBS (a PRBS the step model cannot predict)"""
+    event; prbs_gain: the actuator gain during the PRBS (a PRBS the step model cannot predict); prbs_bits_done:
+    {speed: bits} of a PRBS cut short; phase_results: {speed: result} (an abort that still ends with a complete
+    footer). Holds and PRBS bits follow the probe's heading budget (hold_steps, prbs_bit_steps)"""
     car = car or SteerCar()
     rng = random.Random(seed)
     events = []
@@ -419,30 +467,36 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;30:0.5x6,1.0x4;60:0.5x6",
                 pending["end_step"] = car.step_no
                 events.append(pending)
             open_event = idx
-            for k in range(12):
+            hold = hold_steps(amp, kmh)
+            for k in range(hold):
                 car.run(name, "train", 1, amp, vt, seg_flag=1, event_idx=idx, seg_target=kmh)
                 if k == 0:
                     pending = {"event_idx": idx, "phase": name, "target_kmh": "%.3f" % kmh, "amplitude": "%.4f" % amp,
                                "run_idx": 1, "jitter_steps": gap - 18, "onset_step": car.step_no,
                                "release_step": "", "end_step": "", "onset_kmh": "%.3f" % (vt * 3.6),
-                               "onset_along_m": "0.0", "result": "ok"}
+                               "onset_along_m": "0.0", "hold_steps": hold, "result": "ok"}
         for k in range(18):
             car.run(name, "train", 1, 0.0, end_v, event_idx=open_event, seg_target=kmh)
             if k == 0:
                 pending["release_step"] = car.step_no
         pending["end_step"] = car.step_no
         events.append(pending)
+        prbs_cols = (0, 0, 1, "none")
         if prbs:
             gain = car.act.gain
             if prbs_gain is not None:
                 car.act.gain = prbs_gain
-            amp = {10.0: 0.5, 30.0: 0.3, 60.0: 0.2}.get(kmh, 0.2)
-            for bit in prbs_bits:
-                for _ in range(4):
+            amp = PRBS_AMPLITUDES.get(kmh, 0.2)
+            bit_steps = prbs_bit_steps(amp, kmh, prbs_bits)
+            done = (prbs_bits_done or {}).get(kmh, len(prbs_bits))
+            for bit in prbs_bits[:done]:
+                for _ in range(bit_steps):
                     car.run(name, "prbs", 1, amp if bit else -amp, end_v, seg_flag=1, seg_target=kmh)
             car.act.gain = gain
+            prbs_cols = (done, len(prbs_bits), bit_steps, "ok" if done == len(prbs_bits) else "incomplete")
         drive_stop(car, name, 1)
-        phases.append(phase_row(car, len(phases), name, "steps", "flat", kmh, 0, -1, first))
+        phases.append(phase_row(car, len(phases), name, "steps", "flat", kmh, 0, -1, first,
+                                result=(phase_results or {}).get(kmh, "ok"), prbs=prbs_cols))
     header = common_header("e23")
     header.update({"params.m_sStepGrid": grid})
     probe_common.write_synthetic_play(play_dir, header, {"e23_steps": (STEP_COLUMNS, car.rows),
@@ -467,7 +521,7 @@ def e23_prbs_bits(order, seed, count):
 def run_main(module, argv):
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = probe_common.run_cli(module.main, argv)
+        code = steer_common.run_cli(module.main, argv)
     return code, out.getvalue()
 
 
@@ -502,10 +556,32 @@ def blank_columns(play_dir, probe, columns):
         handle.write("\n".join(out) + "\n")
 
 
+def edit_column(play_dir, probe, where, column, value):
+    """Sets column to value on every <probe>_steps.csv row where(row dict) accepts"""
+    path = os.path.join(play_dir, probe + "_steps.csv")
+    with open(path, "r", encoding="ascii") as handle:
+        lines = handle.read().splitlines()
+    header = lines[0].split(",")
+    index = header.index(column)
+    out = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split(",")
+        if where(dict(zip(header, cells))):
+            cells[index] = value
+        out.append(",".join(cells))
+    with open(path, "w", encoding="ascii") as handle:
+        handle.write("\n".join(out) + "\n")
+
+
+def blank_segment(play_dir, probe, segment, column):
+    edit_column(play_dir, probe, lambda r: r["segment"] == segment, column, "")
+
+
 def no_mode(test, text):
-    test.assertNotIn("Mode A stays the production default", text)
-    test.assertNotIn("Mode B (seated driver, CC-14) becomes", text)
-    test.assertIn("mode_decision: none", text)
+    """Coordinator decision (round 3): never an automated Mode A / B decision, only the manual-review line"""
+    test.assertNotIn("Mode A stays", text)
+    test.assertNotIn("Mode B (seated driver", text)
+    test.assertIn("mode_decision: none (manual review: G19 admission record); items: evidence ", text)
 
 
 class Cc07Tests(unittest.TestCase):
@@ -531,13 +607,14 @@ class Cc07Tests(unittest.TestCase):
             self.assertEqual(item(text, name), "PASS", "%s in\n%s" % (name, text))
         self.assertEqual(code, 0, text)
         self.assertIn("selected rot", text)
-        self.assertIn("Mode A stays the production default", text)
+        no_mode(self, text)
+        self.assertIn("d_load PASS (complete)", text)
 
     def test_without_a_baseline_c_is_incomplete_and_no_mode_is_chosen(self):
         code, text = run_main(e21, self.session(baseline=False))
         self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
         self.assertEqual(item(text, "b_flat"), "PASS", text)
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         no_mode(self, text)
 
     # (a) readback
@@ -565,8 +642,8 @@ class Cc07Tests(unittest.TestCase):
         self.assertEqual(item(text, "a_readback"), "FAIL", text)
         self.assertRegex(detail(text, "a_readback"), r" [1-9]\d* deviating rows not explained")
         self.assertRegex(detail(text, "a_readback"), r"[1-9]\d* of them after >= 60 zero-command rows")
-        self.assertEqual(code, 1, text)
-        self.assertIn("Mode B (seated driver, CC-14) becomes", text)
+        self.assertEqual(code, 0, text)
+        no_mode(self, text)
 
     def test_nonzero_command_readback_error_never_passes(self):
         # Codex: staircase rows with a 0.1 readback error left a PASS (only zero-command rows were read)
@@ -576,7 +653,9 @@ class Cc07Tests(unittest.TestCase):
         self.assertIn("e22/stair", text)
         e23_play = build_e23(self.path("e23", "play_01"), SteerCar(), grid="10:0.5x6;30:0.5x6")
         code, text = run_main(e21, argv + ["--e23", e23_play])
-        self.assertEqual(item(text, "a_readback"), "FAIL", text)
+        # the e22 load rows at 20..27 km/h lie outside this model's cells (10 and 30 km/h only): never PASS
+        self.assertIn(item(text, "a_readback"), ("FAIL", "INCOMPLETE"), text)
+        self.assertRegex(detail(text, "a_readback"), r" [1-9]\d* deviating rows not explained")
 
     # (b) flat
     def test_alternating_curvature_fails_b_despite_zero_net_drift(self):
@@ -650,7 +729,7 @@ class Cc07Tests(unittest.TestCase):
         code, text = run_main(e21, argv)
         self.assertEqual(item(text, "evidence"), "INCOMPLETE", text)
         self.assertIn("withheld: a play it depends on is not complete]", text)
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         no_mode(self, text)
 
     def test_contradictory_identities_are_refused(self):
@@ -658,17 +737,17 @@ class Cc07Tests(unittest.TestCase):
         a = build_e21(self.path("e21", "play_01"))
         b = build_e22(self.path("e22", "play_01"), header_extra={"ego.prefab": "{0000}Prefabs/Other.et"})
         code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+        self.assertEqual(code, 1, text)
         self.assertIn("differ in ego.prefab", text)
         c = build_e22(self.path("e22b", "play_01"), header_extra={"engine.build_version": "1.8.0.13"})
         code, text = run_main(e21, [a, "--e22", c])
-        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+        self.assertEqual(code, 1, text)
 
     def test_a_play_without_identity_stamps_is_refused(self):
         a = build_e21(self.path("e21", "play_01"), header_extra={"launch.pin_id": ""})
         b = build_e22(self.path("e22", "play_01"))
         code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+        self.assertEqual(code, 1, text)
         self.assertIn("lacks the identity field(s) launch.pin_id", text)
 
     # step 0
@@ -677,7 +756,7 @@ class Cc07Tests(unittest.TestCase):
         code, text = run_main(e21, ["--signal-scale-deg", "1"] + argv)
         self.assertEqual(item(text, "step0_channel"), "FAIL", text)
         self.assertEqual(item(text, "d_load"), "INCOMPLETE", text)
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         no_mode(self, text)
 
     def test_intermittently_lagged_bones_are_not_validated(self):
@@ -710,7 +789,7 @@ class Cc07Tests(unittest.TestCase):
                 b = build_e22(self.path("e22_" + name, "play_01"), **kw)
                 code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
                 self.assertEqual(item(text, "d_load"), "INCOMPLETE", text)
-                self.assertNotIn("Mode A stays", text)
+                no_mode(self, text)
 
     def test_empty_plays_never_pass(self):
         a = probe_common.write_synthetic_play(self.path("e21_empty", "play_01"), common_header("e21"),
@@ -720,7 +799,7 @@ class Cc07Tests(unittest.TestCase):
                                               {"e22_steps": (STEP_COLUMNS, []), "e22_phases": (PHASE_COLUMNS, [])},
                                               FOOTER)
         code, text = run_main(e21, [a, "--e22", b])
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         self.assertNotIn("] step0_channel: L", text.replace("[INCOMPLETE] step0_channel: L", ""))
         for name in ("step0_channel", "a_readback", "b_flat", "c_cross", "d_load"):
             self.assertNotEqual(item(text, name), "PASS", text)
@@ -731,7 +810,7 @@ class Cc07Tests(unittest.TestCase):
         a = probe_common.write_synthetic_play(self.path("e21_col", "play_01"), common_header("e21"),
                                               {"e21_steps": (columns, [])}, FOOTER)
         code, text = run_main(e21, [a])
-        self.assertEqual(code, probe_common.EXIT_INPUT_ERROR, text)
+        self.assertEqual(code, 1, text)
 
 
     # --- Codex round 2 (a58ddd6) ------------------------------------------------------------------------------
@@ -743,9 +822,9 @@ class Cc07Tests(unittest.TestCase):
         code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
         self.assertEqual(item(text, "d_load"), "INCOMPLETE", text)
         self.assertIn("[observed FAIL", detail(text, "d_load"))
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         no_mode(self, text)
-        self.assertIn("FAIL observed inside incomplete items: d_load", text)
+        self.assertIn("d_load INCOMPLETE (incomplete, a FAIL observed inside)", text)
 
     def test_an_interrupted_e23_withholds_its_dependents(self):
         # Codex: removing e23's footer gave evidence PASS, exit 0 and Mode A (e23 silently dropped)
@@ -759,7 +838,7 @@ class Cc07Tests(unittest.TestCase):
         self.assertEqual(item(text, "evidence"), "INCOMPLETE", text)
         self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
         self.assertEqual(item(text, "step0_channel"), "INCOMPLETE", text)
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         no_mode(self, text)
 
     def test_missing_called_rows_or_values_are_incomplete(self):
@@ -799,12 +878,14 @@ class Cc07Tests(unittest.TestCase):
         def act():
             return Actuator(tau=0.2)
 
-        argv = self.session(e21_car=SteerCar(actuator=act(), readback_offset=0.005),
-                            e22_car=SteerCar(actuator=act()))
+        argv = self.session(e21_car=SteerCar(actuator=act(), readback_offset=0.005), e22_car=SteerCar(actuator=act()))
         e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
         code, text = run_main(e21, argv + ["--e23", e23_play])
-        self.assertEqual(item(text, "a_readback"), "FAIL", text)
-        m = re.search(r"one-step max ([0-9.e-]+), free-running max ([0-9.e-]+), 1 s mean max ([0-9.e-]+)",
+        # FAIL, or INCOMPLETE when e23's own slow stops leave deviations outside the validated cells; never PASS
+        self.assertIn(item(text, "a_readback"), ("FAIL", "INCOMPLETE"), text)
+        if item(text, "a_readback") == "INCOMPLETE":
+            self.assertIn("[observed FAIL", detail(text, "a_readback"))
+        m = re.search(r"one-step max ([0-9.e-]+), free-running max ([0-9.e-]+); on every row: 1 s mean max ([0-9.e-]+)",
                       detail(text, "a_readback"))
         self.assertIsNotNone(m, text)
         self.assertLess(float(m.group(1)), 1e-3)
@@ -827,7 +908,7 @@ class Cc07Tests(unittest.TestCase):
         # Codex: 8e-4 1/m at a 25 m wavelength kept the 25 m window maxima at 1.15e-5 and passed
         code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_wave=(8e-4, 25.0))))
         self.assertEqual(item(text, "b_flat"), "FAIL", text)
-        m = re.search(r"\|dpsi\|/ds p95 ([0-9.e-]+)", detail(text, "b_flat"))
+        m = re.search(r"heading p95 ([0-9.e-]+)", detail(text, "b_flat"))
         self.assertGreater(float(m.group(1)), 5e-4)
 
     def test_an_unresolvable_noise_floor_is_incomplete(self):
@@ -838,7 +919,8 @@ class Cc07Tests(unittest.TestCase):
 
     def test_a_near_zero_baseline_gets_no_uncalibrated_floor(self):
         # Codex: a zero-drift baseline and 0.09 deg/100 m passed on the 0.1 deg/100 m floor
-        code, text = run_main(e21, self.session(e21_car=SteerCar(slope_kappa=2.62e-4)))
+        code, text = run_main(e21, self.session(e21_car=SteerCar(slope_kappa=2.62e-4),
+                                                baseline_car=SteerCar(slope_kappa=0.0)))
         self.assertRegex(detail(text, "c_cross"), r"heading drift 0\.0[89]")
         self.assertEqual(item(text, "c_cross"), "FAIL", text)
 
@@ -856,6 +938,100 @@ class Cc07Tests(unittest.TestCase):
                 code, text = run_main(e21, [a, "--e22", b, "--baseline", base])
                 self.assertEqual(item(text, "c_cross"), expected, text)
         self.assertIn("not the same ground", detail(text, "c_cross"))
+
+
+    # --- Codex round 3 (91bb2cb) ------------------------------------------------------------------------------
+    def test_a_second_half_drift_is_unresolved_not_tolerated(self):
+        # Codex: drift only in the second half of each measure segment widened its own tolerance (sigma 3.41) and
+        # passed against a zero-drift baseline
+        code, text = run_main(e21, self.session(e21_car=SteerCar(late_kappa=(50.0, 6e-4)),
+                                                baseline_car=SteerCar(slope_kappa=0.0)))
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+        self.assertIn("unresolved: the two halves differ", detail(text, "c_cross"))
+        no_mode(self, text)
+
+    def test_curvature_magnitude_survives_every_wavelength(self):
+        # Codex: a 4.9 m wave of 8e-4 1/m averaged to 3.5e-5 and passed; the magnitude is now taken per step
+        for wavelength in (2.0, 4.9, 10.0, 25.0, 50.0):
+            with self.subTest(wavelength=wavelength):
+                code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_wave=(8e-4, wavelength))))
+                self.assertNotEqual(item(text, "b_flat"), "PASS", text)
+                p95 = float(re.search(r"heading p95 ([0-9.e-]+)", detail(text, "b_flat")).group(1))
+                self.assertGreater(p95, 1e-4, text)
+                if wavelength >= 4.9:
+                    self.assertEqual(item(text, "b_flat"), "FAIL", text)
+        code, text = run_main(e21, self.session(e21_car=SteerCar(kappa_wave=(3e-5, 4.9))))
+        self.assertEqual(item(text, "b_flat"), "PASS", text)
+
+    def test_an_excursion_with_a_channel_offset_is_not_a_pass(self):
+        # Codex: a short excursion plus a constant yaw / heading disagreement passed on the larger channel's floor
+        car = SteerCar(kappa_bump=(80.0, 2.0, 6e-4), yaw_kappa_offset=7e-5)
+        code, text = run_main(e21, self.session(e21_car=car))
+        self.assertNotEqual(item(text, "b_flat"), "PASS", text)
+        self.assertRegex(detail(text, "b_flat"), r"systematic heading - yaw offset -7(\.\d+)?e-05")
+
+    def test_a_truncated_or_aborted_prbs_is_not_held_out(self):
+        # Codex: 8 of 31 PRBS bits in a phase that ended aborted_heading, complete footer, still validated the model
+        def act():
+            return Actuator(tau=0.014)
+
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()), prbs_bits_done={10.0: 8},
+                             phase_results={10.0: "aborted_heading"})
+        code, text = run_main(e23, [e23_play])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
+        self.assertEqual(item(text, "input_10kmh_0.5"), "INCOMPLETE", text)
+        self.assertIn("ended aborted_heading", detail(text, "input_10kmh_0.5"))
+        argv = self.session(e21_car=SteerCar(actuator=act()), e22_car=SteerCar(actuator=act()))
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertIn("did not end ok", detail(text, "a_readback"))
+
+    def test_the_model_scope_has_no_gaps(self):
+        # Codex: bins at 10 and 60 km/h gave a 0..69 km/h, |cmd| <= 1 scope
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.014)),
+                         grid="10:0.5x6,1.0x4;60:0.5x6")
+
+        class Args:
+            min_events, min_r2, max_cv = 6, 0.9, 0.2
+
+        state, model, _ = e23.input_model(probe_common.Play(play), Args())
+        self.assertTrue(state)
+
+        def row(kmh, cmd):
+            return steer_common.Step({"speed_kmh": "%g" % kmh, "cmd_steer": "%g" % cmd})
+
+        for kmh, cmd, inside in ((10, 1.0, True), (60, 0.5, True), (60, 1.0, False), (30, 0.3, False),
+                                 (40, 0.0, False), (0, 0.0, False), (70, 0.2, False)):
+            self.assertIs(e21.in_scope(row(kmh, cmd), model["scope"]), inside, (kmh, cmd))
+
+    def test_missing_readbacks_with_a_model_are_incomplete(self):
+        # Codex: the missing-readback case with a validated model raised a TypeError
+        def act():
+            return Actuator(tau=0.014)
+
+        argv = self.session(e21_car=SteerCar(actuator=act()), e22_car=SteerCar(actuator=act()))
+        blank_segment(argv[2], "e22", "brake", "input_post_steer")
+        e23_play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=act()))
+        code, text = run_main(e21, argv + ["--e23", e23_play])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(item(text, "a_readback"), "INCOMPLETE", text)
+
+    def test_current_cross_assistance_must_be_full(self):
+        # Codex: assist_mode 0 on every current cross row still passed against a FULL baseline
+        argv = self.session()
+        edit_column(argv[0], "e21", lambda r: r["phase"].startswith("cross_"), "assist_mode", "0")
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "c_cross"), "INCOMPLETE", text)
+        self.assertIn("assistance not FULL", detail(text, "c_cross"))
+
+    def test_exit_codes(self):
+        code, text = run_main(e21, self.session(baseline=False))
+        self.assertEqual(code, 0, text)                 # ran; the items carry the verdicts
+        code, text = run_main(e21, [self.path("nowhere", "play_01")])
+        self.assertEqual(code, 1, text)
+        code, text = run_main(e21, ["--no-such-option"])
+        self.assertEqual(code, 1, text)
 
 
 class Cc08Tests(unittest.TestCase):
@@ -891,7 +1067,7 @@ class Cc08Tests(unittest.TestCase):
                 self.assertEqual(item(text, "coverage"), "INCOMPLETE", text)
                 self.assertIn("PREVIEW", detail(text, "coverage"))
                 self.assertEqual(item(text, "llc_path"), "INCOMPLETE", text)
-                self.assertEqual(code, 3, text)
+                self.assertEqual(code, 0, text)
 
     def test_an_unvalidated_channel_without_prbs_is_not_a_pass(self):
         # Codex: an unvalidated wheel channel and no PRBS returned exit 0 and "CC-08 PASS"
@@ -899,7 +1075,7 @@ class Cc08Tests(unittest.TestCase):
         code, text = run_main(e23, [play])
         self.assertEqual(item(text, "wheel_10kmh_0.5"), "INCOMPLETE", text)
         self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         self.assertNotIn("RESULT CC-08: PASS", text)
 
     def test_a_poorly_predicted_prbs_fails(self):
@@ -918,7 +1094,7 @@ class Cc08Tests(unittest.TestCase):
         self.assertEqual(item(text, "input_10kmh_0.5"), "PASS", text)
         self.assertEqual(item(text, "input_30kmh_0.5"), "INCOMPLETE", text)
         self.assertEqual(item(text, "coverage"), "INCOMPLETE", text)
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
 
     def test_a_slowing_run_is_binned_by_its_measured_speed(self):
         # Codex: a slowing 60 km/h run stayed in the 60 km/h bin
@@ -999,7 +1175,7 @@ class Cc08Tests(unittest.TestCase):
         with open(os.path.join(play, "e23_events.csv"), "w", encoding="ascii") as handle:
             handle.write(",".join(EVENT_COLUMNS) + "\n")
         code, text = run_main(e23, [play])
-        self.assertEqual(code, 3, text)
+        self.assertEqual(code, 0, text)
         self.assertNotIn("[PASS] input_", text)
 
 
@@ -1026,6 +1202,29 @@ class Cc08Tests(unittest.TestCase):
         rates = e23.stability("M3", per[0], [e23.Params(d=1, g=1.0, tau=0.05, q=q) for q in (3.0, 3.0, 3.0, None)],
                               windows, DT, 0.5, 0.2)
         self.assertIsNone(rates["R"][0])
+
+
+    def test_the_default_grid_stays_under_the_heading_guard(self):
+        # Codex round 3: 0.4 s holds reached 43 deg at 30 km/h x 1.0 and 40 deg at 60 km/h x 0.5 (guard 30 deg)
+        grid = re.search(r'\[Attribute\("([^"]+)", UIWidgets\.EditBox, "Step grid', STEPS_TEXT).group(1)
+        amps = re.search(r'\[Attribute\("([^"]+)", UIWidgets\.EditBox, "Held-out PRBS amplitude', STEPS_TEXT).group(1)
+        self.assertEqual({float(k): float(v) for k, v in (g.split(":") for g in amps.split(";"))}, PRBS_AMPLITUDES)
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.014)), grid=grid)
+        steps = steer_common.load_steps(probe_common.Play(play), "e23")
+        worst = {}
+        for s in steps:
+            if s.segment in ("train", "prbs"):
+                off = abs(steer_common.wrap_deg(s.f["heading_deg"] - 75.0))
+                key = (s.phase, s.segment)
+                worst[key] = max(worst.get(key, 0.0), off)
+        print("max heading off the strip per phase and segment:", {k: round(v, 1) for k, v in sorted(worst.items())})
+        self.assertLess(max(worst.values()), 25.0, worst)
+        code, text = run_main(e23, [play])
+        for name in ("input_10kmh_0.5", "input_10kmh_1", "input_30kmh_0.5", "input_30kmh_1", "input_60kmh_0.5"):
+            self.assertEqual(item(text, name), "PASS", text)
+        for speed in (10, 30, 60):
+            self.assertEqual(item(text, "prbs_input_%dkmh" % speed), "PASS", text)
+        self.assertIn("input_20kmh_0.5: outside the CC-08 grid", text)
 
 
 class ContractTests(unittest.TestCase):
@@ -1152,6 +1351,14 @@ class ContractTests(unittest.TestCase):
                                                    r"TraceOnce\(")
         for name in ("StepGrid", "ContinueSampling", "StepObstacles", "StepStages"):
             self.assertNotIn("m_iSiteSamplesPerFrame", methods.get(name, ""))
+
+    def test_undersized_budgets_are_refused(self):
+        # Codex round 3: budgets below a unit's atomic cost (4 samples, 1 trace) made no progress
+        base = read(BASE_SOURCE)
+        refusal = base[base.index("if (m_iSiteSamplesPerFrame < 4 || m_iSiteTracesPerFrame < 1)"):]
+        self.assertTrue(refusal.split("\n", 1)[1].strip().startswith("return RefuseStart("))
+        start = base.index("protected bool StartSteerProbe") if "protected bool StartSteerProbe" in base else 0
+        self.assertLess(base.index("m_iSiteTracesPerFrame < 1", start), base.index("AddSearch(SITE_FLAT", start))
 
     def test_the_sweep_plan_and_budget_with_a_mock_tracer(self):
         # the translated DC_SteerSweepPlan / DC_SteerBudget, driven the way StepObstacles drives them: at most the

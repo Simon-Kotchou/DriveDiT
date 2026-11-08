@@ -104,6 +104,7 @@ class DC_ProbeSteerPhase
 	int m_iPrbsExpected = -1;				//!< e23: bits of one PRBS period (0 = no PRBS, -1 = not an e23 phase)
 	int m_iPrbsBits;						//!< e23: bits completed (the period once done, else the most an aborted run did)
 	int m_iPrbsBitSteps = 1;				//!< e23: steps per PRBS bit at this phase's speed and amplitude
+	int m_iPrbsExtended;					//!< e23: bits applied for more engine steps than planned (merged dispatches)
 	int m_iRuns;							//!< runs (reset .. stop) started in this phase
 	int m_iSpins;
 	int m_iStartStep = -1;
@@ -662,7 +663,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (!m_StepsCsv)
 			return RefuseStart(probeId + "_steps.csv could not be created");
 
-		array<string> phaseColumns = {"phase_idx", "phase", "kind", "site", "start_step", "end_step", "start_world_ms", "end_world_ms", "target_kmh", "steer", "assist", "runs", "result", "note", "prbs_bits", "prbs_expected", "prbs_bit_steps", "prbs_result"};
+		array<string> phaseColumns = {"phase_idx", "phase", "kind", "site", "start_step", "end_step", "start_world_ms", "end_world_ms", "target_kmh", "steer", "assist", "runs", "result", "note", "prbs_bits", "prbs_expected", "prbs_bit_steps", "prbs_extended", "prbs_result"};
 		m_PhasesCsv = ctx.OpenCsv(probeId + "_phases", phaseColumns);
 		if (!m_PhasesCsv)
 			return RefuseStart(probeId + "_phases.csv could not be created");
@@ -1565,21 +1566,26 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		row.AddInt(phase.m_iRuns);
 		row.AddString(phase.m_sResult);
 		row.AddString(phase.m_sNote);
-		// e23's PRBS completion (empty for the other probes): ok only when a run finished the whole period
+		// e23's PRBS completion (empty for the other probes): ok only when a run applied every bit of the period for at
+		// least its planned engine steps; distorted when the bits were counted but the period did not complete
 		string prbsResult;
 		if (phase.m_iPrbsExpected >= 0)
 		{
 			row.AddInt(phase.m_iPrbsBits);
 			row.AddInt(phase.m_iPrbsExpected);
 			row.AddInt(phase.m_iPrbsBitSteps);
+			row.AddInt(phase.m_iPrbsExtended);
 			prbsResult = "incomplete";
 			if (phase.m_iPrbsExpected == 0)
 				prbsResult = "none";
 			else if (phase.m_bPrbsDone && phase.m_iPrbsBits >= phase.m_iPrbsExpected)
 				prbsResult = "ok";
+			else if (phase.m_iPrbsBits >= phase.m_iPrbsExpected)
+				prbsResult = "distorted";
 		}
 		else
 		{
+			row.AddString(string.Empty);
 			row.AddString(string.Empty);
 			row.AddString(string.Empty);
 			row.AddString(string.Empty);

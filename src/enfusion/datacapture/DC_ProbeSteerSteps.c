@@ -127,6 +127,10 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	protected float m_fOnsetAlongM;
 	protected int m_iOpenJitterSteps;
 	protected int m_iPrbsBitsDrawn;
+	protected bool m_bPrbsBitOpen;			//!< the drawn bit has not had its planned engine steps yet
+	protected int m_iPrbsBitApplied;		//!< engine steps the open bit has been applied (covered steps)
+	protected int m_iPrbsBitsApplied;		//!< bits applied for at least their planned engine steps
+	protected int m_iPrbsExtended;			//!< bits applied for more steps than planned (a dispatch covered more)
 	protected int m_iPrbsMaxRun;			//!< the largest |running sum| of +-1 over one PRBS period
 	protected int m_iHoldSteps;				//!< the open event's hold (HoldStepsFor)
 	protected float m_fPrbsSteer;
@@ -432,8 +436,10 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 		if (m_eSegment == DC_ESteerSegment.PRBS)
 		{
-			int bitIdx = m_iSegStep / Math.MaxInt(1, phase.m_iPrbsBitSteps);
-			while (m_iPrbsBitsDrawn <= bitIdx)
+			// one bit at a time: the next bit is drawn only after the current one was applied for its planned engine
+			// steps (AdvanceSegment counts the covered steps), so a dispatch covering several steps extends a bit and
+			// never skips one
+			if (!m_bPrbsBitOpen && m_iPrbsBitsDrawn < m_iPrbsPeriodBits)
 			{
 				if (m_Prbs.NextBit() == 1)
 					m_fPrbsSteer = phase.m_fPrbsAmplitude;
@@ -441,6 +447,8 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 					m_fPrbsSteer = -phase.m_fPrbsAmplitude;
 
 				m_iPrbsBitsDrawn++;
+				m_bPrbsBitOpen = true;
+				m_iPrbsBitApplied = 0;
 			}
 
 			m_bSegFlag = true;
@@ -478,10 +486,25 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 		if (m_eSegment == DC_ESteerSegment.PRBS)
 		{
-			if (m_iSegStep >= m_iPrbsPeriodBits * phase.m_iPrbsBitSteps)
+			// the dispatch just stepped applied the open bit for m_iLastCovered engine steps
+			if (m_bPrbsBitOpen)
+			{
+				m_iPrbsBitApplied += m_iLastCovered;
+				if (m_iPrbsBitApplied >= phase.m_iPrbsBitSteps)
+				{
+					if (m_iPrbsBitApplied > phase.m_iPrbsBitSteps)
+						m_iPrbsExtended++;
+
+					m_iPrbsBitsApplied++;
+					m_bPrbsBitOpen = false;
+				}
+			}
+
+			if (m_iPrbsBitsApplied >= m_iPrbsPeriodBits)
 			{
 				phase.m_bPrbsDone = true;
-				phase.m_iPrbsBits = m_iPrbsPeriodBits;
+				phase.m_iPrbsBits = m_iPrbsBitsApplied;
+				phase.m_iPrbsExtended = m_iPrbsExtended;
 				phase.AddNote("prbs_run:" + phase.m_iRuns.ToString());
 				EnterSegment(DC_ESteerSegment.STOP);
 			}
@@ -602,6 +625,10 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 		m_Prbs.Init(m_iPrbsOrder, m_iPrbsSeed);
 		m_iPrbsBitsDrawn = 0;
+		m_bPrbsBitOpen = false;
+		m_iPrbsBitApplied = 0;
+		m_iPrbsBitsApplied = 0;
+		m_iPrbsExtended = 0;
 		EnterSegment(DC_ESteerSegment.PRBS);
 	}
 
@@ -657,11 +684,12 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	{
 		m_bOn = false;
 		CloseEvent(phase, result);
-		// an aborted PRBS: the bits it completed (the phases file shows it incomplete unless a later run completes it)
+		// an aborted PRBS: the bits it applied in full (the phases file shows it incomplete unless a later run
+		// completes the whole period)
 		if (m_eSegment == DC_ESteerSegment.PRBS && !phase.m_bPrbsDone)
 		{
-			int bitsDone = m_iSegStep / Math.MaxInt(1, phase.m_iPrbsBitSteps);
-			phase.m_iPrbsBits = Math.MaxInt(phase.m_iPrbsBits, bitsDone);
+			phase.m_iPrbsBits = Math.MaxInt(phase.m_iPrbsBits, m_iPrbsBitsApplied);
+			phase.m_iPrbsExtended = m_iPrbsExtended;
 		}
 	}
 
@@ -718,6 +746,6 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		float budgetDeg = HEADING_BUDGET_DEG;
 		float kappaPerSteer = KAPPA_PER_STEER;
 		lines.Insert("s2.heading_budget_deg=" + budgetDeg.ToString(-1, 1) + " at kappa " + kappaPerSteer.ToString(-1, 3) + " 1/m per unit (holds and PRBS bits cut to it; the phases file has the bit steps per phase)");
-		lines.Insert("s2.rule=train: per event a gap at 0 (off + jitter steps), then the amplitude for on_steps (seg_flag 1), released into the next gap; event_idx from the onset to the next onset; e23_events.csv onset_step / release_step = the first step with the new command; prbs: seg_flag 1, event_idx -1, the e01 generator with this probe's order and seed, one period");
+		lines.Insert("s2.rule=train: per event a gap at 0 (off + jitter steps), then the amplitude for hold_steps (seg_flag 1), released into the next gap; event_idx from the onset to the next onset; e23_events.csv onset_step / release_step = the first step with the new command; prbs: seg_flag 1, event_idx -1, the e01 generator with this probe's order and seed, one period, every bit applied for at least prbs_bit_steps engine steps (a dispatch covering more extends the bit, prbs_extended counts them; no bit is skipped)");
 	}
 }

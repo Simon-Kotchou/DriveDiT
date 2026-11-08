@@ -24,9 +24,9 @@ Printed format of every analysis (Verdict.report):
 Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error (argparse, InputError). A play without
 run_footer.txt is analysed as far as possible and its result is at best INCOMPLETE.
 
-Storage rule of this machine: the C: drive is full. Optional outputs go only under /mnt/e/ or /dev/shm/
-(check_out_path), synthetic test plays only there too (write_synthetic_play, make_temp_dir), never /tmp (the WSL
-root is on C:). Stdlib only; numpy is never required here.
+Storage rule: optional outputs go only under the configured data roots (WRITE_ROOTS) or /dev/shm, never /tmp
+(check_out_path); synthetic test plays only there too (write_synthetic_play, make_temp_dir). Stdlib only; numpy is
+never required here.
 """
 
 import csv
@@ -266,7 +266,7 @@ def _inside_write_roots(path):
 
 
 def check_out_path(path):
-    """Optional outputs only under /mnt/e/ or /dev/shm/, never /mnt/c (or /tmp, which is on C:). Returns the path."""
+    """Optional outputs only under the configured data roots (WRITE_ROOTS), never /tmp. Returns the path."""
     if not path or not _inside_write_roots(path):
         raise InputError("refusing output path %r: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
     return path

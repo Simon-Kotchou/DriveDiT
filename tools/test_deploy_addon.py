@@ -101,7 +101,7 @@ def listing(root):
     return out
 
 
-# Off this machine (CI) there is no E: drive at /mnt/e and the checkout lies on the device of /.
+# In CI there is no E: drive at /mnt/e and the checkout lies on the device of /.
 E_MOUNTED = os.path.ismount("/mnt/e")
 REPO_ON_ROOT_DEVICE = os.stat(REPO).st_dev == os.stat("/").st_dev
 # E: targets outside the allowed root, and the allowed root itself. Refused everywhere; for the allowed-root reason
@@ -529,6 +529,166 @@ class DeployAddonTest(unittest.TestCase):
         rc, out = self.run_tool("--emcp-handlers", empty)
         self.assertEqual(rc, 2, out)
         self.assertFalse(os.path.exists(self.target))
+
+
+def minimal_pin(pin_dir, pin_id):
+    """A dd-pin/1 pin file with just the sections the pin loader requires (no installs behind it)."""
+    import json
+    app = {"appid": 1, "buildid": 1, "depots": {}, "paks": {}, "acf": {"wsl": "/x.acf"}, "install": {"wsl": "/x"}}
+    path = os.path.join(pin_dir, "pin_%s.json" % pin_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"schema": "dd-pin/1", "pin_id": pin_id, "game": app, "tools": app}, f)
+    return path
+
+
+class TargetPinTest(unittest.TestCase):
+    """DD-14a: --target-pin, the per-pin deploy roots and the TARGET_PIN stamp."""
+
+    setUp = DeployAddonTest.setUp
+    tearDown = DeployAddonTest.tearDown
+    run_tool = DeployAddonTest.run_tool
+
+    ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
+
+    def test_isolation_rules(self):
+        r = deploy_addon.isolation_reason
+        roots = {"stable": os.path.join(self.tmp, "addons"), "cold-1.8.0.13": os.path.join(self.tmp, "addons_c18")}
+        prod = os.path.join(roots["stable"], "DataCapture")
+        cold = os.path.join(roots["cold-1.8.0.13"], "DataCapture")
+        active = {"pin_id": "1.9.0.37", "launch_path_id": "stable", "is_active": True}
+        old_stable = {"pin_id": "1.8.0.13", "launch_path_id": "stable", "is_active": False}
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        exp_pin = {"pin_id": "1.9.0.10-exp", "launch_path_id": "experimental", "is_active": False}
+        self.assertIsNone(r(prod, roots))                       # the default deploy, unchanged
+        self.assertIsNone(r(prod, roots, (), active))
+        self.assertIn("takes only the ACTIVE pin", r(prod, roots, (), old_stable))
+        self.assertIn("belongs to stable pins", r(prod, roots, (), cold_pin))
+        self.assertIsNone(r(cold, roots, (), cold_pin))
+        self.assertIn("belongs to cold-1.8.0.13 pins", r(cold, roots, (), active))
+        self.assertIn("only deploy target is", r(os.path.join(roots["cold-1.8.0.13"], "Other"), roots, (), cold_pin))
+        # an --allow-root that covers the protected roots never reaches them
+        wide = (self.tmp,)
+        self.assertIn("takes only a deploy with --target-pin", r(cold, roots, wide))
+        self.assertIn("takes only the ACTIVE pin", r(prod, roots, wide, old_stable))
+        self.assertIn("belongs to stable pins", r(prod, roots, wide, cold_pin))
+        # outside every protected root
+        scratch = os.path.join(self.tmp, "scratch", "DataCapture")
+        self.assertIsNone(r(scratch, roots, wide, exp_pin))
+        self.assertIn("no deploy root", r(scratch, roots, (), exp_pin))
+        self.assertIn("deploys to %s" % cold, r(scratch, roots, (), cold_pin))
+
+    def test_case_aliases_reach_the_protected_roots(self):
+        # Codex round 2 N1: drvfs is case-insensitive, so /mnt/e/DriveDiT/ADDONS is the production root
+        r = deploy_addon.isolation_reason
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        wide = ("/mnt/e/DriveDiT",)
+        self.assertIn("belongs to stable pins", r("/mnt/e/DriveDiT/ADDONS/DataCapture", self.ROOTS, wide, cold_pin))
+        self.assertIn("belongs to stable pins", r("/mnt/e/DriveDiT/Addons/datacapture", self.ROOTS, wide, cold_pin))
+        self.assertIn("takes only a deploy with --target-pin", r("/mnt/e/DriveDiT/ADDONS_C18/DataCapture",
+                                                                  self.ROOTS, wide))
+        self.assertIsNone(r("/mnt/e/DriveDiT/ADDONS_C18/DATACAPTURE", self.ROOTS, wide, cold_pin))
+        self.assertIn("only deploy target", r("/mnt/e/DriveDiT/ADDONS_C18/Other", self.ROOTS, wide, cold_pin))
+
+    def test_identity_alias_reaches_the_protected_root(self):
+        # The same directory under another name (any alias the path strings do not show) is found by (st_dev,
+        # st_ino) of the target's ancestors.
+        root = os.path.join(self.tmp, "prod")
+        alias = os.path.join(self.tmp, "alias")
+        os.makedirs(os.path.join(root, "DataCapture"))
+        os.makedirs(os.path.join(alias, "DataCapture"))
+        real_identity = deploy_addon._identity
+
+        def identity(path):
+            if os.path.normpath(path) == alias:
+                return real_identity(root)
+            if os.path.normpath(path) == os.path.join(alias, "DataCapture"):
+                return real_identity(os.path.join(root, "DataCapture"))
+            return real_identity(path)
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        roots = {"stable": root, "cold-1.8.0.13": os.path.join(self.tmp, "cold")}
+        with mock.patch.object(deploy_addon, "_identity", identity):
+            why = deploy_addon.isolation_reason(os.path.join(alias, "DataCapture"), roots, (self.tmp,), cold_pin)
+        self.assertIn("belongs to stable pins", why)
+
+    def test_live_case_alias_of_the_production_root(self):
+        # Where E: is mounted: the real ADDONS alias is the production root (read-only stat; nothing deployed)
+        if not os.path.isdir("/mnt/e/DriveDiT/addons/DataCapture"):
+            self.skipTest("the production addon is not here")
+        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
+        self.assertTrue(deploy_addon.same_dir("/mnt/e/DriveDiT/ADDONS/DataCapture", "/mnt/e/DriveDiT/addons/DataCapture"))
+        self.assertIn("belongs to stable pins", deploy_addon.isolation_reason(
+            os.path.realpath("/mnt/e/DriveDiT/ADDONS/DataCapture"), self.ROOTS, ("/mnt/e/DriveDiT",), cold_pin))
+
+    def test_pinlib_and_launchers_agree(self):
+        pinlib, _ = deploy_addon.load_pin_tools()
+        self.assertEqual(pinlib.DEPLOY_ROOTS, self.ROOTS)
+        self.assertEqual(deploy_addon.DEFAULT_DEPLOY_ROOTS, self.ROOTS)
+
+    def buildinfo(self):
+        with open(os.path.join(self.target, SCRIPT_DST, "DC_BuildInfo.c"), encoding="ascii") as f:
+            return f.read()
+
+    def test_stamp_and_state(self):
+        pins = os.path.join(self.tmp, "pins")
+        os.makedirs(pins)
+        minimal_pin(pins, "9.9.0.1")
+        minimal_pin(pins, "9.9.0.2")
+        rc, out = self.run_tool("--target-pin", "9.9.0.1", "--pin-dir", pins)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("target pin 9.9.0.1 (launch path stable, build_key unknown)", out)
+        info = self.buildinfo()
+        self.assertIn('static const string TARGET_PIN = "9.9.0.1";', info)
+        self.assertIn('static const string TARGET_LAUNCH_PATH = "stable";', info)
+        import json
+        with open(os.path.join(self.target, ".deploy_state.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["target_pin"], "9.9.0.1")
+        rc, out = self.run_tool("--target-pin", "9.9.0.2", "--pin-dir", pins)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("deployed for pin 9.9.0.1", out)
+
+    def test_without_target_pin_nothing_changes(self):
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("TARGET_", self.buildinfo())
+        self.assertNotIn("target pin", out)
+
+    def test_active_pointer_is_read_with_a_target_pin(self):
+        pins = os.path.join(self.tmp, "pins")
+        os.makedirs(pins)
+        minimal_pin(pins, "9.9.0.1")
+        minimal_pin(pins, "9.9.0.2")
+        with open(os.path.join(pins, "ACTIVE"), "w") as f:
+            f.write("9.9.0.2\n")
+        # inside the scratch root the active flag does not matter; the pure rule is tested above. Here: the stamp
+        # records the pin, and an ACTIVE file is read without error.
+        rc, out = self.run_tool("--target-pin", "9.9.0.1", "--pin-dir", pins)
+        self.assertEqual(rc, 0, out)
+
+    def test_wide_allow_root_cannot_reach_the_cold_root(self):
+        # Runs only where E: is mounted; --dry-run, and the cold root's parent need not exist (nothing is written).
+        if deploy_addon.forbidden_device_reason(os.path.realpath("/mnt/e/DriveDiT"), "target") or \
+                not os.path.isdir("/mnt/e/DriveDiT"):
+            self.skipTest("/mnt/e/DriveDiT is not on a mounted E: drive here")
+        rc, out = self.run_tool("--dry-run", "--allow-root", "/mnt/e/DriveDiT",
+                                target="/mnt/e/DriveDiT/addons_c18/DataCapture", allow_root=False)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("takes only a deploy with --target-pin", out)
+
+    def test_bad_target_pin_refused_before_writing(self):
+        for args in (("--target-pin", "../x", "--pin-dir", self.tmp), ("--target-pin", "9.9.0.3", "--pin-dir", self.tmp)):
+            rc, out = self.run_tool(*args)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("nothing was written", out)
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_cold_root_needs_its_target_pin(self):
+        # addons_c18 is not an allowed root without a target pin naming it (pure check, no write)
+        target = "/mnt/e/DriveDiT/addons_c18/DataCapture"
+        self.assertIsNotNone(deploy_addon.target_reason(target))
+        if deploy_addon.forbidden_device_reason(os.path.realpath("/mnt/e/DriveDiT"), "target"):
+            self.skipTest("/mnt/e is not mounted here (it is the WSL disk), so every E: target is refused anyway")
+        self.assertIn("not inside an allowed deploy root", deploy_addon.target_reason(target))
+        self.assertIsNone(deploy_addon.target_reason(target, ("/mnt/e/DriveDiT/addons_c18",)))
 
 
 if __name__ == "__main__":

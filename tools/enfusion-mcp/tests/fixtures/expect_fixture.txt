@@ -1,0 +1,8 @@
+# synthetic fixture expectations (api_index_diff.py)
+class-added ZxWheelFx
+parent-changed ZxCamera ZxEntity ZxCameraEntity
+member-added ZxCarSim GetParkBrake UpdateTyres
+member-removed ZxHarness CountSuites
+unchanged ZxCarSim GetSteer SetSteer SetBrakes GetSpeed
+unchanged ZxHarness CurrentSuite
+planned tools/enfusion-mcp/tests/fixtures/planned_fixture.txt

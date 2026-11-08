@@ -5,7 +5,8 @@ stdio MCP server for Claude Code in WSL, driving Arma Reforger Workbench over it
 It replaces the abandoned npm `enfusion-mcp` 0.6.1 entry: its upstream repo is gone, it defaults to `127.0.0.1` (refused
 under WSL NAT), and it has no WSL path handling.
 
-Every write goes to E:. C: is nearly full, and the WSL disk (`~`, `/tmp`, `/var`, ...) lives on C: too.
+Every write goes to E:. C: is never written (a project rule), and the WSL disk (`~`, `/tmp`, `/var`, ...) lives on C:
+by default.
 The scripts accept a work root, project path, `.gproj` or Workbench profile only as an absolute path that resolves onto a
 drive other than C: (`/mnt/<d..z>/...`, or `X:\...` for the profile). Relative paths are refused as well: Claude Code starts
 the wrapper with its own cwd, which is the C: repo.
@@ -18,7 +19,7 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | Piece | Pin |
 |---|---|
 | MCP server | BK `0acfa884228477043c6b4c2b8c7f0c270d648398` (main, 2026-08-05), `package.json` 0.12.0, 54 tools |
-| API index | Reforger 1.8 index from [`fma-rc/enfusion-mcp`](https://github.com/fma-rc/enfusion-mcp) `4cd14dbbfb8a3b2832b0ec2480a5dcc8fe1b2c49` (`data/api/*.json`: 887 Enfusion + 8,085 Arma classes, scraped from Tools buildid 24870687). BK's own index predates 1.7 |
+| API index (legacy) | Reforger 1.8 index from [`fma-rc/enfusion-mcp`](https://github.com/fma-rc/enfusion-mcp) `4cd14dbbfb8a3b2832b0ec2480a5dcc8fe1b2c49` (`data/api/*.json`: 887 Enfusion + 8,085 Arma classes, scraped from Tools buildid 24870687). BK's own index predates 1.7 |
 | Node | nvm `v24.2.0` (BK needs `>=20`), resolved from the real `~/.nvm` (read-only) |
 | Engine | Reforger 1.8.0.13 (game buildid 24903726, Tools buildid 24870687), the **interim** pin; see DD-0 for the build pin. The target is 1.9 once it is stable and compatibility is checked; a move to 1.9 also needs a 1.9 API index here |
 
@@ -30,6 +31,13 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | `enfusion-mcp-wsl.sh` | stdio wrapper that Claude Code runs. Forces the three guards to `1`, refuses a `dist/` without the guard code, finds the Windows host, runs the server from `$EMCP_ROOT/cwd`. `--print-env` shows the resolved config and creates nothing; `--check` also opens one TCP connection to the NET API port |
 | `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "E:\DriveDiT\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight against the **active** pin (`preflight.py --pin-active`: the pin that `E:\DriveDiT\pin\ACTIVE` names, switched only by DD-0's `pin_activate.py`; `WB_PIN_DIR` overrides the pin dir, `WB_PIN` is refused), names no game version, and starts Workbench only if the preflight (run on `/usr/bin/python3`) printed exactly one launch id and `launch_<id>.json` exists, as `wb_R1.bat` does. Its `WB_DIR` is the Tools install in DD-0's `pinlib.LAUNCH_PATHS`, and the preflight's `launch_path` check refuses any pin not made from that install. It refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
 | `claude-mcp-entry.json` | the user-scope MCP entry (same as the `claude mcp add` command below) |
+| `mcp_gate.py` | DD-14a. What the wrapper execs: picks the pin (`EMCP_PIN`, else ACTIVE), serves only that pin's index and project root, binds the endpoint host, and proxies the stdio session through the `bk_tools.py` policy (deny by default: reads, and wb reads after the handshake; every write denied; sealed-map guard) |
+| `endpoint_handshake.py`, `wb_proc.js` | DD-14a. The read-only endpoint handshake of MIGRATION_1_9 6.3 (also a CLI); `wb_proc.js` is its WMI process query, run by cscript.exe (no PowerShell) |
+| `bk_tools.py` | DD-14a. The gate's deny-by-default allow-list (path-free BK read tools and wb getters, each with its allowed argument keys) and the sealed-map guard |
+| `index_sources.json` | DD-14a. Pin id to dump tag and commit, for the index provenance check |
+| `api_index.py` | DD-14a. Builds a per-pin API index in BK's JSON shape from the official script dump at the pin's tag, stamped with the pin (`api/INDEX_PIN.json`) |
+| `api_index_diff.py`, `expect_1.8.0.13_to_1.9.0.37.txt` | DD-14a, CC-05. Diffs two per-pin indexes and checks them against the API delta (API_DELTA 2-3, G19-0) and the planned surface (`tools/compat19/planned_surface.txt`) |
+| `tests/test_handshake.py`, `tests/fixtures/` | DD-14a tests: index, provenance, diff, gate config, policy (every write and path-taking tool denied, the path-free reads allowed), handshake (stub Windows probes), proxy (stub server). The fixture dumps are synthetic classes, not game scripts |
 | `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `457d5e46…1c92`) |
 | `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `09803bae…dc9ba`) |
 
@@ -97,25 +105,126 @@ any incoming value (it logs `ignoring ...` on stderr) and exports `1`. It also r
 `workbench/client.js` and `tools/mod.js` lack the guard code, so an unpatched build can never run behind it.
 
 Other wrapper defaults (each can be overridden by exporting it, or through `env` in the MCP entry):
-- `ENFUSION_PROJECT_PATH=/mnt/e/DriveDiT/addons`: generators (`project`, `prefab`, `mod` create, `script_create`, ...) write there. A value on C: or the WSL disk is refused (exit 2).
+- `ENFUSION_PROJECT_PATH`: set by `mcp_gate.py` to the pin's project root (`/mnt/e/DriveDiT/addons` for a stable pin); generators (`project`, `prefab`, `mod` create, `script_create`, ...) write there. A value on C: or the WSL disk is refused (exit 2), and so is any value other than the pin's root.
 - `ENFUSION_DEFAULT_MOD=DataCapture`: if anything ever injects handlers, it targets the open addon, not `ArmaDrive` on C:.
-- `ENFUSION_MCP_DATA_DIR`: exported only when `data/api/arma-classes.json` exists. BK silently falls back to an empty index otherwise.
+- `ENFUSION_MCP_DATA_DIR`: set by `mcp_gate.py` to the pin's index (see "Per-pin index"); BK silently falls back to an empty index when it is empty, so the gate checks every api file first.
 - `ENFUSION_GAME_PATH` (D:) and `ENFUSION_WORKBENCH_PATH` (C:) are only read. Everything BK does with the Workbench path that could write (launch, `mod build`) is guarded.
 - `HOME`, `TMPDIR` and `XDG_*` point at `$EMCP_ROOT`, and the server runs in `$EMCP_ROOT/cwd`. stdout carries only JSON-RPC.
 
+## Per-pin index and the endpoint handshake (DD-14a, CC-05)
+
+Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is the 1.8 scrape: it has no
+`VehicleWheelEffectComponent`, `GetHandbrake` or `Update*Configuration`. The wrapper therefore no longer serves
+`data/`. It execs `mcp_gate.py`, which serves `$EMCP_ROOT/pins/<pin id>/data` only:
+
+- **The pin.** `EMCP_PIN=<id>` in the MCP entry's `env` (a second config), else `E:\DriveDiT\pin\ACTIVE`. A stable
+  `EMCP_PIN` must be the active pin: the stable project root and installs are the active pin's. A 1.8 config after
+  the re-pin is the cold pin, `EMCP_PIN=1.8.0.13-cold` (project root `E:\DriveDiT\addons_c18`).
+- **The index.** `pins/<id>/data/api/INDEX_PIN.json` must name that pin id and pin file sha256 (and its build_key,
+  when both are known), and every api file must match its hash. Its source must be the dump tag and commit that
+  `index_sources.json` maps the pin to, and that tag must be `v<engine_version_expected>` of the pin's engine
+  sidecar, so a 1.8 dump can never stamp a 1.9 pin. There is no fallback: a missing or foreign index refuses
+  (exit 2) before the server starts, and `--print-env` says why.
+- **The project root** is `pinlib.DEPLOY_ROOTS[launch path]`; an `ENFUSION_PROJECT_PATH` set by hand must be it, and
+  a deploy stamped for another pin (`.deploy_state.json` `target_pin`) refuses. `ENFUSION_GAME_PATH` and
+  `ENFUSION_WORKBENCH_PATH` are the pin's installs.
+- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback, or the WSL NAT gateway proven to be the local
+  Windows host (the address of its `vEthernet (WSL)` adapter). All three are required: exactly one up IPv4 default route of any kind (a
+  device-only `tun0` default route counts, Codex round 3), with a gateway, via `eth0`; `/etc/resolv.conf` carrying
+  WSL's generated header with that gateway as its only nameserver; and `ipconfig.exe` (read-only, Windows `TEMP`/`TMP`
+  on E: as for the helpers below) showing a `vEthernet (WSL...)` adapter whose IPv4 address is that gateway. The route
+  and resolver files alone can describe a stale or bridged setup; the adapter address is the Windows side of the WSL
+  NAT switch. Anything else (a LAN or VPN gateway such as `198.51.100.1`, or no such adapter) refuses, and only
+  loopback is accepted: the handshake can only vouch for the local Workbench. `ipconfig.exe` runs only for a
+  non-loopback host. The gate passes the
+  checked host and port to the server, and the listener must serve that address (`0.0.0.0`, `[::]` or the host).
+- **Deny by default** (coordinator decisions, Codex rounds 2-3: the runbook never uses MCP mutations; agents never
+  call MCP tools to change anything, the user presses Play; and the allow-list holds only what we need). `bk_tools.py`
+  allows only these, each with an explicit set of argument keys, and denies every other tool, every other action,
+  unknown tools, unknown actions, a missing action and any other argument key:
+
+  | Class | Tools and actions |
+  |---|---|
+  | read (no handshake) | `api_search`, `component_search`, `wiki_search`, `wiki_read`, `wb_knowledge` |
+  | wb read (after the handshake) | `wb_connect`, `wb_state`, `wb_entity_list`, `wb_entity_inspect`; `wb_entity_modify` getProperty/listProperties/listArrayItems/getWorldTransform; `wb_entity_select` getSelected; `wb_script_editor` getCurrentFile/getLine/getLinesCount (no `path`); `wb_layers` list/isVisible/getInfo; `wb_localization` getTable/listLanguages; `wb_component` list; `wb_terrain` getHeight/getBounds |
+
+  Denied, among others: every file writer (`project` write, `script_create`, `prefab`, `config_create`,
+  `layout_create`, `mod` create/build/validate, ...), `wb_projects` open, `wb_play`, `wb_stop`, `wb_save`, every
+  entity, layer, component, clipboard, localization and script-editor write, `wb_undo_redo`, `wb_execute_action`,
+  `wb_reload`, `wb_open_resource`, `wb_launch` and `wb_cleanup`. Also denied (Codex round 3): `wb_validate`
+  (`MaterialValidator.CheckTextures()` can remove an item from Workbench's shared texture queue, and BK's request
+  fields do not match the handlers'), and every tool that takes a filesystem, resource or mod path: `project`,
+  `workshop_info`, `wb_read_props`, `asset_search`, `game_browse`, `game_read` (the game install holds the sealed
+  Everon world), `wb_resources`, `wb_prefabs` and `wb_projects`; and (Codex round 4) `wb_diagnose`, which lists each
+  addon's `Scripts/WorkbenchGame/EnfusionMCP` directory without resolving symlinks (BK `client.ts:288`), an indirect
+  filesystem read. `wb_connect` stays: it is a ping. There is no read-path check any more: no allowed
+  entry takes a path. **Enabling any write tool, or re-enabling any path-taking read tool, needs its own reviewed
+  per-tool policy first** (for writes, where each argument and generated subdirectory really lands, as BK computes it;
+  for reads, every read-location field per action, resolved against its real base, symlinks followed, rooted and
+  resource namespaces handled).
+- **The sealed-map guard** runs on every call: an identifier token `eden` or `everon` (split on non-alphanumerics and
+  camelCase, so `EdenTerrain` is caught and `foreverOnline` is not) or the Everon root world GUID
+  `853E92315D1D9EFE` refuses. Not detected: a read on a sealed world already open in Workbench without naming it; the
+  runbook rule "never open Eden/Everon in an MCP-attached Workbench" covers it (writes are denied anyway).
+- **The endpoint handshake** (MIGRATION_1_9 6.3) runs before every wb read; a refused call is answered with an MCP
+  error and never forwarded. All read-only and without PowerShell: `netstat.exe -ano` gives the one PID listening on
+  the port; `cscript.exe` running `wb_proc.js` (a WMI `Win32_Process` query, E:-resident) gives its exe path,
+  creation time and command line. The exe must be the pin's Workbench with the pin's exe sha256; `-profile` and
+  `-gproj` must be the launch path's (`pinlib.WB_LAUNCH`); `-dcLaunchId` must name a launch record that is a JSON
+  object with the dd-launch fields, an ok wb record of this pin file (and build_key and launch path), and the process
+  must have been created -5..+300 s from the record's utc. Exactly one `console.log` under the profile names that
+  launch id after the record, and it must be the newest log of the profile; it must start 0..+120 s after the
+  process creation (whole seconds), show the pin's Workbench as its working directory and the process's `-gproj`,
+  and report `Creating game instance(...), version X` equal to the pin's `engine_version_expected`. 6.3 asks for a
+  read-only handler call there; no deployed handler returns `GetBuildVersion()`, so the log of the same process,
+  bound by its creation time, is read instead. A Workbench started by hand (no `-dcLaunchId`, a OneDrive profile, a
+  C: project) fails by design. Residual, documented: a replacement process that writes no log of its own within the
+  same second, and a project changed inside a running Workbench, are not detected (we never do either).
+- **R1.** The Windows helpers (`ipconfig.exe`, `netstat.exe`, `cscript.exe`) run with Windows `TEMP` and `TMP` set
+  to `E:\DriveDiT\tmp\mcp` (`WSLENV=TEMP/p:TMP/p` path translation; the gate creates the dir through the tools/pin
+  write guard), and `wb_proc.js --env` proves it once per session before any query (measured: it reports `E:\...`). The claim is **no tool-owned C: file writes**. WMI's
+  own repository and event-log activity is Windows service behaviour, outside these tools and outside R1; it is not
+  claimed to be zero.
+- **Cost, measured 2026-11-07:** `ipconfig.exe` 0.04 s once per session (non-loopback host only), `netstat.exe -ano`
+  0.03 s, `wb_proc.js --env` 0.08 s once, a process query 0.16 s;
+  the exe hash (68 MB) once per path, size and mtime; the log heads (256 KiB each, only dirs touched since the
+  record). About 0.2 s per wb read.
+
+Build the indexes (agent, E: only, about 15 s each; `--dry-run` first). Apply the build_key and engine sidecars of
+both pins first: the build needs `engine_version_expected`, and the stamps then carry the build_key:
+
+```bash
+SD=/mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable R=/mnt/e/drivedit_realign/mcp
+python3 -I -B tools/enfusion-mcp/api_index.py build --dump-git $SD --pin-id 1.9.0.37 \
+  --out $R/pins/1.9.0.37/data --shared $R/data --apply
+python3 -I -B tools/enfusion-mcp/api_index.py build --dump-git $SD --pin-id 1.8.0.13 \
+  --out $R/pins/1.8.0.13/data --shared $R/data --apply
+python3 -I -B tools/enfusion-mcp/api_index_diff.py --old $R/pins/1.8.0.13/data --new $R/pins/1.9.0.37/data \
+  --expect tools/enfusion-mcp/expect_1.8.0.13_to_1.9.0.37.txt     # from the repo root; RESULT: OK
+```
+
+Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `index_sources.json`, `api_index.py`,
+`api_index_diff.py` and the wrapper to `$EMCP_ROOT` (the gate finds `tools/pin` at `E:\DriveDiT\tools\pin`, or
+`DD_PIN_TOOLS`), and check with `enfusion-mcp-wsl.sh --print-env` (`pin gate: ok`). `endpoint_handshake.py
+--pin-active` runs the handshake by hand against a running Workbench.
+
 ## Network: Windows host discovery under WSL NAT
 
-- This machine is Windows 10 22H2 (19045) with WSL 2.3.26 in **NAT** mode. Mirrored mode needs Windows 11 22H2+.
+- The tools support WSL in **NAT** mode (the Windows host is the default gateway, verified against the Windows
+  `vEthernet (WSL)` adapter) and in mirrored mode (the host is `127.0.0.1`; mirrored mode needs a recent Windows 11).
 - At every start the wrapper reads `wslinfo --networking-mode`:
   - `mirrored`: the host is `127.0.0.1`;
-  - otherwise: the host is the `via` address of `ip -4 route show default` (today `172.19.208.1`), or the default
+  - otherwise: the host is the `via` address of `ip -4 route show default`, or the default
     route's gateway in `/proc/net/route` when `ip` is missing or fails. It must be an IPv4 address.
   - If there is none (for example a device-only default route), the wrapper exits 1 with
     `cannot determine the Windows host IP ...`. Then set `ENFUSION_WORKBENCH_HOST` in the MCP entry's `env` to the IPv4
     address of the `vEthernet (WSL)` adapter (Windows `ipconfig`).
   - It does this per start because the NAT subnet can change after a reboot. Keep `env` in the MCP entry empty unless discovery fails.
+  - The gate then accepts that host only if `endpoint_handshake.nat_gateway` proves it is the Windows side of the WSL
+    NAT switch (one default route, WSL's resolver, and the `vEthernet (WSL...)` adapter address from `ipconfig.exe`;
+    see "The endpoint" above); otherwise it refuses before the server starts.
 - Workbench's NET API listens on `0.0.0.0:5775`, so no `netsh portproxy` is needed. `enfusion-mcp-wsl.sh --check` tests TCP reachability without sending a request.
-- Security: `0.0.0.0:5775` exposes editor actions to the LAN, as far as Windows Firewall allows. Consider scoping the inbound rule for 5775 to the WSL vEthernet subnet (`172.16.0.0/12`). That is a Windows change for the user.
+- Security: `0.0.0.0:5775` exposes editor actions to the LAN, as far as Windows Firewall allows. Consider scoping the inbound rule for 5775 to the subnet of the `vEthernet (WSL)` adapter (Windows `ipconfig`). That is a Windows change for the user.
 
 ## Handlers
 
@@ -148,8 +257,8 @@ Other wrapper defaults (each can be overridden by exporting it, or through `env`
    If the profile still points at OneDrive, stop, because captures would land on C:.
 3. **Check the wrapper, then swap the MCP entry.**
    - `bash /mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh --check` (prints to stderr; opens one TCP connection to port 5775
-     and sends nothing). Expect the three guards at `1`, `guards compiled into dist: yes`, the host `172.19.208.1` (or the
-     current gateway) and `TCP ... reachable`.
+     and sends nothing). Expect the three guards at `1`, `guards compiled into dist: yes`, the host (the current WSL
+     gateway) and `TCP ... reachable`.
    - The swap writes a few hundred bytes to `~/.claude.json` on C:, and only the user runs it:
      ```bash
      claude mcp remove enfusion-mcp -s user && claude mcp add -s user enfusion-mcp -- /mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh
@@ -158,9 +267,10 @@ Other wrapper defaults (each can be overridden by exporting it, or through `env`
    - In the C: repo's `.claude/settings.local.json`, delete the stale allowlist names `mcp__enfusion-mcp__project_browse` and `mcp__enfusion-mcp__prefab_create`.
    - Do **not** allowlist `…__project`, `…__prefab`, `…__wb_cleanup` or any other tool with write actions: the permission prompt is the only check on their arguments (see Rules).
 4. **Restart Claude Code, run `/mcp`, and probe in this order:**
-   1. `wb_diagnose`: it never launches or copies anything. It may report `error` instead of `up_no_handlers` (a BK classifier bug, see below).
-   2. `wb_connect`: expect `Workbench Connected` with `Info: EnfusionMCP Workbench bridge active`.
-   3. `wb_state`.
+   1. `wb_connect`: expect `Workbench Connected` with `Info: EnfusionMCP Workbench bridge active`.
+   2. `wb_state`.
+
+   (`wb_diagnose` is denied by the gate since DD-14a, Codex round 4; `enfusion-mcp-wsl.sh --check` tests TCP reachability.)
 
    Then follow the capture runbook R0-R4 in `CAPTURE_PROGRAM.md` §7.2.
 
@@ -169,13 +279,13 @@ Other wrapper defaults (each can be overridden by exporting it, or through `env`
 - **Never use `wb_launch` or `mod build` from WSL.** Both are blocked by the guards, so don't try to work around them. Launch Workbench only with `wb_R1.bat` or `launch-workbench.sh`.
 - **Never use `wb_cleanup`.** With `all: true` it deletes the handlers from DataCapture (Workbench then loses the bridge until they are redeployed and Workbench restarts), and with `modDir` it deletes from any directory it is given, C: included.
 - **Tool arguments bypass the wrapper's path defaults.** 13 BK tools (`project`, `prefab`, `mod`, `script_create`, `config_create`, `server_config`, `layout_create`, `layout_recipe`, `menu_create`, `gamemode_scaffold`, `scenario_create_conflict`, `animation_graph`, `workshop_info`) take a `projectPath` argument that replaces `ENFUSION_PROJECT_PATH`; `animation_graph` and `mod` also take an `outputPath`. Never pass a `/mnt/c/...` path (or a Windows `C:` path) in any of them, and approve such calls only after reading the arguments. Relative paths resolve under `$EMCP_ROOT/cwd`.
-- Before handlers are loaded, use only `wb_diagnose` and `wb_connect` as probes. With the guards on, other `wb_*` calls fail with `LAUNCH_FAILED` instead of copying files.
+- Before handlers are loaded, use only `wb_connect` (and `enfusion-mcp-wsl.sh --check`) as probes. With the guards on, other `wb_*` calls fail with `LAUNCH_FAILED` instead of copying files.
 - Never point `ENFUSION_PROJECT_PATH` at the OneDrive addons dir on C: (the wrapper refuses it).
 
 ## Known quirks
 
-- `wb_diagnose` matches only `not existing Net API function`, but 1.8 replies `Undefined API func`. So it reports `error` rather than `up_no_handlers`.
-- `wb_connect` reports `Connection Failed` both when Workbench is down and when the handlers are not loaded; `wb_diagnose` tells them apart (`refused` vs `error`).
+- `wb_diagnose` (denied by the gate) matches only `not existing Net API function`, but 1.8 replies `Undefined API func`. So it reports `error` rather than `up_no_handlers`.
+- `wb_connect` reports `Connection Failed` both when Workbench is down and when the handlers are not loaded; `enfusion-mcp-wsl.sh --check` tells a closed port apart (`NOT reachable`).
 - `wb_projects list` prints "No projects loaded". BK reads `result.projects`, but Workbench returns `{"Loaded Projects": [...]}`.
 - The `NO_AUTO_INSTALL` error text still says "Load the DriveDiT_EMCP handler addon". After the re-home, read it as "deploy the handlers into DataCapture and restart Workbench". The patch is kept byte-identical to the reviewed version (sha256 above).
 - `npm prune` rewrites the root `version` field in the build copy's `package-lock.json` (BK ships 0.7.0 there). No dependency changes.

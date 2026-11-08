@@ -79,6 +79,44 @@ class SecretScanTest(unittest.TestCase):
                    "/homepage", "$ROOT/home/.npmrc", "a/home/" + name):
             self.assertEqual(kinds(ok), [], ok)
 
+    def test_private_ip(self):
+        def q(*octets):
+            return ".".join(str(o) for o in octets)
+
+        for bad in (q(10, 1, 2, 3), "host=" + q(172, 16, 5, 4), q(172, 31, 255, 254), q(192, 168, 0, 1) + ":5775",
+                    "http://" + q(192, 168, 1, 10) + "/x", "(" + q(10, 0, 0, 1) + ")", "at " + q(10, 9, 8, 7) + ".",
+                    "nameserver " + q(172, 19, 0, 1), "via " + q(192, 168, 50, 1) + " dev eth0"):
+            self.assertEqual(kinds(bad), ["private-ip"], bad)
+        for ok in (q(192, 0, 2, 1), q(198, 51, 100, 7), q(203, 0, 113, 9),       # RFC 5737 documentation
+                   q(127, 0, 0, 1), q(0, 0, 0, 0), q(172, 15, 0, 1), q(172, 32, 0, 1), q(169, 254, 1, 1),
+                   "1.9.0.37", q(10, 1, 2, 3, 4), q(999, 1, 1, 1), "v" + q(10, 1, 2, 3), q(10, 1, 2, 3) + "a",
+                   'version = "' + q(10, 4, 0, 35) + '"', "pkg==" + q(10, 1, 2, 3), "x >= " + q(10, 1, 2, 3),
+                   "nvidia_curand-" + q(10, 4, 0, 35) + "-py3-none-any.whl", "version: " + q(192, 168, 0, 1)):
+            self.assertEqual(kinds(ok), [], ok)
+
+    def test_private_ip_allow_entry_is_path_specific(self):
+        line = '"1.9", "' + ".".join(("10", "0", "1", "2")) + '", "1.9.0.9-rc2"'
+        self.assertEqual(kinds(line, "tools/pin/tests/test_pin.py"), [])
+        self.assertEqual(kinds(line, "tools/pin/tests/other.py"), ["private-ip"])
+        self.assertEqual(len(scan.ALLOWLIST), 1)  # every allow entry is reviewed; add one only with its reason
+
+    def test_windows_build(self):
+        win = "Win" + "dows "
+        for bad in (win + "10 " + "22H2", win + "11 23H2", win + "10 (" + "19045)", win + "10 Pro 22H2",
+                    win + "10, version 21H2", win + "11 build 22631", "[Version 10.0." + "19045.5131]",
+                    "OS Version:   10.0." + "22631 N/A"):
+            self.assertEqual(kinds(bad), ["windows-build"], bad)
+        for ok in (win + "10", win + "11", win + "10 and 11", win + "2000", "needs a recent " + win + "11",
+                   win + "host", "version 10.0.1", "torch 2.15.0"):
+            self.assertEqual(kinds(ok), [], ok)
+
+    def test_wsl_version(self):
+        for bad in ("WSL " + "2.3.26", "WSL version: " + "2.3.26.0", "wsl v" + "2.0.9", "WSL2 " + "2.4.13",
+                    "Linux 5.15.167.4" + "-microsoft-standard-WSL2"):
+            self.assertEqual(kinds(bad), ["wsl-version"], bad)
+        for ok in ("WSL 2", "WSL2", "WSL in NAT mode", "under WSL; use it", "wslinfo --networking-mode"):
+            self.assertEqual(kinds(ok), [], ok)
+
     def test_allowlist_is_path_specific(self):
         line = "/home/" + "svc/app"
         with mock.patch.object(scan, "ALLOWLIST", {("deploy/Dockerfile", "home-path", "svc")}):

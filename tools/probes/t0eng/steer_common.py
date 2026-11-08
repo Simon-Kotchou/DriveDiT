@@ -401,76 +401,94 @@ def yaw_noise(rows):
     return max(jitter, q / math.sqrt(12.0))
 
 
-def step_magnitudes(rows):
-    """Per-step curvature magnitudes, the absolute value taken before any aggregation: [(ds m, |dpsi| / ds 1/m from
-    the heading, |r| / v 1/m from the yaw rate, signed dpsi / ds - r / v)] for consecutive rows with a position,
-    heading, yaw rate and speed (v >= MIN_SPEED_MS)"""
-    points = path_points(rows)
-    out = []
-    for k in range(1, len(points)):
-        ds = points[k][0] - points[k - 1][0]
-        r, v = points[k][2], points[k][3]
-        if ds <= 0.01 or r is None or v is None or v < MIN_SPEED_MS:
+def channel_samples(rows):
+    """Per-channel samples along the path, each channel on its own: heading steps need only the heading and the
+    positions of two consecutive rows, yaw samples only the yaw rate and the speed of a row (placed at that row's
+    path position). Returns (heading [(s, ds, |dpsi| / ds, dpsi / ds)], yaw [(s, ds, |r| / v, r / v)], missing
+    {'heading': rows without a heading or position, 'yaw': rows without a yaw rate or speed >= MIN_SPEED_MS, or
+    without a position to place them})"""
+    heading, yaw = [], []
+    missing = {"heading": 0, "yaw": 0}
+    s_pos = 0.0
+    psi = 0.0
+    prev = None
+    for step in rows:
+        x, z, h = step.f.get("pos_x"), step.f.get("pos_z"), step.f.get("heading_deg")
+        r, v = step.f.get("angvel_l_y"), step.f.get("vel_l_z")
+        if x is None or z is None or h is None:
+            missing["heading"] += 1
+            missing["yaw"] += 1              # without a position no yaw sample can be placed on the path either
+            prev = None
             continue
-        dpsi = points[k][1] - points[k - 1][1]
-        out.append((ds, abs(dpsi) / ds, abs(r) / v, dpsi / ds - r / v))
-    return out
+        ds = 0.0
+        if prev is not None:
+            ds = math.hypot(x - prev[0], z - prev[1])
+            dpsi = math.radians(wrap_deg(h - prev[2]))
+            s_pos += ds
+            psi += dpsi
+            if ds > 0.01:
+                heading.append((s_pos, ds, abs(dpsi) / ds, dpsi / ds))
+        prev = (x, z, h)
+        if r is None or v is None or v < MIN_SPEED_MS:
+            missing["yaw"] += 1
+        elif ds > 0.0:
+            yaw.append((s_pos, ds, abs(r) / v, r / v))
+    return heading, yaw, missing
+
+
+def windowed(samples, total, window_m, step_m):
+    """Path-weighted means of the per-sample magnitudes over sliding windows: ([mean], [count])"""
+    means, counts = [], []
+    begin = 0.0
+    a = 0
+    while begin + window_m <= total:
+        while a < len(samples) and samples[a][0] <= begin:
+            a += 1
+        b = a
+        while b < len(samples) and samples[b][0] <= begin + window_m:
+            b += 1
+        length = sum(smp[1] for smp in samples[a:b])
+        if b > a and length > 0:
+            means.append(sum(smp[1] * smp[2] for smp in samples[a:b]) / length)
+            counts.append(b - a)
+        begin += step_m
+    return means, counts
 
 
 def channel_stats(rows, window_m, step_m):
-    """The flat statistic per channel, from per-step magnitudes averaged (path-weighted) over sliding windows of
-    window_m every step_m, so a curvature of any wavelength keeps its magnitude: {'heading': {...}, 'yaw': {...},
-    'offset': the mean signed heading-minus-yaw curvature (a systematic disagreement, reported, never noise),
-    'windows'}. Each channel: p95, max and its own noise floor = the noise-only window statistic mu + 3 s from its
-    own measured noise (heading: per-step dpsi noise sqrt(2) sigma_h, steer_common.heading_noise; yaw: sigma_r,
-    yaw_noise): mu = E|noise| / step (sqrt(2 / pi) sigma), s = its window fluctuation (x 2 for the correlation of
-    neighbouring heading steps)"""
-    steps = step_magnitudes(rows)
+    """The flat statistic per channel, each channel computed on its own (a missing yaw sample never drops a heading
+    step): per-step magnitudes averaged (path-weighted) over sliding windows of window_m every step_m, so a curvature
+    of any wavelength keeps its magnitude. {'heading': {...}, 'yaw': {...}, 'offset': the mean signed heading-minus-yaw
+    curvature over the rows that have both (a systematic disagreement, reported, never noise), 'windows'}. Each
+    channel: p95, max, 'missing' (rows of the run without that channel's samples: the channel is then incomplete)
+    and its own noise floor = the noise-only window statistic mu + 3 s from its own measured noise (heading:
+    per-step dpsi noise sqrt(2) sigma_h, heading_noise; yaw: sigma_r, yaw_noise): mu = E|noise| / step (sqrt(2 / pi)
+    sigma), s = its window fluctuation (x 2 for the correlation of neighbouring heading steps)"""
+    heading, yaw, missing = channel_samples(rows)
     sigma_h, q_h = heading_noise(rows)
     sigma_r = yaw_noise(rows)
-    out = {"windows": 0, "offset": mean([st[3] for st in steps]) if steps else None, "sigma_h": sigma_h,
-           "sigma_r": sigma_r, "q_h": q_h}
-    starts = []
-    s_pos = 0.0
-    positions = []
-    for ds, _, _, _ in steps:
-        positions.append(s_pos)
-        s_pos += ds
-    heading_w, yaw_w, counts = [], [], []
-    begin = 0.0
-    a = 0
-    while steps and begin + window_m <= s_pos:
-        while a < len(steps) and positions[a] < begin:
-            a += 1
-        b = a
-        length = 0.0
-        while b < len(steps) and length < window_m:
-            length += steps[b][0]
-            b += 1
-        if length < window_m or b <= a:
-            break
-        chunk = steps[a:b]
-        heading_w.append(sum(st[0] * st[1] for st in chunk) / length)
-        yaw_w.append(sum(st[0] * st[2] for st in chunk) / length)
-        counts.append(len(chunk))
-        starts.append(begin)
-        begin += step_m
-    out["windows"] = len(heading_w)
-    n = mean(counts) if counts else None
-    mean_ds = mean([st[0] for st in steps]) if steps else None
+    total = heading[-1][0] if heading else 0.0
+    yaw_by_s = {round(smp[0], 6): smp[3] for smp in yaw}
+    pairs = [hs[3] - yaw_by_s[round(hs[0], 6)] for hs in heading if round(hs[0], 6) in yaw_by_s]
+    out = {"windows": 0, "offset": mean(pairs) if pairs else None, "sigma_h": sigma_h, "sigma_r": sigma_r,
+           "q_h": q_h}
     speeds = [st for st in (s.f.get("vel_l_z") for s in rows) if st is not None and st >= MIN_SPEED_MS]
     v = mean(speeds)
-    for name, values, sigma, scale, corr in (("heading", heading_w, math.sqrt(2.0) * sigma_h if sigma_h else None,
-                                              mean_ds, 2.0),
-                                             ("yaw", yaw_w, sigma_r, v, 1.0)):
+    for name, samples, sigma, scale, corr in (
+            ("heading", heading, math.sqrt(2.0) * sigma_h if sigma_h else None,
+             mean([smp[1] for smp in heading]) if heading else None, 2.0),
+            ("yaw", yaw, sigma_r, v, 1.0)):
+        values, counts = windowed(samples, total, window_m, step_m)
         ch = {"p95": probe_common.percentile(values, 95) if values else None, "max": max(values) if values else None,
-              "floor": None, "mu": None}
+              "floor": None, "mu": None, "missing": missing[name], "windows": len(values)}
+        n = mean(counts) if counts else None
         if sigma is not None and scale and n:
             mu = sigma * math.sqrt(2.0 / math.pi) / scale
             spread = sigma * math.sqrt(corr * (1.0 - 2.0 / math.pi) / n) / scale
             ch["mu"] = mu
             ch["floor"] = mu + 3.0 * spread
         out[name] = ch
+    out["windows"] = min(out["heading"]["windows"], out["yaw"]["windows"])
     return out
 
 
@@ -502,7 +520,8 @@ def drift_estimate(rows, end_m):
     heading quantisation); drift = (end - start) / length. nonstationary when the two halves differ by more than 3
     sigma of their difference: within-run variation is unresolved evidence, never extra tolerance. (None, None,
     None, why) without the rows. Repeated paired runs on the same strip are the proper uncertainty source for (c);
-    e21_selfsteer --use-repeats uses them when a session has them"""
+    they are to be implemented once a session has them (paired differences, a small-sample t interval, INCOMPLETE on
+    insufficient or invalid pairs)"""
     points = path_points(rows)
     if len(points) < 20:
         return None, None, None, "too few rows"

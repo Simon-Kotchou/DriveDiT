@@ -4,7 +4,7 @@
     python3 -I -B tools/probes/t0eng/e21_selfsteer.py <e21 play_dir> --e22 <e22 play_dir> [--e23 <e23 play_dir>]
                   [--baseline <1.8 e21 play_dir>] [--signal-scale-deg 33.75] [--max-step0-error 0.05]
                   [--max-lag-steps 1] [--max-unmeasurable 0.2] [--readback-tol 1e-3] [--max-kappa 1e-4]
-                  [--bias-tol 2e-4] [--use-repeats] [--angle-tol-deg 0.25] [--angle-tol-share 0.05]
+                  [--bias-tol 2e-4] [--angle-tol-deg 0.25] [--angle-tol-share 0.05]
 
 Plays are $profile:DC_Probes/<probe>/<launch_id>/play_NN directories (DC_ProbeSelfSteer, DC_ProbeSteerLoad,
 DC_ProbeSteerSteps). Nothing is written. The analysis decides Mode A against Mode B, so every item is PASS, FAIL or
@@ -57,8 +57,10 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  (steer_common.drift_estimate: line fits over 5 m at the ends, their residuals with the lag-1
                  correlation, at least the quantisation); halves that differ beyond 3 sigma are unresolved
                  (INCOMPLETE), never extra tolerance. Repeated paired runs on the same strip are the proper
-                 uncertainty source: --use-repeats takes their spread when a session has them. No baseline (P1 has
-                 no Mode B reference) -> INCOMPLETE. INFO the wheel-angle deviation from the flat zero command
+                 uncertainty source; they are not implemented yet (no session has them): paired current-baseline
+                 differences, a small-sample t interval, INCOMPLETE on insufficient or invalid pairs. No baseline
+                 (P1 has no Mode B reference) -> INCOMPLETE. INFO the wheel-angle deviation from the flat zero
+                 command
   d_load         e22 load phases with both command signs, phase ok: delta_eff,ref = the median over the steady ref
                  rows (low slip); every mandated a_lat level (the steady rows of the level whose median |v r| is
                  within 0.3 m/s2 of 2.0 / 2.75 / 3.5, >= 1 s) and the brake segment (steady rows, median decel
@@ -336,7 +338,7 @@ def channel_state(ch, bound):
     """One channel against bound with its own floor: None when the floor is unknown or above the bound (not
     resolvable); True when every window's statistic (an upward-biased estimate of the magnitude) is <= bound; False
     when the p95 exceeds bound + the floor (more than the noise could add); else None"""
-    if ch["floor"] is None or ch["p95"] is None:
+    if ch["missing"] or ch["floor"] is None or ch["p95"] is None:
         return None
     if ch["floor"] > bound:
         return None
@@ -351,15 +353,21 @@ def flat_state(st, bound):
     """Both channels, each against its own floor (one channel's floor never excuses the other's excess)"""
     if st["windows"] < MIN_WINDOWS:
         return None
-    return sc.combine([channel_state(st["heading"], bound), channel_state(st["yaw"], bound)])
+    return sc.combine(channel_states(st, bound))
+
+
+def channel_states(st, bound):
+    return [channel_state(st["heading"], bound), channel_state(st["yaw"], bound)]
 
 
 def flat_text(st):
     parts = []
     for name in ("heading", "yaw"):
         ch = st[name]
-        parts.append("%s p95 %s max %s floor %s" % (name, sc.fmt(ch["p95"], 3), sc.fmt(ch["max"], 3),
-                                                     sc.fmt(ch["floor"], 3)))
+        parts.append("%s p95 %s max %s floor %s%s" % (name, sc.fmt(ch["p95"], 3), sc.fmt(ch["max"], 3),
+                                                       sc.fmt(ch["floor"], 3),
+                                                       " (%d rows without its samples: incomplete)" % ch["missing"]
+                                                       if ch["missing"] else ""))
     return "%d windows of %g m: %s 1/m; systematic heading - yaw offset %s 1/m (sigma_h %s rad, sigma_r %s rad/s)" % (
         st["windows"], WINDOW_M, "; ".join(parts), sc.fmt(st["offset"], 3), sc.fmt(st["sigma_h"], 3),
         sc.fmt(st["sigma_r"], 3))
@@ -570,6 +578,7 @@ def info_nocall(steps, verdict):
 def check_flat(steps, results, verdict, args, baseline):
     states = []
     parts = []
+    observed_channel = []
     for speed in FLAT_SPEEDS:
         name = "flat_%d" % speed
         rows, why = drive_phase(steps, results, name, speed, MIN_FLAT_M)
@@ -593,7 +602,8 @@ def check_flat(steps, results, verdict, args, baseline):
             else:
                 base = flat_channels(base_rows)
                 resolvable = base["windows"] >= MIN_WINDOWS and all(
-                    base[c]["floor"] is not None and base[c]["floor"] <= args.max_kappa for c in ("heading", "yaw"))
+                    not base[c]["missing"] and base[c]["floor"] is not None and base[c]["floor"] <= args.max_kappa
+                    for c in ("heading", "yaw"))
                 if not resolvable:
                     base_text = "baseline not usable (not resolvable): " + flat_text(base)
                 else:
@@ -603,10 +613,14 @@ def check_flat(steps, results, verdict, args, baseline):
                                                                              sc.fmt(allowance, 3))
         if state is not True:
             state = flat_state(st, allowance) if allowance is not None else None
+        seen = state is None and False in channel_states(st, allowance if allowance is not None else args.max_kappa)
+        if seen:
+            observed_channel.append(name)
         states.append(state)
-        parts.append("%s: %s (bound %g; %s) -> %s; net %s 1/m over %s m (turn %s deg)" % (
-            name, flat_text(st), args.max_kappa, base_text, STATE_TEXT[state], sc.fmt(kappa, 3),
-            sc.fmt(distance, 4), sc.fmt(turn, 3)))
+        parts.append("%s: %s (bound %g; %s) -> %s%s; net %s 1/m over %s m (turn %s deg)" % (
+            name, flat_text(st), args.max_kappa, base_text, STATE_TEXT[state],
+            " (a channel FAILs, the other is incomplete)" if seen else "", sc.fmt(kappa, 3), sc.fmt(distance, 4),
+            sc.fmt(turn, 3)))
         nocall = with_lead(steps, phase_segment(steps, name, "nocall"))
         nk, nd, _ = sc.path_curvature(nocall)
         verdict.info("b_nocall_%d" % speed, "no-call segment: %s; net %s 1/m over %s m" % (
@@ -622,7 +636,10 @@ def check_flat(steps, results, verdict, args, baseline):
                 sc.fmt(mode, 2), ASSIST_NONE, flat_text(none_st), STATE_TEXT[flat_state(none_st, args.max_kappa)],
                 args.max_kappa))
     state = sc.combine(states)
-    verdict.check("b_flat", state, "; ".join(parts) + sc.observed(states))
+    note = sc.observed(states)
+    if not note and state is None and observed_channel:
+        note = " [observed FAIL in a channel of %s; withheld: incomplete]" % ", ".join(observed_channel)
+    verdict.check("b_flat", state, "; ".join(parts) + note)
     return state
 
 
@@ -739,19 +756,10 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
 
 
 def drift_of(steps, name, rows, args):
-    """sc.drift_estimate of the measure rows; with --use-repeats and >= 2 complete measure runs of the phase, sigma
-    is at least the spread of the runs' drifts / sqrt(n) (repeated paired runs: the proper uncertainty source)"""
-    drift, sigma, moving, how = sc.drift_estimate(rows, DRIFT_END_M)
-    if drift is None or not args.use_repeats:
-        return drift, sigma, moving, how
-    runs = [with_lead(steps, block) for p, run, seg, block in sc.segments(steps) if p == name and seg == "measure"]
-    drifts = [sc.drift_estimate(block, DRIFT_END_M)[0] for block in runs]
-    drifts = [d for d in drifts if d is not None]
-    if len(drifts) >= 2:
-        repeat = sc.stdev(drifts) / math.sqrt(len(drifts))
-        sigma = max(sigma, repeat)
-        how += "; %d repeated runs, spread / sqrt(n) %s" % (len(drifts), sc.fmt(repeat, 3))
-    return drift, sigma, moving, how
+    """sc.drift_estimate of the measure rows (measurement noise only). Repeated paired runs, the proper uncertainty
+    source, are to be implemented once a session has them: paired current-baseline differences per run, a
+    small-sample t interval, INCOMPLETE on insufficient or invalid pairs"""
+    return sc.drift_estimate(rows, DRIFT_END_M)
 
 
 def steady(rows):
@@ -889,8 +897,6 @@ def main(argv=None):
     parser.add_argument("--readback-tol", type=float, default=1e-3)
     parser.add_argument("--max-kappa", type=float, default=1e-4)
     parser.add_argument("--bias-tol", type=float, default=2e-4)
-    parser.add_argument("--use-repeats", action="store_true",
-                        help="(c): with >= 2 measure runs per cross phase, use their spread as the drift uncertainty")
     parser.add_argument("--angle-tol-deg", type=float, default=0.25)
     parser.add_argument("--angle-tol-share", type=float, default=0.05)
     parser.add_argument("--min-r2", type=float, default=0.9)

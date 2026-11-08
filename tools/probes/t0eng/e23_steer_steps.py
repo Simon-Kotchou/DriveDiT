@@ -89,6 +89,11 @@ SPEED_BIN_SHARE = 0.15
 MIN_DOUBLETS = 2              # per side of the split
 RESOLVED_SHARE = 2.0 / 3.0
 TAU_RESOLUTION = math.log(100.0)
+# Rows after every command change that must carry a readback: the delay search (D_MAX) + 2 (a missing first
+# readback would hide a delay)
+TRANSITION_ROWS = D_MAX + 2
+# DC_ProbePrbs taps per order (DC_ProbeSequences.c)
+PRBS_TAPS = {5: (5, 3), 6: (6, 5), 7: (7, 6), 8: (8, 6, 5, 4), 9: (9, 5), 10: (10, 7)}
 STATE_TEXT = {True: "PASS", False: "FAIL", None: "INCOMPLETE"}
 
 
@@ -587,12 +592,19 @@ def make_window(steps, first, last, path, channel, scale_rad, baselines, dt):
         y.append(None if val is None else val - base)
     if sum(1 for v in y if v is not None) < 0.8 * len(y):
         return None
+    # every command change needs its readbacks: the first TRANSITION_ROWS rows after it identify the delay
+    gaps = 0
+    previous = hist[-1] if hist else (prev.f.get("cmd_steer") or 0.0)
+    for k, cmd in enumerate(u):
+        if abs(cmd - previous) > 1e-9:
+            gaps += sum(1 for v in y[k:k + TRANSITION_ROWS] if v is None)
+        previous = cmd
     u_e = list(hist)
     for cmd, steps_n in zip(u, n):
         u_e.extend([cmd] * steps_n)
     speeds = [s.f.get("vel_l_z") for s in rows if s.f.get("vel_l_z") is not None]
     return {"u": u, "n": n, "y": y, "y0": y0 - base, "u_e": u_e, "offset": len(hist), "rows": rows,
-            "v": max(sc.mean(speeds) or 0.0, 0.1)}
+            "v": max(sc.mean(speeds) or 0.0, 0.1), "gaps": gaps}
 
 
 def on_speed(kmh, target):
@@ -605,9 +617,10 @@ def on_speed(kmh, target):
 
 
 def event_windows(steps, events, path, channel, scale_rad, dt):
-    """({(planned speed, |amplitude|): [window]}, {reason: count of events left out}): the ok events, each scored
-    from its onset to its end, binned by their phase's planned speed when the measured mean speed of the scored rows
-    is within SPEED_BIN_SHARE of it"""
+    """({(planned speed, |amplitude|): [window]}, {reason: count of events left out}, {key: events of that bin with
+    a missing readback near a command change or no usable signal}): the ok events, each scored from its onset to its
+    end, binned by their phase's planned speed when the measured mean speed of the scored rows is within
+    SPEED_BIN_SHARE of it. A bin with such an event cannot be certified (analyse_bin: INCOMPLETE)"""
     by_step = {}
     for idx, step in enumerate(steps):
         number = step.i.get("physics_step")
@@ -616,6 +629,7 @@ def event_windows(steps, events, path, channel, scale_rad, dt):
     baselines = run_baselines(steps, path, channel, scale_rad)
     bins = {}
     dropped = {}
+    gaps = {}
 
     def drop(reason):
         dropped[reason] = dropped.get(reason, 0) + 1
@@ -632,21 +646,24 @@ def event_windows(steps, events, path, channel, scale_rad, dt):
                 or end not in by_step or by_step[end] <= by_step[onset]:
             drop("incomplete_row")
             continue
-        window = make_window(steps, by_step[onset], by_step[end], path, channel, scale_rad, baselines, dt)
-        if window is None:
-            drop("no_signal")
-            continue
-        speed_kmh = sc.mean([s.f.get("speed_kmh") for s in window["rows"] if s.f.get("speed_kmh") is not None])
+        scored = steps[by_step[onset]:by_step[end] + 1]
+        speed_kmh = sc.mean([s.f.get("speed_kmh") for s in scored if s.f.get("speed_kmh") is not None])
         spec = on_speed(speed_kmh, probe_common.to_float(event.get("target_kmh")))
         if spec is None:
             drop("off_speed")
+            continue
+        key = (spec, round(abs(amplitude), 3))
+        window = make_window(steps, by_step[onset], by_step[end], path, channel, scale_rad, baselines, dt)
+        if window is None or window["gaps"]:
+            drop("no_signal" if window is None else "transition_gap")
+            gaps[key] = gaps.get(key, 0) + 1
             continue
         release = probe_common.to_int(event.get("release_step"))
         window.update({"step_size": abs(amplitude), "amplitude": amplitude, "speed_kmh": speed_kmh,
                        "release_index": by_step[release] - by_step[onset] if release in by_step else None,
                        "doublet": (event.get("phase"), event.get("run_idx"), index // 2)})
-        bins.setdefault((spec, round(abs(amplitude), 3)), []).append(window)
-    return bins, dropped
+        bins.setdefault(key, []).append(window)
+    return bins, dropped, gaps
 
 
 def aborted_speeds(play):
@@ -674,10 +691,61 @@ def prbs_status(play):
     return out
 
 
-def prbs_windows(steps, path, channel, scale_rad, dt, status):
+def prbs_sequence(play):
+    """The planned PRBS bits of one period (DC_ProbePrbs with params m_iPrbsOrder / m_iPrbsSeed), or None"""
+    order = probe_common.to_int(play.param("m_iPrbsOrder"))
+    seed = probe_common.to_int(play.param("m_iPrbsSeed"))
+    if order not in PRBS_TAPS or seed is None or seed & ((1 << order) - 1) == 0:
+        return None
+    shifts = [order - tap for tap in PRBS_TAPS[order]]
+    state = seed & ((1 << order) - 1)
+    bits = []
+    for _ in range((1 << order) - 1):
+        bits.append(state & 1)
+        feedback = 0
+        for shift in shifts:
+            feedback ^= (state >> shift) & 1
+        state = (state >> 1) | (feedback << (order - 1))
+    return bits
+
+
+def applied_matches(rows, dt, bits, bit_steps):
+    """(True, '') when the commands of a PRBS segment, re-derived from cmd_steer, are the planned bits with every
+    bit applied for at least bit_steps engine steps and at most one dispatch more (runs of equal bits compared as
+    runs); else (False, why). A skipped or shortened bit breaks a run"""
+    applied = []
+    for s in rows:
+        cmd = s.f.get("cmd_steer")
+        if cmd is None or abs(cmd) < 1e-9:
+            return False, "a PRBS row without a non-zero command"
+        sign = 1 if cmd > 0 else 0
+        steps = sc.covered_steps(s, dt)
+        if applied and applied[-1][0] == sign:
+            applied[-1][1] += steps
+        else:
+            applied.append([sign, steps])
+    planned = []
+    for bit in bits:
+        if planned and planned[-1][0] == bit:
+            planned[-1][1] += 1
+        else:
+            planned.append([bit, 1])
+    if [a[0] for a in applied] != [p[0] for p in planned]:
+        return False, "%d applied runs against %d planned (a bit was skipped or reordered)" % (len(applied),
+                                                                                               len(planned))
+    widest = max(sc.covered_steps(s, dt) for s in rows)
+    for (sign, steps), (_, count) in zip(applied, planned):
+        if steps < count * bit_steps or steps > count * (bit_steps + widest - 1):
+            return False, "a run of %d bits applied for %d engine steps (planned %d)" % (count, steps,
+                                                                                         count * bit_steps)
+    return True, ""
+
+
+def prbs_windows(steps, path, channel, scale_rad, dt, status, planned=None):
     """{planned speed: window} of the PRBS segments that completed their whole sequence: the phase's prbs_result ok
-    with bits == expected, and the segment covering expected x bit_steps engine steps (the measured mean speed within
-    the bin share). An aborted or truncated PRBS is not a held-out set"""
+    with bits == expected, the commands re-derived from cmd_steer equal to the planned bits (applied_matches;
+    planned: prbs_sequence), every readback present near each bit change (make_window gaps) and the measured mean speed
+    within the bin share. An aborted, truncated, distorted or partly unobserved PRBS is not a held-out set"""
     out = {}
     index = {id(s): i for i, s in enumerate(steps)}
     baselines = run_baselines(steps, path, channel, scale_rad)
@@ -689,10 +757,12 @@ def prbs_windows(steps, path, channel, scale_rad, dt, status):
             continue
         if sum(sc.covered_steps(s, dt) for s in rows) < expected * bit_steps:
             continue
+        if planned is None or len(planned) != expected or not applied_matches(rows, dt, planned, bit_steps)[0]:
+            continue
         begin = index.get(id(rows[0]), 0)
         end = index.get(id(rows[-1]), begin)
         window = make_window(steps, begin, end, path, channel, scale_rad, baselines, dt)
-        if window is None:
+        if window is None or window["gaps"]:
             continue
         speed_kmh = sc.mean([s.f.get("speed_kmh") for s in rows if s.f.get("speed_kmh") is not None])
         spec = on_speed(speed_kmh, rows[-1].f.get("seg_target"))
@@ -738,9 +808,14 @@ def centering(window):
 # analysis
 
 
-def analyse_bin(windows, dt, args, step_size):
-    """{'state', 'selected', 'params', 'rate', 'detail', 'windows'} of one bin"""
+def analyse_bin(windows, dt, args, step_size, gaps=0):
+    """{'state', 'selected', 'params', 'rate', 'detail', 'windows'} of one bin; gaps: its events left out for a
+    missing readback near a command change or no usable signal (the bin is then INCOMPLETE whatever the fit)"""
     out = {"state": None, "selected": None, "params": None, "rate": None, "windows": windows}
+    if gaps:
+        out["detail"] = "%d events miss readbacks within %d rows of a command change or their initial state " \
+                        "(the delay and dynamics are not observed)" % (gaps, TRANSITION_ROWS)
+        return out
     signs = sorted(set(1 if w["amplitude"] > 0 else -1 for w in windows))
     if len(windows) < args.min_events:
         out["detail"] = "%d events (< %d)" % (len(windows), args.min_events)
@@ -794,8 +869,9 @@ def channel_for(args, play, verdict):
 def prbs_check(results, path, speed, dt, args):
     window = results[(path, "prbs")].get(speed)
     if window is None:
-        return None, "no completed PRBS at %g km/h (e23_phases prbs_result ok with every bit; measured speed within " \
-                     "%d%%)" % (speed, SPEED_BIN_SHARE * 100)
+        return None, "no completed PRBS at %g km/h (e23_phases prbs_result ok with every bit, the commands re-derived " \
+                     "from cmd_steer equal to the planned bits, every readback near a bit change; measured speed " \
+                     "within %d%%)" % (speed, SPEED_BIN_SHARE * 100)
     models = [(abs(amplitude - window["step_size"]), amplitude, results[(path, (speed, amplitude))])
               for amplitude, _ in SPEC_STEPS
               if (path, (speed, amplitude)) in results and results[(path, (speed, amplitude))]["selected"]]
@@ -835,15 +911,16 @@ def analyse(play, args, verdict):
     for path in RAW_PATHS + ("kappa",):
         if path == "wheel" and channel is None:
             continue
-        bins, dropped = event_windows(steps, events, path, channel, scale_rad, dt)
+        bins, dropped, gaps = event_windows(steps, events, path, channel, scale_rad, dt)
         if path == "input":
             dropped_all = dropped
             input_bins = bins
+            input_gaps = gaps
         for speed in SPEC_SPEEDS:
             for amplitude, _ in SPEC_STEPS:
                 results[(path, (speed, amplitude))] = analyse_bin(bins.get((speed, amplitude), []), dt, args,
-                                                                  amplitude)
-        results[(path, "prbs")] = prbs_windows(steps, path, channel, scale_rad, dt, status)
+                                                                  amplitude, gaps.get((speed, amplitude), 0))
+        results[(path, "prbs")] = prbs_windows(steps, path, channel, scale_rad, dt, status, prbs_sequence(play))
 
     # coverage against the spec grid (the input path's binning; the counts per sign)
     coverage_ok = True
@@ -890,7 +967,7 @@ def analyse(play, args, verdict):
             raw_states.append(state)
     extra = sorted(key for key in input_bins if key[0] not in SPEC_SPEEDS and len(input_bins[key]) >= args.min_events)
     for key in extra:
-        res = analyse_bin(input_bins[key], dt, args, key[1])
+        res = analyse_bin(input_bins[key], dt, args, key[1], input_gaps.get(key, 0))
         verdict.info("input_%gkmh_%g" % key, "outside the CC-08 grid (a validated cell of CC-07 (a)'s input model "
                                              "only): %s, %s" % (STATE_TEXT[res["state"]], res["detail"]))
     for speed in SPEC_SPEEDS:
@@ -933,11 +1010,11 @@ def input_model(play, args):
     dt = sc.step_dt(play)
     if dt is None:
         return None, None, "e23: no physics step in the run header"
-    bins, _ = event_windows(steps, events, "input", None, None, dt)
+    bins, _, gaps = event_windows(steps, events, "input", None, None, dt)
     fitted = []
-    for key in sorted(bins):
-        if len(bins[key]) >= args.min_events:
-            fitted.append((key, analyse_bin(bins[key], dt, args, key[1])))
+    for key in sorted(set(bins) | set(gaps)):
+        if len(bins.get(key, [])) + gaps.get(key, 0) >= args.min_events:
+            fitted.append((key, analyse_bin(bins.get(key, []), dt, args, key[1], gaps.get(key, 0))))
     if not fitted:
         return None, None, "e23: no input bin with >= %d events" % args.min_events
     stopped = sorted("%s %s" % (name, result) for name, (speed, result) in aborted_speeds(play).items()
@@ -948,7 +1025,7 @@ def input_model(play, args):
              for key, res in fitted]
     states = [res["state"] for _, res in fitted]
     results = {("input", key): res for key, res in fitted}
-    results[("input", "prbs")] = prbs_windows(steps, "input", None, None, dt, prbs_status(play))
+    results[("input", "prbs")] = prbs_windows(steps, "input", None, None, dt, prbs_status(play), prbs_sequence(play))
     speeds = sorted(set(key[0] for key, _ in fitted))
     for speed in speeds:
         # the model is claimed at this speed only with a usable, passing held-out PRBS there

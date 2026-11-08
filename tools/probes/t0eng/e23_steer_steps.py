@@ -38,6 +38,12 @@ command, its output compared at the last of them; target = g x u[step - d]):
   M2 + first order   y1 += (1 - a) (target - y1), a = exp(-dt / tau)
   M3 + rate limit    the M2 step clamped to +-R dt (R = q x |g| x the bin's step size per second)
   M4 + relaxation    M3 then a second first order with tau2 = sigma / v (tyre relaxation length sigma)
+Identifiability: every command change needs readbacks in its first TRANSITION_ROWS rows, and its first readback
+must come from a dispatch covering exactly one engine step: after a merged dispatch delays d and d + 1 leave the
+same recorded endpoint, so such a bin and its PRBS are INCOMPLETE ("delay not identifiable under merged
+dispatches") and CC-07 (a)'s model exception is unavailable. The real runs so far report clock.merged_fixed_steps 0,
+so the rule should cost no real data. The PRBS is replayed through the producer's bit-boundary state machine
+(applied_matches): any other dispatch sequence is not a held-out set.
 Windows: the scored rows run from an event's onset to its end; the rows before are unscored history (the model state
 starts at the measured output of the row before the onset, the D_MAX engine steps of commands before feed the delay),
 so no row is scored twice. Every output is measured from its run's hold baseline (command 0 at speed). An event
@@ -593,18 +599,22 @@ def make_window(steps, first, last, path, channel, scale_rad, baselines, dt):
     if sum(1 for v in y if v is not None) < 0.8 * len(y):
         return None
     # every command change needs its readbacks: the first TRANSITION_ROWS rows after it identify the delay
+    # and its first readback must come from a dispatch of exactly one engine step: after a merged dispatch delays d
+    # and d + 1 give the same recorded endpoint (the runs so far had clock.merged_fixed_steps 0, so this costs none)
     gaps = 0
+    merged = 0
     previous = hist[-1] if hist else (prev.f.get("cmd_steer") or 0.0)
     for k, cmd in enumerate(u):
         if abs(cmd - previous) > 1e-9:
             gaps += sum(1 for v in y[k:k + TRANSITION_ROWS] if v is None)
+            merged += int(n[k] != 1)
         previous = cmd
     u_e = list(hist)
     for cmd, steps_n in zip(u, n):
         u_e.extend([cmd] * steps_n)
     speeds = [s.f.get("vel_l_z") for s in rows if s.f.get("vel_l_z") is not None]
     return {"u": u, "n": n, "y": y, "y0": y0 - base, "u_e": u_e, "offset": len(hist), "rows": rows,
-            "v": max(sc.mean(speeds) or 0.0, 0.1), "gaps": gaps}
+            "v": max(sc.mean(speeds) or 0.0, 0.1), "gaps": gaps, "merged": merged}
 
 
 def on_speed(kmh, target):
@@ -617,10 +627,11 @@ def on_speed(kmh, target):
 
 
 def event_windows(steps, events, path, channel, scale_rad, dt):
-    """({(planned speed, |amplitude|): [window]}, {reason: count of events left out}, {key: events of that bin with
-    a missing readback near a command change or no usable signal}): the ok events, each scored from its onset to its
-    end, binned by their phase's planned speed when the measured mean speed of the scored rows is within
-    SPEED_BIN_SHARE of it. A bin with such an event cannot be certified (analyse_bin: INCOMPLETE)"""
+    """({(planned speed, |amplitude|): [window]}, {reason: count of events left out}, {key: (events left out for a
+    missing readback near a command change or no usable signal, events whose command change is first observed
+    after a merged dispatch)}): the ok events, each scored from its onset to its end, binned by their phase's
+    planned speed when the measured mean speed of the scored rows is within SPEED_BIN_SHARE of it. A bin with either
+    kind of event cannot be certified (analyse_bin: INCOMPLETE)"""
     by_step = {}
     for idx, step in enumerate(steps):
         number = step.i.get("physics_step")
@@ -656,8 +667,12 @@ def event_windows(steps, events, path, channel, scale_rad, dt):
         window = make_window(steps, by_step[onset], by_step[end], path, channel, scale_rad, baselines, dt)
         if window is None or window["gaps"]:
             drop("no_signal" if window is None else "transition_gap")
-            gaps[key] = gaps.get(key, 0) + 1
+            missing, merged = gaps.get(key, (0, 0))
+            gaps[key] = (missing + 1, merged)
             continue
+        if window["merged"]:
+            missing, merged = gaps.get(key, (0, 0))
+            gaps[key] = (missing, merged + 1)
         release = probe_common.to_int(event.get("release_step"))
         window.update({"step_size": abs(amplitude), "amplitude": amplitude, "speed_kmh": speed_kmh,
                        "release_index": by_step[release] - by_step[onset] if release in by_step else None,
@@ -710,34 +725,40 @@ def prbs_sequence(play):
 
 
 def applied_matches(rows, dt, bits, bit_steps):
-    """(True, '') when the commands of a PRBS segment, re-derived from cmd_steer, are the planned bits with every
-    bit applied for at least bit_steps engine steps and at most one dispatch more (runs of equal bits compared as
-    runs); else (False, why). A skipped or shortened bit breaks a run"""
-    applied = []
-    for s in rows:
+    """(True, '') when the PRBS segment's dispatches replay the producer exactly (DC_ProbeSteerSteps: a bit is drawn
+    at a dispatch boundary when no bit is open, applied for the covered steps of each dispatch, and closed once it
+    has bit_steps engine steps): every dispatch's cmd_steer is the open planned bit's command (+A for 1, -A for 0,
+    one amplitude), and exactly one period completes with nothing after it; else (False, why)"""
+    if not rows or not bits:
+        return False, "no PRBS rows or no planned bits"
+    amplitude = None
+    index = -1
+    open_bit = False
+    applied = 0
+    completed = 0
+    for k, s in enumerate(rows):
         cmd = s.f.get("cmd_steer")
         if cmd is None or abs(cmd) < 1e-9:
-            return False, "a PRBS row without a non-zero command"
-        sign = 1 if cmd > 0 else 0
-        steps = sc.covered_steps(s, dt)
-        if applied and applied[-1][0] == sign:
-            applied[-1][1] += steps
-        else:
-            applied.append([sign, steps])
-    planned = []
-    for bit in bits:
-        if planned and planned[-1][0] == bit:
-            planned[-1][1] += 1
-        else:
-            planned.append([bit, 1])
-    if [a[0] for a in applied] != [p[0] for p in planned]:
-        return False, "%d applied runs against %d planned (a bit was skipped or reordered)" % (len(applied),
-                                                                                               len(planned))
-    widest = max(sc.covered_steps(s, dt) for s in rows)
-    for (sign, steps), (_, count) in zip(applied, planned):
-        if steps < count * bit_steps or steps > count * (bit_steps + widest - 1):
-            return False, "a run of %d bits applied for %d engine steps (planned %d)" % (count, steps,
-                                                                                         count * bit_steps)
+            return False, "dispatch %d without a non-zero command" % k
+        if amplitude is None:
+            amplitude = abs(cmd)
+        elif abs(abs(cmd) - amplitude) > 1e-4:
+            return False, "dispatch %d at amplitude %s, not %s" % (k, sc.fmt(abs(cmd)), sc.fmt(amplitude))
+        if not open_bit:
+            if index + 1 >= len(bits):
+                return False, "dispatch %d after the period completed" % k
+            index += 1
+            open_bit = True
+            applied = 0
+        if (1 if cmd > 0 else 0) != bits[index]:
+            return False, "dispatch %d applies %+d, planned bit %d is %d (a bit was skipped, added or reordered)" % (
+                k, 1 if cmd > 0 else -1, index, bits[index])
+        applied += sc.covered_steps(s, dt)
+        if applied >= bit_steps:
+            open_bit = False
+            completed += 1
+    if completed != len(bits) or open_bit:
+        return False, "%d of %d planned bits completed" % (completed, len(bits))
     return True, ""
 
 
@@ -762,7 +783,7 @@ def prbs_windows(steps, path, channel, scale_rad, dt, status, planned=None):
         begin = index.get(id(rows[0]), 0)
         end = index.get(id(rows[-1]), begin)
         window = make_window(steps, begin, end, path, channel, scale_rad, baselines, dt)
-        if window is None or window["gaps"]:
+        if window is None or window["gaps"] or window["merged"]:
             continue
         speed_kmh = sc.mean([s.f.get("speed_kmh") for s in rows if s.f.get("speed_kmh") is not None])
         spec = on_speed(speed_kmh, rows[-1].f.get("seg_target"))
@@ -808,13 +829,15 @@ def centering(window):
 # analysis
 
 
-def analyse_bin(windows, dt, args, step_size, gaps=0):
-    """{'state', 'selected', 'params', 'rate', 'detail', 'windows'} of one bin; gaps: its events left out for a
-    missing readback near a command change or no usable signal (the bin is then INCOMPLETE whatever the fit)"""
+def analyse_bin(windows, dt, args, step_size, gaps=(0, 0)):
+    """{'state', 'selected', 'params', 'rate', 'detail', 'windows'} of one bin; gaps: (its events left out for a
+    missing readback near a command change or no usable signal, its events whose command change is first observed
+    after a merged dispatch). Either makes the bin INCOMPLETE whatever the fit (the fit is still reported)"""
     out = {"state": None, "selected": None, "params": None, "rate": None, "windows": windows}
-    if gaps:
+    missing, merged = gaps
+    if missing:
         out["detail"] = "%d events miss readbacks within %d rows of a command change or their initial state " \
-                        "(the delay and dynamics are not observed)" % (gaps, TRANSITION_ROWS)
+                        "(the delay and dynamics are not observed)" % (missing, TRANSITION_ROWS)
         return out
     signs = sorted(set(1 if w["amplitude"] > 0 else -1 for w in windows))
     if len(windows) < args.min_events:
@@ -836,6 +859,9 @@ def analyse_bin(windows, dt, args, step_size, gaps=0):
     rate = params.q * abs(params.g) * step_size if clamped(selected, params) else None
     others = ", ".join("%s R2 %s BIC %s" % (s, sc.fmt(v["test_r2"], 4), sc.fmt(v["bic"], 6))
                        for s, v in fit["structures"].items())
+    if merged:
+        parts = parts + [None]
+        state = None
     out.update({"state": state, "selected": selected, "params": params, "rate": rate, "test_r2": info["test_r2"],
                 "per_event": per_event})
     out["detail"] = ("%s (%s): held-out R2 %s (>= %g) on %d doublets (trained on %d), d %d steps, g %s, tau %s s, "
@@ -846,6 +872,9 @@ def analyse_bin(windows, dt, args, step_size, gaps=0):
                          sc.fmt(params.sigma, 3) if selected == "M4" else "-",
                          "; ".join(text for _, text in stable.values()), args.max_cv, len(windows),
                          "/".join("%+d" % s for s in signs), others)) + sc.observed(parts)
+    if merged:
+        out["detail"] = ("delay not identifiable under merged dispatches (%d events with a command change first "
+                         "observed after a dispatch of more than one engine step): " % merged) + out["detail"]
     return out
 
 
@@ -870,8 +899,8 @@ def prbs_check(results, path, speed, dt, args):
     window = results[(path, "prbs")].get(speed)
     if window is None:
         return None, "no completed PRBS at %g km/h (e23_phases prbs_result ok with every bit, the commands re-derived " \
-                     "from cmd_steer equal to the planned bits, every readback near a bit change; measured speed " \
-                     "within %d%%)" % (speed, SPEED_BIN_SHARE * 100)
+                     "from cmd_steer replaying the planned bits, every readback near a bit change, every bit change " \
+                     "observed on a single-step dispatch; measured speed within %d%%)" % (speed, SPEED_BIN_SHARE * 100)
     models = [(abs(amplitude - window["step_size"]), amplitude, results[(path, (speed, amplitude))])
               for amplitude, _ in SPEC_STEPS
               if (path, (speed, amplitude)) in results and results[(path, (speed, amplitude))]["selected"]]
@@ -919,7 +948,7 @@ def analyse(play, args, verdict):
         for speed in SPEC_SPEEDS:
             for amplitude, _ in SPEC_STEPS:
                 results[(path, (speed, amplitude))] = analyse_bin(bins.get((speed, amplitude), []), dt, args,
-                                                                  amplitude, gaps.get((speed, amplitude), 0))
+                                                                  amplitude, gaps.get((speed, amplitude), (0, 0)))
         results[(path, "prbs")] = prbs_windows(steps, path, channel, scale_rad, dt, status, prbs_sequence(play))
 
     # coverage against the spec grid (the input path's binning; the counts per sign)
@@ -967,7 +996,7 @@ def analyse(play, args, verdict):
             raw_states.append(state)
     extra = sorted(key for key in input_bins if key[0] not in SPEC_SPEEDS and len(input_bins[key]) >= args.min_events)
     for key in extra:
-        res = analyse_bin(input_bins[key], dt, args, key[1], input_gaps.get(key, 0))
+        res = analyse_bin(input_bins[key], dt, args, key[1], input_gaps.get(key, (0, 0)))
         verdict.info("input_%gkmh_%g" % key, "outside the CC-08 grid (a validated cell of CC-07 (a)'s input model "
                                              "only): %s, %s" % (STATE_TEXT[res["state"]], res["detail"]))
     for speed in SPEC_SPEEDS:
@@ -1013,8 +1042,8 @@ def input_model(play, args):
     bins, _, gaps = event_windows(steps, events, "input", None, None, dt)
     fitted = []
     for key in sorted(set(bins) | set(gaps)):
-        if len(bins.get(key, [])) + gaps.get(key, 0) >= args.min_events:
-            fitted.append((key, analyse_bin(bins.get(key, []), dt, args, key[1], gaps.get(key, 0))))
+        if len(bins.get(key, [])) + gaps.get(key, (0, 0))[0] >= args.min_events:
+            fitted.append((key, analyse_bin(bins.get(key, []), dt, args, key[1], gaps.get(key, (0, 0)))))
     if not fitted:
         return None, None, "e23: no input bin with >= %d events" % args.min_events
     stopped = sorted("%s %s" % (name, result) for name, (speed, result) in aborted_speeds(play).items()

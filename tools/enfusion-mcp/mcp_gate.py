@@ -16,7 +16,7 @@ enfusion-mcp-wsl.sh execs this instead of node. Before the server starts:
   - ENFUSION_GAME_PATH and ENFUSION_WORKBENCH_PATH are the pin's installs.
 Any refusal exits 2 before the server starts, with the reason on stderr.
 
-Also before the server starts: ENFUSION_WORKBENCH_HOST must be loopback or the proven WSL NAT gateway (this machine's
+Also before the server starts: ENFUSION_WORKBENCH_HOST must be loopback or the proven WSL NAT gateway (the local
 Windows host; endpoint_handshake.nat_gateway, which runs ipconfig.exe), and the index stamp's source must be the dump tag and commit index_sources.json maps the pin to, with
 the tag equal to the pin's engine_version_expected (api_index.verify_source).
 

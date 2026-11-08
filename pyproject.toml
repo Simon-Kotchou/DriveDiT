@@ -29,8 +29,8 @@ dd-train = "drivedit.train.cli:main"     # world-model training (DD-20); needs t
 [project.optional-dependencies]
 # The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras
 # are kept for the model package that replaces it. Until then only tests/test_torch_smoke.py uses them.
-# `uv sync --extra model` alone takes torch from PyPI (2.15.0+cu132 on Linux x86_64), which segfaults at CUDA init
-# under WSL on this machine; use it with one of the selectors below.
+# `uv sync --extra model` alone takes torch from PyPI (2.15.0+cu132 on Linux x86_64), which has segfaulted at CUDA init
+# under WSL; use it with one of the selectors below.
 model = [
     "torch>=2.2",
     "einops>=0.7",
@@ -40,7 +40,7 @@ model = [
 # Torch variant selectors, used together with `model`; they are mutually exclusive.
 #   uv sync --extra model --extra cpu    # torch from the PyTorch CPU wheel index (CI)
 #   uv sync --extra model --extra cuda   # torch 2.14.1+cu130 from the PyTorch cu130 index, the newest build there.
-#                                        # Verified on the local RTX 3080 Ti under WSL (DD-19, 2026-11-05); PyPI's
+#                                        # Verified on a local CUDA GPU under WSL (DD-19, 2026-11-05); PyPI's
 #                                        # 2.15.0+cu132 segfaults at torch.cuda.is_available() there.
 cpu = ["torch>=2.2"]
 cuda = ["torch>=2.2"]

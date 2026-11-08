@@ -460,7 +460,7 @@ def full_checks(src: dict, ident: dict, acf_paths=None, roots=None, mtime_resolu
 
     A cold pin always hashes every pak against its recorded sha256 (Codex round 1, MIGRATION_1_9 7.1): a pak changed
     with its size and mtime preserved is refused at launch too. No cache: a cache keyed by size, mtime and path could
-    not see that change. About 6.5 min for the 28 GB of 1.8.0.13 at the 73 MB/s measured on E: (2026-11-07). It also
+    not see that change. It reads every pak of the install, which takes minutes. It also
     checks the reference SHA256SUMS anchor."""
     pin_acf, pin_roots = pinned_paths(src["pin"])
     acf_paths = {app: (acf_paths or {}).get(app) or pin_acf[app] for app in pinlib.APPS}

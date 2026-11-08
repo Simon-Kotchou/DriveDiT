@@ -49,8 +49,8 @@ fi
 [[ -x "${NODE_BIN:-}" ]] || die 1 "node not found (set NODE_BIN)"
 
 # --- Windows host as seen from this WSL distro -----------------------------------------------------
-# NAT mode (this machine: 'wslinfo --networking-mode' -> nat; Windows 10 19045 cannot use mirrored):
-# the Windows host is the default gateway. Mirrored mode (Win11 22H2+ only): 127.0.0.1.
+# NAT mode ('wslinfo --networking-mode' -> nat): the Windows host is the default gateway (mcp_gate.py verifies it
+# against the Windows vEthernet (WSL) adapter). Mirrored mode (recent Windows 11 only): 127.0.0.1.
 is_ipv4() {
   local o re='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
   [[ "${1:-}" =~ $re ]] || return 1

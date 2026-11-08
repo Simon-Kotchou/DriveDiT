@@ -5,7 +5,8 @@ stdio MCP server for Claude Code in WSL, driving Arma Reforger Workbench over it
 It replaces the abandoned npm `enfusion-mcp` 0.6.1 entry: its upstream repo is gone, it defaults to `127.0.0.1` (refused
 under WSL NAT), and it has no WSL path handling.
 
-Every write goes to E:. C: is nearly full, and the WSL disk (`~`, `/tmp`, `/var`, ...) lives on C: too.
+Every write goes to E:. C: is never written (a project rule), and the WSL disk (`~`, `/tmp`, `/var`, ...) lives on C:
+by default.
 The scripts accept a work root, project path, `.gproj` or Workbench profile only as an absolute path that resolves onto a
 drive other than C: (`/mnt/<d..z>/...`, or `X:\...` for the profile). Relative paths are refused as well: Claude Code starts
 the wrapper with its own cwd, which is the C: repo.
@@ -127,13 +128,13 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
 - **The project root** is `pinlib.DEPLOY_ROOTS[launch path]`; an `ENFUSION_PROJECT_PATH` set by hand must be it, and
   a deploy stamped for another pin (`.deploy_state.json` `target_pin`) refuses. `ENFUSION_GAME_PATH` and
   `ENFUSION_WORKBENCH_PATH` are the pin's installs.
-- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback, or the WSL NAT gateway proven to be this machine's
-  Windows host (`172.19.208.1` today). All three are required: exactly one up IPv4 default route of any kind (a
+- **The endpoint.** `ENFUSION_WORKBENCH_HOST` must be loopback, or the WSL NAT gateway proven to be the local
+  Windows host (the address of its `vEthernet (WSL)` adapter). All three are required: exactly one up IPv4 default route of any kind (a
   device-only `tun0` default route counts, Codex round 3), with a gateway, via `eth0`; `/etc/resolv.conf` carrying
   WSL's generated header with that gateway as its only nameserver; and `ipconfig.exe` (read-only, Windows `TEMP`/`TMP`
   on E: as for the helpers below) showing a `vEthernet (WSL...)` adapter whose IPv4 address is that gateway. The route
   and resolver files alone can describe a stale or bridged setup; the adapter address is the Windows side of the WSL
-  NAT switch. Anything else (a LAN or VPN gateway such as `192.168.1.1`, or no such adapter) refuses, and only
+  NAT switch. Anything else (a LAN or VPN gateway such as `198.51.100.1`, or no such adapter) refuses, and only
   loopback is accepted: the handshake can only vouch for the local Workbench. `ipconfig.exe` runs only for a
   non-loopback host. The gate passes the
   checked host and port to the server, and the listener must serve that address (`0.0.0.0`, `[::]` or the host).
@@ -209,10 +210,11 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
 
 ## Network: Windows host discovery under WSL NAT
 
-- This machine is Windows 10 22H2 (19045) with WSL 2.3.26 in **NAT** mode. Mirrored mode needs Windows 11 22H2+.
+- The tools support WSL in **NAT** mode (the Windows host is the default gateway, verified against the Windows
+  `vEthernet (WSL)` adapter) and in mirrored mode (the host is `127.0.0.1`; mirrored mode needs a recent Windows 11).
 - At every start the wrapper reads `wslinfo --networking-mode`:
   - `mirrored`: the host is `127.0.0.1`;
-  - otherwise: the host is the `via` address of `ip -4 route show default` (today `172.19.208.1`), or the default
+  - otherwise: the host is the `via` address of `ip -4 route show default`, or the default
     route's gateway in `/proc/net/route` when `ip` is missing or fails. It must be an IPv4 address.
   - If there is none (for example a device-only default route), the wrapper exits 1 with
     `cannot determine the Windows host IP ...`. Then set `ENFUSION_WORKBENCH_HOST` in the MCP entry's `env` to the IPv4
@@ -222,7 +224,7 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
     NAT switch (one default route, WSL's resolver, and the `vEthernet (WSL...)` adapter address from `ipconfig.exe`;
     see "The endpoint" above); otherwise it refuses before the server starts.
 - Workbench's NET API listens on `0.0.0.0:5775`, so no `netsh portproxy` is needed. `enfusion-mcp-wsl.sh --check` tests TCP reachability without sending a request.
-- Security: `0.0.0.0:5775` exposes editor actions to the LAN, as far as Windows Firewall allows. Consider scoping the inbound rule for 5775 to the WSL vEthernet subnet (`172.16.0.0/12`). That is a Windows change for the user.
+- Security: `0.0.0.0:5775` exposes editor actions to the LAN, as far as Windows Firewall allows. Consider scoping the inbound rule for 5775 to the subnet of the `vEthernet (WSL)` adapter (Windows `ipconfig`). That is a Windows change for the user.
 
 ## Handlers
 
@@ -255,8 +257,8 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
    If the profile still points at OneDrive, stop, because captures would land on C:.
 3. **Check the wrapper, then swap the MCP entry.**
    - `bash /mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh --check` (prints to stderr; opens one TCP connection to port 5775
-     and sends nothing). Expect the three guards at `1`, `guards compiled into dist: yes`, the host `172.19.208.1` (or the
-     current gateway) and `TCP ... reachable`.
+     and sends nothing). Expect the three guards at `1`, `guards compiled into dist: yes`, the host (the current WSL
+     gateway) and `TCP ... reachable`.
    - The swap writes a few hundred bytes to `~/.claude.json` on C:, and only the user runs it:
      ```bash
      claude mcp remove enfusion-mcp -s user && claude mcp add -s user enfusion-mcp -- /mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh

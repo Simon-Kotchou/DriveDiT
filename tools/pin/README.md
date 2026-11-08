@@ -72,7 +72,7 @@ forgery-only).
 ## Write safety
 
 Every write goes through `pinlib.check_write_path`, which resolves symlinks first. It accepts only paths under
-`/mnt/e/`, and it always refuses `/mnt/c/` (C: is nearly full and holds the live Workbench addon). `/mnt/e` is only a
+`/mnt/e/`, and it always refuses `/mnt/c/` (C: is never written, a project rule, and it holds the live Workbench addon). `/mnt/e` is only a
 name, so the guard also reads `/proc/self/mountinfo`: the path must lie on the mount at `/mnt/e` whose source is the
 `E:` drive (`pinlib.WRITE_ROOT_DRIVES`). An unmounted `/mnt/e` (an empty directory on the WSL disk, which is on C:),
 a redirected one, or another filesystem mounted below it is refused.
@@ -290,7 +290,7 @@ Steam must be running.
 
 ```bash
 bash /mnt/e/DriveDiT/tools/pin/cold_copy.sh          # dry run: checks the installs against the active pin and prints the plan
-bash /mnt/e/DriveDiT/tools/pin/cold_copy.sh --run    # copies about 27.9 GB to E:\DriveDiT\pin\<active pin id>
+bash /mnt/e/DriveDiT/tools/pin/cold_copy.sh --run    # copies the whole install to E:\DriveDiT\pin\<active pin id>
 ```
 
 By default it copies the **active** pin, resolved exactly as `preflight --pin-active` does. `--pin PIN_JSON` names a
@@ -331,7 +331,7 @@ It owns the go/no-go and the list of compatibility probes.
 1. **Keep Automatic updates at "1"** ("Only update this game when I launch it") on both apps. Do not switch to
    "Always keep this game updated" to get 1.9: the update should happen when you start it, not overnight.
 2. **Optional: cold-copy 1.8 first**, while 1.8.0.13 is still the active pin, if a rollback to 1.8 should stay
-   possible: `bash /mnt/e/DriveDiT/tools/pin/cold_copy.sh` (dry run), then `--run` (about 28 GB to
+   possible: `bash /mnt/e/DriveDiT/tools/pin/cold_copy.sh` (dry run), then `--run` (the whole install, to
    `E:\DriveDiT\pin\1.8.0.13`).
 3. **Update both apps via Steam**, by hand. UNVERIFIED: the exact Steam UI for a manual update under this setting;
    record what you did in MIGRATION_1_9.md. From now until step 5, every launch is refused (`buildid != pin`). That is
@@ -504,7 +504,7 @@ failure. Steam's online state cannot be read from WSL, so `--steam` records what
 
 Both stable apps are single Steam installs, and they are on 1.9.0.37 since 2026-11-05. 1.8.0.13 runs again only from
 a copy. The verified reference copy `E:\DriveDiT\pin\1.8.0.13` (cold_copy.sh, 2026-10-22) stays a pristine restore
-source; runs use a separate **working copy** `E:\DriveDiT\pin\1.8.0.13-run` (decision 16), about 28 GB more on E:.
+source; runs use a separate **working copy** `E:\DriveDiT\pin\1.8.0.13-run` (decision 16), a second full copy of the install.
 
 | Piece | Value |
 |---|---|
@@ -514,10 +514,10 @@ source; runs use a separate **working copy** `E:\DriveDiT\pin\1.8.0.13-run` (dec
 | Addon | its own copy, `mkdir /mnt/e/DriveDiT/addons_c18`, then `deploy_addon.py --target /mnt/e/DriveDiT/addons_c18/DataCapture --target-pin 1.8.0.13-cold --require-clean`, so a 1.8 Workbench never re-saves the 1.9 addon |
 | build_key | equal to 1.8.0.13's (`0d31b417…` from the reference copy's SHA256SUMS); `make_pin.py` refuses otherwise |
 
-**Make it** (agent, E: only; reads the whole copy, about 28 GB):
+**Make it** (agent, E: only; reads the whole copy):
 
 ```bash
-# 1. the working copy, from the verified reference (the user's call: about 28 GB on E:)
+# 1. the working copy, from the verified reference (the user's call: a second full copy on E:)
 cd /mnt/e/DriveDiT/pin/1.8.0.13 && sha256sum -c --quiet SHA256SUMS            # verify the reference first
 mkdir /mnt/e/DriveDiT/pin/1.8.0.13-run
 rsync -rt /mnt/e/DriveDiT/pin/1.8.0.13/{game,tools,meta} /mnt/e/DriveDiT/pin/1.8.0.13-run/
@@ -536,8 +536,8 @@ every one of them matches SHA256SUMS, `steam_appid.txt` is unchanged, and the bu
 refuses the reference copy itself as `--from-copy`, and any directory that is not a `COLD_RUN_ROOTS` entry (a pin from
 there could never launch). The pin records each pak's sha256, and every launch, `--check` and activation of a cold pin re-hashes every pak
 against it (`<app>.pak_sha256`, mandatory), so a pak changed with its size and mtime kept is refused. There is no
-cache (one keyed by size and mtime could not see that change): about 6.5 min per cold launch for the 28 GB of 1.8.0.13
-at the 73 MB/s measured on E: (2026-11-07). The pin also records the sha256 of the reference SHA256SUMS
+cache (one keyed by size and mtime could not see that change): every cold launch reads every pak of the install,
+which takes minutes. The pin also records the sha256 of the reference SHA256SUMS
 (`cold_of.sums_sha256`), checked at every launch. The acf checks read the saved appmanifests: on a
 copy nothing moves them, so they catch tampering only. `pin_activate.py 1.8.0.13-cold` works (the preferred rollback,
 MIGRATION_1_9 7 step 16); while it is active, `wb_R1.bat` and `client_R1_i01.bat` refuse (launch path mismatch) and

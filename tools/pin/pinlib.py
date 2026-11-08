@@ -12,7 +12,7 @@ two write-once sidecars of a pin (pin_<id>.build_key.json for a dd-pin/1 pin, pi
 
 Write safety: every path this package writes to goes through check_write_path().
 Writes are allowed only under /mnt/e/ (the E: drive). /mnt/c/ is always refused,
-whatever the allowed roots are, because C: is nearly full and holds the live
+whatever the allowed roots are, because C: is never written (a project rule) and holds the live
 Workbench addon. /mnt/e is only a name, so the guard also reads /proc/self/mountinfo
 and requires the path to lie on the mount of the E: drive itself (WRITE_ROOT_DRIVES):
 an unmounted /mnt/e is an empty directory on the WSL disk, which lives on C:.

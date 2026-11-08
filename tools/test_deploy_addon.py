@@ -101,7 +101,7 @@ def listing(root):
     return out
 
 
-# Off this machine (CI) there is no E: drive at /mnt/e and the checkout lies on the device of /.
+# In CI there is no E: drive at /mnt/e and the checkout lies on the device of /.
 E_MOUNTED = os.path.ismount("/mnt/e")
 REPO_ON_ROOT_DEVICE = os.stat(REPO).st_dev == os.stat("/").st_dev
 # E: targets outside the allowed root, and the allowed root itself. Refused everywhere; for the allowed-root reason

@@ -195,7 +195,7 @@ def collect_cold_app(app: str, copy_dir: str, ref_app: dict, sums: dict) -> dict
     The copy is <copy>/<app>/ (the install) and <copy>/meta/appmanifest_<appid>.acf (the appmanifest saved by
     cold_copy.sh). Instead of Steam's state, every pak and exe is hashed and compared with SHA256SUMS
     (<app>/<rel>), and the copy must hold exactly the reference pin's paks and exes, with the same sizes.
-    NotPinnable otherwise. Reads the whole install (about 28 GB for 1.8.0.13).
+    NotPinnable otherwise. Reads the whole install.
     """
     appid = ref_app["appid"]
     acf_path = os.path.join(copy_dir, "meta", "appmanifest_%d.acf" % appid)

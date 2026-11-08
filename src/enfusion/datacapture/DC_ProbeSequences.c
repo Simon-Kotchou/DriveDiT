@@ -404,6 +404,8 @@ class DC_ProbeActuator
 	protected float m_fCmdClutch = 1;
 	protected int m_iCmdGear = -1;				//!< -1 = no SetGear call
 	protected bool m_bCmdHandbrake = true;
+	//! DD-14b S1 no-call variant (SetSteeringCall(false)): ApplyStep skips SetSteering; false for every other probe
+	protected bool m_bSkipSteering;
 
 	// Speed hold
 	protected bool m_bSpeedHold;
@@ -859,6 +861,21 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! DD-14b S1 (DC_ProbeSelfSteer): false = ApplyStep calls no SetSteering (the no-call variant; the engine keeps its
+	//! own steering input), true = SetSteering(cmd_steer) every step, the default and the only mode of every other
+	//! probe. Park sets it back to true
+	void SetSteeringCall(bool call)
+	{
+		m_bSkipSteering = !call;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool IsSteeringCalled()
+	{
+		return !m_bSkipSteering;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Closed-loop speed hold: PI on GetSpeedKmh -> throttle or brake (never both); steer held open loop; clutch 1.
 	//! Calling it again with a new target or steering keeps the integrator.
 	void SetSpeedHold(float targetKmh, float steer)
@@ -893,7 +910,8 @@ class DC_ProbeActuator
 	//! Call from OnProbeSimulate: runs the PI and the shift policy, wakes the physics at a release of the commanded
 	//! handbrake and an asleep body on the later released steps, runs the stuck guard and, on a manual gearbox, the
 	//! launch clutch (DD-14c, DC_LaunchClutch: the clutch passed to SetClutch, and a Mode A restart of a stalled
-	//! engine), calls SetSteering/SetBreak/SetGear/SetClutch/SetThrottle every step (gear before clutch and throttle,
+	//! engine), calls SetSteering/SetBreak/SetGear/SetClutch/SetThrottle every step (SetSteering not while
+	//! SetSteeringCall(false), the DD-14b S1 no-call variant; gear before clutch and throttle,
 	//! the order of VehicleCinematicTrack.c:149-162), then reads input_pre_*. SetGear: an explicit gear (SetCommand gear
 	//! >= 0) every step, which the policy then continues from (AdoptExplicitGear); a policy gear on change and again
 	//! after GEAR_REASSERT_S without readback (ApplyPolicyGear). timeSlice is the physics time the step covers (n x
@@ -965,7 +983,9 @@ class DC_ProbeActuator
 				StartModeA();
 		}
 
-		m_Simulation.SetSteering(m_fCmdSteer);
+		if (!m_bSkipSteering)
+			m_Simulation.SetSteering(m_fCmdSteer);
+
 		m_Simulation.SetBreak(m_fCmdBrake, m_bCmdHandbrake);
 		if (m_iCmdGear >= 0)
 		{
@@ -1241,6 +1261,7 @@ class DC_ProbeActuator
 	//! calls the setters any more.
 	void Park()
 	{
+		m_bSkipSteering = false;
 		SetCommand(0, 0, 1, 1, -1, true);
 		m_iPolicySetGear = -1;
 		ApplyStep(0);
@@ -1263,6 +1284,20 @@ class DC_ProbeActuator
 	vector GetAngularVelocityLocal()
 	{
 		return m_vAngVelLocal;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GetSteering after the last step (column input_post_steer; DD-14b axle choice at zero steer)
+	float GetPostSteer()
+	{
+		return m_fPostSteer;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! GetAccelerationLocal of the last ReadPost (column acc_l_*)
+	vector GetAccelerationLocal()
+	{
+		return m_vAccLocal;
 	}
 
 	//------------------------------------------------------------------------------------------------

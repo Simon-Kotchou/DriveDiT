@@ -430,13 +430,14 @@ def rows_for(engine_steps, merge):
 
 def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;40:0.5x4;60:0.5x6", seed=5,
               prbs=True, prbs_gain=None, slow_kmh=None, alt_tau=None, prbs_bits_done=None, phase_results=None,
-              old_prbs_skips=False):
+              old_prbs_skips=False, prbs_applied=None):
     """slow_kmh: {speed: the speed the phase decays to while its train runs}; alt_tau: (tau_a, tau_b) alternating per
     event; prbs_gain: the actuator gain during the PRBS (a PRBS the step model cannot predict); prbs_bits_done:
     {speed: bits} of a PRBS cut short; phase_results: {speed: result} (an abort that still ends with a complete
     footer). Holds and PRBS bits follow the probe's heading budget (hold_steps, prbs_bit_steps) and its covered-step
     counting (rows_for). old_prbs_skips: the round-3 producer, which drew bit index = elapsed steps / bit steps and so
-    skipped bits when a dispatch covered more than a bit, yet recorded 31 / 31 ok"""
+    skipped bits when a dispatch covered more than a bit, yet recorded 31 / 31 ok; prbs_applied: bits applied instead
+    of the planned ones (the phases file still says ok)"""
     car = car or SteerCar()
     rng = random.Random(seed)
     events = []
@@ -507,7 +508,7 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;4
                     car.run(name, "prbs", 1, amp if bit else -amp, end_v, seg_flag=1, seg_target=kmh)
                     elapsed += car.merge
             else:
-                for bit in prbs_bits[:done]:
+                for bit in (prbs_applied or prbs_bits)[:done]:
                     rows = rows_for(bit_steps, car.merge)
                     extended += int(rows * car.merge > bit_steps)
                     for _ in range(rows):
@@ -1149,6 +1150,63 @@ class Cc07Tests(unittest.TestCase):
         self.assertLess(worst, 25.0)
 
 
+    # --- Codex round 5 (8d2ac52) ------------------------------------------------------------------------------
+    def test_another_prbs_sequence_never_replays_as_the_planned_one(self):
+        # Codex: 1110101... applied for the planned 1101010... (order 5, seed 11, 5 steps per bit, 7-step dispatches)
+        # passed the run-length tolerance: PRBS PASS, R2 1, a validated model
+        planned = e23_prbs_bits(5, 11, 31)
+        self.assertEqual("".join(map(str, planned)), "1101010000100101100111110001101")
+        applied = [int(c) for c in "1110101000100101100111110001101"]
+        for merge in (7, 1):
+            with self.subTest(merge=merge):
+                play = build_e23(self.path("e23_%d" % merge, "play_01"), SteerCar(actuator=Actuator(tau=0.014),
+                                                                                  merge=merge),
+                                 grid="10:0.5x6", prbs_applied=applied)
+                p = probe_common.Play(play)
+                rows = [r for r in steer_common.load_steps(p, "e23") if r.segment == "prbs"]
+                ok, why = e23.applied_matches(rows, DT, e23.prbs_sequence(p), 5)
+                self.assertFalse(ok)
+                self.assertIn("planned bit 2 is 0", why)
+                code, text = run_main(e23, [play])
+                self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
+
+                class Args:
+                    min_events, min_r2, max_cv = 6, 0.9, 0.2
+
+                self.assertIsNone(e23.input_model(p, Args())[0])
+        # the planned sequence with every bit extended to one 7-step dispatch replays exactly
+        play = build_e23(self.path("e23_ext", "play_01"), SteerCar(actuator=Actuator(tau=0.014), merge=7),
+                         grid="10:0.5x6")
+        p = probe_common.Play(play)
+        rows = [r for r in steer_common.load_steps(p, "e23") if r.segment == "prbs"]
+        self.assertEqual(e23.applied_matches(rows, DT, e23.prbs_sequence(p), 5), (True, ""))
+
+    def test_merged_dispatches_never_certify_a_delay(self):
+        # Codex: a true one-step delay with 2- or 6-step dispatches and every readback present reported d 0 PASS,
+        # PRBS PASS (R2 1) and a validated zero-delay model
+        for merge in (2, 6):
+            with self.subTest(merge=merge):
+                play = build_e23(self.path("e23_%d" % merge, "play_01"),
+                                 SteerCar(actuator=Actuator(delay=1), merge=merge), grid="10:0.5x6")
+                code, text = run_main(e23, [play])
+                self.assertEqual(code, 0, text)
+                self.assertEqual(item(text, "input_10kmh_0.5"), "INCOMPLETE", text)
+                self.assertIn("delay not identifiable under merged dispatches", detail(text, "input_10kmh_0.5"))
+                self.assertNotRegex(text, r"\[PASS\] input_10kmh_0.5")
+                self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
+
+                class Args:
+                    min_events, min_r2, max_cv = 6, 0.9, 0.2
+
+                state, _, why = e23.input_model(probe_common.Play(play), Args())
+                self.assertIsNone(state, why)
+        # single-step dispatches identify the delay
+        play = build_e23(self.path("e23_1", "play_01"), SteerCar(actuator=Actuator(delay=1)), grid="10:0.5x6")
+        code, text = run_main(e23, [play])
+        self.assertEqual(item(text, "input_10kmh_0.5"), "PASS", text)
+        self.assertRegex(detail(text, "input_10kmh_0.5"), r"d 1 steps")
+
+
 class Cc08Tests(unittest.TestCase):
     def setUp(self):
         self.base = probe_common.make_temp_dir("t0eng_steer_")
@@ -1261,9 +1319,11 @@ class Cc08Tests(unittest.TestCase):
         play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.10), merge=2),
                          grid="10:0.5x6")
         code, text = run_main(e23, [play])
-        m = re.search(r"input_10kmh_0.5: PARTIAL \(raw engine path\): M2 [^;]* tau ([0-9.]+) s", text)
+        m = re.search(r"input_10kmh_0.5: PARTIAL \(raw engine path\): delay not identifiable under merged dispatches "
+                      r"[^:]*: M2 [^;]* tau ([0-9.]+) s", text)
         self.assertIsNotNone(m, text)
-        self.assertAlmostEqual(float(m.group(1)), 0.10, delta=0.01)
+        self.assertAlmostEqual(float(m.group(1)), 0.10, delta=0.01)       # the fit itself handles merged steps
+        self.assertEqual(item(text, "input_10kmh_0.5"), "INCOMPLETE", text)  # but a delay is not identifiable
 
     def test_the_validated_wheel_channel_and_its_signal_scale_are_used(self):
         e22_play = build_e22(self.path("e22", "play_01"))

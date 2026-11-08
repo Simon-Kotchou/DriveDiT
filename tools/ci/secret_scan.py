@@ -7,6 +7,12 @@ Flags, in every git-tracked text file (default) or in the files named on the com
   email         e-mail addresses, except noreply ones (noreply@anthropic.com, GitHub noreply addresses)
   win-profile   Windows profile paths: C:\\Users\\<name>, C:/Users/<name>, /mnt/c/Users/<name>
   home-path     Linux home paths: /home/<name>, with or without a child path
+  private-ip    RFC 1918 IPv4 addresses (10/8, 172.16/12, 192.168/16). Loopback and the RFC 5737 documentation
+                ranges are not RFC 1918 and pass; so does a dotted quad in a version context (`version = "..."`,
+                `==`, `>=`, or right after `<name>-` as in a wheel file name), which is a version, not an address
+  windows-build Windows release or build strings: Windows 10/11 followed by a release or build (a release like
+                21H2, or a five-digit build), and `Version 10.0.<build>` as `ver` and `systeminfo` print it
+  wsl-version   WSL versions (WSL followed by a three-part version) and WSL kernel release strings
 
 The patterns are generic on purpose: this file names no real account, host or address. Matches are
 printed redacted (kind, file, line, first characters only) so a CI log never repeats what it found.
@@ -25,6 +31,7 @@ Exit status: 0 clean, 1 findings, 2 usage or git error.
 from __future__ import annotations
 
 import codecs
+import ipaddress
 import os
 import re
 import subprocess
@@ -36,7 +43,25 @@ PATTERNS = {
     "win-profile": re.compile(r"(?i)(?:\b[A-Z]:[\\/]+|/mnt/[a-z]/)Users[\\/]+(?P<name>[^\\/\s\"'`<>|:*?]+)"),
     # The name ends at "/" or at a quote, space, separator or bracket, or at the end of the line (a bare /home/<name>).
     "home-path": re.compile(r"(?<![\w.~-])/home/(?P<name>[^/\s\"'`<>|:*?,;=()\[\]]+)"),
+    # A dotted quad of 0-255 octets, not inside a longer dotted number; findings() keeps only RFC 1918 addresses.
+    "private-ip": re.compile(r"(?<![\w.])(?P<name>(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))(?!\w|\.\d)"),
+    "windows-build": re.compile(
+        r"(?i)\bWindows[\s_-]*1[01]\b\W{0,3}(?:(?:Pro|Home|Enterprise|Education|IoT|LTSC|N)\W{1,3}){0,2}"
+        r"(?:version\s+|build\s+)?(?:\d{2}H[12]|\d{5}(?:\.\d+)?)\b"
+        r"|\bVersion:?\s+10\.0\.\d{5}\b"
+    ),
+    "wsl-version": re.compile(
+        r"(?i)\bWSL\s*2?\s*(?:version:?\s*)?v?\d+\.\d+\.\d+|\b\d+\.\d+\.\d+(?:\.\d+)?-microsoft-standard\b"
+    ),
 }
+
+# RFC 1918 private networks: 10/8, 172.16/12, 192.168/16 (as integers, so this file holds no dotted quad). Loopback
+# (127/8), link-local and the RFC 5737 documentation ranges are not in them.
+PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(n) for n in ((0x0A000000, 8), (0xAC100000, 12), (0xC0A80000, 16)))
+
+# Text right before a dotted quad that makes it a version: a TOML/YAML version field, a pip specifier, or a
+# "<name>-" prefix as in a wheel or sdist file name (nvidia_curand-10.4.0.35-py3-none-...).
+VERSION_CONTEXT = re.compile(r"""(?i)(?:\bversion\s*[:=]\s*["']?|[=<>~!]=\s*|\w-)$""")
 
 # E-mail addresses that are public by design.
 ALLOWED_EMAILS = re.compile(
@@ -51,8 +76,13 @@ PLACEHOLDER_NAMES = re.compile(
     r"(?i)^(?:x|y|user|username|name|you|me|someone|example|<[^>]*>|\$\{?\w+\}?|%\w+%|\.\.\.|\*|public|default|all users)$"
 )
 
-# Reviewed exceptions, as (tracked path, kind, matched name). Keep this list short and specific.
-ALLOWLIST: set[tuple[str, str, str]] = set()
+# Reviewed exceptions, as (tracked path, kind, matched name, or the whole match for a kind without a name). Keep
+# this list short and specific, with the reason.
+ALLOWLIST: set[tuple[str, str, str]] = {
+    # A version-shaped pin id in DD-0's pin-id validator test (PinIdTests.test_valid_ids): a version, not an address.
+    # Assembled, so this file holds no dotted quad.
+    ("tools/pin/tests/test_pin.py", "private-ip", ".".join(("10", "0", "1", "2"))),
+}
 
 BOMS = (  # UTF-32 first: its little-endian BOM begins with the UTF-16 one
     (codecs.BOM_UTF32_LE, "utf-32-le"),
@@ -117,6 +147,14 @@ def redact(s: str) -> str:
     return s[:4] + "..." if len(s) > 4 else s[:1] + "..."
 
 
+def is_private_address(text: str, before: str) -> bool:
+    """An RFC 1918 address, not a version (VERSION_CONTEXT)."""
+    if VERSION_CONTEXT.search(before):
+        return False
+    addr = ipaddress.ip_address(text)
+    return any(addr in net for net in PRIVATE_NETWORKS)
+
+
 def findings(path: str, text: str):
     for lineno, line in enumerate(text.splitlines(), 1):
         for kind, rx in PATTERNS.items():
@@ -124,8 +162,12 @@ def findings(path: str, text: str):
                 hit = m.group(0)
                 if kind == "email" and (ALLOWED_EMAILS.match(hit) or RESERVED_EMAIL_DOMAIN.search(hit)):
                     continue
+                if kind == "private-ip" and not is_private_address(hit, line[: m.start()]):
+                    continue
                 name = m.groupdict().get("name")
-                if name is not None and (is_placeholder(name) or (path, kind, name) in ALLOWLIST):
+                if kind != "private-ip" and name is not None and is_placeholder(name):
+                    continue
+                if (path, kind, hit if name is None else name) in ALLOWLIST:
                     continue
                 yield lineno, kind, hit
 

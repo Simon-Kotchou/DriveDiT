@@ -24,8 +24,11 @@ tracking. This analysis covers the raw engine path; what it cannot cover is INCO
                  PASS: the selected structure's held-out R2 >= --min-r2 and every identified parameter stable
                  (CV <= --max-cv); FAIL: R2 or a CV out of bounds; INCOMPLETE: too few events or doublets, a
                  parameter that is not resolved
-  prbs_<path>_<v>kmh   the held-out PRBS segment at each spec speed predicted by the bin model of that speed:
-                 R2 >= --min-r2 PASS, below FAIL, no segment or no model INCOMPLETE
+  prbs_<path>_<v>kmh   the held-out PRBS at each spec speed predicted by the bin model of that speed: only a PRBS
+                 that completed its whole sequence (e23_phases.csv prbs_result ok, prbs_bits = prbs_expected, the
+                 segment covering every bit); R2 >= --min-r2 PASS, below FAIL, none or no model INCOMPLETE
+  aborts         a phase that did not end ok (aborted_heading, overspeed, aborted_area, spin, skipped) withholds
+                 every bin and PRBS of its speed (INCOMPLETE), even when the footer is complete
   steer_sign     the kappa plateaus have the command's sign (+1 on 1.8.0.13 and 1.9.0.37)
   INFO           cmd -> kappa per bin (labelled PARTIAL: the command to the realised curvature, not the llc path),
                  the rate limit vs speed, the centering on release, the L/R angle ratio, the script-setter limit
@@ -50,8 +53,9 @@ rate limit covers the whole on-time in more than 1/3 of the events), of tau, R a
 events and inactive in others (tau < dt / ln 100, no rate limit, no relaxation) is unresolved, never stable; the delay
 is stable when constant or its CV <= --max-cv. Without a complete footer every bin, PRBS and steer_sign result is
 withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input bin and the held-out
-PRBS at every bin speed to PASS.
-Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
+PRBS at every bin speed to PASS and no aborted phase at those speeds; its scope is the validated cells only (each bin
+speed +-15% with the largest amplitude fitted there), no gap filling, no extrapolation to standstill.
+Exit codes: 0 the analysis ran (the items carry the verdicts), 1 an input, identity or usage error.
 """
 
 import argparse
@@ -591,17 +595,19 @@ def make_window(steps, first, last, path, channel, scale_rad, baselines, dt):
             "v": max(sc.mean(speeds) or 0.0, 0.1)}
 
 
-def spec_speed_of(kmh):
-    """The spec speed a measured mean speed belongs to (within SPEED_BIN_SHARE), else None"""
-    for speed in SPEC_SPEEDS:
-        if abs(kmh - speed) <= SPEED_BIN_SHARE * speed:
-            return speed
-    return None
+def on_speed(kmh, target):
+    """The planned speed when the measured mean speed is within SPEED_BIN_SHARE of it, else None (bins are keyed
+    by the planned speed of the phase, validated by the measured one; the spec speeds are the CC-08 bins, other
+    planned speeds only widen the input model's validated cells)"""
+    if kmh is None or target is None or target <= 0:
+        return None
+    return round(target, 3) if abs(kmh - target) <= SPEED_BIN_SHARE * target else None
 
 
 def event_windows(steps, events, path, channel, scale_rad, dt):
-    """({(spec speed, |amplitude|): [window]}, {reason: count of events left out}): the ok events, each scored from
-    its onset to its end, binned by the measured mean speed of its scored rows"""
+    """({(planned speed, |amplitude|): [window]}, {reason: count of events left out}): the ok events, each scored
+    from its onset to its end, binned by their phase's planned speed when the measured mean speed of the scored rows
+    is within SPEED_BIN_SHARE of it"""
     by_step = {}
     for idx, step in enumerate(steps):
         number = step.i.get("physics_step")
@@ -631,7 +637,7 @@ def event_windows(steps, events, path, channel, scale_rad, dt):
             drop("no_signal")
             continue
         speed_kmh = sc.mean([s.f.get("speed_kmh") for s in window["rows"] if s.f.get("speed_kmh") is not None])
-        spec = spec_speed_of(speed_kmh) if speed_kmh is not None else None
+        spec = on_speed(speed_kmh, probe_common.to_float(event.get("target_kmh")))
         if spec is None:
             drop("off_speed")
             continue
@@ -643,13 +649,45 @@ def event_windows(steps, events, path, channel, scale_rad, dt):
     return bins, dropped
 
 
-def prbs_windows(steps, path, channel, scale_rad, dt):
-    """{spec speed: window} of the PRBS segments (the measured mean speed within the bin share)"""
+def aborted_speeds(play):
+    """{phase: (planned speed, result)} of the e23 phases that did not end ok"""
+    out = {}
+    targets = {}
+    if play.has("e23_phases.csv"):
+        for row in play.csv("e23_phases", ("phase", "target_kmh")):
+            targets[row.get("phase", "")] = probe_common.to_float(row.get("target_kmh"))
+    for name, result in sc.aborted_phases(play, "e23").items():
+        target = targets.get(name)
+        out[name] = (round(target, 3) if target is not None else None, result)
+    return out
+
+
+def prbs_status(play):
+    """{phase: (bits, expected, bit_steps, result)} from e23_phases.csv (the probe's PRBS completion record)"""
+    out = {}
+    if not play.has("e23_phases.csv"):
+        return out
+    for row in play.csv("e23_phases", ("phase",)):
+        out[row.get("phase", "")] = (probe_common.to_int(row.get("prbs_bits")),
+                                     probe_common.to_int(row.get("prbs_expected")),
+                                     probe_common.to_int(row.get("prbs_bit_steps")), row.get("prbs_result", ""))
+    return out
+
+
+def prbs_windows(steps, path, channel, scale_rad, dt, status):
+    """{planned speed: window} of the PRBS segments that completed their whole sequence: the phase's prbs_result ok
+    with bits == expected, and the segment covering expected x bit_steps engine steps (the measured mean speed within
+    the bin share). An aborted or truncated PRBS is not a held-out set"""
     out = {}
     index = {id(s): i for i, s in enumerate(steps)}
     baselines = run_baselines(steps, path, channel, scale_rad)
     for phase, run, segment, rows in sc.segments(steps):
         if segment != "prbs" or len(rows) < 20:
+            continue
+        bits, expected, bit_steps, result = status.get(phase, (None, None, None, ""))
+        if result != "ok" or not expected or bits != expected or not bit_steps:
+            continue
+        if sum(sc.covered_steps(s, dt) for s in rows) < expected * bit_steps:
             continue
         begin = index.get(id(rows[0]), 0)
         end = index.get(id(rows[-1]), begin)
@@ -657,7 +695,7 @@ def prbs_windows(steps, path, channel, scale_rad, dt):
         if window is None:
             continue
         speed_kmh = sc.mean([s.f.get("speed_kmh") for s in rows if s.f.get("speed_kmh") is not None])
-        spec = spec_speed_of(speed_kmh) if speed_kmh is not None else None
+        spec = on_speed(speed_kmh, rows[-1].f.get("seg_target"))
         if spec is None:
             continue
         amps = [abs(s.f.get("cmd_steer") or 0.0) for s in rows]
@@ -756,7 +794,8 @@ def channel_for(args, play, verdict):
 def prbs_check(results, path, speed, dt, args):
     window = results[(path, "prbs")].get(speed)
     if window is None:
-        return None, "no PRBS segment at %g km/h (measured speed within %d%%)" % (speed, SPEED_BIN_SHARE * 100)
+        return None, "no completed PRBS at %g km/h (e23_phases prbs_result ok with every bit; measured speed within " \
+                     "%d%%)" % (speed, SPEED_BIN_SHARE * 100)
     models = [(abs(amplitude - window["step_size"]), amplitude, results[(path, (speed, amplitude))])
               for amplitude, _ in SPEC_STEPS
               if (path, (speed, amplitude)) in results and results[(path, (speed, amplitude))]["selected"]]
@@ -786,6 +825,10 @@ def analyse(play, args, verdict):
     states = [sc.play_evidence(p, name) for name, p in plays]
     verdict.check("evidence", sc.combine([s for s, _ in states]), "; ".join(d for _, d in states))
     channel, scale_rad = channel_for(args, play, verdict)
+    status = prbs_status(play)
+    aborted = aborted_speeds(play)
+    verdict.info("phases", "not ok (their speeds are withheld): %s" % (
+        ", ".join("%s %s" % (name, result) for name, (speed, result) in sorted(aborted.items())) or "none"))
 
     results = {}
     dropped_all = {}
@@ -800,7 +843,7 @@ def analyse(play, args, verdict):
             for amplitude, _ in SPEC_STEPS:
                 results[(path, (speed, amplitude))] = analyse_bin(bins.get((speed, amplitude), []), dt, args,
                                                                   amplitude)
-        results[(path, "prbs")] = prbs_windows(steps, path, channel, scale_rad, dt)
+        results[(path, "prbs")] = prbs_windows(steps, path, channel, scale_rad, dt, status)
 
     # coverage against the spec grid (the input path's binning; the counts per sign)
     coverage_ok = True
@@ -845,6 +888,11 @@ def analyse(play, args, verdict):
             state, text = prbs_check(results, path, speed, dt, args)
             verdict.check(name, state, text)
             raw_states.append(state)
+    extra = sorted(key for key in input_bins if key[0] not in SPEC_SPEEDS and len(input_bins[key]) >= args.min_events)
+    for key in extra:
+        res = analyse_bin(input_bins[key], dt, args, key[1])
+        verdict.info("input_%gkmh_%g" % key, "outside the CC-08 grid (a validated cell of CC-07 (a)'s input model "
+                                             "only): %s, %s" % (STATE_TEXT[res["state"]], res["detail"]))
     for speed in SPEC_SPEEDS:
         for amplitude, _ in SPEC_STEPS:
             res = results[("kappa", (speed, amplitude))]
@@ -852,6 +900,13 @@ def analyse(play, args, verdict):
                                                                    "path; not gated): %s, %s" % (
                                                                        STATE_TEXT[res["state"]], res["detail"]))
     report_extras(channel, results, verdict)
+    # a run aborted by the motion guards (or a skipped phase) leaves its speed's evidence incomplete even when the
+    # footer is complete
+    for name, (speed, result) in sorted(aborted.items()):
+        if speed is None:
+            continue
+        sc.withhold(verdict, [n for _, n, _ in verdict.items if n.startswith(("input_", "wheel_", "prbs_"))
+                              and ("_%gkmh" % speed) in n], "phase %s ended %s" % (name, result))
     evidence_state = verdict.tag_of("evidence")
     if evidence_state != probe_common.PASS:
         sc.withhold(verdict, [name for _, name, _ in verdict.items if name.startswith(("input_", "wheel_", "prbs_"))]
@@ -885,11 +940,15 @@ def input_model(play, args):
             fitted.append((key, analyse_bin(bins[key], dt, args, key[1])))
     if not fitted:
         return None, None, "e23: no input bin with >= %d events" % args.min_events
+    stopped = sorted("%s %s" % (name, result) for name, (speed, result) in aborted_speeds(play).items()
+                     if speed in set(key[0] for key, _ in fitted))
+    if stopped:
+        return None, None, "e23 phases of the model's speeds did not end ok: %s" % ", ".join(stopped)
     texts = ["%g km/h x %g: %s %s" % (key[0], key[1], STATE_TEXT[res["state"]], res["detail"].split(";")[0])
              for key, res in fitted]
     states = [res["state"] for _, res in fitted]
     results = {("input", key): res for key, res in fitted}
-    results[("input", "prbs")] = prbs_windows(steps, "input", None, None, dt)
+    results[("input", "prbs")] = prbs_windows(steps, "input", None, None, dt, prbs_status(play))
     speeds = sorted(set(key[0] for key, _ in fitted))
     for speed in speeds:
         # the model is claimed at this speed only with a usable, passing held-out PRBS there
@@ -911,20 +970,13 @@ def input_model(play, args):
              "g": sc.median([p.g for p in params]),
              "tau": sc.median([p.tau for p in params]),
              "rate": sc.median([res["rate"] for _, res in fitted]) if structure == "M3" else None}
-    # scope: the amplitudes up to the largest bin; the speeds of the bins (+-SPEED_BIN_SHARE), from 0 km/h only when
-    # the model is the same at every bin speed (one delay, gain / tau / rate CV across the bins <= max_cv) over >= 2
-    # speeds: then it is stated as speed-independent and extrapolated below the lowest bin
-    same = len(speeds) >= 2 and len(set(p.d for p in params)) == 1 and all(
-        (cv(values) or 0.0) <= args.max_cv for values in (
-            [p.g for p in params], [p.tau for p in params],
-            [res["rate"] for _, res in fitted] if structure == "M3" else [1.0, 1.0]))
-    low = 0.0 if same else speeds[0] * (1.0 - SPEED_BIN_SHARE)
-    model["scope"] = {"kmh": (low, speeds[-1] * (1.0 + SPEED_BIN_SHARE)),
-                      "amplitude": max(key[1] for key, _ in fitted),
-                      "text": "%g..%g km/h%s, |cmd| <= %g" % (low, speeds[-1] * (1.0 + SPEED_BIN_SHARE),
-                                                              " (speed-independent across %s km/h, extrapolated below "
-                                                              "%g)" % ("/".join("%g" % v for v in speeds), speeds[0])
-                                                              if same else "", max(key[1] for key, _ in fitted))}
+    # scope: the validated cells only, each bin speed +-SPEED_BIN_SHARE with the largest amplitude fitted at that
+    # speed; no gap filling between speeds and no extrapolation to standstill
+    cells = []
+    for speed in speeds:
+        amp = max(key[1] for key, _ in fitted if key[0] == speed)
+        cells.append((speed * (1.0 - SPEED_BIN_SHARE), speed * (1.0 + SPEED_BIN_SHARE), amp))
+    model["scope"] = {"cells": cells, "text": "; ".join("%g..%g km/h |cmd| <= %g" % cell for cell in cells)}
     return True, model, "%s d %d g %s tau %s s rate %s, from %d e23 input bins with PRBS" % (
         structure, model["d"], sc.fmt(model["g"], 4), sc.fmt(model["tau"], 3), sc.fmt(model["rate"], 4), len(fitted))
 
@@ -1018,8 +1070,9 @@ def main(argv=None):
         raise probe_common.InputError("%s is a %s play, not e23" % (play.dir, play.probe))
     verdict = sc.StrictVerdict("CC-08 steering actuator structure (e23)", play.dir)
     analyse(play, args, verdict)
-    return verdict.report()
+    verdict.report()
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(probe_common.run_cli(main))
+    sys.exit(sc.run_cli(main))

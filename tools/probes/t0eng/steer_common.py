@@ -359,33 +359,6 @@ def path_points(rows):
     return points
 
 
-def local_windows(rows, window_m, step_m):
-    """Sliding windows of window_m path length every step_m: [(|dpsi| / ds 1/m, |mean r| / mean v 1/m, rows in the
-    window)]. The absolute value is taken per window, so a curvature that alternates over more than a window length
-    is not cancelled"""
-    points = path_points(rows)
-    out = []
-    start = 0
-    begin = 0.0
-    while points and begin + window_m <= points[-1][0]:
-        while start < len(points) and points[start][0] < begin:
-            start += 1
-        end = start
-        while end < len(points) and points[end][0] < points[start][0] + window_m:
-            end += 1
-        if end >= len(points) or end <= start:
-            break
-        ds = points[end][0] - points[start][0]
-        dpsi = points[end][1] - points[start][1]
-        rates = [p[2] for p in points[start + 1:end + 1] if p[2] is not None]
-        speeds = [p[3] for p in points[start + 1:end + 1] if p[3] is not None]
-        yaw = abs(mean(rates)) / mean(speeds) if rates and speeds and mean(speeds) > MIN_SPEED_MS else None
-        if ds > 0:
-            out.append((abs(dpsi) / ds, yaw, end - start))
-        begin += step_m
-    return out
-
-
 def decimals(texts):
     """The most decimals of the number strings (the CSV resolution)"""
     best = 0
@@ -395,86 +368,203 @@ def decimals(texts):
     return best
 
 
+def white_sigma(values):
+    """The white-noise sigma of a series from its fourth differences: rms(d4) / sqrt(70) (var(d4) = 70 sigma^2 for
+    white noise). A real smooth signal leaks in as (2 sin(pi / N))^4 of its amplitude for N samples per wavelength:
+    5% at 13 samples (a 4.9 m wave at 40 km/h), against 23% for second differences; below about 6 samples per
+    wavelength the wave is not separable from noise and its floor rises (not resolvable). None for < 15 values"""
+    d4 = [values[k + 2] - 4.0 * values[k + 1] + 6.0 * values[k] - 4.0 * values[k - 1] + values[k - 2]
+          for k in range(2, len(values) - 2)]
+    if len(d4) < 10:
+        return None
+    return math.sqrt(sum(d * d for d in d4) / len(d4) / 70.0)
+
+
 def heading_noise(rows):
-    """(sigma_h rad, quantisation step rad): the per-row heading noise from the data, the rms of the second
-    differences of the unwrapped heading over consecutive rows / sqrt(6) (white noise; a smooth curvature adds
-    almost nothing at one step), at least the quantisation q / sqrt(12) of the CSV's heading decimals"""
+    """(sigma_h rad, quantisation step rad): the per-row heading noise of the unwrapped heading (white_sigma), at
+    least the quantisation q / sqrt(12) of the CSV's heading decimals"""
     points = path_points(rows)
     q = math.radians(10.0 ** -decimals(p[4].raw.get("heading_deg", "") for p in points)) if points else None
-    second = [points[k + 1][1] - 2.0 * points[k][1] + points[k - 1][1] for k in range(1, len(points) - 1)]
-    if len(second) < 10 or q is None:
+    jitter = white_sigma([p[1] for p in points])
+    if jitter is None or q is None:
         return None, q
-    jitter = math.sqrt(sum(d * d for d in second) / len(second) / 6.0)
     return max(jitter, q / math.sqrt(12.0)), q
 
 
 def yaw_noise(rows):
-    """sigma_r rad/s per row: the rms of the first differences of angvel_l_y / sqrt(2), at least the quantisation of
-    its decimals / sqrt(12)"""
+    """sigma_r rad/s per row of angvel_l_y (white_sigma), at least the quantisation of its decimals / sqrt(12)"""
     values = [s.f.get("angvel_l_y") for s in rows if s.f.get("angvel_l_y") is not None]
-    diffs = [values[k] - values[k - 1] for k in range(1, len(values))]
-    if len(diffs) < 10:
+    jitter = white_sigma(values)
+    if jitter is None:
         return None
     q = 10.0 ** -decimals(s.raw.get("angvel_l_y", "") for s in rows)
-    return max(math.sqrt(sum(d * d for d in diffs) / len(diffs) / 2.0), q / math.sqrt(12.0))
+    return max(jitter, q / math.sqrt(12.0))
 
 
-def curvature_stats(rows, window_m, step_m):
-    """The local absolute-curvature statistic of zero-command rows and its noise floor: {'k_p95', 'k_max', 'r_p95',
-    'r_max', 'k_floor', 'r_floor', 'windows', 'sigma_h', 'sigma_r', 'q_h'}. Floors (3 sigma of one window):
-    heading 3 sqrt(2) sigma_h / window_m (the two end headings), yaw 3 rms(yaw statistic - heading statistic)"""
-    windows = local_windows(rows, window_m, step_m)
-    sigma_h, q_h = heading_noise(rows)
-    sigma_r = yaw_noise(rows)
-    out = {"windows": len(windows), "sigma_h": sigma_h, "sigma_r": sigma_r, "q_h": q_h}
-    kappas = [w[0] for w in windows]
-    yaws = [w[1] for w in windows if w[1] is not None]
-    out["k_p95"] = probe_common.percentile(kappas, 95) if kappas else None
-    out["k_max"] = max(kappas) if kappas else None
-    out["r_p95"] = probe_common.percentile(yaws, 95) if yaws else None
-    out["r_max"] = max(yaws) if yaws else None
-    out["k_floor"] = 3.0 * math.sqrt(2.0) * sigma_h / window_m if sigma_h is not None else None
-    # the yaw statistic measures the same curvature from the sampled rate: 3 x the rms of its difference to the
-    # heading statistic on the same windows (the per-row rate jitter integrates away in the heading, so a white-noise
-    # floor from sigma_r would overstate it; e01 1.9.0.37: rms 1e-5..2.5e-5 1/m), at least its quantisation
-    diffs = [w[1] - w[0] for w in windows if w[1] is not None]
-    speeds = [s.f.get("vel_l_z") for s in rows if s.f.get("vel_l_z") is not None]
-    v = mean(speeds)
-    if len(diffs) >= 10 and sigma_r is not None and v:
-        q_r = 10.0 ** -decimals(s.raw.get("angvel_l_y", "") for s in rows)
-        out["r_floor"] = max(3.0 * math.sqrt(sum(d * d for d in diffs) / len(diffs)), q_r / v)
-    else:
-        out["r_floor"] = None
+def step_magnitudes(rows):
+    """Per-step curvature magnitudes, the absolute value taken before any aggregation: [(ds m, |dpsi| / ds 1/m from
+    the heading, |r| / v 1/m from the yaw rate, signed dpsi / ds - r / v)] for consecutive rows with a position,
+    heading, yaw rate and speed (v >= MIN_SPEED_MS)"""
+    points = path_points(rows)
+    out = []
+    for k in range(1, len(points)):
+        ds = points[k][0] - points[k - 1][0]
+        r, v = points[k][2], points[k][3]
+        if ds <= 0.01 or r is None or v is None or v < MIN_SPEED_MS:
+            continue
+        dpsi = points[k][1] - points[k - 1][1]
+        out.append((ds, abs(dpsi) / ds, abs(r) / v, dpsi / ds - r / v))
     return out
 
 
-def drift_estimate(rows, min_half_m):
-    """(drift deg / 100 m, sigma deg / 100 m, detail) of a zero-command segment: the heading change over the path
-    length; sigma = sqrt(noise^2 + split^2) with noise = sqrt(2) sigma_h / length (heading_noise) and split = |d1 -
-    d2| / 2 of the two halves (the repeat variance). (None, None, why) when a half is shorter than min_half_m or the
-    noise cannot be measured"""
+def channel_stats(rows, window_m, step_m):
+    """The flat statistic per channel, from per-step magnitudes averaged (path-weighted) over sliding windows of
+    window_m every step_m, so a curvature of any wavelength keeps its magnitude: {'heading': {...}, 'yaw': {...},
+    'offset': the mean signed heading-minus-yaw curvature (a systematic disagreement, reported, never noise),
+    'windows'}. Each channel: p95, max and its own noise floor = the noise-only window statistic mu + 3 s from its
+    own measured noise (heading: per-step dpsi noise sqrt(2) sigma_h, steer_common.heading_noise; yaw: sigma_r,
+    yaw_noise): mu = E|noise| / step (sqrt(2 / pi) sigma), s = its window fluctuation (x 2 for the correlation of
+    neighbouring heading steps)"""
+    steps = step_magnitudes(rows)
+    sigma_h, q_h = heading_noise(rows)
+    sigma_r = yaw_noise(rows)
+    out = {"windows": 0, "offset": mean([st[3] for st in steps]) if steps else None, "sigma_h": sigma_h,
+           "sigma_r": sigma_r, "q_h": q_h}
+    starts = []
+    s_pos = 0.0
+    positions = []
+    for ds, _, _, _ in steps:
+        positions.append(s_pos)
+        s_pos += ds
+    heading_w, yaw_w, counts = [], [], []
+    begin = 0.0
+    a = 0
+    while steps and begin + window_m <= s_pos:
+        while a < len(steps) and positions[a] < begin:
+            a += 1
+        b = a
+        length = 0.0
+        while b < len(steps) and length < window_m:
+            length += steps[b][0]
+            b += 1
+        if length < window_m or b <= a:
+            break
+        chunk = steps[a:b]
+        heading_w.append(sum(st[0] * st[1] for st in chunk) / length)
+        yaw_w.append(sum(st[0] * st[2] for st in chunk) / length)
+        counts.append(len(chunk))
+        starts.append(begin)
+        begin += step_m
+    out["windows"] = len(heading_w)
+    n = mean(counts) if counts else None
+    mean_ds = mean([st[0] for st in steps]) if steps else None
+    speeds = [st for st in (s.f.get("vel_l_z") for s in rows) if st is not None and st >= MIN_SPEED_MS]
+    v = mean(speeds)
+    for name, values, sigma, scale, corr in (("heading", heading_w, math.sqrt(2.0) * sigma_h if sigma_h else None,
+                                              mean_ds, 2.0),
+                                             ("yaw", yaw_w, sigma_r, v, 1.0)):
+        ch = {"p95": probe_common.percentile(values, 95) if values else None, "max": max(values) if values else None,
+              "floor": None, "mu": None}
+        if sigma is not None and scale and n:
+            mu = sigma * math.sqrt(2.0 / math.pi) / scale
+            spread = sigma * math.sqrt(corr * (1.0 - 2.0 / math.pi) / n) / scale
+            ch["mu"] = mu
+            ch["floor"] = mu + 3.0 * spread
+        out[name] = ch
+    return out
+
+
+def end_estimate(points, start, end):
+    """The heading at the middle of points[start:end] from a least-squares line in s, and its standard error from
+    the residuals with the lag-1 correlation (effective sample size n (1 - rho) / (1 + rho)): (psi, sigma, s)"""
+    chunk = points[start:end]
+    n = len(chunk)
+    if n < 5:
+        return None, None, None
+    s_mid = sum(p[0] for p in chunk) / n
+    p_mid = sum(p[1] for p in chunk) / n
+    sxx = sum((p[0] - s_mid) ** 2 for p in chunk)
+    slope = sum((p[0] - s_mid) * (p[1] - p_mid) for p in chunk) / sxx if sxx > 0 else 0.0
+    residuals = [p[1] - (p_mid + slope * (p[0] - s_mid)) for p in chunk]
+    var = sum(r * r for r in residuals) / max(1, n - 2)
+    rho = 0.0
+    if var > 0:
+        rho = sum(residuals[k] * residuals[k - 1] for k in range(1, n)) / ((n - 1) * var)
+        rho = max(-0.9, min(0.95, rho))
+    n_eff = max(1.0, n * (1.0 - rho) / (1.0 + rho))
+    return p_mid, math.sqrt(var / n_eff), s_mid
+
+
+def drift_estimate(rows, end_m):
+    """The heading drift of a zero-command segment from measurement noise only: (drift deg / 100 m, sigma deg /
+    100 m, nonstationary, detail). The headings at the start, the middle and the end come from line fits over
+    end_m of path (their standard errors from the residuals, corrected for their lag-1 correlation, at least the
+    heading quantisation); drift = (end - start) / length. nonstationary when the two halves differ by more than 3
+    sigma of their difference: within-run variation is unresolved evidence, never extra tolerance. (None, None,
+    None, why) without the rows. Repeated paired runs on the same strip are the proper uncertainty source for (c);
+    e21_selfsteer --use-repeats uses them when a session has them"""
     points = path_points(rows)
-    if len(points) < 4:
-        return None, None, "too few rows"
-    length = points[-1][0] - points[0][0]
-    if length < 2 * min_half_m:
-        return None, None, "%s m (< 2 x %g m halves)" % (fmt(length, 4), min_half_m)
-    mid = next(k for k, p in enumerate(points) if p[0] - points[0][0] >= length / 2.0)
+    if len(points) < 20:
+        return None, None, None, "too few rows"
+    total = points[-1][0] - points[0][0]
+    if total < 4 * end_m:
+        return None, None, None, "%s m (< 4 x %g m)" % (fmt(total, 4), end_m)
+    _, q = heading_noise(rows)
+    floor = (q or 0.0) / math.sqrt(12.0)
+
+    def at(centre):
+        lo = next(k for k, p in enumerate(points) if p[0] >= centre - end_m / 2.0)
+        hi = next((k for k, p in enumerate(points) if p[0] > centre + end_m / 2.0), len(points))
+        psi, sigma, s_at = end_estimate(points, lo, hi)
+        return psi, max(sigma or 0.0, floor), s_at
+
+    s0 = points[0][0]
+    a_psi, a_sig, a_s = at(s0 + end_m / 2.0)
+    m_psi, m_sig, m_s = at(s0 + total / 2.0)
+    e_psi, e_sig, e_s = at(points[-1][0] - end_m / 2.0)
+    if None in (a_psi, m_psi, e_psi):
+        return None, None, None, "the end fits failed"
     scale = math.degrees(1.0) * 100.0
+    length = e_s - a_s
+    drift = (e_psi - a_psi) / length * scale
+    sigma = math.sqrt(a_sig ** 2 + e_sig ** 2) / length * scale
+    d1 = (m_psi - a_psi) / (m_s - a_s) * scale
+    d2 = (e_psi - m_psi) / (e_s - m_s) * scale
+    sigma_diff = math.sqrt(a_sig ** 2 + 4.0 * m_sig ** 2 + e_sig ** 2) / (length / 2.0) * scale
+    nonstationary = abs(d1 - d2) > 3.0 * sigma_diff
+    return drift, sigma, nonstationary, "halves %s / %s (3 sigma %s), noise sigma %s deg/100 m" % (
+        fmt(d1, 3), fmt(d2, 3), fmt(3.0 * sigma_diff, 3), fmt(sigma, 3))
 
-    def rate(a, b):
-        return (points[b][1] - points[a][1]) / (points[b][0] - points[a][0]) * scale
 
-    drift = rate(0, len(points) - 1)
-    d1, d2 = rate(0, mid), rate(mid, len(points) - 1)
-    sigma_h, _ = heading_noise(rows)
-    if sigma_h is None:
-        return None, None, "the heading noise cannot be measured"
-    noise = math.sqrt(2.0) * sigma_h / length * scale
-    split = abs(d1 - d2) / 2.0
-    sigma = math.sqrt(noise * noise + split * split)
-    return drift, sigma, "halves %s / %s, noise %s, split %s deg/100 m" % (fmt(d1, 3), fmt(d2, 3), fmt(noise, 3),
-                                                                            fmt(split, 3))
+def margin_test(current, sigma_current, baseline, sigma_baseline, z=1.96):
+    """CC-07 (c): |current| <= 1.1 |baseline| tested with a confidence interval of the difference: True when its
+    upper bound is <= 0, False when its lower bound is > 0, None in between; (state, difference, half width)"""
+    diff = abs(current) - 1.1 * abs(baseline)
+    half = z * math.sqrt(sigma_current ** 2 + (1.1 * sigma_baseline) ** 2)
+    if diff + half <= 0:
+        return True, diff, half
+    if diff - half > 0:
+        return False, diff, half
+    return None, diff, half
+
+
+def aborted_phases(play, probe):
+    """{phase: result} of the phases that did not end ok (an abort ends a run but the probe can still finish with
+    a complete footer, so the dependent evidence must look here)"""
+    return {name: result for name, result in phase_results(play, probe).items() if result != "ok"}
+
+
+def run_cli(main, argv=None):
+    """The steering analyses' exit codes: 0 the analysis ran (whatever the items say: the Mode A / B decision is a
+    manual review), 1 an input or identity error or a usage error"""
+    try:
+        main(argv)
+    except probe_common.InputError as error:
+        print("input error: %s" % error)
+        return 1
+    except SystemExit as stop:
+        return 0 if stop.code in (0, None) else 1
+    return 0
 
 
 def phase_rows_complete(steps, play, probe, expect_call):

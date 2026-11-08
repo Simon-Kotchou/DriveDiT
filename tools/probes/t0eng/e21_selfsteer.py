@@ -4,14 +4,16 @@
     python3 -I -B tools/probes/t0eng/e21_selfsteer.py <e21 play_dir> --e22 <e22 play_dir> [--e23 <e23 play_dir>]
                   [--baseline <1.8 e21 play_dir>] [--signal-scale-deg 33.75] [--max-step0-error 0.05]
                   [--max-lag-steps 1] [--max-unmeasurable 0.2] [--readback-tol 1e-3] [--max-kappa 1e-4]
-                  [--bias-tol 2e-4] [--angle-tol-deg 0.25] [--angle-tol-share 0.05]
+                  [--bias-tol 2e-4] [--use-repeats] [--angle-tol-deg 0.25] [--angle-tol-share 0.05]
 
 Plays are $profile:DC_Probes/<probe>/<launch_id>/play_NN directories (DC_ProbeSelfSteer, DC_ProbeSteerLoad,
 DC_ProbeSteerSteps). Nothing is written. The analysis decides Mode A against Mode B, so every item is PASS, FAIL or
 INCOMPLETE (steer_common: missing, interrupted or partial evidence is INCOMPLETE, never PASS; an item with a missing
 part is INCOMPLETE even when another part failed, the failure kept as "[observed FAIL ...]"; a production mode is
-printed only when every item is complete). An item that depends on a supplied play without a complete footer (e23
-included) is withheld as INCOMPLETE with its observed tag. The plays must carry the same build, pin, prefab, map and addon
+There is no automated Mode A / B decision: mode_decision always reads "none (manual review: G19 admission record)"
+and lists every item with its verdict and completeness; the coordinator and the user decide from that evidence
+once the 1.8 baseline exists. An item that depends on a supplied play without a complete footer (e23 included), or
+on a phase that did not end ok, is withheld as INCOMPLETE with its observed tag. The plays must carry the same build, pin, prefab, map and addon
 identity (else input error); a --baseline must be a complete 1.8 play of the same prefab and map. The mandated
 conditions are encoded here (FLAT_SPEEDS, CROSS_SPEEDS, ALAT_TARGETS, BRAKE_DECEL), not read from the run.
 MIGRATION_1_9.md 6.1 CC-07, item by item:
@@ -30,34 +32,40 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  there (each phase's physics_step start..end, one row per dispatched step) with steer_call 1 and a
                  finite command and readback, else INCOMPLETE; then |input_post_steer - cmd_steer| <= --readback-tol.
                  A deviation is explained only by the CC-08 cmd -> steer_input model of e23 (input_model: every input
-                 bin and the held-out PRBS at every bin speed PASS, one structure), inside its scope (the bin speeds,
-                 or from 0 km/h when the model is the same at every bin speed; |cmd| up to the largest bin), when both
+                 bin and the completed held-out PRBS at every bin speed PASS, one structure), inside its validated
+                 cells (each bin speed +-15% with the largest amplitude fitted there; no gaps filled, no standstill
+                 extrapolation), when both
                  its one-step prediction from the previous measured input and its free-running prediction from the
                  block's first settled row are within --readback-tol, and the free-running residual's mean over every
                  1 s stays within --bias-tol (a persistent offset). No e23 model, a deviation outside the scope or
                  without a predecessor -> INCOMPLETE; an unexplained deviation or bias -> FAIL
   b_flat         flat_20 and flat_40 (assistance FULL), phase ok, the measure segment >= 200 m at the speed (mean
-                 within 10%): the local absolute curvature |dpsi| / ds and |mean r| / v over every 5 m of path (1 m
-                 steps; WINDOW_M below) has p95 <= --max-kappa (1e-4 1/m) and max <= the bound + the noise floor. The
-                 floors are measured from the data (steer_common.curvature_stats: 3 sqrt(2) sigma_h / 5 m from the
-                 per-row heading noise, 3 x rms(yaw - heading statistic)); a floor above the bound is INCOMPLETE (not
-                 resolvable). Over the bound with a valid 1.8 baseline: the allowance max(1e-4, 1.5 x the baseline's
-                 p95); without one: INCOMPLETE. INFO the net drift, the no-call segment, flat_<v>_none (NONE)
+                 within 10%), per channel: the per-step magnitudes |dpsi_i| / ds_i (heading) and |r_i| / v_i (yaw),
+                 absolute BEFORE any aggregation, averaged over every 5 m of path (1 m steps), so no wavelength
+                 cancels. Each channel against its own noise floor (steer_common.channel_stats: the noise-only window
+                 statistic + 3 of its spread, from that channel's measured noise): PASS when every window is <= the
+                 bound (the statistic overestimates the magnitude), FAIL when the p95 exceeds bound + floor, else
+                 INCOMPLETE; a floor above the bound is INCOMPLETE (not resolvable); a systematic heading-yaw offset
+                 is reported, never noise. Bound --max-kappa (1e-4 1/m), or with a valid, resolvable 1.8 baseline
+                 max(1e-4, 1.5 x its p95); over 1e-4 without one: INCOMPLETE. INFO net drift, no-call, NONE
   c_cross        site.cross.found, its zone >= 5% cross-slope; cross_20 and cross_40 (phase ok, >= 100 m at the
-                 speed): |heading drift per 100 m| <= max(1.1 x |b|, |b| + 2 sigma) against a valid 1.8 baseline b
-                 that drove the same surveyed strip (site.cross.reuse: start within 1 m, heading within 0.5 deg, the
-                 same length and zone, the centre tyre-pair heights within 5 cm, assistance FULL); sigma =
-                 sqrt(sigma_now^2 + sigma_baseline^2), each from the heading noise and the two halves of the segment
-                 (steer_common.drift_estimate); no baseline (P1 has no Mode B reference) or no sigma -> INCOMPLETE.
-                 INFO the wheel-angle deviation from the flat zero command
+                 speed, assistance FULL on every measure row): |drift| <= 1.1 |b| tested with a 95% interval of the
+                 difference (steer_common.margin_test): PASS when its upper bound is <= 0, FAIL when its lower bound
+                 is > 0, else INCOMPLETE. b: a valid 1.8 baseline that drove the same surveyed strip
+                 (site.cross.reuse: start within 1 m, heading within 0.5 deg, the same length and zone, the centre
+                 tyre-pair heights within 5 cm, assistance FULL). sigma from measurement noise only
+                 (steer_common.drift_estimate: line fits over 5 m at the ends, their residuals with the lag-1
+                 correlation, at least the quantisation); halves that differ beyond 3 sigma are unresolved
+                 (INCOMPLETE), never extra tolerance. Repeated paired runs on the same strip are the proper
+                 uncertainty source: --use-repeats takes their spread when a session has them. No baseline (P1 has
+                 no Mode B reference) -> INCOMPLETE. INFO the wheel-angle deviation from the flat zero command
   d_load         e22 load phases with both command signs, phase ok: delta_eff,ref = the median over the steady ref
                  rows (low slip); every mandated a_lat level (the steady rows of the level whose median |v r| is
                  within 0.3 m/s2 of 2.0 / 2.75 / 3.5, >= 1 s) and the brake segment (steady rows, median decel
                  within 0.75 m/s2 of 3.0, >= 0.5 s): p95 |delta_eff - delta_eff,ref| <= max(--angle-tol-deg,
                  --angle-tol-share x |delta_eff,ref|); needs the step-0 channel
-  mode_decision  only when every item is decided: all PASS -> Mode A stays the production default; a FAIL in a..d ->
-                 Mode B (CC-14) becomes the production candidate; otherwise no decision, with the reasons
-Exit codes: 0 PASS, 1 FAIL, 3 INCOMPLETE, 2 usage or input error.
+  mode_decision  always "none (manual review: G19 admission record)" with every item's verdict and completeness
+Exit codes: 0 the analysis ran (the items carry the verdicts), 1 an input, identity or usage error.
 """
 
 import argparse
@@ -105,7 +113,7 @@ MIN_WINDOWS = 20
 SITE_MATCH_M = 1.0
 SITE_MATCH_DEG = 0.5
 PROFILE_MATCH_M = 0.05
-DRIFT_MIN_HALF_M = 25.0
+DRIFT_END_M = 5.0
 # (a) model exception: the free-running prediction's mean over any 1 s window
 BIAS_WINDOW_S = 1.0
 ASSIST_FULL = 2
@@ -184,6 +192,8 @@ def step0_selection(load_play, args, extra_play=None):
             continue
         if LOW_SLIP_KMH[0] <= v <= LOW_SLIP_KMH[1] and abs(s.a_lat) <= LOW_SLIP_ALAT and abs(s.kappa) >= KAPPA_FLOOR:
             low.append(s)
+    aborted = {name: result for name, result in sc.aborted_phases(load_play, "e22").items()
+               if name.startswith("stair_")}
     changes = [(0, k, SETTLE_TO, dt) for k in transitions(steps, ("stair",))]
     if extra_steps and extra_dt:
         changes += [(1, k, 12, extra_dt) for k in transitions(extra_steps, ("train",))]
@@ -240,14 +250,17 @@ def step0_selection(load_play, args, extra_play=None):
         if state is True and result["selected"] is None:
             result["selected"] = key
             result["scale_rad"] = scale if key == "sig" else None
-    if result["selected"] is not None:
+    if aborted:
+        result["state"] = None
+    elif result["selected"] is not None:
         result["state"] = True
     elif any(s is None for s in states):
         result["state"] = None
     else:
         result["state"] = False
-    result["detail"] = "L %s m, %d low-slip rows, %d command changes; %s; selected %s" % (
-        sc.fmt(wheelbase, 4), len(low), len(changes), "; ".join(parts), result["selected"] or "none")
+    result["detail"] = "L %s m, %d low-slip rows, %d command changes; %s; selected %s%s" % (
+        sc.fmt(wheelbase, 4), len(low), len(changes), "; ".join(parts), result["selected"] or "none",
+        "; stair phases not ok: " + ", ".join("%s %s" % kv for kv in sorted(aborted.items())) if aborted else "")
     return result
 
 
@@ -315,22 +328,41 @@ def drive_phase(steps, results, name, target_kmh, min_m, segment="measure"):
     return lead, None
 
 
-def flat_statistic(rows, bound):
-    """(state, p95, max, text) of the local absolute curvature against bound: None when it is not resolvable (a
-    floor above the bound) or too short; True when p95 <= bound and max <= bound + floor; else False"""
-    st = sc.curvature_stats(rows, WINDOW_M, WINDOW_STEP_M)
-    p95 = max(v for v in (st["k_p95"], st["r_p95"], 0.0) if v is not None)
-    top = max(v for v in (st["k_max"], st["r_max"], 0.0) if v is not None)
-    floor = max(v for v in (st["k_floor"], st["r_floor"], 0.0) if v is not None)
-    text = "%d windows of %g m: |dpsi|/ds p95 %s max %s, |r|/v p95 %s max %s 1/m; noise floors %s / %s 1/m (sigma_h %s " \
-           "rad, q %s rad)" % (st["windows"], WINDOW_M, sc.fmt(st["k_p95"], 3), sc.fmt(st["k_max"], 3), sc.fmt(st["r_p95"], 3),
-                              sc.fmt(st["r_max"], 3), sc.fmt(st["k_floor"], 3), sc.fmt(st["r_floor"], 3),
-                              sc.fmt(st["sigma_h"], 3), sc.fmt(st["q_h"], 2))
-    if st["windows"] < MIN_WINDOWS or st["k_floor"] is None or st["r_floor"] is None:
-        return None, p95, top, text + ": too short or the noise cannot be measured"
-    if floor > bound:
-        return None, p95, top, text + ": not resolvable (a floor above %s)" % sc.fmt(bound, 3)
-    return p95 <= bound and top <= bound + floor, p95, top, text
+def flat_channels(rows):
+    return sc.channel_stats(rows, WINDOW_M, WINDOW_STEP_M)
+
+
+def channel_state(ch, bound):
+    """One channel against bound with its own floor: None when the floor is unknown or above the bound (not
+    resolvable); True when every window's statistic (an upward-biased estimate of the magnitude) is <= bound; False
+    when the p95 exceeds bound + the floor (more than the noise could add); else None"""
+    if ch["floor"] is None or ch["p95"] is None:
+        return None
+    if ch["floor"] > bound:
+        return None
+    if ch["max"] <= bound:
+        return True
+    if ch["p95"] > bound + ch["floor"]:
+        return False
+    return None
+
+
+def flat_state(st, bound):
+    """Both channels, each against its own floor (one channel's floor never excuses the other's excess)"""
+    if st["windows"] < MIN_WINDOWS:
+        return None
+    return sc.combine([channel_state(st["heading"], bound), channel_state(st["yaw"], bound)])
+
+
+def flat_text(st):
+    parts = []
+    for name in ("heading", "yaw"):
+        ch = st[name]
+        parts.append("%s p95 %s max %s floor %s" % (name, sc.fmt(ch["p95"], 3), sc.fmt(ch["max"], 3),
+                                                     sc.fmt(ch["floor"], 3)))
+    return "%d windows of %g m: %s 1/m; systematic heading - yaw offset %s 1/m (sigma_h %s rad, sigma_r %s rad/s)" % (
+        st["windows"], WINDOW_M, "; ".join(parts), sc.fmt(st["offset"], 3), sc.fmt(st["sigma_h"], 3),
+        sc.fmt(st["sigma_r"], 3))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -362,10 +394,13 @@ def called(step):
 
 
 def in_scope(step, scope):
+    """Inside one of the model's validated (speed interval, largest |command|) cells: no gap filling, no
+    extrapolation"""
     v = step.f.get("speed_kmh")
     cmd = step.f.get("cmd_steer")
-    return v is not None and cmd is not None and scope["kmh"][0] <= v <= scope["kmh"][1] and \
-        abs(cmd) <= scope["amplitude"] + 1e-9
+    if v is None or cmd is None:
+        return False
+    return any(lo <= v <= hi and abs(cmd) <= amp + 1e-9 for lo, hi, amp in scope["cells"])
 
 
 def model_residuals(model, scope, steps, dt, tol, bias_tol):
@@ -382,7 +417,7 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol):
         u_e.extend([s.f.get("cmd_steer") or 0.0] * sc.covered_steps(s, dt))
         ends.append(len(u_e))
     out = {"one_step": 0.0, "free": 0.0, "bias": 0.0, "accumulated": 0.0, "unexplained": 0, "outside": 0,
-           "no_state": 0, "bias_windows": 0, "rows": 0}
+           "no_state": 0, "bias_windows": 0, "rows": 0, "missing": 0}
     k = 0
     while k < len(steps):
         s = steps[k]
@@ -399,21 +434,28 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol):
             row = steps[idx]
             cmd, post = row.f.get("cmd_steer"), row.f.get("input_post_steer")
             out["rows"] += 1
+            if cmd is None or post is None or not math.isfinite(cmd) or not math.isfinite(post):
+                # a missing value (already INCOMPLETE by the row check): the model state is not known past it
+                free_y = None
+                out["missing"] += 1
+                continue
             deviates = abs(post - cmd) > tol
             if deviates and not in_scope(row, scope):
                 out["outside"] += 1
             one = None
             if idx > k:
                 prev = steps[idx - 1].f.get("input_post_steer")
-                if prev is not None and math.isfinite(prev):
+                if prev is not None and math.isfinite(prev) and steps[idx - 1].f.get("cmd_steer") is not None:
                     one = abs(post - model_step(model, prev, u_e, ends[idx - 1], ends[idx] - ends[idx - 1], dt))
-                    out["one_step"] = max(out["one_step"], one)
+                    if deviates:
+                        out["one_step"] = max(out["one_step"], one)
             free = None
             if free_y is not None:
                 free_y = model_step(model, free_y, u_e, ends[idx - 1], ends[idx] - ends[idx - 1], dt)
                 r = post - free_y
                 free = abs(r)
-                out["free"] = max(out["free"], free)
+                if deviates:
+                    out["free"] = max(out["free"], free)
                 residuals.append((r, row.f.get("timeslice_s") or dt))
             elif not deviates:
                 free_y = post
@@ -496,7 +538,8 @@ def check_readback(sets, verdict, args, e23_play):
                 for key in merged:
                     merged[key] = max(merged[key], res[key]) if isinstance(merged[key], float) else \
                         merged[key] + res[key]
-            parts.append("model residuals: one-step max %s, free-running max %s, 1 s mean max %s (<= %g, %d windows "
+            parts.append("model residuals on the deviating rows: one-step max %s, free-running max %s; on every row: 1 "
+                         "s mean max %s (<= %g, %d windows "
                          "over), accumulated max %s s; %d deviating rows not explained, %d outside the scope (%s), %d "
                          "without a predecessor or settled start" % (
                              sc.fmt(merged["one_step"], 3), sc.fmt(merged["free"], 3), sc.fmt(merged["bias"], 3),
@@ -539,7 +582,8 @@ def check_flat(steps, results, verdict, args, baseline):
             parts.append("%s: assistance not FULL on every measure row" % name)
             continue
         kappa, distance, turn = sc.path_curvature(rows)
-        state, p95, top, text = flat_statistic(rows, args.max_kappa)
+        st = flat_channels(rows)
+        state = flat_state(st, args.max_kappa)
         allowance = None
         base_text = "no baseline"
         if baseline is not None:
@@ -547,35 +591,36 @@ def check_flat(steps, results, verdict, args, baseline):
             if base_rows is None:
                 base_text = "baseline not usable: " + base_why
             else:
-                base_state, base_p95, _, base_stat = flat_statistic(base_rows, args.max_kappa)
-                if base_state is None:
-                    base_text = "baseline not usable: " + base_stat
+                base = flat_channels(base_rows)
+                resolvable = base["windows"] >= MIN_WINDOWS and all(
+                    base[c]["floor"] is not None and base[c]["floor"] <= args.max_kappa for c in ("heading", "yaw"))
+                if not resolvable:
+                    base_text = "baseline not usable (not resolvable): " + flat_text(base)
                 else:
+                    base_p95 = max(base["heading"]["p95"], base["yaw"]["p95"])
                     allowance = max(args.max_kappa, 1.5 * base_p95)
-                    base_text = "1.8 baseline p95 %s 1/m -> allowance %s" % (sc.fmt(base_p95, 3), sc.fmt(allowance, 3))
-        if state is False:
-            if allowance is None:
-                state = None
-            else:
-                state, _, _, _ = flat_statistic(rows, allowance)
+                    base_text = "1.8 baseline p95 %s 1/m -> allowance %s" % (sc.fmt(base_p95, 3),
+                                                                             sc.fmt(allowance, 3))
+        if state is not True:
+            state = flat_state(st, allowance) if allowance is not None else None
         states.append(state)
         parts.append("%s: %s (bound %g; %s) -> %s; net %s 1/m over %s m (turn %s deg)" % (
-            name, text, args.max_kappa, base_text, STATE_TEXT[state], sc.fmt(kappa, 3), sc.fmt(distance, 4),
-            sc.fmt(turn, 3)))
+            name, flat_text(st), args.max_kappa, base_text, STATE_TEXT[state], sc.fmt(kappa, 3),
+            sc.fmt(distance, 4), sc.fmt(turn, 3)))
         nocall = with_lead(steps, phase_segment(steps, name, "nocall"))
         nk, nd, _ = sc.path_curvature(nocall)
-        _, n95, _, _ = flat_statistic(nocall, args.max_kappa)
-        verdict.info("b_nocall_%d" % speed, "no-call segment: p95 %s 1/m, net %s 1/m over %s m" % (
-            sc.fmt(n95, 3), sc.fmt(nk, 3), sc.fmt(nd, 4)))
+        verdict.info("b_nocall_%d" % speed, "no-call segment: %s; net %s 1/m over %s m" % (
+            flat_text(flat_channels(nocall)), sc.fmt(nk, 3), sc.fmt(nd, 4)))
         none_name = name + "_none"
         none_rows, none_why = drive_phase(steps, results, none_name, speed, 50.0)
         if none_rows is None:
             verdict.info("b_" + none_name, none_why)
         else:
             mode = sc.median([s.i.get("assist_mode") for s in none_rows[1:] if s.i.get("assist_mode") is not None])
-            none_state, none_p95, _, _ = flat_statistic(none_rows, args.max_kappa)
-            verdict.info("b_" + none_name, "assistance %s (NONE = %d): p95 %s 1/m (%s against the %g bound)" % (
-                sc.fmt(mode, 2), ASSIST_NONE, sc.fmt(none_p95, 3), STATE_TEXT[none_state], args.max_kappa))
+            none_st = flat_channels(none_rows)
+            verdict.info("b_" + none_name, "assistance %s (NONE = %d): %s (%s against the %g bound)" % (
+                sc.fmt(mode, 2), ASSIST_NONE, flat_text(none_st), STATE_TEXT[flat_state(none_st, args.max_kappa)],
+                args.max_kappa))
     state = sc.combine(states)
     verdict.check("b_flat", state, "; ".join(parts) + sc.observed(states))
     return state
@@ -646,11 +691,17 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
             states.append(None)
             parts.append(why)
             continue
-        drift, sigma, how = sc.drift_estimate(rows, DRIFT_MIN_HALF_M)
+        if any(s.i.get("assist_mode") != ASSIST_FULL for s in rows[1:]):
+            states.append(None)
+            parts.append("%s: assistance not FULL on every measure row" % name)
+            continue
+        drift, sigma, moving, how = drift_of(steps, name, rows, args)
         state = None
         base_text = "no 1.8 baseline (P1 has no Mode B reference)"
         if drift is None:
-            base_text = "the drift uncertainty cannot be estimated: " + how
+            base_text = "the drift cannot be estimated: " + how
+        elif moving:
+            base_text = "unresolved: the two halves differ beyond their noise (%s)" % how
         elif base_site is not None and base_site[0] is not True:
             base_text = "baseline not usable: " + base_site[1]
         elif base_site is not None:
@@ -660,16 +711,16 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
             if base_rows is None:
                 base_text = "baseline not usable: " + base_why
             else:
-                base_drift, base_sigma, base_how = sc.drift_estimate(base_rows, DRIFT_MIN_HALF_M)
+                base_drift, base_sigma, base_moving, base_how = drift_of(baseline["steps"], name, base_rows, args)
                 if base_drift is None:
-                    base_text = "baseline drift uncertainty cannot be estimated: " + base_how
+                    base_text = "baseline drift cannot be estimated: " + base_how
+                elif base_moving:
+                    base_text = "baseline unresolved: its halves differ beyond their noise (%s)" % base_how
                 else:
-                    sigma_all = math.sqrt(sigma * sigma + base_sigma * base_sigma)
-                    bound = max(1.1 * abs(base_drift), abs(base_drift) + 2.0 * sigma_all)
-                    state = abs(drift) <= bound
-                    base_text = "1.8 baseline %s +- %s deg/100 m (%s; %s) -> tolerance max(1.1 x, + 2 sigma %s) = %s" % (
-                        sc.fmt(base_drift, 3), sc.fmt(base_sigma, 3), base_site[1], base_how, sc.fmt(sigma_all, 3),
-                        sc.fmt(bound, 3))
+                    state, diff, half = sc.margin_test(drift, sigma, base_drift, base_sigma)
+                    base_text = "1.8 baseline %s +- %s deg/100 m (%s; %s): |now| - 1.1 |baseline| = %s +- %s (95%%)" % (
+                        sc.fmt(base_drift, 3), sc.fmt(base_sigma, 3), base_site[1], base_how, sc.fmt(diff, 3),
+                        sc.fmt(half, 3))
         states.append(state)
         text = "%s: heading drift %s +- %s deg/100 m (%s) (%s) -> %s" % (
             name, sc.fmt(drift, 3), sc.fmt(sigma, 3), how, base_text, STATE_TEXT[state])
@@ -685,6 +736,22 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
     state = sc.combine(states)
     verdict.check("c_cross", state, "; ".join(parts) + "; " + detail_site + sc.observed(states))
     return state
+
+
+def drift_of(steps, name, rows, args):
+    """sc.drift_estimate of the measure rows; with --use-repeats and >= 2 complete measure runs of the phase, sigma
+    is at least the spread of the runs' drifts / sqrt(n) (repeated paired runs: the proper uncertainty source)"""
+    drift, sigma, moving, how = sc.drift_estimate(rows, DRIFT_END_M)
+    if drift is None or not args.use_repeats:
+        return drift, sigma, moving, how
+    runs = [with_lead(steps, block) for p, run, seg, block in sc.segments(steps) if p == name and seg == "measure"]
+    drifts = [sc.drift_estimate(block, DRIFT_END_M)[0] for block in runs]
+    drifts = [d for d in drifts if d is not None]
+    if len(drifts) >= 2:
+        repeat = sc.stdev(drifts) / math.sqrt(len(drifts))
+        sigma = max(sigma, repeat)
+        how += "; %d repeated runs, spread / sqrt(n) %s" % (len(drifts), sc.fmt(repeat, 3))
+    return drift, sigma, moving, how
 
 
 def steady(rows):
@@ -799,25 +866,18 @@ def open_play(path, probe):
 
 
 def decide(verdict):
-    """The mode decision: printed only when every item is complete (PASS or FAIL); a FAIL observed inside an
-    incomplete item is listed, never decided on"""
+    """No automated Mode A / B decision (coordinator decision, DD-14b round 3): the item verdicts, their metrics and
+    their completeness are the evidence for the manual G19 admission review"""
     items = ("evidence", "step0_channel", "a_readback", "b_flat", "c_cross", "d_load")
-    tags = {name: verdict.tag_of(name) for name in items}
-    open_items = [n for n in items if tags[n] not in (probe_common.PASS, probe_common.FAIL)]
-    failed = [n for n in items[2:] if tags[n] == probe_common.FAIL]
-    seen = [name for tag, name, detail in verdict.items if name in items and tag == probe_common.INCOMPLETE
-            and "[observed FAIL" in detail]
-    if all(tags[n] == probe_common.PASS for n in items):
-        verdict.info("mode_decision", "CC-07 PASS on this build: Mode A stays the production default")
-    elif not open_items and failed:
-        verdict.info("mode_decision", "CC-07 FAIL (%s): Mode B (seated driver, CC-14) becomes the production "
-                                      "candidate (decision 11)" % ", ".join(failed))
-    else:
-        verdict.info("mode_decision", "none: INCOMPLETE %s%s%s; no production mode is chosen from missing or partial "
-                                      "evidence" % (", ".join(open_items) or "-",
-                                                    "; FAIL so far: " + ", ".join(failed) if failed else "",
-                                                    "; FAIL observed inside incomplete items: " + ", ".join(seen)
-                                                    if seen else ""))
+    summary = []
+    for name in items:
+        tag = verdict.tag_of(name)
+        detail = next((d for t, n, d in verdict.items if n == name), "")
+        completeness = "complete" if tag in (probe_common.PASS, probe_common.FAIL) else "incomplete"
+        if "[observed FAIL" in detail:
+            completeness += ", a FAIL observed inside"
+        summary.append("%s %s (%s)" % (name, tag, completeness))
+    verdict.info("mode_decision", "none (manual review: G19 admission record); items: " + "; ".join(summary))
 
 
 def main(argv=None):
@@ -829,6 +889,8 @@ def main(argv=None):
     parser.add_argument("--readback-tol", type=float, default=1e-3)
     parser.add_argument("--max-kappa", type=float, default=1e-4)
     parser.add_argument("--bias-tol", type=float, default=2e-4)
+    parser.add_argument("--use-repeats", action="store_true",
+                        help="(c): with >= 2 measure runs per cross phase, use their spread as the drift uncertainty")
     parser.add_argument("--angle-tol-deg", type=float, default=0.25)
     parser.add_argument("--angle-tol-share", type=float, default=0.05)
     parser.add_argument("--min-r2", type=float, default=0.9)
@@ -904,8 +966,9 @@ def main(argv=None):
             sc.withhold(verdict, (name,), "a play it depends on is not complete")
     info_lines(play, steps, verdict, channel)
     decide(verdict)
-    return verdict.report()
+    verdict.report()
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(probe_common.run_cli(main))
+    sys.exit(sc.run_cli(main))

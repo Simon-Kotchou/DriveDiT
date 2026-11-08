@@ -54,7 +54,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	static const float SPEED_CAP_KMH = 35;
 
 	// === STEP 0 ===
-	[Attribute("12:0.1,-0.1,0.2,-0.2,0.3,-0.3;18:0.05,-0.05,0.1,-0.1,0.15,-0.15", UIWidgets.EditBox, "Step-0 staircase: groups '<speed km/h>:<steer>,...' separated by ';' (low-slip regime: 10-20 km/h, a_lat <= 1 m/s2)", category: "Step 0")]
+	[Attribute("10.5:0.1,-0.1,0.2,-0.2,0.3,-0.3,0.05,-0.05,0.15,-0.15,0.25,-0.25", UIWidgets.EditBox, "Step-0 staircase: groups '<speed km/h>:<steer>,...' separated by ';' (low-slip regime: 10-20 km/h, a_lat <= 1 m/s2; 10.5 km/h keeps every level change inside e23's 10 km/h bin, the scope of CC-07 (a)'s model exception)", category: "Step 0")]
 	protected string m_sStairGrid;
 
 	[Attribute("3", UIWidgets.Slider, "Hold of each staircase level [s]", "0.5 20 0.5", category: "Step 0")]
@@ -100,7 +100,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	[Attribute("0.1", UIWidgets.Slider, "Brake PI: integral gain [1/(m/s2 s)]", "0 2 0.01", category: "Load")]
 	protected float m_fBrakeKi;
 
-	[Attribute("5", UIWidgets.Slider, "Braking in the turn ends below this speed [km/h]", "1 30 0.5", category: "Load")]
+	[Attribute("10", UIWidgets.Slider, "Braking in the turn ends below this speed [km/h] (10: the release to steer 0 then happens inside e23's 10 km/h bin, the scope of CC-07 (a)'s model exception)", "1 30 0.5", category: "Load")]
 	protected float m_fBrakeEndKmh;
 
 	[Attribute("40", UIWidgets.Slider, "Circle runs start this far along the site [m]", "5 500 1", category: "Load")]

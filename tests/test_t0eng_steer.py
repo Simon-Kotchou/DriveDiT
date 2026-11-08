@@ -275,9 +275,10 @@ class SteerCar:
         self.rows.append(row)
 
 
-def phase_row(car, index, name, kind, site, kmh, steer, assist, first_step, result="ok", prbs=("", "", "", "")):
+def phase_row(car, index, name, kind, site, kmh, steer, assist, first_step, result="ok",
+              prbs=("", "", "", "", "")):
     """A <probe>_phases.csv row as DC_ProbeSteerBase writes it (start / end = the phase's first and last physics_step;
-    prbs = bits, expected, bit steps, result: e23 only)"""
+    prbs = bits, expected, bit steps, extended bits, result: e23 only)"""
     return [index, name, kind, site, first_step, car.step_no, "", "", kmh, steer, assist, 1, result, ""] + list(prbs)
 
 
@@ -421,12 +422,21 @@ def prbs_bit_steps(amplitude, kmh, bits):
     return max(1, min(BIT_STEPS, int(math.floor(math.radians(HEADING_BUDGET_DEG) / per_step))))
 
 
+def rows_for(engine_steps, merge):
+    """Dispatched rows the producer needs to apply engine_steps when each row covers merge steps (it never cuts a
+    hold or a bit short: the last dispatch extends it)"""
+    return max(1, int(math.ceil(engine_steps / float(merge))))
+
+
 def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;40:0.5x4;60:0.5x6", seed=5,
-              prbs=True, prbs_gain=None, slow_kmh=None, alt_tau=None, prbs_bits_done=None, phase_results=None):
+              prbs=True, prbs_gain=None, slow_kmh=None, alt_tau=None, prbs_bits_done=None, phase_results=None,
+              old_prbs_skips=False):
     """slow_kmh: {speed: the speed the phase decays to while its train runs}; alt_tau: (tau_a, tau_b) alternating per
     event; prbs_gain: the actuator gain during the PRBS (a PRBS the step model cannot predict); prbs_bits_done:
     {speed: bits} of a PRBS cut short; phase_results: {speed: result} (an abort that still ends with a complete
-    footer). Holds and PRBS bits follow the probe's heading budget (hold_steps, prbs_bit_steps)"""
+    footer). Holds and PRBS bits follow the probe's heading budget (hold_steps, prbs_bit_steps) and its covered-step
+    counting (rows_for). old_prbs_skips: the round-3 producer, which drew bit index = elapsed steps / bit steps and so
+    skipped bits when a dispatch covered more than a bit, yet recorded 31 / 31 ok"""
     car = car or SteerCar()
     rng = random.Random(seed)
     events = []
@@ -468,7 +478,7 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;4
                 events.append(pending)
             open_event = idx
             hold = hold_steps(amp, kmh)
-            for k in range(hold):
+            for k in range(rows_for(hold, car.merge)):
                 car.run(name, "train", 1, amp, vt, seg_flag=1, event_idx=idx, seg_target=kmh)
                 if k == 0:
                     pending = {"event_idx": idx, "phase": name, "target_kmh": "%.3f" % kmh, "amplitude": "%.4f" % amp,
@@ -481,7 +491,7 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;4
                 pending["release_step"] = car.step_no
         pending["end_step"] = car.step_no
         events.append(pending)
-        prbs_cols = (0, 0, 1, "none")
+        prbs_cols = (0, 0, 1, 0, "none")
         if prbs:
             gain = car.act.gain
             if prbs_gain is not None:
@@ -489,16 +499,26 @@ def build_e23(play_dir, car=None, grid="10:0.5x6,1.0x4;20:0.5x4;30:0.5x6,1.0x4;4
             amp = PRBS_AMPLITUDES.get(kmh, 0.2)
             bit_steps = prbs_bit_steps(amp, kmh, prbs_bits)
             done = (prbs_bits_done or {}).get(kmh, len(prbs_bits))
-            for bit in prbs_bits[:done]:
-                for _ in range(bit_steps):
+            extended = 0
+            if old_prbs_skips:
+                elapsed = 0
+                while elapsed < len(prbs_bits) * bit_steps:
+                    bit = prbs_bits[elapsed // bit_steps]
                     car.run(name, "prbs", 1, amp if bit else -amp, end_v, seg_flag=1, seg_target=kmh)
+                    elapsed += car.merge
+            else:
+                for bit in prbs_bits[:done]:
+                    rows = rows_for(bit_steps, car.merge)
+                    extended += int(rows * car.merge > bit_steps)
+                    for _ in range(rows):
+                        car.run(name, "prbs", 1, amp if bit else -amp, end_v, seg_flag=1, seg_target=kmh)
             car.act.gain = gain
-            prbs_cols = (done, len(prbs_bits), bit_steps, "ok" if done == len(prbs_bits) else "incomplete")
+            prbs_cols = (done, len(prbs_bits), bit_steps, extended, "ok" if done == len(prbs_bits) else "incomplete")
         drive_stop(car, name, 1)
         phases.append(phase_row(car, len(phases), name, "steps", "flat", kmh, 0, -1, first,
                                 result=(phase_results or {}).get(kmh, "ok"), prbs=prbs_cols))
     header = common_header("e23")
-    header.update({"params.m_sStepGrid": grid})
+    header.update({"params.m_sStepGrid": grid, "params.m_iPrbsOrder": 5, "params.m_iPrbsSeed": 11})
     probe_common.write_synthetic_play(play_dir, header, {"e23_steps": (STEP_COLUMNS, car.rows),
                                                          "e23_phases": (PHASE_COLUMNS, phases),
                                                          "e23_events": (EVENT_COLUMNS, events)}, FOOTER)
@@ -1034,6 +1054,101 @@ class Cc07Tests(unittest.TestCase):
         self.assertEqual(code, 1, text)
 
 
+    # --- Codex round 4 (d6c7d91) ------------------------------------------------------------------------------
+    def test_missing_yaw_samples_never_erase_the_heading_evidence(self):
+        # Codex: blanking the yaw rate where the curvature exceeded 5e-5 dropped whole steps and turned a 0.002 1/m
+        # excursion into b_flat PASS
+        argv = self.session(e21_car=SteerCar(kappa_bump=(80.0, 10.0, 0.002)))
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "b_flat"), "FAIL", text)
+
+        def curving(r):
+            v = float(r["vel_l_z"] or 0.0)
+            return r["phase"].startswith("flat_") and v > 1.0 and abs(float(r["angvel_l_y"] or 0.0)) / v > 5e-5
+
+        edit_column(argv[0], "e21", curving, "angvel_l_y", "")
+        code, text = run_main(e21, argv)
+        self.assertEqual(item(text, "b_flat"), "INCOMPLETE", text)
+        heading_max = float(re.search(r"heading p95 [0-9.e-]+ max ([0-9.e-]+)", detail(text, "b_flat")).group(1))
+        self.assertGreater(heading_max, 1e-3)
+        self.assertRegex(detail(text, "b_flat"), r"rows without its samples: incomplete")
+        self.assertIn("[observed FAIL", detail(text, "b_flat"))
+
+    def test_the_repeats_option_is_not_available(self):
+        # Codex: --use-repeats paired one run's drift with the standard error of the repeats' mean; removed until a
+        # session has repeats (paired differences, a small-sample t interval)
+        code, text = run_main(e21, self.session(baseline=False) + ["--use-repeats"])
+        self.assertEqual(code, 1, text)
+        self.assertNotIn("use_repeats", read(os.path.join(T0ENG, "e21_selfsteer.py")))
+
+    def test_skipped_prbs_bits_never_certify_the_model(self):
+        # Codex: 5-step bits under 6-step dispatches skipped bits 5, 11, 17, 23, 29 and still recorded 31 / 31 ok;
+        # PRBS PASS and a validated model followed
+        def act():
+            return Actuator(tau=0.014)
+
+        old = build_e23(self.path("e23_old", "play_01"), SteerCar(actuator=act(), merge=6), grid="10:0.5x6",
+                        old_prbs_skips=True)
+        code, text = run_main(e23, [old])
+        self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
+
+        class Args:
+            min_events, min_r2, max_cv = 6, 0.9, 0.2
+
+        state, _, detail_text = e23.input_model(probe_common.Play(old), Args())
+        self.assertIsNone(state, detail_text)
+        steps = steer_common.load_steps(probe_common.Play(old), "e23")
+        rows = [r for r in steps if r.segment == "prbs"]
+        ok, why = e23.applied_matches(rows, DT, e23.prbs_sequence(probe_common.Play(old)), 5)
+        self.assertFalse(ok)
+        self.assertIn("skipped", why)
+        # the round-4 producer extends a bit instead of skipping it: every bit applied, the sequence matches
+        new = build_e23(self.path("e23_new", "play_01"), SteerCar(actuator=act(), merge=6), grid="10:0.5x6")
+        steps = steer_common.load_steps(probe_common.Play(new), "e23")
+        rows = [r for r in steps if r.segment == "prbs"]
+        self.assertEqual(e23.applied_matches(rows, DT, e23.prbs_sequence(probe_common.Play(new)), 5), (True, ""))
+
+    def test_missing_transition_readbacks_never_certify_a_delay(self):
+        # Codex: blanking the first readback after every train / PRBS command change turned d = 1 into d 0 PASS
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(delay=1)), grid="10:0.5x6")
+        code, text = run_main(e23, [play])
+        self.assertRegex(detail(text, "input_10kmh_0.5"), r"M\d [^;]*d 1 steps")
+        path = os.path.join(play, "e23_steps.csv")
+        with open(path, "r", encoding="ascii") as handle:
+            lines = handle.read().splitlines()
+        header = lines[0].split(",")
+        seg, cmd, post = header.index("segment"), header.index("cmd_steer"), header.index("input_post_steer")
+        out, previous = [lines[0]], None
+        for line in lines[1:]:
+            cells = line.split(",")
+            if cells[seg] in ("train", "prbs") and previous is not None and cells[cmd] != previous:
+                cells[post] = ""
+            previous = cells[cmd]
+            out.append(",".join(cells))
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write("\n".join(out) + "\n")
+        code, text = run_main(e23, [play])
+        self.assertEqual(item(text, "input_10kmh_0.5"), "INCOMPLETE", text)
+        self.assertIn("miss readbacks within 10 rows of a command change", detail(text, "input_10kmh_0.5"))
+        self.assertEqual(item(text, "prbs_input_10kmh"), "INCOMPLETE", text)
+        self.assertNotRegex(text, r"\[PASS\] input_10kmh_0.5")
+
+    def test_two_step_dispatches_stay_under_the_heading_guard(self):
+        # the producer extends holds and bits to whole dispatches: the predicted heading with every dispatch covering
+        # two engine steps, at the fixture's kappa / command and scaled to 0.30 (Codex's sensitivity case)
+        grid = re.search(r'\[Attribute\("([^"]+)", UIWidgets\.EditBox, "Step grid', STEPS_TEXT).group(1)
+        play = build_e23(self.path("e23", "play_01"), SteerCar(actuator=Actuator(tau=0.014), merge=2), grid=grid)
+        steps = steer_common.load_steps(probe_common.Play(play), "e23")
+        worst = 0.0
+        for s in steps:
+            if s.segment in ("train", "prbs"):
+                worst = max(worst, abs(steer_common.wrap_deg(s.f["heading_deg"] - 75.0)))
+        fixture_kappa = math.tan(DMAX) / WHEELBASE
+        print("two-step dispatches: max heading %.1f deg at kappa / command %.3f, %.1f deg scaled to 0.30" % (
+            worst, fixture_kappa, worst * 0.30 / fixture_kappa))
+        self.assertLess(worst, 25.0)
+
+
 class Cc08Tests(unittest.TestCase):
     def setUp(self):
         self.base = probe_common.make_temp_dir("t0eng_steer_")
@@ -1108,7 +1223,7 @@ class Cc08Tests(unittest.TestCase):
         play = build_e23(self.path("e23", "play_01"), grid="10:0.5x6")
         steps = steer_common.load_steps(probe_common.Play(play), "e23")
         events = probe_common.Play(play).csv("e23_events", e23.EVENT_COLUMNS)
-        bins, _ = e23.event_windows(steps, events, "input", None, None, DT)
+        bins, _, _ = e23.event_windows(steps, events, "input", None, None, DT)
         windows = bins[(10.0, 0.5)]
         train, test, n_train, n_test = e23.split_doublets(windows)
         scored = [id(r) for w in windows for r in w["rows"]]

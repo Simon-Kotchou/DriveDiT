@@ -7,8 +7,10 @@ and are deleted afterwards. Every test reads the synthetic local config tests/fi
 placeholder.local.env (DD-22; set as DRIVEDIT_LOCAL_CONFIG below, so the scripts run in a subprocess read it
 too), never this machine's: its data drive is /mnt/x, its system drive /mnt/z, and neither is a real mount.
 No system-drive path is ever handed to code that writes: such strings appear only in the pure path-guard
-tests (check_write_path never writes). Tests that run make_pin or preflight use a stand-in forbidden prefix
-inside the temp dir (TmpCase.fake_c_drive), or /proc. TmpCase points pinlib.LAUNCH_PATHS (the installs the
+tests (check_write_path never writes). Tests that run make_pin or preflight use a stand-in system volume inside
+the temp dir (TmpCase.fake_c_drive: a fake drvfs mount whose root holds Windows/System32, which the write boundary
+refuses by itself), or /proc. The mount tests run in the fake world of tests/fixtures/local_config/
+boundary_vectors.py (fake mountinfo, fake drives under /dev/shm). TmpCase points pinlib.LAUNCH_PATHS (the installs the
 launchers start) at the fake Steam layout; tests that run a script in a subprocess see the config's launch
 paths, which do not exist, so the fake pins fail <app>.launch_path there.
 """
@@ -37,7 +39,7 @@ REPO = os.path.dirname(os.path.dirname(PIN_DIR))
 # so every pinlib path table and every script started below reads it, whatever the shell exported.
 LOCAL_CONFIG_FIXTURE = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
 os.environ["DRIVEDIT_LOCAL_CONFIG"] = LOCAL_CONFIG_FIXTURE
-NEVER_C = "/mnt/z/__dd0_pin_test_never_written__"   # the fixture's system drive; pure path-guard tests only
+BV_PATH = os.path.join(REPO, "tests", "fixtures", "local_config", "boundary_vectors.py")
 NEVER_WRITABLE = "/proc/__dd0_pin_test_never_written__"  # off the data drive, and the kernel refuses writes there
 
 
@@ -62,7 +64,20 @@ LAUNCH_DIR = os.path.join(os.path.dirname(PIN_DIR), "launch")
 lc = pinlib._local_config_module()
 CFG = lc.load(LOCAL_CONFIG_FIXTURE)
 REAL_LAUNCH_PATHS = pinlib.LAUNCH_PATHS  # the config's (the launchers'), read before any test points it elsewhere
-DATA_DRIVE = CFG.drive("DATA_ROOT") + "/"       # /mnt/x/: the fixture's data drive, the default write root
+DATA_DRIVE = CFG.drive("DATA_ROOT") + "/"       # the fixture's data drive, the default write root
+DATA_ROOT = CFG.get("DATA_ROOT")
+SYSTEM_DRIVE = CFG.get("SYSTEM_DRIVE")           # the fixture's system drive, mounted nowhere
+NEVER_C = SYSTEM_DRIVE + "/__dd0_pin_test_never_written__"   # pure path-guard tests only
+_bv_spec = importlib.util.spec_from_file_location("dd22_boundary_vectors", BV_PATH)
+bv = importlib.util.module_from_spec(_bv_spec)
+_bv_spec.loader.exec_module(bv)
+
+
+def enter(case, cm):
+    """Enter a context manager for the rest of one test (unittest.TestCase.enterContext is Python 3.11+)."""
+    value = cm.__enter__()
+    case.addCleanup(cm.__exit__, None, None, None)
+    return value
 
 
 def override(case, mod, name, value):
@@ -162,16 +177,15 @@ class TmpCase(unittest.TestCase):
         override(self, pinlib, "LAUNCH_PATHS", self.fs.launch_paths())
 
     def fake_c_drive(self):
-        """A stand-in for the system drive inside the temp dir. The guard refuses it exactly like SYSTEM_DRIVE,
-        even though the temp dir is an allowed root, so the refusal paths of make_pin/preflight are tested without
-        ever handing them a system-drive path."""
+        """A stand-in for the system drive inside the temp dir: a fake drvfs mount whose root holds Windows/System32
+        (boundary_vectors.patched_system_volume). The write boundary refuses it by itself, even though the temp dir
+        is an allowed root, so the refusal paths of make_pin/preflight are tested without ever handing them a
+        system-drive path. The returned directory does not exist yet."""
         self.assertIs(make_pin.pinlib, pinlib)
         self.assertIs(preflight.pinlib, pinlib)
         self.assertIs(pin_activate.pinlib, pinlib)
-        fake = os.path.join(self.tmp, "fake_c_drive")
-        override(self, pinlib, "FORBIDDEN_WRITE_PREFIXES",
-                 pinlib.FORBIDDEN_WRITE_PREFIXES + (os.path.realpath(fake).lower() + "/",))
-        return fake
+        root = enter(self, bv.patched_system_volume(lc, self.tmp))
+        return os.path.join(root, "dd")
 
 
 # --------------------------------------------------------------------------- parser
@@ -199,13 +213,13 @@ class AcfParserTests(unittest.TestCase):
 
     def test_escapes_comments_case_and_conditionals(self):
         text = ('// header comment\n"AppState"\n{\n\t"appid"\t"1"\n'
-                '\t"LauncherPath"\t\t"Z:\\\\Program Files\\\\Steam\\\\steam.exe"\n'
+                '\t"LauncherPath"\t\t"Z:\\\\Synthetic Steam (x86)\\\\steam.exe"\n'
                 '\t"name"\t"say \\"hi\\""  // trailing comment\n'
                 '\t"autoupdatebehavior"\t"1" [$WIN32]\n'
                 '\t"Nested" { "k" "v" }\n}\n')
         root = pinlib.parse_vdf(text)
         app = pinlib.kv_get(root, "appstate")
-        self.assertEqual(app["LauncherPath"], "Z:\\Program Files\\Steam\\steam.exe")
+        self.assertEqual(app["LauncherPath"], "Z:\\Synthetic Steam (x86)\\steam.exe")
         self.assertEqual(app["name"], 'say "hi"')
         self.assertEqual(pinlib.kv_get(app, "AutoUpdateBehavior"), "1")
         self.assertEqual(app["Nested"], {"k": "v"})
@@ -225,36 +239,52 @@ class AcfParserTests(unittest.TestCase):
 
 class PathGuardTests(unittest.TestCase):
     def test_conversions(self):
-        self.assertEqual(pinlib.win_to_wsl("X:\\DataRoot\\pin\\x.json"), "/mnt/x/DataRoot/pin/x.json")
-        self.assertEqual(pinlib.win_to_wsl("x:/DataRoot"), "/mnt/x/DataRoot")
-        self.assertEqual(pinlib.win_to_wsl("/mnt/x/a"), "/mnt/x/a")
-        self.assertEqual(pinlib.wsl_to_win("/mnt/y/Library/steamapps/common/Arma Reforger"),
-                         "Y:\\Library\\steamapps\\common\\Arma Reforger")
-        self.assertEqual(pinlib.wsl_to_win("/mnt/x"), "X:\\")
+        self.assertEqual(pinlib.win_to_wsl("X:\\DataRoot\\pin\\x.json"), DATA_ROOT + "/pin/x.json")
+        self.assertEqual(pinlib.win_to_wsl("x:/DataRoot"), DATA_ROOT)
+        self.assertEqual(pinlib.win_to_wsl(DATA_ROOT + "/a"), DATA_ROOT + "/a")
+        self.assertEqual(pinlib.wsl_to_win(CFG.get("GAME_INSTALL")), CFG.win("GAME_INSTALL"))
+        self.assertEqual(pinlib.wsl_to_win(DATA_DRIVE.rstrip("/")), "X:\\")
         self.assertIsNone(pinlib.wsl_to_win("/dev/shm/x"))
 
     def test_default_roots_come_from_the_local_config(self):
-        self.assertEqual(pinlib.DEFAULT_WRITE_ROOTS, ("/mnt/x/",))
-        self.assertEqual(pinlib.FORBIDDEN_WRITE_PREFIXES, ("/mnt/z/",))
-        self.assertEqual(pinlib.WRITE_ROOT_DRIVES, {"/mnt/x": "X:"})
-        self.assertEqual(pinlib.DEFAULT_PIN_DIR, "/mnt/x/DataRoot/pin")
+        self.assertEqual(pinlib.DEFAULT_WRITE_ROOTS, (DATA_DRIVE,))
+        self.assertEqual(pinlib.DEFAULT_PIN_DIR, DATA_ROOT + "/pin")
+        for gone in ("FORBIDDEN_WRITE_PREFIXES", "WRITE_ROOT_DRIVES", "drive_mount_for", "MOUNTINFO"):
+            self.assertFalse(hasattr(pinlib, gone), gone)   # the boundary decides (SYSTEM_DRIVE is advisory)
 
     def test_data_drive_allowed(self):
-        with mock.patch.object(pinlib, "_read_mountinfo", return_value=SAMPLE_MOUNTINFO):
-            self.assertEqual(pinlib.check_write_path("/mnt/x/DataRoot/pin/pin.json"), "/mnt/x/DataRoot/pin/pin.json")
-            self.assertEqual(pinlib.check_write_path("X:\\DataRoot\\pin\\pin.json"), "/mnt/x/DataRoot/pin/pin.json")
+        with bv.world() as w, w.use(lc, "real_like"):
+            override(self, pinlib, "DEFAULT_WRITE_ROOTS", (w.mnt + "/x/",))
+            self.assertEqual(pinlib.check_write_path(w.mnt + "/x/DataRoot/pin/pin.json"),
+                             w.mnt + "/x/DataRoot/pin/pin.json")
+            self.assertEqual(pinlib.check_write_path(w.mnt + "/x"), w.mnt + "/x")
 
     def test_c_drive_refused(self):
-        for p in (NEVER_C + "/pin.json", "/mnt/Z/x.json", "Z:\\DataRoot\\pin.json", "/mnt/z",
-                  "/mnt/x/../z/x.json"):
+        for p in (NEVER_C + "/pin.json", "/mnt/Z/Synthetic Steam (x86)/x.json", "Z:\\DataRoot\\pin.json", SYSTEM_DRIVE,
+                  DATA_DRIVE + "../z/x.json"):
             with self.assertRaises(pinlib.PinError, msg=p):
                 pinlib.check_write_path(p)
             with self.assertRaises(pinlib.PinError, msg=p):
                 pinlib.check_write_path(p, allowed_roots=("/mnt/", "/"))
         self.assertFalse(os.path.exists(NEVER_C))
 
+    def test_system_volume_refused_whatever_the_roots(self):
+        with bv.world() as w, w.use(lc, "swapped"):   # DATA_ROOT under the system drive, SYSTEM_DRIVE the data drive
+            for p in (w.mnt + "/z/DataRoot/pin/x.json", w.mnt + "/x/DataRoot/pin/x.json"):
+                for roots in (None, (w.mnt,), ("/",)):
+                    with self.assertRaises(pinlib.PinError, msg=(p, roots)):
+                        pinlib.check_write_path(p, roots)
+
+    def test_explicit_roots_only_narrow(self):
+        # AP-R2 row 3: a caller's allowed_roots outside the boundary allow nothing (no write-open is ever reached).
+        for roots in (("/tmp",), ("/",), ("/home",)):
+            with self.assertRaisesRegex(pinlib.PinError, "refusing to write", msg=roots):
+                pinlib.write_json_new("/tmp/__dd0_pin_test_never_written__.json", {"a": 1}, allowed_roots=roots)
+        self.assertFalse(os.path.exists("/tmp/__dd0_pin_test_never_written__.json"))
+
     def test_outside_e_refused(self):
-        for p in ("/dev/shm/x.json", "/tmp/x.json", "/home/x.json", "/mnt/y/x.json", "relative.json"):
+        for p in ("/dev/shm/x.json", "/tmp/x.json", "/home/x.json", CFG.drive("GAME_INSTALL") + "/x.json",
+                  "relative.json"):
             if p == "relative.json" and os.getcwd().startswith(DATA_DRIVE):
                 continue
             with self.assertRaises(pinlib.PinError, msg=p):
@@ -622,7 +652,7 @@ class PreflightTests(TmpCase):
         r = subprocess.run([sys.executable, "-I", "-B", script, "--pin", self.fs.pin, "--exe", "client",
                             "--launch-dir", NEVER_WRITABLE], capture_output=True, text=True, cwd=self.tmp)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
-        self.assertIn("outside", r.stderr)
+        self.assertIn("refusing to write %s" % NEVER_WRITABLE, r.stderr)
         self.assertFalse(os.path.exists(NEVER_WRITABLE))
 
 
@@ -1384,76 +1414,47 @@ class AnchoredWriteTests(PinnedCase):
             os.close(fd)
 
 
-SAMPLE_MOUNTINFO = (
-    "78 63 8:32 / / rw,relatime - ext4 /dev/sdc rw,discard\n"
-    "119 112 0:66 / /dev/shm rw,nosuid,nodev,noatime shared:24 - tmpfs none rw\n"
-    "159 78 0:84 / /mnt/z rw,noatime - 9p Z:\\134 rw,dirsync,aname=drvfs;path=Z:\\;uid=1000;gid=1000\n"
-    "161 78 0:86 / /mnt/x rw,noatime - 9p X:\\134 rw,dirsync,aname=drvfs;path=X:\\;uid=1000;gid=1000\n")
-
-
 class MountGuardTests(unittest.TestCase):
-    """AP-5: the data drive's mount point (the fixture's /mnt/x) is only a name; writes under it must land on the
-    mount of that drive (X:)."""
+    """AP-5: a drive mount point is only a name; writes under it must land on the mount of that drive, verified in
+    mountinfo (the fake world of boundary_vectors.py: <mnt>/x is drive X:, <mnt>/y is mounted nowhere)."""
 
-    def guard(self, text, path="/mnt/x/DataRoot/pin/x.json"):
-        with mock.patch.object(pinlib, "_read_mountinfo", return_value=text):
-            return pinlib.check_write_path(path)
+    def setUp(self):
+        self.w = enter(self, bv.world(prefix="dd0pin_world_"))
+        enter(self, self.w.use(lc, "real_like"))
+        override(self, pinlib, "DEFAULT_WRITE_ROOTS", (self.w.mnt + "/",))
 
     def test_parse(self):
-        mounts = pinlib.parse_mountinfo(SAMPLE_MOUNTINFO + "garbage line\n")
-        e = pinlib.mount_of("/mnt/x/DataRoot/pin", mounts)
-        self.assertEqual((e["mount_point"], e["fstype"], e["source"]), ("/mnt/x", "9p", "X:\\"))
-        self.assertEqual(e["dev"], os.makedev(0, 86))
-        self.assertEqual(pinlib.mount_of("/mnt/xylophone/x", mounts)["mount_point"], "/")
-        self.assertEqual(pinlib.mount_of("/dev/shm/x", mounts)["mount_point"], "/dev/shm")
-        sp = pinlib.parse_mountinfo("1 0 0:9 / /mnt/my\\040drive rw - 9p Y:\\134 rw\n")
+        mounts = pinlib.parse_mountinfo(self.w.mountinfo + "garbage line\n")
+        e = pinlib.mount_of(self.w.mnt + "/x/DataRoot/pin", mounts)
+        self.assertEqual((e["mount_point"], e["fstype"], e["source"], e["root"]),
+                         (self.w.mnt + "/x", "9p", "X:\\", "/"))
+        self.assertEqual(pinlib.mount_of(self.w.mnt + "/xylophone/x", mounts)["mount_point"], "/dev/shm")
+        sp = pinlib.parse_mountinfo("1 0 0:9 / /mnt/my\\040drive rw - 9p " + "Y:" + "\\134 rw\n")
         self.assertEqual((sp[0]["mount_point"], sp[0]["source"]), ("/mnt/my drive", "Y:\\"))
 
-    def test_e_drive_mount_accepted(self):
-        self.assertEqual(self.guard(SAMPLE_MOUNTINFO), "/mnt/x/DataRoot/pin/x.json")
-        self.assertEqual(self.guard(SAMPLE_MOUNTINFO, "/mnt/x"), "/mnt/x")
-        # Only the drvfs path= option names the drive (older WSL shows the source as "drvfs").
-        self.assertEqual(self.guard(SAMPLE_MOUNTINFO.replace("9p X:\\134", "9p drvfs")),
-                         "/mnt/x/DataRoot/pin/x.json")
+    def test_data_drive_mount_accepted(self):
+        p = self.w.mnt + "/x/DataRoot/pin/x.json"
+        self.assertEqual(pinlib.check_write_path(p), p)
 
-    def test_unmounted_e_refused(self):
-        text = "".join(l + "\n" for l in SAMPLE_MOUNTINFO.splitlines() if " /mnt/x " not in l)
-        with self.assertRaisesRegex(pinlib.PinError, r"must lie on the X: drive mounted at /mnt/x, but it lies on / "):
-            self.guard(text)
+    def test_unmounted_drive_refused(self):
+        with self.assertRaisesRegex(pinlib.PinError, "not on the data drive"):
+            pinlib.check_write_path(self.w.mnt + "/y/DataRoot/pin/x.json")
 
-    def test_other_drive_at_e_refused(self):
-        text = SAMPLE_MOUNTINFO.replace("9p X:\\134", "9p Y:\\134").replace("path=X:\\", "path=Y:\\")
-        with self.assertRaisesRegex(pinlib.PinError, "lies on /mnt/x"):
-            self.guard(text)
-
-    def test_mount_below_e_refused(self):
-        text = SAMPLE_MOUNTINFO + "200 161 0:99 / /mnt/x/DataRoot rw - tmpfs none rw\n"
-        with self.assertRaisesRegex(pinlib.PinError, "lies on /mnt/x/DataRoot"):
-            self.guard(text)
-        self.assertEqual(self.guard(text, "/mnt/x/other/x.json"), "/mnt/x/other/x.json")
-        # the last mount at a point is the one on top
-        text = SAMPLE_MOUNTINFO + "201 78 0:98 / /mnt/x rw - tmpfs none rw\n"
+    def test_other_drive_at_the_mount_point_refused(self):
         with self.assertRaises(pinlib.PinError):
-            self.guard(text)
+            pinlib.check_write_path(self.w.mnt + "/v/DataRoot/x.json")
+
+    def test_mount_below_the_data_drive_refused(self):
+        with self.assertRaisesRegex(pinlib.PinError, "nested"):
+            pinlib.check_write_path(self.w.mnt + "/x/DataRoot/nested/x.json")
+        with self.assertRaisesRegex(pinlib.PinError, "device"):
+            pinlib.check_write_path(self.w.mnt + "/x/DataRoot/otherdev/x.json")
+        self.assertEqual(pinlib.check_write_path(self.w.mnt + "/x/other/x.json"), self.w.mnt + "/x/other/x.json")
 
     def test_unreadable_mountinfo_refused(self):
-        with mock.patch.object(pinlib, "MOUNTINFO", "/nonexistent/__dd0_mountinfo__"):
+        with mock.patch.object(lc, "MOUNTINFO", "/nonexistent/__dd0_mountinfo__"):
             with self.assertRaisesRegex(pinlib.PinError, "cannot read"):
-                pinlib.check_write_path("/mnt/x/DataRoot/pin/x.json")
-
-    def test_paths_off_drive_roots_are_not_affected(self):
-        tmp = tempfile.mkdtemp(prefix="dd0pin-", dir=_tmp_base())
-        self.addCleanup(shutil.rmtree, tmp, True)
-        if os.path.realpath(tmp).startswith(DATA_DRIVE):
-            self.skipTest("temp dir is on the data drive")
-        target = os.path.join(tmp, "x.json")
-        with mock.patch.object(pinlib, "_read_mountinfo", side_effect=AssertionError("not consulted")):
-            self.assertEqual(pinlib.check_write_path(target, allowed_roots=(tmp,)), os.path.realpath(target))
-
-    def test_data_drive_mount_found(self):
-        with mock.patch.object(pinlib, "_read_mountinfo", return_value=SAMPLE_MOUNTINFO):
-            m = pinlib.drive_mount_for("/mnt/x/DataRoot/pin")
-        self.assertEqual((m["mount_point"], m["dev"]), ("/mnt/x", os.makedev(0, 86)))
+                pinlib.check_write_path(self.w.mnt + "/x/DataRoot/pin/x.json")
 
 
 class ReadRaceTests(TmpCase):
@@ -1512,7 +1513,7 @@ class ColdCopyResolutionTests(PinnedCase):
         self.put_active(b"1.8.0.13\n")
         rc, _, err = self.cold_copy("--pin-dir", self.pin_dir)
         self.assertEqual(rc, 1)
-        self.assertIn("refusing to write outside /mnt/x/", err)
+        self.assertIn("refusing to write %s" % NEVER_WRITABLE, err)
 
     def test_pointer_problems_stop_it(self):
         rc, _, err = self.cold_copy("--pin-dir", self.pin_dir)
@@ -1527,7 +1528,7 @@ class ColdCopyResolutionTests(PinnedCase):
     def test_explicit_pin_and_exclusivity(self):
         rc, _, err = self.cold_copy("--pin", self.pin_file("1.8.0.13"))
         self.assertEqual(rc, 1)
-        self.assertIn("refusing to write outside /mnt/x/", err)
+        self.assertIn("refusing to write %s" % NEVER_WRITABLE, err)
         rc, _, err = self.cold_copy("--pin", self.pin_file("1.8.0.13"), "--pin-dir", self.pin_dir)
         self.assertEqual(rc, 1)
         self.assertIn("mutually exclusive", err)

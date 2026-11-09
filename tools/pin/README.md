@@ -90,13 +90,15 @@ forgery-only).
 
 ## Write safety
 
-Every write goes through `pinlib.check_write_path`, which resolves symlinks first. It accepts only paths on the data
-drive (the drive mount of `DATA_ROOT`, `pinlib.DEFAULT_WRITE_ROOTS`), and it always refuses the system drive
-(`SYSTEM_DRIVE`: it is never written, a project rule, and it holds the live Workbench addon). A drive mount such as
-`/mnt/x` is only a name, so the guard also reads `/proc/self/mountinfo`: the path must lie on the mount at the data
-drive's mount point whose source is that Windows drive (`pinlib.WRITE_ROOT_DRIVES`). An unmounted mount point (an
-empty directory on the WSL disk, which lives on the system drive), a redirected one, or another filesystem mounted
-below it is refused.
+Every write goes through `pinlib.check_write_path`, which is the write boundary of the whole repository
+(`tools/local_config.py check_write`, DD-22 round 2), narrowed to `pinlib.DEFAULT_WRITE_ROOTS` (the drive mount of
+`DATA_ROOT`) unless a caller passes its own roots, which can only narrow it further. The boundary resolves the
+destination through its nearest existing ancestor (a symlink as the last component and any `..` component are
+refused) and accepts only RAM (`/dev/shm`, verified as tmpfs) or the data drive: the drive of `DATA_ROOT`, verified in
+`/proc/self/mountinfo` as that Windows drive's own drvfs mount of the whole drive, with the device of the path equal
+to the mount's. An unmounted mount point (an empty directory on the WSL disk), a redirected one, or another
+filesystem mounted below it is refused. Whatever the config or the caller says, a volume whose root holds
+`Windows/System32` is refused: the system drive is found by its content, and `SYSTEM_DRIVE` only words the refusal.
 
 `make_pin.py` never creates directories and never overwrites a pin unless `--force` is given. `pin_activate.py`
 writes only `ACTIVE`, a temp file next to it, `ACTIVE.log` and `ACTIVE.lock`, in the pin directory. It opens the pin

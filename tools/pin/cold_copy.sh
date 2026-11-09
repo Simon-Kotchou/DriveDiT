@@ -17,9 +17,9 @@
 #   see README "Rollback". The pin file in DEST/meta keeps every pak and exe mtime_ns exactly.
 #
 # DRY RUN BY DEFAULT: without --run it only reads, checks the live installs against the pin, and prints the plan.
-# The sources are only read. DEST must pass pinlib.check_write_path: on the data drive (the drive of DATA_ROOT), on
-# that drive's own mount (an unmounted drive mount is a directory on the WSL disk, which lives on the system drive),
-# and never on the system drive (SYSTEM_DRIVE).
+# The sources are only read. DEST must pass pinlib.check_write_path (the write boundary): on the data drive (the
+# drive of DATA_ROOT), on that drive's own mount (an unmounted drive mount is a directory on the WSL disk), and never
+# on a volume whose root holds Windows/System32.
 #
 # With --run:
 #   1. preflight --check on the live installs. AutoUpdateBehavior is waived here, because the copy is the
@@ -84,9 +84,9 @@ PIN_SRC="${F[0]}"; PIN="${F[1]}"; PIN_ID="${F[2]}"
 GAME_SRC="${F[3]}"; GAME_ACF="${F[4]}"; TOOLS_SRC="${F[5]}"; TOOLS_ACF="${F[6]}"
 [[ -n "$DEST" ]] || DEST="$(dirname "$PIN")/$PIN_ID"
 
-# Write guard, first pinlib.check_write_path (the guard every pin tool uses; it also checks /proc/self/mountinfo that
-# DEST lies on the data drive's mount), then the same rules again in bash on the resolved path: never under the
-# system drive's mount, and strictly inside the data drive's (both from the local config, through pinlib).
+# Write guard: pinlib.check_write_path, the write boundary every writer uses (tools/local_config.py check_write: the
+# data drive verified in /proc/self/mountinfo, never a volume whose root holds Windows/System32), narrowed to the data
+# drive; then the same containment again in bash on the resolved path: strictly inside the data drive's mount.
 mapfile -t G < <("${PY[@]}" -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("dd_pin_pinlib", sys.argv[1])
@@ -94,15 +94,12 @@ pl = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = pl
 spec.loader.exec_module(pl)
 try:
-    print(pl.check_write_path(sys.argv[2])); print(pl.FORBIDDEN_WRITE_PREFIXES[0]); print(pl.DEFAULT_WRITE_ROOTS[0])
+    print(pl.check_write_path(sys.argv[2])); print(pl.DEFAULT_WRITE_ROOTS[0])
 except pl.PinError as exc:
     sys.exit("cold_copy: %s" % exc)
 ' "$HERE/pinlib.py" "$DEST")
-[[ ${#G[@]} -eq 3 && "${G[1]}" == /mnt/?/ && "${G[2]}" == /mnt/?/ ]] || exit 1
-DEST_REAL="${G[0]}"; SYSTEM_MNT="${G[1]}"; DATA_MNT="${G[2]}"
-case "${DEST_REAL,,}/" in
-  "$SYSTEM_MNT"*) die "refusing to write on the system drive ($DEST -> $DEST_REAL)" ;;
-esac
+[[ ${#G[@]} -eq 2 && "${G[1]}" == /mnt/?/ ]] || exit 1
+DEST_REAL="${G[0]}"; DATA_MNT="${G[1]}"
 case "$DEST_REAL/" in
   "$DATA_MNT"?*) ;;
   *) die "refusing to write outside the data drive ${DATA_MNT%/}: $DEST -> $DEST_REAL" ;;

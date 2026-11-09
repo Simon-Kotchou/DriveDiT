@@ -17,12 +17,12 @@ PinError that names it, so every tool refuses rather than guess. LAUNCH_PATHS, D
 DEPLOY_ROOTS and the other path tables are computed when read (module __getattr__); a test may assign one, and every
 reader here honours the assignment (_get).
 
-Write safety: every path this package writes to goes through check_write_path().
-Writes are allowed only on the data drive (the drive of DATA_ROOT, DEFAULT_WRITE_ROOTS). The system drive
-(SYSTEM_DRIVE) is always refused, whatever the allowed roots are, because it is never written (a project rule) and
-holds the live Workbench addon. A drive mount such as /mnt/x is only a name, so the guard also reads
-/proc/self/mountinfo and requires the path to lie on the mount of the data drive itself (WRITE_ROOT_DRIVES):
-an unmounted /mnt/x is an empty directory on the WSL disk, which lives on the system drive.
+Write safety: every path this package writes to goes through check_write_path(), which is the one write boundary
+of the repository (tools/local_config.py check_write): RAM (/dev/shm) or the data drive (the drive of DATA_ROOT,
+verified in /proc/self/mountinfo as that Windows drive's own drvfs mount, device included), never a volume whose
+root holds Windows/System32, whatever the config or the caller says. The allowed roots (DEFAULT_WRITE_ROOTS, the
+data drive, unless a caller passes its own) only narrow it. SYSTEM_DRIVE is advisory: it names the system drive in
+a refusal, nothing more. An unmounted /mnt/x is an empty directory on the WSL disk, which the boundary refuses.
 pin_activate.py writes through one opened directory fd (open_guarded_dir and the
 *_at helpers), so a directory swapped after the check cannot redirect its writes.
 """
@@ -183,11 +183,8 @@ def launch_paths_for(lp_id: str) -> dict:
         return _get("COLD_LAUNCH_PATHS")[lp_id]
     raise PinError("unknown launch path %r (known: %s)" % (lp_id, ", ".join(launch_path_ids())))
 
-# DEFAULT_WRITE_ROOTS (computed): (<data drive>/,), the drive mount of DATA_ROOT. FORBIDDEN_WRITE_PREFIXES
-# (computed): (<SYSTEM_DRIVE>/,). WRITE_ROOT_DRIVES (computed): {<data drive mount>: "<X>:"}: a write under that
-# mount point must land on the mount of that Windows drive (checked in /proc/self/mountinfo), not on whatever
-# directory happens to carry the name.
-MOUNTINFO = "/proc/self/mountinfo"
+# DEFAULT_WRITE_ROOTS (computed): (<data drive>/,), the drive mount of DATA_ROOT: the roots check_write_path narrows
+# the write boundary (tools/local_config.py check_write) to when a caller passes none.
 
 # Active pin pointer. <pin dir>/ACTIVE holds one line, the id of the pin every launcher checks
 # (preflight --pin-active), and that pin is <pin dir>/pin_<id>.json. Only pin_activate.py writes ACTIVE: it
@@ -301,15 +298,6 @@ def _wb_launch() -> dict:
             for lp, v in WB_LAUNCH_RELS.items()}
 
 
-def _write_root_drives() -> dict:
-    lc = _local_config_module()
-    cfg = local_config()
-    try:
-        return {cfg.drive("DATA_ROOT"): cfg.drive_win("DATA_ROOT")}
-    except lc.LocalConfigError as exc:
-        raise PinError(str(exc))
-
-
 _COMPUTED = {
     "DEFAULT_ACF": _default_acf,
     "DEFAULT_ACF_BY_CHANNEL": _default_acf_by_channel,
@@ -319,9 +307,7 @@ _COMPUTED = {
     "EXPERIMENTAL_LAUNCH_PATHS": _experimental_launch_paths,
     "WB_LAUNCH": _wb_launch,
     "DEPLOY_ROOTS": lambda: {lp: local_path("DATA_ROOT") + "/" + rel for lp, rel in DEPLOY_ROOT_RELS.items()},
-    "DEFAULT_WRITE_ROOTS": lambda: (sorted(_get("WRITE_ROOT_DRIVES"))[0] + "/",),
-    "FORBIDDEN_WRITE_PREFIXES": lambda: (local_path("SYSTEM_DRIVE") + "/",),
-    "WRITE_ROOT_DRIVES": _write_root_drives,
+    "DEFAULT_WRITE_ROOTS": lambda: (_local("drive", "DATA_ROOT") + "/",),
     "DEFAULT_PIN_DIR": lambda: local_path("DATA_ROOT") + "/pin",
 }
 
@@ -356,7 +342,7 @@ def win_to_wsl(path: str) -> str:
 
 
 def wsl_to_win(path: str):
-    """'/mnt/y/Library/x' -> 'Y:\\Library\\x'; None for paths outside /mnt/<drive>."""
+    """'/mnt/y/Game Library/x' -> 'Y:\\Game Library\\x'; None for paths outside /mnt/<drive>."""
     m = _WSL_MNT.match(path)
     if not m:
         return None
@@ -364,103 +350,30 @@ def wsl_to_win(path: str):
     return "%s:\\%s" % (m.group(1).upper(), rest.replace("/", "\\"))
 
 
-def _read_mountinfo() -> str:
-    try:
-        with open(MOUNTINFO, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError as exc:
-        raise PinError("cannot read %s to check which drive a write lands on: %s" % (MOUNTINFO, exc))
-
-
-def _unescape_mount(s: str) -> str:
-    # mountinfo writes space, tab, newline and backslash as \040, \011, \012 and \134.
-    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
-
-
 def parse_mountinfo(text: str) -> list:
-    """[{mount_point, dev, fstype, source, options}] in file order (a later mount at the same point is on top)."""
-    mounts = []
-    for line in text.splitlines():
-        fields = line.split(" ")
-        if "-" not in fields[6:]:
-            continue
-        sep = fields.index("-", 6)
-        if len(fields) < sep + 3:
-            continue
-        major, _, minor = fields[2].partition(":")
-        try:
-            dev = os.makedev(int(major), int(minor))
-        except ValueError:
-            continue
-        mounts.append({"mount_point": _unescape_mount(fields[4]), "dev": dev, "fstype": fields[sep + 1],
-                       "source": _unescape_mount(fields[sep + 2]),
-                       "options": _unescape_mount(fields[sep + 3]) if len(fields) > sep + 3 else ""})
-    return mounts
+    """[{mount_point, root, dev, fstype, source, options}] (tools/local_config.py parse_mountinfo)."""
+    return _local_config_module().parse_mountinfo(text)
 
 
 def mount_of(resolved: str, mounts: list) -> dict:
-    """The mount a resolved absolute path lies on: the longest mount point that contains it (the last one wins)."""
-    best = None
-    for m in mounts:
-        mp = m["mount_point"]
-        if mp == "/" or resolved == mp or resolved.startswith(mp.rstrip("/") + "/"):
-            if best is None or len(mp) >= len(best["mount_point"]):
-                best = m
-    return best
-
-
-def _is_drive(mount: dict, drive: str) -> bool:
-    """True if a mountinfo entry is the drvfs mount of the Windows drive "X:" (source X:\\ or option path=X:\\)."""
-    want = drive.upper().rstrip(":") + ":"
-    if mount["source"].replace("/", "\\").rstrip("\\").upper() == want:
-        return True
-    opts = re.split(r"[;,]", mount["options"])
-    return any(o.replace("/", "\\").rstrip("\\").upper() == "PATH=" + want for o in opts)
-
-
-def drive_mount_for(resolved: str):
-    """For a resolved path under a WRITE_ROOT_DRIVES root, the mountinfo entry of that drive's mount; else None.
-
-    Raises PinError unless the path lies on a mount at exactly that root whose source is that drive. An unmounted
-    data drive mount (an empty directory on the WSL disk), a redirected one, or another filesystem mounted below it is
-    refused.
-    """
-    for root, drive in _get("WRITE_ROOT_DRIVES").items():
-        if resolved == root or resolved.startswith(root.rstrip("/") + "/"):
-            m = mount_of(resolved, parse_mountinfo(_read_mountinfo()))
-            if m is None or m["mount_point"] != root or not _is_drive(m, drive):
-                where = ("nothing (no mount found)" if m is None else
-                         "%s (%s from %r)" % (m["mount_point"], m["fstype"], m["source"]))
-                raise PinError("refusing to write to %s: it must lie on the %s drive mounted at %s, but it lies on %s"
-                               % (resolved, drive, root, where))
-            return m
-    return None
+    """The mount a resolved absolute path lies on (tools/local_config.py mount_of)."""
+    return _local_config_module().mount_of(resolved, mounts)
 
 
 def check_write_path(path: str, allowed_roots=None) -> str:
     """Return the resolved absolute path if writing there is allowed, else raise PinError.
 
-    allowed_roots: None for DEFAULT_WRITE_ROOTS (the data drive). The path is resolved with realpath first, so a
-    symlink on the data drive that points to the system drive is refused. The system drive (FORBIDDEN_WRITE_PREFIXES)
-    is refused even when a caller passes an allowed root that would contain it. A path on the data drive's mount
-    point must also lie on that drive's own mount (drive_mount_for), not merely carry the name.
+    The write boundary decides (tools/local_config.py check_write: RAM or the verified data drive, never a
+    Windows system volume; '..' and a symlink as the last component refused). allowed_roots, None for
+    DEFAULT_WRITE_ROOTS (the data drive), only narrows it: a root outside the boundary allows nothing there.
     """
+    lc = _local_config_module()
     if allowed_roots is None:
         allowed_roots = _get("DEFAULT_WRITE_ROOTS")
-    if not path:
-        raise PinError("empty output path")
-    resolved = os.path.realpath(os.path.abspath(win_to_wsl(path)))
-    low = resolved.lower() + "/"
-    for bad in _get("FORBIDDEN_WRITE_PREFIXES"):
-        if low.startswith(bad):
-            raise PinError("refusing to write on the system drive (%s resolves to %s)" % (path, resolved))
-    for root in allowed_roots:
-        r = os.path.realpath(os.path.abspath(root))
-        if resolved == r or resolved.startswith(r.rstrip("/") + "/"):
-            drive_mount_for(resolved)
-            return resolved
-    raise PinError("refusing to write outside %s: %s (resolves to %s)"
-                   % (", ".join(allowed_roots), path, resolved))
+    try:
+        return lc.check_write(path, allowed_roots)
+    except lc.WriteRefused as exc:
+        raise PinError(str(exc))
 
 
 # --------------------------------------------------------------------------- Valve KeyValues (.acf)
@@ -1128,7 +1041,7 @@ def open_guarded_dir(path: str, allowed_roots=None) -> int:
     """Open an existing directory that may be written to and return its fd, for the *_at helpers below.
 
     The path goes through check_write_path first. The guard then runs again on the directory the fd really refers to
-    (its /proc/self/fd link), and that directory must be on the drive's own mount (same st_dev). Every later create,
+    (its /proc/self/fd link), and the opened directory must be on that path's mount (same st_dev). Every later create,
     replace and unlink uses dir_fd=, so a directory swapped for a symlink after this call cannot redirect a write.
     """
     resolved = check_write_path(path, allowed_roots)
@@ -1150,10 +1063,13 @@ def open_guarded_dir(path: str, allowed_roots=None) -> int:
         st = os.fstat(fd)
         if not stat.S_ISDIR(st.st_mode):
             raise PinError("not a directory: %s" % actual)
-        mount = drive_mount_for(actual)
-        if mount is not None and st.st_dev != mount["dev"]:
-            raise PinError("directory %s is not on the %s mount (device %d:%d)"
-                           % (actual, mount["mount_point"], os.major(mount["dev"]), os.minor(mount["dev"])))
+        lc = _local_config_module()
+        try:
+            mount = lc.mount_of(actual, lc.read_mountinfo())
+        except lc.WriteRefused as exc:
+            raise PinError(str(exc))
+        if mount is None or st.st_dev != mount["dev"]:
+            raise PinError("directory %s is not on the %s mount" % (actual, mount["mount_point"] if mount else "(no)"))
     except BaseException:
         os.close(fd)
         raise

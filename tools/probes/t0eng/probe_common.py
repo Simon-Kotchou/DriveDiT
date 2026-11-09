@@ -371,13 +371,19 @@ def write_synthetic_play(play_dir, header, csvs, footer=None, files=None):
 
 
 def make_temp_dir(prefix):
-    """Test helper: a new directory under $TMPDIR when that lies in /dev/shm/ or on the data drive of the local
-    config, else under /dev/shm/. unittest.SkipTest when neither is usable. Never /tmp. The caller removes it
-    (shutil.rmtree in a finally or addCleanup)."""
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not (_inside_write_roots(base) and os.path.isdir(base) and os.access(base, os.W_OK)):
-        base = "/dev/shm"
-        if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-            raise unittest.SkipTest("no writable $TMPDIR under /dev/shm/ or the data drive and no /dev/shm; "
-                                    "not using /tmp")
-    return tempfile.mkdtemp(prefix=prefix, dir=base)
+    """Test helper: a new directory under $TMPDIR when the write boundary allows it, else under /dev/shm/ when it does,
+    checked before anything is created (no symlink, an existing writable directory). unittest.SkipTest when neither
+    is usable, with the reason (a sandbox can hide the RAM mount, and the boundary refuses then, fail-closed). Never
+    /tmp or the system temp dir. The caller removes it (shutil.rmtree in a finally or addCleanup)."""
+    reasons = []
+    for cand in (os.environ.get("TMPDIR") or "", "/dev/shm"):
+        if not cand:
+            continue
+        if os.path.islink(cand) or not os.path.isdir(cand) or not os.access(cand, os.W_OK):
+            reasons.append("%s is not an existing writable directory (or is a symlink)" % cand)
+            continue
+        why = write_refusal(os.path.join(os.path.realpath(cand), "__dd22_scratch_probe__"))
+        if why is None:
+            return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(cand))
+        reasons.append(why)
+    raise unittest.SkipTest("no scratch directory the write boundary allows (%s); not using /tmp" % "; ".join(reasons))

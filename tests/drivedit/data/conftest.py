@@ -1,9 +1,9 @@
 """Shared fixtures of the drivedit.data tests: the features_v1 spec, the golden synthetic dc-2.0 session
 (``tests/fixtures/capture_dc2``) read once, its shard built once, and scratch directories.
 
-Scratch space lies under $TMPDIR when that is on /dev/shm/, else under /dev/shm/ (never /tmp, which is on the system
-drive on the development host). Every test reads the synthetic local config (DD-22: data root /mnt/x/DataRoot, system
-drive /mnt/z, neither a real mount), so no default root names a real drive. No torch here.
+Scratch space lies in validated RAM: $TMPDIR when that is on /dev/shm/, else /dev/shm/ (never /tmp;
+tests/fixtures/local_config/scratch.py). Every test reads the synthetic local config (DD-22: data root
+/mnt/x/DataRoot, system drive /mnt/z, neither a real mount), so no default root names a real drive. No torch here.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import os
 import re
 import shutil
 import tempfile
@@ -35,6 +34,13 @@ GOLDEN_JSON = FIXTURES / "golden.json"
 ROUTES_DIR = FIXTURES / "routes"
 CARD = FIXTURES / "cards" / "S105_synthetic.json"
 LOCAL_CONFIG_FIXTURE = REPO / "tests" / "fixtures" / "local_config" / "placeholder.local.env"
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", REPO / "tests" / "fixtures" / "local_config" / "scratch.py"
+)
+assert _scratch_spec is not None
+assert _scratch_spec.loader is not None
+_scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(_scratch)
 
 
 @pytest.fixture(autouse=True)
@@ -44,12 +50,9 @@ def placeholder_local_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def scratch_base() -> Path:
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base == "/dev/shm") and os.path.isdir(base)):
-        base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-        pytest.skip("no writable scratch base under /dev/shm")
-    return Path(base)
+    """The validated RAM scratch base (tests/fixtures/local_config/scratch.py): the builder writes through the real
+    write boundary, so these tests skip where it refuses RAM."""
+    return Path(_scratch.boundary_base())
 
 
 @pytest.fixture(scope="session")

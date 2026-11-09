@@ -39,6 +39,7 @@ def load(name, rel):
 mig = load("dd_test_migrate_local_config", "tools/migrate_local_config.py")
 lc = mig.lc
 bv = load("dd22_boundary_vectors", "tests/fixtures/local_config/boundary_vectors.py")
+scratch = load("dd22_scratch", "tests/fixtures/local_config/scratch.py")
 CFG = lc.load(FIXTURE)
 with open(FIXTURE, encoding="ascii") as _fh:
     FIXTURE_TEXT = _fh.read()
@@ -140,9 +141,8 @@ def write_legacy(root, changes=None):
 
 
 def temp_dir():
-    if not (os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK)):
-        raise unittest.SkipTest("no writable /dev/shm")
-    return tempfile.mkdtemp(prefix="dd22_migrate_", dir="/dev/shm")
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py)."""
+    return scratch.mkdtemp("dd22_migrate_", real_boundary=False)
 
 
 def run(*argv):
@@ -162,6 +162,7 @@ class HistoryTest(unittest.TestCase):
     def test_the_last_pre_dd22_revision_is_reproduced(self):
         if not history_available():
             self.skipTest("%s is not in this clone's history (a shallow CI checkout)" % REV)
+        scratch.boundary_base()   # the runtime getters' config goes to RAM through the real boundary (skips if refused)
         legacy = mig.Legacy(repo=REPO, rev=REV)
         values = mig.derive(legacy)
         text = mig.config_text(values, legacy.where())
@@ -290,6 +291,12 @@ class GetterTest(unittest.TestCase):
         for rel in ("src", "tools", "data", "docs"):
             shutil.copytree(os.path.join(REPO, rel), os.path.join(copy, rel),
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        world = bv.world(prefix="dd22_getter_world_")   # the child's config goes to the world's RAM
+        w = world.__enter__()
+        self.addCleanup(world.__exit__, None, None, None)
+        use = w.use(lc, "real_like")
+        use.__enter__()
+        self.addCleanup(use.__exit__, None, None, None)
         rows = dict((r[0], r) for r in mig.runtime_rows(mig.Legacy(directory=legacy), CFG, FIXTURE_TEXT, copy,
                                                         sys.executable))
         self.assertEqual(rows["build.DATASET_ROOTS"][1], rows["build.DATASET_ROOTS"][2])

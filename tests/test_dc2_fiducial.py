@@ -19,6 +19,11 @@ import unittest
 import numpy
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 FIDUCIAL_PATH = os.path.join(REPO, "data", "dc2", "fiducial.py")
 
 
@@ -34,13 +39,8 @@ M = fiducial.CODE_MODULUS
 
 
 def temp_dir(prefix):
-    """The make_temp_dir rule of tools/probes/t0eng/probe_common.py, kept local so this test needs no other tool."""
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
-        base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/")
-    return tempfile.mkdtemp(prefix=prefix, dir=base)
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py)."""
+    return scratch.mkdtemp(prefix, real_boundary=False)
 
 
 def scene(width, height, seed=0):

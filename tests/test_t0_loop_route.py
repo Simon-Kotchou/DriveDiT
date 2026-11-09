@@ -62,6 +62,11 @@ import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 import drivedit_nav  # noqa: E402
@@ -580,10 +585,8 @@ class LoopRouteTest(unittest.TestCase):
 
     @staticmethod
     def tmp_base():
-        base = os.path.realpath(os.environ.get("TMPDIR") or "/dev/shm")
-        if not base.startswith("/dev/shm"):
-            base = "/dev/shm"
-        return base
+        # validated RAM; the generator writes through the real write boundary, so these tests skip where it refuses RAM
+        return scratch.boundary_base()
 
 
 ROUTE_REV_FILE = os.path.join(REPO, "addons", "DataCapture", "Configs", "routes", "arland_t0_loop_rev.json")

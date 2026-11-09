@@ -63,6 +63,11 @@ from unittest import mock
 import numpy
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 HARVEST = os.path.join(REPO, "tools", "harvester", "harvest.py")
 GOLDEN_JSON = os.path.join(REPO, "tests", "fixtures", "capture_dc2", "golden.json")
 WB_ID = "arland_T0b_20261025T091512Z_wb_i00_5e00"
@@ -118,12 +123,8 @@ def scratch_ok(path):
 
 
 def temp_dir(prefix):
-    base = os.environ.get("TMPDIR")
-    if not scratch_ok(base):
-        base = "/dev/shm"
-        if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-            raise unittest.SkipTest("no usable temporary base under /dev/shm/")
-    return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(base))
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py); skipped where the write boundary refuses RAM."""
+    return scratch.mkdtemp(prefix, real_boundary=True)
 
 
 def run(root, *argv):

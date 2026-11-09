@@ -214,10 +214,19 @@ class World:
                 os.environ[lc.ENV_VAR] = env
 
 
+def _scratch():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dd22_scratch_bv", os.path.join(HERE, "scratch.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 @contextlib.contextmanager
 def world(prefix: str = "dd22_boundary_"):
-    """A fresh World in a directory under /dev/shm, removed afterwards."""
-    base = os.path.realpath(tempfile.mkdtemp(prefix=prefix, dir="/dev/shm"))
+    """A fresh World in a directory in validated RAM (scratch.ram_base: no real-boundary check, the world brings its
+    own mountinfo), removed afterwards."""
+    base = os.path.realpath(_scratch().mkdtemp(prefix, real_boundary=False))
     try:
         yield World(base)
     finally:

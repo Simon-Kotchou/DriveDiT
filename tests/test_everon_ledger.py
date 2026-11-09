@@ -30,6 +30,11 @@ import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 LEDGER = os.path.join(REPO, "docs", "program", "everon_ledger.md")
 # DD-22: documents of a real machine are compared only when DD_TEST_LOCAL_CONFIG names its local config (opt-in).
 _evidence_spec = importlib.util.spec_from_file_location(
@@ -63,10 +68,8 @@ def scratch_ok(path):
 
 
 def temp_dir(prefix):
-    base = os.environ.get("TMPDIR")
-    if not scratch_ok(base):
-        base = "/dev/shm"
-    return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(base))
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py)."""
+    return scratch.mkdtemp(prefix, real_boundary=False)
 
 
 def run_main(argv):

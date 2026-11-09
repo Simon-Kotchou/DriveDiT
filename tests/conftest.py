@@ -6,13 +6,19 @@ get the `torch` marker, and without torch they are not collected at all. Whole d
 codec, model and train tests) are listed in TORCH_TEST_DIRS and treated the same way. A new test module that imports
 torch must be added to one of the two lists.
 
-This file imports neither torch nor any project module, and sets DRIVEDIT_LOCAL_CONFIG (below).
+This file imports neither torch nor any project module, and sets DRIVEDIT_LOCAL_CONFIG (below). It also replaces pytest's
+tmp_path and tmp_path_factory with directories in validated RAM (tests/fixtures/local_config/scratch.py, DD-22): no test falls back to the
+system temp dir.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import re
+import shutil
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -39,6 +45,45 @@ _HERE = Path(__file__).parent
 os.environ["DRIVEDIT_LOCAL_CONFIG"] = str(_HERE / "fixtures" / "local_config" / "placeholder.local.env")
 _TORCH_PATHS = {(_HERE / p).resolve() for p in TORCH_TEST_MODULES}
 _TORCH_DIRS = [(_HERE / d).resolve() for d in TORCH_TEST_DIRS]
+
+_scratch_spec = importlib.util.spec_from_file_location("dd22_scratch", _HERE / "fixtures" / "local_config" / "scratch.py")
+assert _scratch_spec is not None
+assert _scratch_spec.loader is not None
+_scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(_scratch)
+
+
+class _RamTempPathFactory:
+    """The part of pytest's TempPathFactory the tests use (mktemp, getbasetemp), in validated RAM."""
+
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def getbasetemp(self) -> Path:
+        return self._base
+
+    def mktemp(self, basename: str, numbered: bool = True) -> Path:
+        return Path(tempfile.mkdtemp(prefix=basename + "_", dir=self._base))
+
+
+@pytest.fixture(scope="session")
+def tmp_path_factory() -> Iterator[_RamTempPathFactory]:
+    """pytest's tmp_path_factory in validated RAM (scratch.ram_base(); never the system temp dir)."""
+    base = Path(tempfile.mkdtemp(prefix="dd22_pytest_", dir=_scratch.ram_base()))
+    yield _RamTempPathFactory(base)
+    shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture
+def tmp_path(request: pytest.FixtureRequest) -> Iterator[Path]:
+    """pytest's tmp_path in validated RAM (scratch.ram_base(); never the system temp dir), removed afterwards. The test
+    skips, with the reason, where there is no usable RAM scratch."""
+    base = _scratch.ram_base()
+    prefix = re.sub(r"[^A-Za-z0-9_]", "_", request.node.name)[:40]
+    path = Path(tempfile.mkdtemp(prefix=prefix + "_", dir=base))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
 
 if importlib.util.find_spec("torch") is None:
     collect_ignore = [*TORCH_TEST_MODULES, *TORCH_TEST_DIRS]

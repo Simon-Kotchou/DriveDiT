@@ -16,6 +16,7 @@ import copy
 import importlib
 import json
 import math
+import importlib.util
 import os
 import shutil
 import sys
@@ -24,6 +25,11 @@ import unittest
 import warnings
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
@@ -38,12 +44,8 @@ TOL_P20 = 0.05  # acceptance tolerance on p20 (m)
 
 
 def tmp_base():
-    tmpdir = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if tmpdir.startswith("/dev/shm/") and os.path.isdir(tmpdir):
-        return tmpdir
-    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
-        return "/dev/shm"
-    raise unittest.SkipTest("no TMPDIR on /dev/shm and no writable /dev/shm; not using the system temp dir")
+    """Validated RAM (tests/fixtures/local_config/scratch.py); never the system temp dir."""
+    return scratch.ram_base()
 
 
 def route_dict(xz, map_id="arland", split="train", maneuvers=(), stops=None, closed=False, route_id="test_route",

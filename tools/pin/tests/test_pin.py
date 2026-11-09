@@ -2,8 +2,8 @@
 
     python3 -I -B -m unittest discover -s tools/pin/tests -v
 
-Temporary Steam-library trees go under $DD_PIN_TEST_TMP, else /dev/shm, else the system temp dir,
-and are deleted afterwards. Every test reads the synthetic local config tests/fixtures/local_config/
+Temporary Steam-library trees go under $DD_PIN_TEST_TMP (a directory under /dev/shm, validated before use), else
+$TMPDIR or /dev/shm (tests/fixtures/local_config/scratch.py; never the system temp dir), and are deleted afterwards. Every test reads the synthetic local config tests/fixtures/local_config/
 placeholder.local.env (DD-22; set as DRIVEDIT_LOCAL_CONFIG below, so the scripts run in a subprocess read it
 too), never this machine's: its data drive is /mnt/x, its system drive /mnt/z, and neither is a real mount.
 No system-drive path is ever handed to code that writes: such strings appear only in the pure path-guard
@@ -40,6 +40,11 @@ REPO = os.path.dirname(os.path.dirname(PIN_DIR))
 LOCAL_CONFIG_FIXTURE = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
 os.environ["DRIVEDIT_LOCAL_CONFIG"] = LOCAL_CONFIG_FIXTURE
 BV_PATH = os.path.join(REPO, "tests", "fixtures", "local_config", "boundary_vectors.py")
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 NEVER_WRITABLE = "/proc/__dd0_pin_test_never_written__"  # off the data drive, and the kernel refuses writes there
 
 
@@ -92,10 +97,9 @@ TOOLS_MTIME_NS = 1788671758_506855800      # sub-second, like the real Tools pak
 
 
 def _tmp_base():
-    for cand in (os.environ.get("DD_PIN_TEST_TMP"), "/dev/shm"):
-        if cand and os.path.isdir(cand) and os.access(cand, os.W_OK):
-            return cand
-    return None
+    """The validated RAM scratch base: $DD_PIN_TEST_TMP when set (it must pass), else $TMPDIR or /dev/shm; the tests of
+    the real write boundary skip where it refuses RAM (scratch.boundary_base)."""
+    return scratch.boundary_base("DD_PIN_TEST_TMP")
 
 
 def run_main(fn, argv, roots):

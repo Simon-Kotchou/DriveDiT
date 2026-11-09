@@ -4,13 +4,13 @@ endpoint handshake before Workbench calls (ticket DD-14a, CC-05; MIGRATION_1_9 5
 
 enfusion-mcp-wsl.sh execs this instead of node. Before the server starts:
   - the pin: EMCP_PIN (a pin id, for a second wrapper config) or <pin dir>/ACTIVE (EMCP_PIN_DIR, default
-    /mnt/e/DriveDiT/pin); loaded and validated by tools/pin (its sidecars included). EMCP_PIN may name a stable pin
+    <DATA_ROOT>/pin of the local config, tools/local_config.py); loaded and validated by tools/pin (its sidecars included). EMCP_PIN may name a stable pin
     only if it is the active one (the stable project root and installs are the active pin's); a 1.8 config after the
     re-pin is the cold pin, EMCP_PIN=1.8.0.13-cold;
   - the index: <EMCP_ROOT>/pins/<pin id>/data, whose api/INDEX_PIN.json must name this pin id and pin sha256 (and its
     build_key, when both are known), with every api file matching its recorded hash. An ENFUSION_MCP_DATA_DIR set by
     the caller must be that directory. There is no fallback: the 1.8 scrape never answers for a 1.9 pin;
-  - the project root: pinlib.DEPLOY_ROOTS[launch path] (E:\\DriveDiT\\addons for stable, addons_c18 for the cold
+  - the project root: pinlib.DEPLOY_ROOTS[launch path] (<DATA_ROOT>/addons for stable, addons_c18 for the cold
     pin). An ENFUSION_PROJECT_PATH set by the caller must be it, and a deploy there stamped for another pin
     (.deploy_state.json target_pin) refuses;
   - ENFUSION_GAME_PATH and ENFUSION_WORKBENCH_PATH are the pin's installs.
@@ -74,9 +74,10 @@ class GateRefusal(Exception):
 
 def resolve_config(env: dict) -> dict:
     """The pin, data dir, project root and install paths for this session; GateRefusal on any mismatch."""
-    root = os.path.realpath(env.get("EMCP_ROOT") or "/mnt/e/drivedit_realign/mcp")
-    pin_dir = os.path.abspath(pinlib.win_to_wsl(env.get("EMCP_PIN_DIR") or pinlib.DEFAULT_PIN_DIR))
     try:
+        # DD-22: the MCP root defaults to <REALIGN_ROOT>/mcp and the pin dir to <DATA_ROOT>/pin, both of the local config.
+        root = os.path.realpath(env.get("EMCP_ROOT") or pinlib.local_path("REALIGN_ROOT") + "/mcp")
+        pin_dir = os.path.abspath(pinlib.win_to_wsl(env.get("EMCP_PIN_DIR") or pinlib.DEFAULT_PIN_DIR))
         if env.get("EMCP_PIN"):
             src = preflight.load_pin_by_id(pin_dir, pinlib.validate_pin_id(env["EMCP_PIN"]))
             how = "EMCP_PIN"
@@ -148,10 +149,13 @@ def resolve_config(env: dict) -> dict:
     if target_pin and target_pin != src["pin_id"]:
         raise GateRefusal("project root %s was deployed for pin %s, not %s" % (project, target_pin, src["pin_id"]))
     host = env.get("ENFUSION_WORKBENCH_HOST") or "127.0.0.1"
-    win_temp = env.get("EMCP_WIN_TEMP") or eh.MCP_WIN_TEMP
+    try:
+        win_temp = env.get("EMCP_WIN_TEMP") or eh.mcp_win_temp()
+    except pinlib.PinError as exc:
+        raise GateRefusal("the helper temp dir: %s" % exc)
     gateway, gw_why = None, "not needed for a loopback host"
     if host not in eh.LOOPBACK:
-        # A non-loopback host must be the proven WSL NAT gateway (ipconfig.exe runs with an E: TEMP/TMP).
+        # A non-loopback host must be the proven WSL NAT gateway (ipconfig.exe runs with a data-drive TEMP/TMP).
         if env.get("EMCP_TEST_IPCONFIG") is None:
             try:
                 os.makedirs(pinlib.check_write_path(win_temp), exist_ok=True)
@@ -307,7 +311,7 @@ def main(argv=None, env=None) -> int:
     if not cmd:
         print("[mcp_gate] no server command given (mcp_gate.py -- NODE DIST)", file=sys.stderr)
         return 2
-    try:  # the Windows TEMP/TMP of the cscript helper (R1): an E: dir, through the tools/pin write guard
+    try:  # the Windows TEMP/TMP of the cscript helper (R1): a data-drive dir, through the tools/pin write guard
         os.makedirs(pinlib.check_write_path(cfg["win_temp"]), exist_ok=True)
     except (pinlib.PinError, OSError) as exc:
         print("[mcp_gate] REFUSED: the helper temp dir %s: %s; the MCP server was not started" % (cfg["win_temp"], exc),

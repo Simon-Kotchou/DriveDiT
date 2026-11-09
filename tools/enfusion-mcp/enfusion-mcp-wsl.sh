@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# enfusion-mcp-wsl.sh - start steffenbk/enfusion-mcp-BK (built on E:) as a stdio MCP server from WSL.
+# enfusion-mcp-wsl.sh - start steffenbk/enfusion-mcp-BK (built on the data drive) as a stdio MCP server from WSL.
 #
 # DriveDiT setup, 2026-10-20 (DD-3). Versioned in the repo under tools/enfusion-mcp/ (runbook: README.md there).
-# Evidence: /mnt/e/drivedit_realign/enfusion/mcp-setup.md
+# Evidence: <REALIGN_ROOT>/enfusion/mcp-setup.md. <REALIGN_ROOT>, the system drive and the defaults below come from
+# the local config (DD-22; tools/local_config.py); without it the wrapper refuses (exit 2).
 #
 #   enfusion-mcp-wsl.sh              exec the MCP server (Claude Code calls it like this)
 #   enfusion-mcp-wsl.sh --print-env  print the resolved environment to stderr and exit (creates nothing)
@@ -17,26 +18,45 @@
 # stdout belongs to JSON-RPC: every diagnostic in this script goes to stderr.
 # Paths, host and port can be overridden by exporting them beforehand (or via "env" in the MCP config).
 # The three guards cannot: they are always 1 here, and the wrapper refuses to start a build without them.
-# Exit codes: 0 ok; 1 missing node/dist, unguarded build or no Windows host IP; 2 refused path or bad setting.
+# Exit codes: 0 ok; 1 missing node/dist, unguarded build or no Windows host IP; 2 refused path, bad setting or no
+# local config.
 set -euo pipefail
 
+NAME=enfusion-mcp-wsl
 log() { printf '[enfusion-mcp-wsl] %s\n' "$*" >&2; }
 die() { local code="$1"; shift; log "$*"; exit "$code"; }
+HERE="$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")"
+# DD-22: this machine's paths come from the untracked local config (tools/local_config.py, drivedit.local.env).
+# An installed MCP root holds a copy of local_config.py next to this script; tell it the file with
+# DRIVEDIT_LOCAL_CONFIG (the MCP entry's "env"). In the repo the loader is ../local_config.py.
+LOCAL_CONFIG_PY=""
+for _c in "$HERE/local_config.py" "$HERE/../local_config.py"; do
+  if [[ -f "$_c" ]]; then LOCAL_CONFIG_PY="$_c"; break; fi
+done
+local_config() {   # local_config KEY [--win | --drive]: one value; the loader names the file and key on a refusal
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" get "$@"
+}
+SYSTEM_DRIVE="$(local_config SYSTEM_DRIVE)" || die 2 "no local config (see the message above); nothing started"
 
 # True only for an absolute path that resolves (symlinks and '..' included) onto a Windows drive other
-# than C:, i.e. /mnt/<letter>/... with letter != c. Everything else is on C:: /mnt/c itself and the whole
-# WSL ext4.vhdx (~, /tmp, /var, /opt, ...). Relative paths are refused too: they would resolve against
-# the caller's cwd, and Claude Code starts this wrapper with its own cwd (the C: repo).
+# than the system drive (SYSTEM_DRIVE), i.e. /mnt/<letter>/... on another letter. Everything else is on the
+# system drive: its mount itself and the whole WSL ext4.vhdx (~, /tmp, /var, /opt, ...). Relative paths are
+# refused too: they would resolve against the caller's cwd, and Claude Code starts this wrapper with its own cwd.
 off_c_drive() {
-  local r="" re='^/mnt/[abdefghijklmnopqrstuvwxyz](/|$)'
+  local r="" re='^/mnt/[a-z](/|$)'
   [[ "${1:-}" == /* ]] || return 1
   r="$(realpath -m -- "$1" 2>/dev/null)" || return 1
-  [[ "$r" =~ $re ]]
+  [[ "$r" =~ $re && "${r:0:6}" != "$SYSTEM_DRIVE" ]]
 }
 
-ROOT="${EMCP_ROOT:-/mnt/e/drivedit_realign/mcp}"   # work root of build-bk.sh (build, data, HOME/TMP redirects)
-off_c_drive "$ROOT" || die 2 "refusing EMCP_ROOT=$ROOT: use an absolute path on a drive other than C: (/mnt/c and the WSL disk are on C:)"
+ROOT="${EMCP_ROOT:-}"                              # work root of build-bk.sh (build, data, HOME/TMP redirects)
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(local_config REALIGN_ROOT)/mcp" || die 2 "no REALIGN_ROOT in the local config (see the message above)"
+fi
+off_c_drive "$ROOT" || die 2 "refusing EMCP_ROOT=$ROOT: use an absolute path on a drive other than the system drive ($SYSTEM_DRIVE and the WSL disk are on it)"
 ROOT="$(realpath -m -- "$ROOT")"
+export EMCP_ROOT="$ROOT"                           # mcp_gate.py serves the index of the same root
 DIST="${EMCP_DIST:-$ROOT/build/enfusion-mcp-BK/dist/index.js}"
 
 # --- node binary (resolved before HOME is redirected; nvm lives under the real HOME) -------------
@@ -88,16 +108,16 @@ export ENFUSION_WORKBENCH_HOST ENFUSION_WORKBENCH_PORT
 
 # --- paths: WSL form for everything the server opens itself ----------------------------------------
 # Generators (project write, script_create, prefab create, mod create, game_duplicate, ...) write into the project
-# path, and so would any handler copy: it must stay off C: (never the OneDrive addons dir). mcp_gate.py sets it to
-# the pin's project root (E:\DriveDiT\addons for a stable pin); a value set here must be that root.
+# path, and so would any handler copy: it must stay off the system drive (never the OneDrive addons dir).
+# mcp_gate.py sets it to the pin's project root (<DATA_ROOT>/addons for a stable pin); a value set here must be that root.
 if [[ -n "${ENFUSION_PROJECT_PATH:-}" ]]; then
-  off_c_drive "$ENFUSION_PROJECT_PATH" || die 2 "refusing ENFUSION_PROJECT_PATH=$ENFUSION_PROJECT_PATH: the server writes there; use an absolute path off C:"
+  off_c_drive "$ENFUSION_PROJECT_PATH" || die 2 "refusing ENFUSION_PROJECT_PATH=$ENFUSION_PROJECT_PATH: the server writes there; use an absolute path off the system drive"
 fi
 # ENFUSION_GAME_PATH and ENFUSION_WORKBENCH_PATH (read only; launch and mod build are guarded) are the pin's
 # installs, and ENFUSION_MCP_DATA_DIR is the pin's index: mcp_gate.py sets all three. BK's loader silently falls back
 # to an EMPTY index when api/*.json is missing (src/index/loader.ts loadJson(..., [])), so the gate checks every
 # api file against the index stamp first.
-GATE="${EMCP_GATE:-$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")/mcp_gate.py}"
+GATE="${EMCP_GATE:-$HERE/mcp_gate.py}"
 PY=/usr/bin/python3
 # If anything ever injects handlers, it must target the addon that is actually open, not the
 # alphabetically-first addon that findFallbackGproj() would otherwise pick.
@@ -123,7 +143,7 @@ guarded_build() {
     && grep -q 'ENFUSION_MCP_NO_AUTO_LAUNCH' "$DIST_DIR/tools/mod.js"
 }
 
-# --- keep incidental writes off C: (the WSL ext4.vhdx lives on C:) ---------------------------------
+# --- keep incidental writes off the system drive (the WSL ext4.vhdx lives on it) -------------------
 export HOME="$ROOT/home"            # also: BK reads $HOME/.enfusion-mcp/config.json (absent)
 export TMPDIR="$ROOT/tmp"           # also the default dir of node's compile cache
 export XDG_CACHE_HOME="$ROOT/xdg/cache" XDG_CONFIG_HOME="$ROOT/xdg/config"

@@ -4,7 +4,9 @@ is a stub child that echoes. The fixture dumps are synthetic (tests/fixtures/dum
 
     python3 -I -B -m unittest discover -s tools/enfusion-mcp/tests -v
 
-Temp trees go under $DD_PIN_TEST_TMP, else /dev/shm, and are deleted afterwards.
+Temp trees go under $DD_PIN_TEST_TMP, else /dev/shm, and are deleted afterwards. Every test reads the synthetic local
+config of tools/pin/tests (DD-22; data drive /mnt/x, system drive /mnt/z), never this machine's. The BK source check
+runs only when $DD_TEST_BK_SRC names a pinned BK checkout's src/tools.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ EMCP = os.path.dirname(HERE)
 REPO = os.path.dirname(os.path.dirname(EMCP))
 FIX = os.path.join(HERE, "fixtures")
 PIN_TESTS = os.path.join(REPO, "tools", "pin", "tests")
-BK_SRC = "/mnt/e/drivedit_realign/mcp/build/enfusion-mcp-BK/src/tools"
+BK_SRC = os.environ.get("DD_TEST_BK_SRC", "")   # opt-in: <MCP root>/build/enfusion-mcp-BK/src/tools
 
 
 def _load(name, path):
@@ -131,9 +133,7 @@ class PinCase(base.TmpCase):
         for name, value in (("DEPLOY_ROOTS", {"stable": self.project, "cold-1.8.0.13": self.cold_project}),
                             ("WB_LAUNCH", {"stable": {"profile": self.profile, "gproj": self.gproj,
                                                       "launcher": "wb_R1.bat"}})):
-            saved = getattr(pinlib, name)
-            setattr(pinlib, name, value)
-            self.addCleanup(setattr, pinlib, name, saved)
+            base.override(self, pinlib, name, value)
 
     def pin_file(self, pin_id):
         return os.path.join(self.fs.out_dir, "pin_%s.json" % pin_id)
@@ -308,7 +308,7 @@ class IndexDiffTests(PinCase):
         self.addCleanup(shutil.rmtree, outside, True)
         link = os.path.join(self.tmp, "link")
         os.symlink(outside, link)
-        for tsv in ("/mnt/c/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
+        for tsv in ("/mnt/z/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
             self.assertEqual(self.diff(expect, "--tsv", tsv)[0], 2, tsv)
         cwd = os.getcwd()
         os.chdir(outside)
@@ -571,10 +571,10 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "no Workbench exe hash", dict(self.ident, exe_sha256=None))
 
     def test_another_profile_or_project(self):
-        cmd = '"%s" -profile "D:\\OneDrive\\ArmaReforgerWorkbench" -gproj "%s" -dcLaunchId %s' % (
+        cmd = '"%s" -profile "Y:\\OneDrive\\ArmaReforgerWorkbench" -gproj "%s" -dcLaunchId %s' % (
             self.exe, self.gproj, self.LID)
         self.refused(self.probes(cmd=cmd), "-profile is")
-        cmd = '"%s" -profile "%s" -gproj "D:\\DataTest\\addon.gproj" -dcLaunchId %s' % (self.exe, self.profile, self.LID)
+        cmd = '"%s" -profile "%s" -gproj "Y:\\DataTest\\addon.gproj" -dcLaunchId %s' % (self.exe, self.profile, self.LID)
         self.refused(self.probes(cmd=cmd), "-gproj is")
 
     def test_started_by_hand(self):
@@ -611,7 +611,7 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "0 console.log(s)")
         self.write_log(gproj=os.path.join(self.tmp, "other.gproj"))
         self.refused(self.probes(), "names another -gproj")
-        self.write_log(cwd="C:\\Elsewhere\\Workbench\\")
+        self.write_log(cwd="Z:\\Elsewhere\\Workbench\\")
         self.refused(self.probes(), "has working directory")
         self.write_log()
         self.write_log(name="logs_2026-11-05_22-25-00", start=REC_UNIX + 30)
@@ -633,15 +633,20 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "is not the newest log")
 
     def test_windows_probe_environment(self):
-        p = eh.WindowsProbes(win_temp="/mnt/e/DriveDiT/tmp/mcp")
+        p = eh.WindowsProbes(win_temp="/mnt/x/DataRoot/tmp/mcp")
         env = p.win_env()
-        self.assertEqual(env["WSLENV"], eh.win_env("/mnt/e/DriveDiT/tmp/mcp")["WSLENV"])
-        self.assertEqual((env["TEMP"], env["TMP"]), ("/mnt/e/DriveDiT/tmp/mcp", "/mnt/e/DriveDiT/tmp/mcp"))
+        self.assertEqual(env["WSLENV"], eh.win_env("/mnt/x/DataRoot/tmp/mcp")["WSLENV"])
+        self.assertEqual((env["TEMP"], env["TMP"]), ("/mnt/x/DataRoot/tmp/mcp", "/mnt/x/DataRoot/tmp/mcp"))
         self.assertEqual(env["WSLENV"].split(":")[-2:], ["TEMP/p", "TMP/p"])
-        self.assertEqual(eh.parse_env_line("TEMP=E:\\DriveDiT\\tmp\\mcp\tTMP=E:\\DriveDiT\\tmp\\mcp\r\n"),
-                         {"TEMP": "E:\\DriveDiT\\tmp\\mcp", "TMP": "E:\\DriveDiT\\tmp\\mcp"})
-        with self.assertRaises(OSError):   # a temp dir off E: is refused before cscript runs
+        self.assertEqual(eh.parse_env_line("TEMP=X:\\DataRoot\\tmp\\mcp\tTMP=X:\\DataRoot\\tmp\\mcp\r\n"),
+                         {"TEMP": "X:\\DataRoot\\tmp\\mcp", "TMP": "X:\\DataRoot\\tmp\\mcp"})
+        with self.assertRaises(OSError):   # a temp dir off the data drive is refused before cscript runs
             eh.WindowsProbes(win_temp=self.tmp).check_env()
+        # DD-22: the Windows tools and the temp dir come from the local config
+        self.assertEqual((p.netstat, p.cscript), ("/mnt/z/Windows/System32/NETSTAT.EXE",
+                                                  "/mnt/z/Windows/System32/cscript.exe"))
+        self.assertEqual(eh.MCP_WIN_TEMP, "/mnt/x/DataRoot/tmp/mcp")
+        self.assertEqual(eh.IPCONFIG, "/mnt/z/Windows/System32/ipconfig.exe")
 
     def test_cli_main_reads_only(self):
         before = sorted(os.listdir(self.pin_dir))
@@ -655,9 +660,9 @@ class HandshakeTests(PinCase):
         self.assertEqual(sorted(os.listdir(self.pin_dir)), before)
 
     def test_parsing(self):
-        argv = eh.split_cmdline('"C:\\Program Files (x86)\\x.exe" -profile "E:\\a b" -forceUpdate -maxFPS 60 -dcLaunchId X')
-        self.assertEqual(argv[0], "C:\\Program Files (x86)\\x.exe")
-        self.assertEqual(eh.cli_args(argv[1:]), {"profile": "E:\\a b", "forceupdate": "", "maxfps": "60",
+        argv = eh.split_cmdline('"Z:\\Program Files (x86)\\x.exe" -profile "X:\\a b" -forceUpdate -maxFPS 60 -dcLaunchId X')
+        self.assertEqual(argv[0], "Z:\\Program Files (x86)\\x.exe")
+        self.assertEqual(eh.cli_args(argv[1:]), {"profile": "X:\\a b", "forceupdate": "", "maxfps": "60",
                                                  "dclaunchid": "X"})
         self.assertEqual(eh.listening_pids("  TCP    0.0.0.0:57750   0.0.0.0:0   LISTENING   9\n"
                                            "  TCP    [::]:5775       [::]:0      LISTENING   7\n", 5775), {7})
@@ -710,7 +715,7 @@ WRITE_CALLS = [
     ("wb_localization", {"action": a}) for a in ("insert", "delete", "modify")] + [
     ("wb_clipboard", {"action": a}) for a in ("copy", "cut", "paste", "pasteAtCursor", "duplicate", "hasCopied")] + [
     ("wb_component", {"action": a, "entityName": "x"}) for a in ("add", "remove")] + [
-    ("wb_projects", {"action": "open", "name": "E:\\DriveDiT\\addons\\DataCapture\\worlds\\x.ent"}),
+    ("wb_projects", {"action": "open", "name": "X:\\DataRoot\\addons\\DataCapture\\worlds\\x.ent"}),
     ("wb_entity_select", {"action": "select", "name": "x"}), ("wb_entity_select", {"action": "deselect"}),
     ("wb_entity_select", {"action": "clear"})]
 PATH_CALLS = [("project", {"action": "browse"}), ("project", {"action": "read", "path": "Scripts/Game/X.c"}),
@@ -833,9 +838,9 @@ class GatePolicyTests(unittest.TestCase):
         self.assertEqual(bk.identifier_tokens("worlds/EdenTerrain_v2"), ["worlds", "eden", "terrain", "v", "2"])
 
     def test_table_matches_the_bk_source(self):
-        # Opt-in: the pinned BK source on E: (absent in CI). Every BK tool is classified (allowed or denied).
-        if not os.path.isdir(BK_SRC):
-            self.skipTest("BK source not present")
+        # Opt-in: the pinned BK source ($DD_TEST_BK_SRC; absent in CI). Every BK tool is classified (allowed or denied).
+        if not BK_SRC or not os.path.isdir(BK_SRC):
+            self.skipTest("set DD_TEST_BK_SRC to a pinned BK checkout's src/tools to run this test")
         names = set()
         for fn in os.listdir(BK_SRC):
             if fn.endswith(".ts"):
@@ -912,10 +917,11 @@ class WrapperTests(PinCase):
         self.assertEqual(subprocess.run(["bash", "-n", self.WRAPPER]).returncode, 0)
 
     def test_print_env_runs_the_gate(self):
-        # The wrapper accepts a work root only on a Windows drive other than C:, so this runs only with
-        # DD_PIN_TEST_TMP on such a drive.
-        if not re.match(r"^/mnt/[abd-z]/", os.path.realpath(self.tmp)):
-            self.skipTest("temp dir is not on a /mnt/<d..z> drive")
+        # The wrapper accepts a work root only on a Windows drive other than the system drive (the fixture's is
+        # /mnt/z), so this runs only with DD_PIN_TEST_TMP on such a drive.
+        real = os.path.realpath(self.tmp)
+        if not re.match(r"^/mnt/[a-y]/", real):
+            self.skipTest("temp dir is not on a /mnt/<drive> other than the fixture's system drive")
         dist = os.path.join(self.root, "build", "enfusion-mcp-BK", "dist")
         os.makedirs(os.path.join(dist, "workbench"))
         os.makedirs(os.path.join(dist, "tools"))
@@ -925,7 +931,7 @@ class WrapperTests(PinCase):
         os.chmod(node, 0o755)
         env = {"PATH": "/usr/bin:/bin", "EMCP_ROOT": self.root, "NODE_BIN": node, "ENFUSION_WORKBENCH_HOST": "127.0.0.1",
                "EMCP_PIN_DIR": self.pin_dir, "EMCP_PIN": "1.8.0.13", "HOME": self.tmp,
-               "DD_PIN_TOOLS": os.path.join(REPO, "tools", "pin")}
+               "DD_PIN_TOOLS": os.path.join(REPO, "tools", "pin"), "DRIVEDIT_LOCAL_CONFIG": base.LOCAL_CONFIG_FIXTURE}
         r = subprocess.run(["bash", self.WRAPPER, "--print-env"], env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("REFUSED", r.stderr)

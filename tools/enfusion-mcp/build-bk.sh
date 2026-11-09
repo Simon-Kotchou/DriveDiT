@@ -1,34 +1,51 @@
 #!/usr/bin/env bash
-# build-bk.sh - build steffenbk/enfusion-mcp-BK on E: with every npm/node/git side effect on E:.
+# build-bk.sh - build steffenbk/enfusion-mcp-BK on the data drive with every npm/node/git side effect there.
 # Versioned in the DriveDiT repo under tools/enfusion-mcp/ (DD-3); the live copy sits in $EMCP_ROOT.
-# Runbook: tools/enfusion-mcp/README.md. Evidence: /mnt/e/drivedit_realign/enfusion/mcp-setup.md
+# Runbook: tools/enfusion-mcp/README.md. Evidence: <REALIGN_ROOT>/enfusion/mcp-setup.md (REALIGN_ROOT and the
+# system drive come from the local config, DD-22; tools/local_config.py).
 #
 #   bash build-bk.sh            # build at the pinned commit + guard patches + prune
-#   bash build-bk.sh --data18   # additionally compose an E: data dir that swaps in fma-rc's Reforger 1.8 API index
+#   bash build-bk.sh --data18   # additionally compose a data dir that swaps in fma-rc's Reforger 1.8 API index
 #   bash build-bk.sh --smoke    # MCP initialize + tools/list over stdio (no Workbench I/O: unreachable host, guards on);
 #                               # exits 1 unless serverInfo and the expected tool count come back
 #
-# Env overrides: EMCP_ROOT (work root: clones, build, caches; default /mnt/e/drivedit_realign/mcp; must be an
-#                absolute path on a drive other than C:), EMCP_PATCH_DIR (guard patches; default: patches/ next
-#                to this script).
-# Re-running is safe: the clone, checkout, patches (already-applied check), npm ci, tsc, prune and the data
-# copy all converge on the same tree.
+# Env overrides: EMCP_ROOT (work root: clones, build, caches; default <REALIGN_ROOT>/mcp; must be an
+#                absolute path on a drive other than the system drive), EMCP_PATCH_DIR (guard patches; default:
+#                patches/ next to this script).
+# Re-running is safe: the clone, checkout (tracked files reset to the pinned commit), patches, npm ci, tsc, prune and
+# the data copy all converge on the same tree.
 set -euo pipefail
 
+NAME=build-bk
 die() { echo "build-bk: $*" >&2; exit "${EXIT_CODE:-1}"; }
-# True only for an absolute path that resolves (symlinks and '..' included) onto a Windows drive other than C:.
-# /mnt/c and the whole WSL ext4.vhdx (~, /tmp, /var, ...) are on C:, which is nearly full; relative paths
-# would resolve against the caller's cwd.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# DD-22: this machine's paths come from the untracked local config (tools/local_config.py, drivedit.local.env).
+# An installed MCP root holds a copy of local_config.py next to this script; tell it the file with
+# DRIVEDIT_LOCAL_CONFIG (the MCP entry's "env"). In the repo the loader is ../local_config.py.
+LOCAL_CONFIG_PY=""
+for _c in "$HERE/local_config.py" "$HERE/../local_config.py"; do
+  if [[ -f "$_c" ]]; then LOCAL_CONFIG_PY="$_c"; break; fi
+done
+local_config() {   # local_config KEY [--win | --drive]: one value; the loader names the file and key on a refusal
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" get "$@"
+}
+SYSTEM_DRIVE="$(local_config SYSTEM_DRIVE)" || EXIT_CODE=2 die "no local config (see the message above)"
+# True only for an absolute path that resolves (symlinks and '..' included) onto a Windows drive other than the
+# system drive. Its mount and the whole WSL ext4.vhdx (~, /tmp, /var, ...) are on the system drive, which is never
+# written; relative paths would resolve against the caller's cwd.
 off_c_drive() {
-  local r="" re='^/mnt/[abdefghijklmnopqrstuvwxyz](/|$)'
+  local r="" re='^/mnt/[a-z](/|$)'
   [[ "${1:-}" == /* ]] || return 1
   r="$(realpath -m -- "$1" 2>/dev/null)" || return 1
-  [[ "$r" =~ $re ]]
+  [[ "$r" =~ $re && "${r:0:6}" != "$SYSTEM_DRIVE" ]]
 }
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="${EMCP_ROOT:-/mnt/e/drivedit_realign/mcp}"
-off_c_drive "$ROOT" || EXIT_CODE=2 die "refusing EMCP_ROOT=$ROOT: use an absolute path on a drive other than C: (/mnt/c and the WSL disk are on C:)"
+ROOT="${EMCP_ROOT:-}"
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(local_config REALIGN_ROOT)/mcp" || EXIT_CODE=2 die "no REALIGN_ROOT in the local config (see the message above)"
+fi
+off_c_drive "$ROOT" || EXIT_CODE=2 die "refusing EMCP_ROOT=$ROOT: use an absolute path on a drive other than the system drive ($SYSTEM_DRIVE and the WSL disk are on it)"
 ROOT="$(realpath -m -- "$ROOT")"
 export EMCP_ROOT="$ROOT"                           # the wrapper reads the same root
 SRC="$ROOT/src/enfusion-mcp-BK"                    # pristine clone (untrusted content, never built in place)
@@ -49,14 +66,14 @@ NODE_DIR="$(dirname "$NODE_BIN")"
 [[ -x "$NODE_DIR/npm" ]] || die "npm not found next to $NODE_BIN"
 export PATH="$NODE_DIR:$PATH"
 
-# ---- every cache/log/temp/config write goes to E: --------------------------------------------------
+# ---- every cache/log/temp/config write goes under ROOT, on the data drive ---------------------------
 export HOME="$ROOT/home"                           # ~/.npmrc, ~/.cache, ~/.config, ~/.gitconfig lookups
 export XDG_CACHE_HOME="$ROOT/xdg/cache" XDG_CONFIG_HOME="$ROOT/xdg/config"
 export XDG_STATE_HOME="$ROOT/xdg/state" XDG_DATA_HOME="$ROOT/xdg/data"
 export TMPDIR="$ROOT/tmp"
 export NODE_COMPILE_CACHE="$ROOT/tmp/node-compile-cache"  # npm 11 / tsc 5.9 call module.enableCompileCache()
 unset NODE_OPTIONS NODE_V8_COVERAGE                # inherited node flags could write reports/coverage elsewhere
-export npm_config_cache="$ROOT/npm-cache"          # default would be ~/.npm (C:)
+export npm_config_cache="$ROOT/npm-cache"          # default would be ~/.npm (the WSL disk)
 export npm_config_logs_dir="$ROOT/npm-logs"        # default would be <cache>/_logs
 export npm_config_userconfig="$ROOT/home/.npmrc"
 export npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false
@@ -65,7 +82,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$ROOT/pw-browsers"
 export GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$HOME" "$TMPDIR" "$npm_config_cache" "$npm_config_logs_dir" "$ROOT/build" \
          "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"
-cd "$ROOT"                                         # never run anything from the caller's (possibly C:) cwd
+cd "$ROOT"                                         # never run anything from the caller's cwd
 
 smoke() {
   # initialize + tools/list over stdio; the server never contacts Workbench for these. Belt and braces:
@@ -111,7 +128,9 @@ if [[ "${1:-}" == "--smoke" ]]; then smoke; exit $?; fi
 if [[ ! -d "$BUILD/.git" ]]; then
   git clone --quiet --no-hardlinks "$SRC" "$BUILD"
 fi
-git -C "$BUILD" -c advice.detachedHead=false checkout --quiet "$PIN"
+# -f resets the tracked files, so the patches below always apply to the pinned sources (DD-22 changed their text,
+# which an earlier build copy holds in the old wording); untracked node_modules/ and dist/ are kept.
+git -C "$BUILD" -c advice.detachedHead=false checkout --quiet -f "$PIN"
 
 # ---- 2. local guard patches (env-gated; no behaviour change unless the env vars are 1) -------------
 for PATCH in "${PATCHES[@]}"; do
@@ -138,7 +157,7 @@ npm prune --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=warn
 du -sh "$BUILD/node_modules" "$BUILD/dist" || true
 cd "$ROOT"
 
-# ---- 6 (optional). E: data dir with the Reforger 1.8 API index from fma-rc ---------------------------
+# ---- 6 (optional). data dir with the Reforger 1.8 API index from fma-rc ------------------------------
 # Read from the pinned commit's objects (not the working tree), so a moved checkout cannot change the index.
 if [[ "${1:-}" == "--data18" ]]; then
   DATA="$ROOT/data"

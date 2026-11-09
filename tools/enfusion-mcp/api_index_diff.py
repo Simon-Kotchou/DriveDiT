@@ -20,7 +20,7 @@ hashes in their INDEX_PIN.json. The expectations file holds one assertion per li
 
 Members are looked up on the class and its ancestors (parents in the index), as a script call resolves them.
 Prints PASS/FAIL per assertion, the delta counts and the two INDEX_PIN stamps; --tsv writes the whole class and
-member delta (E: only: the same resolved-path and mount guard as tools/pin). Exit codes: 0 every assertion holds; 1 at least one fails; 2 usage or read error.
+member delta (data drive only: the same resolved-path and mount guard as tools/pin). Exit codes: 0 every assertion holds; 1 at least one fails; 2 usage or read error.
 """
 from __future__ import annotations
 
@@ -49,10 +49,10 @@ def _pinlib():
 
 
 def open_output(path: str, write_roots=None):
-    """Open a new report file for writing, after pinlib's resolved-path and mount guard (E: only, never C:, a
-    symlinked parent resolved first); the parent must exist and the file must not."""
+    """Open a new report file for writing, after pinlib's resolved-path and mount guard (data drive only, never the
+    system drive, a symlinked parent resolved first); the parent must exist and the file must not."""
     pinlib = _pinlib()
-    target = pinlib.check_write_path(path, write_roots or pinlib.DEFAULT_WRITE_ROOTS)
+    target = pinlib.check_write_path(path, write_roots)
     if not os.path.isdir(os.path.dirname(target)):
         raise pinlib.PinError("output directory does not exist: %s" % os.path.dirname(target))
     return open(target, "x", encoding="utf-8")
@@ -218,12 +218,12 @@ def main(argv=None, write_roots=None) -> int:
     ap.add_argument("--old", required=True)
     ap.add_argument("--new", required=True)
     ap.add_argument("--expect", required=True)
-    ap.add_argument("--tsv", default=None, help="write the full delta here (must not exist; E: only)")
+    ap.add_argument("--tsv", default=None, help="write the full delta here (must not exist; data drive only)")
     args = ap.parse_args(argv)
     if args.tsv:
         pinlib = _pinlib()
         try:
-            pinlib.check_write_path(args.tsv, write_roots or pinlib.DEFAULT_WRITE_ROOTS)
+            pinlib.check_write_path(args.tsv, write_roots)
         except pinlib.PinError as exc:
             print("api_index_diff: --tsv: %s" % exc, file=sys.stderr)
             return 2

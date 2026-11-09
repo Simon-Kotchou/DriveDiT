@@ -5,14 +5,21 @@ stdio MCP server for Claude Code in WSL, driving Arma Reforger Workbench over it
 It replaces the abandoned npm `enfusion-mcp` 0.6.1 entry: its upstream repo is gone, it defaults to `127.0.0.1` (refused
 under WSL NAT), and it has no WSL path handling.
 
-Every write goes to E:. C: is never written (a project rule), and the WSL disk (`~`, `/tmp`, `/var`, ...) lives on C:
-by default.
+Every write goes to the data drive. The system drive is never written (a project rule), and the WSL disk (`~`, `/tmp`,
+`/var`, ...) lives on it by default.
 The scripts accept a work root, project path, `.gproj` or Workbench profile only as an absolute path that resolves onto a
-drive other than C: (`/mnt/<d..z>/...`, or `X:\...` for the profile). Relative paths are refused as well: Claude Code starts
-the wrapper with its own cwd, which is the C: repo.
+drive other than the system drive (`/mnt/<x>/...`, or `<X>:\...` for the profile). Relative paths are refused as well:
+Claude Code starts the wrapper with its own cwd, its project folder.
 
-Evidence and background: `/mnt/e/drivedit_realign/enfusion/mcp-setup.md`, `FIX_PLAN.md` §5, `program/CAPTURE_PROGRAM.md` §7.
-Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
+**Local paths (DD-22).** `<REALIGN_ROOT>`, `<DATA_ROOT>`, `<GAME_INSTALL>`, `<TOOLS_INSTALL>` and the system drive are
+keys of the machine's untracked local config `drivedit.local.env` (`<KEY_WIN>`: the Windows form), read through
+`tools/local_config.py`. The installed MCP root holds a copy of `local_config.py` next to the scripts, and the MCP
+entry tells it the file: `"env": {"DRIVEDIT_LOCAL_CONFIG": "<DATA_ROOT>/config/drivedit.local.env"}`
+(`claude-mcp-entry.json`; `python3 -I -B tools/local_config.py render tools/enfusion-mcp/claude-mcp-entry.json`
+prints it with this machine's values). Without the file the wrapper and the gate refuse (exit 2) and name the key.
+
+Evidence and background: `<REALIGN_ROOT>/enfusion/mcp-setup.md`, `FIX_PLAN.md` §5, `program/CAPTURE_PROGRAM.md` §7.
+Review record: `<REALIGN_ROOT>/p0/dd3-review.md`.
 
 ## Pinned versions
 
@@ -29,7 +36,7 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 |---|---|
 | `build-bk.sh` | build at the pin, apply both guard patches, `npm ci --ignore-scripts`, `tsc`, check the guards are in `dist/`, prune devDependencies. `--data18` also composes the 1.8 data dir from the pinned fma-rc commit. `--smoke` runs `initialize` + `tools/list` and exits 1 unless it gets serverInfo and 54 tools |
 | `enfusion-mcp-wsl.sh` | stdio wrapper that Claude Code runs. Forces the three guards to `1`, refuses a `dist/` without the guard code, finds the Windows host, runs the server from `$EMCP_ROOT/cwd`. `--print-env` shows the resolved config and creates nothing; `--check` also opens one TCP connection to the NET API port |
-| `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "E:\DriveDiT\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight against the **active** pin (`preflight.py --pin-active`: the pin that `E:\DriveDiT\pin\ACTIVE` names, switched only by DD-0's `pin_activate.py`; `WB_PIN_DIR` overrides the pin dir, `WB_PIN` is refused), names no game version, and starts Workbench only if the preflight (run on `/usr/bin/python3`) printed exactly one launch id and `launch_<id>.json` exists, as `wb_R1.bat` does. Its `WB_DIR` is the Tools install in DD-0's `pinlib.LAUNCH_PATHS`, and the preflight's `launch_path` check refuses any pin not made from that install. It refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
+| `launch-workbench.sh` | WSL fallback for DD-0's `wb_R1.bat`: same arguments (`-profile "<DATA_ROOT_WIN>\wb_profile"`, DataCapture gproj, `-forceUpdate -maxFPS 60`), runs the DD-0 pin preflight against the **active** pin (`preflight.py --pin-active`: the pin that `<DATA_ROOT_WIN>\pin\ACTIVE` names, switched only by DD-0's `pin_activate.py`; `WB_PIN_DIR` overrides the pin dir, `WB_PIN` is refused), names no game version, and starts Workbench only if the preflight (run on `/usr/bin/python3`) printed exactly one launch id and `launch_<id>.json` exists, as `wb_R1.bat` does. Its `WB_DIR` is the Tools install in DD-0's `pinlib.LAUNCH_PATHS`, and the preflight's `launch_path` check refuses any pin not made from that install. It refuses if Workbench already runs or that cannot be checked (it reads `tasklist /FO CSV`: the default table format truncates the image name to `ArmaReforgerWorkbenchStea`, so a full-name match there never fires) |
 | `claude-mcp-entry.json` | the user-scope MCP entry (same as the `claude mcp add` command below) |
 | `mcp_gate.py` | DD-14a. What the wrapper execs: picks the pin (`EMCP_PIN`, else ACTIVE), serves only that pin's index and project root, binds the endpoint host, and proxies the stdio session through the `bk_tools.py` policy (deny by default: reads, and wb reads after the handshake; every write denied; sealed-map guard) |
 | `endpoint_handshake.py`, `wb_proc.js` | DD-14a. The read-only endpoint handshake of MIGRATION_1_9 6.3 (also a CLI); `wb_proc.js` is its WMI process query, run by cscript.exe (no PowerShell) |
@@ -38,14 +45,14 @@ Review record: `/mnt/e/drivedit_realign/p0/dd3-review.md`.
 | `api_index.py` | DD-14a. Builds a per-pin API index in BK's JSON shape from the official script dump at the pin's tag, stamped with the pin (`api/INDEX_PIN.json`) |
 | `api_index_diff.py`, `expect_1.8.0.13_to_1.9.0.37.txt` | DD-14a, CC-05. Diffs two per-pin indexes and checks them against the API delta (API_DELTA 2-3, G19-0) and the planned surface (`tools/compat19/planned_surface.txt`) |
 | `tests/test_handshake.py`, `tests/fixtures/` | DD-14a tests: index, provenance, diff, gate config, policy (every write and path-taking tool denied, the path-free reads allowed), handshake (stub Windows probes), proxy (stub server). The fixture dumps are synthetic classes, not game scripts |
-| `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `457d5e46…1c92`) |
-| `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `09803bae…dc9ba`) |
+| `patches/bk-wsl-guard.patch` | env-gated guards in `src/workbench/client.ts` (sha256 `4eb60058…d6eb`; DD-22 changed comment and message text only) |
+| `patches/20-bk-mod-build-guard.patch` | env-gated guard in `src/tools/mod.ts` (sha256 `58de5533…0b7e`; DD-22 changed comment and message text only) |
 
-The live install is `EMCP_ROOT=/mnt/e/drivedit_realign/mcp`. Its copies of these files are byte-identical to the ones here
+The live install is `EMCP_ROOT=<REALIGN_ROOT>/mcp`. Its copies of these files are byte-identical to the ones here
 (scripts at the top level, patches in `patches/`). After changing a file here, copy it there.
 No BK source, `node_modules` or build output is committed.
 
-## E: layout (`EMCP_ROOT`, default `/mnt/e/drivedit_realign/mcp`)
+## MCP root layout (`EMCP_ROOT`, default `<REALIGN_ROOT>/mcp`)
 
 ```
 src/enfusion-mcp-BK/            pristine clone (untrusted content, never built in place)
@@ -53,15 +60,16 @@ src/others/fma-rc_enfusion-mcp/ pristine clone, source of the 1.8 API index
 build/enfusion-mcp-BK/          build copy at the pin + guard patches; dist/ (2.0 MB) and prod node_modules/ (27 MB)
 data/                           api/ (fma-rc 1.8) + BK patterns/ recipes/ wiki/; api/SOURCE_fma-rc_commit.txt
 home/ tmp/ xdg/ npm-cache/ npm-logs/   redirected HOME, TMPDIR, XDG_*, npm cache and logs
-cwd/                            the server's working directory (relative tool paths land here, not on C:)
+cwd/                            the server's working directory (relative tool paths land here, not on the system drive)
+local_config.py                 (DD-22) the loader of the local config, a copy of the repo's tools/local_config.py
 ```
 
-## Build (agent or user, E: only)
+## Build (agent or user, data drive only)
 
 Prerequisite: the two pristine clones exist (one-time; needs GitHub):
 
 ```bash
-R=/mnt/e/drivedit_realign/mcp
+R=<REALIGN_ROOT>/mcp
 git clone https://github.com/steffenbk/enfusion-mcp-BK "$R/src/enfusion-mcp-BK"
 git clone https://github.com/fma-rc/enfusion-mcp "$R/src/others/fma-rc_enfusion-mcp"
 ```
@@ -69,15 +77,15 @@ git clone https://github.com/fma-rc/enfusion-mcp "$R/src/others/fma-rc_enfusion-
 Then (needs the npm registry; the build reads the fma-rc index from commit `4cd14db` whatever is checked out):
 
 ```bash
-bash /mnt/e/drivedit_realign/mcp/build-bk.sh --data18   # pin, guard patches, npm ci, tsc, guard check, prune, 1.8 API data
-bash /mnt/e/drivedit_realign/mcp/build-bk.sh --smoke    # expect serverInfo {name: enfusion-mcp, version: 0.12.0} and 54 tools; exit 0
+bash <REALIGN_ROOT>/mcp/build-bk.sh --data18   # pin, guard patches, npm ci, tsc, guard check, prune, 1.8 API data
+bash <REALIGN_ROOT>/mcp/build-bk.sh --smoke    # expect serverInfo {name: enfusion-mcp, version: 0.12.0} and 54 tools; exit 0
 ```
 
 Re-running either command is safe. To move the pin, see the last section.
 
 What the build redirects, and where to:
 
-| Default target (C:) | Redirected to |
+| Default target (system drive) | Redirected to |
 |---|---|
 | `~` (`.npmrc`, `.gitconfig`, `.enfusion-mcp/`) | `$EMCP_ROOT/home` |
 | `~/.npm` (cache, `_logs`) | `$EMCP_ROOT/npm-cache`, `$EMCP_ROOT/npm-logs` |
@@ -97,7 +105,7 @@ After a build, `find ~ -maxdepth 3 -newer <stamp>` should list only Claude Code'
 |---|---|---|
 | `ENFUSION_MCP_NO_AUTO_INSTALL=1` | `bk-wsl-guard.patch` | the silent copy of the 21 handler files (101,273 B) into the alphabetically first addon under `ENFUSION_PROJECT_PATH` when Workbench answers `Undefined API func` |
 | `ENFUSION_MCP_NO_AUTO_LAUNCH=1` | `bk-wsl-guard.patch` | `wb_launch` and the auto-launch on `ECONNREFUSED`. BK would copy handlers and spawn the Windows exe with `/mnt/...` paths, the game-dir CWD and no `-profile` |
-| `ENFUSION_MCP_NO_AUTO_LAUNCH=1` | `20-bk-mod-build-guard.patch` | `mod` action=`build`. It would spawn a second Workbench with Linux paths, defaulting its output to `Program Files` on C: |
+| `ENFUSION_MCP_NO_AUTO_LAUNCH=1` | `20-bk-mod-build-guard.patch` | `mod` action=`build`. It would spawn a second Workbench with Linux paths, defaulting its output to the Tools install |
 | `ENFUSION_MCP_WSL_PATHS=1` | `bk-wsl-guard.patch` | whole-string params `/mnt/<x>/...` are sent to Workbench as `<X>:/...` (for example `RegisterResourceFile(absFilePath)`). Resource paths (`Prefabs/...`, `{GUID}...`) are untouched |
 
 The patched code tests for exactly `"1"`, so `0`, `true` or `yes` would each turn a guard off. The wrapper therefore ignores
@@ -105,10 +113,10 @@ any incoming value (it logs `ignoring ...` on stderr) and exports `1`. It also r
 `workbench/client.js` and `tools/mod.js` lack the guard code, so an unpatched build can never run behind it.
 
 Other wrapper defaults (each can be overridden by exporting it, or through `env` in the MCP entry):
-- `ENFUSION_PROJECT_PATH`: set by `mcp_gate.py` to the pin's project root (`/mnt/e/DriveDiT/addons` for a stable pin); generators (`project`, `prefab`, `mod` create, `script_create`, ...) write there. A value on C: or the WSL disk is refused (exit 2), and so is any value other than the pin's root.
-- `ENFUSION_DEFAULT_MOD=DataCapture`: if anything ever injects handlers, it targets the open addon, not `ArmaDrive` on C:.
+- `ENFUSION_PROJECT_PATH`: set by `mcp_gate.py` to the pin's project root (`<DATA_ROOT>/addons` for a stable pin); generators (`project`, `prefab`, `mod` create, `script_create`, ...) write there. A value on the system drive or the WSL disk is refused (exit 2), and so is any value other than the pin's root.
+- `ENFUSION_DEFAULT_MOD=DataCapture`: if anything ever injects handlers, it targets the open addon, not `ArmaDrive` on the system drive.
 - `ENFUSION_MCP_DATA_DIR`: set by `mcp_gate.py` to the pin's index (see "Per-pin index"); BK silently falls back to an empty index when it is empty, so the gate checks every api file first.
-- `ENFUSION_GAME_PATH` (D:) and `ENFUSION_WORKBENCH_PATH` (C:) are only read. Everything BK does with the Workbench path that could write (launch, `mod build`) is guarded.
+- `ENFUSION_GAME_PATH` (`GAME_INSTALL`) and `ENFUSION_WORKBENCH_PATH` (`TOOLS_INSTALL`) are only read. Everything BK does with the Workbench path that could write (launch, `mod build`) is guarded.
 - `HOME`, `TMPDIR` and `XDG_*` point at `$EMCP_ROOT`, and the server runs in `$EMCP_ROOT/cwd`. stdout carries only JSON-RPC.
 
 ## Per-pin index and the endpoint handshake (DD-14a, CC-05)
@@ -117,9 +125,9 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
 `VehicleWheelEffectComponent`, `GetHandbrake` or `Update*Configuration`. The wrapper therefore no longer serves
 `data/`. It execs `mcp_gate.py`, which serves `$EMCP_ROOT/pins/<pin id>/data` only:
 
-- **The pin.** `EMCP_PIN=<id>` in the MCP entry's `env` (a second config), else `E:\DriveDiT\pin\ACTIVE`. A stable
+- **The pin.** `EMCP_PIN=<id>` in the MCP entry's `env` (a second config), else `<DATA_ROOT_WIN>\pin\ACTIVE`. A stable
   `EMCP_PIN` must be the active pin: the stable project root and installs are the active pin's. A 1.8 config after
-  the re-pin is the cold pin, `EMCP_PIN=1.8.0.13-cold` (project root `E:\DriveDiT\addons_c18`).
+  the re-pin is the cold pin, `EMCP_PIN=1.8.0.13-cold` (project root `<DATA_ROOT_WIN>\addons_c18`).
 - **The index.** `pins/<id>/data/api/INDEX_PIN.json` must name that pin id and pin file sha256 (and its build_key,
   when both are known), and every api file must match its hash. Its source must be the dump tag and commit that
   `index_sources.json` maps the pin to, and that tag must be `v<engine_version_expected>` of the pin's engine
@@ -132,7 +140,7 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   Windows host (the address of its `vEthernet (WSL)` adapter). All three are required: exactly one up IPv4 default route of any kind (a
   device-only `tun0` default route counts, Codex round 3), with a gateway, via `eth0`; `/etc/resolv.conf` carrying
   WSL's generated header with that gateway as its only nameserver; and `ipconfig.exe` (read-only, Windows `TEMP`/`TMP`
-  on E: as for the helpers below) showing a `vEthernet (WSL...)` adapter whose IPv4 address is that gateway. The route
+  on the data drive as for the helpers below) showing a `vEthernet (WSL...)` adapter whose IPv4 address is that gateway. The route
   and resolver files alone can describe a stale or bridged setup; the adapter address is the Windows side of the WSL
   NAT switch. Anything else (a LAN or VPN gateway such as `198.51.100.1`, or no such adapter) refuses, and only
   loopback is accepted: the handshake can only vouch for the local Workbench. `ipconfig.exe` runs only for a
@@ -168,7 +176,7 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   runbook rule "never open Eden/Everon in an MCP-attached Workbench" covers it (writes are denied anyway).
 - **The endpoint handshake** (MIGRATION_1_9 6.3) runs before every wb read; a refused call is answered with an MCP
   error and never forwarded. All read-only and without PowerShell: `netstat.exe -ano` gives the one PID listening on
-  the port; `cscript.exe` running `wb_proc.js` (a WMI `Win32_Process` query, E:-resident) gives its exe path,
+  the port; `cscript.exe` running `wb_proc.js` (a WMI `Win32_Process` query, resident on the data drive) gives its exe path,
   creation time and command line. The exe must be the pin's Workbench with the pin's exe sha256; `-profile` and
   `-gproj` must be the launch path's (`pinlib.WB_LAUNCH`); `-dcLaunchId` must name a launch record that is a JSON
   object with the dd-launch fields, an ok wb record of this pin file (and build_key and launch path), and the process
@@ -178,11 +186,11 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   and report `Creating game instance(...), version X` equal to the pin's `engine_version_expected`. 6.3 asks for a
   read-only handler call there; no deployed handler returns `GetBuildVersion()`, so the log of the same process,
   bound by its creation time, is read instead. A Workbench started by hand (no `-dcLaunchId`, a OneDrive profile, a
-  C: project) fails by design. Residual, documented: a replacement process that writes no log of its own within the
+  system-drive project) fails by design. Residual, documented: a replacement process that writes no log of its own within the
   same second, and a project changed inside a running Workbench, are not detected (we never do either).
 - **R1.** The Windows helpers (`ipconfig.exe`, `netstat.exe`, `cscript.exe`) run with Windows `TEMP` and `TMP` set
-  to `E:\DriveDiT\tmp\mcp` (`WSLENV=TEMP/p:TMP/p` path translation; the gate creates the dir through the tools/pin
-  write guard), and `wb_proc.js --env` proves it once per session before any query (measured: it reports `E:\...`). The claim is **no tool-owned C: file writes**. WMI's
+  to `<DATA_ROOT_WIN>\tmp\mcp` (`WSLENV=TEMP/p:TMP/p` path translation; the gate creates the dir through the tools/pin
+  write guard), and `wb_proc.js --env` proves it once per session before any query (measured: it reports the data-drive dir). The claim is **no tool-owned system-drive file writes**. WMI's
   own repository and event-log activity is Windows service behaviour, outside these tools and outside R1; it is not
   claimed to be zero.
 - **Cost, measured 2026-11-07:** `ipconfig.exe` 0.04 s once per session (non-loopback host only), `netstat.exe -ano`
@@ -190,11 +198,11 @@ Since 2026-11-05 the active pin is 1.9.0.37, and the fma-rc index in `data/` is 
   the exe hash (68 MB) once per path, size and mtime; the log heads (256 KiB each, only dirs touched since the
   record). About 0.2 s per wb read.
 
-Build the indexes (agent, E: only, about 15 s each; `--dry-run` first). Apply the build_key and engine sidecars of
+Build the indexes (agent, data drive only, about 15 s each; `--dry-run` first). Apply the build_key and engine sidecars of
 both pins first: the build needs `engine_version_expected`, and the stamps then carry the build_key:
 
 ```bash
-SD=/mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable R=/mnt/e/drivedit_realign/mcp
+SD=<REALIGN_ROOT>/program/1_9/work/dl/sd_stable R=<REALIGN_ROOT>/mcp
 python3 -I -B tools/enfusion-mcp/api_index.py build --dump-git $SD --pin-id 1.9.0.37 \
   --out $R/pins/1.9.0.37/data --shared $R/data --apply
 python3 -I -B tools/enfusion-mcp/api_index.py build --dump-git $SD --pin-id 1.8.0.13 \
@@ -204,8 +212,8 @@ python3 -I -B tools/enfusion-mcp/api_index_diff.py --old $R/pins/1.8.0.13/data -
 ```
 
 Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `index_sources.json`, `api_index.py`,
-`api_index_diff.py` and the wrapper to `$EMCP_ROOT` (the gate finds `tools/pin` at `E:\DriveDiT\tools\pin`, or
-`DD_PIN_TOOLS`), and check with `enfusion-mcp-wsl.sh --print-env` (`pin gate: ok`). `endpoint_handshake.py
+`api_index_diff.py`, the wrapper and `tools/local_config.py` (DD-22) to `$EMCP_ROOT` (the gate finds `tools/pin` at
+`<DATA_ROOT>/tools/pin` of the local config `$DRIVEDIT_LOCAL_CONFIG` names, or at `DD_PIN_TOOLS`), and check with `enfusion-mcp-wsl.sh --print-env` (`pin gate: ok`). `endpoint_handshake.py
 --pin-active` runs the handshake by hand against a running Workbench.
 
 ## Network: Windows host discovery under WSL NAT
@@ -229,42 +237,42 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
 ## Handlers
 
 - BK's 21 `EMCP_WB_*.c` NET API handler scripts are in the build at
-  `/mnt/e/drivedit_realign/mcp/build/enfusion-mcp-BK/mod/Scripts/WorkbenchGame/EnfusionMCP/` (101,273 B, identical to the pin).
+  `<REALIGN_ROOT>/mcp/build/enfusion-mcp-BK/mod/Scripts/WorkbenchGame/EnfusionMCP/` (101,273 B, identical to the pin).
 - The deploy step (not this directory) copies them into
-  `E:\DriveDiT\addons\DataCapture\Scripts\WorkbenchGame\EnfusionMCP\`.
-- Keep **exactly one** copy in the loaded project set. Do not load DataTest (C:) in the same session, and do not create `DriveDiT_EMCP` as well: duplicate `EMCP_WB_*` classes break the whole WorkbenchGame module.
+  `<DATA_ROOT_WIN>\addons\DataCapture\Scripts\WorkbenchGame\EnfusionMCP\`.
+- Keep **exactly one** copy in the loaded project set. Do not load DataTest (on the system drive) in the same session, and do not create `DriveDiT_EMCP` as well: duplicate `EMCP_WB_*` classes break the whole WorkbenchGame module.
 - Workbench builds its NET API dispatch table at process start (BK `d6909d2`), so new handlers need a **Workbench restart**.
 
 ## User steps (in order, after the DataCapture deploy)
 
 1. **Close Workbench.** Never save the truncated `DataDrive` world in the old session.
-2. **Relaunch Workbench on E:**, with `-profile "E:\DriveDiT\wb_profile"` and `-gproj "E:\DriveDiT\addons\DataCapture\addon.gproj"`. Use one of:
-   - **preferred:** DD-0's `E:\DriveDiT\tools\launch\wb_R1.bat` (pin preflight against the active pin + pinned arguments);
-   - **from WSL (Steam running):** `bash /mnt/e/drivedit_realign/mcp/launch-workbench.sh`. It runs the same preflight
-     (`--pin-active`, the pin named by `E:\DriveDiT\pin\ACTIVE`) and refuses if DD-0 is not deployed yet or no pin is
+2. **Relaunch Workbench on the data drive**, with `-profile "<DATA_ROOT_WIN>\wb_profile"` and `-gproj "<DATA_ROOT_WIN>\addons\DataCapture\addon.gproj"`. Use one of:
+   - **preferred:** DD-0's `<DATA_ROOT_WIN>\tools\launch\wb_R1.bat` (pin preflight against the active pin + pinned arguments);
+   - **from WSL (Steam running):** `bash <REALIGN_ROOT>/mcp/launch-workbench.sh`. It runs the same preflight
+     (`--pin-active`, the pin named by `<DATA_ROOT_WIN>\pin\ACTIVE`) and refuses if DD-0 is not deployed yet or no pin is
      active. Only before DD-0 is deployed, and knowing the build is unchecked:
-     `WB_SKIP_PREFLIGHT=1 bash /mnt/e/drivedit_realign/mcp/launch-workbench.sh`.
+     `WB_SKIP_PREFLIGHT=1 bash <REALIGN_ROOT>/mcp/launch-workbench.sh`.
 
    Do **not** launch from the Steam library or set Steam launch options: the capture program forbids library launches for
-   the whole campaign (`CAPTURE_PROGRAM.md` §4.2 item 2, §7.1), and Steam would write its config on C:.
+   the whole campaign (`CAPTURE_PROGRAM.md` §4.2 item 2, §7.1), and Steam would write its config on the system drive.
 
-   Then check the new `console.log` under `E:\DriveDiT\wb_profile\logs\`:
-   - `Adding relative directory 'E:\DriveDiT\wb_profile\profile'`;
+   Then check the new `console.log` under `<DATA_ROOT_WIN>\wb_profile\logs\`:
+   - `Adding relative directory '<DATA_ROOT_WIN>\wb_profile\profile'`;
    - `Loaded addons` lists DataCapture and **not** DataTest;
    - `Module: WorkbenchGame; loaded 191x files` (170 base + 21 handlers);
    - no `SCRIPT (E)` line naming `EMCP_WB_`.
 
-   If the profile still points at OneDrive, stop, because captures would land on C:.
+   If the profile still points at OneDrive, stop, because captures would land on the system drive.
 3. **Check the wrapper, then swap the MCP entry.**
-   - `bash /mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh --check` (prints to stderr; opens one TCP connection to port 5775
+   - `bash <REALIGN_ROOT>/mcp/enfusion-mcp-wsl.sh --check` (prints to stderr; opens one TCP connection to port 5775
      and sends nothing). Expect the three guards at `1`, `guards compiled into dist: yes`, the host (the current WSL
      gateway) and `TCP ... reachable`.
-   - The swap writes a few hundred bytes to `~/.claude.json` on C:, and only the user runs it:
+   - The swap writes a few hundred bytes to `~/.claude.json` on the system drive, and only the user runs it:
      ```bash
-     claude mcp remove enfusion-mcp -s user && claude mcp add -s user enfusion-mcp -- /mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh
+     claude mcp remove enfusion-mcp -s user && claude mcp add -s user enfusion-mcp -- <REALIGN_ROOT>/mcp/enfusion-mcp-wsl.sh
      ```
    - This is the same as `claude-mcp-entry.json`. Keeping the name `enfusion-mcp` keeps the `mcp__enfusion-mcp__*` prefix.
-   - In the C: repo's `.claude/settings.local.json`, delete the stale allowlist names `mcp__enfusion-mcp__project_browse` and `mcp__enfusion-mcp__prefab_create`.
+   - In the Claude Code project folder's `.claude/settings.local.json`, delete the stale allowlist names `mcp__enfusion-mcp__project_browse` and `mcp__enfusion-mcp__prefab_create`.
    - Do **not** allowlist `…__project`, `…__prefab`, `…__wb_cleanup` or any other tool with write actions: the permission prompt is the only check on their arguments (see Rules).
 4. **Restart Claude Code, run `/mcp`, and probe in this order:**
    1. `wb_connect`: expect `Workbench Connected` with `Info: EnfusionMCP Workbench bridge active`.
@@ -277,10 +285,10 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
 ## Rules
 
 - **Never use `wb_launch` or `mod build` from WSL.** Both are blocked by the guards, so don't try to work around them. Launch Workbench only with `wb_R1.bat` or `launch-workbench.sh`.
-- **Never use `wb_cleanup`.** With `all: true` it deletes the handlers from DataCapture (Workbench then loses the bridge until they are redeployed and Workbench restarts), and with `modDir` it deletes from any directory it is given, C: included.
-- **Tool arguments bypass the wrapper's path defaults.** 13 BK tools (`project`, `prefab`, `mod`, `script_create`, `config_create`, `server_config`, `layout_create`, `layout_recipe`, `menu_create`, `gamemode_scaffold`, `scenario_create_conflict`, `animation_graph`, `workshop_info`) take a `projectPath` argument that replaces `ENFUSION_PROJECT_PATH`; `animation_graph` and `mod` also take an `outputPath`. Never pass a `/mnt/c/...` path (or a Windows `C:` path) in any of them, and approve such calls only after reading the arguments. Relative paths resolve under `$EMCP_ROOT/cwd`.
+- **Never use `wb_cleanup`.** With `all: true` it deletes the handlers from DataCapture (Workbench then loses the bridge until they are redeployed and Workbench restarts), and with `modDir` it deletes from any directory it is given, the system drive included.
+- **Tool arguments bypass the wrapper's path defaults.** 13 BK tools (`project`, `prefab`, `mod`, `script_create`, `config_create`, `server_config`, `layout_create`, `layout_recipe`, `menu_create`, `gamemode_scaffold`, `scenario_create_conflict`, `animation_graph`, `workshop_info`) take a `projectPath` argument that replaces `ENFUSION_PROJECT_PATH`; `animation_graph` and `mod` also take an `outputPath`. Never pass a system-drive path (`<SYSTEM_DRIVE>/...`, or its Windows form) in any of them, and approve such calls only after reading the arguments. Relative paths resolve under `$EMCP_ROOT/cwd`.
 - Before handlers are loaded, use only `wb_connect` (and `enfusion-mcp-wsl.sh --check`) as probes. With the guards on, other `wb_*` calls fail with `LAUNCH_FAILED` instead of copying files.
-- Never point `ENFUSION_PROJECT_PATH` at the OneDrive addons dir on C: (the wrapper refuses it).
+- Never point `ENFUSION_PROJECT_PATH` at the OneDrive addons dir on the system drive (the wrapper refuses it).
 
 ## Known quirks
 
@@ -290,7 +298,7 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
 - The `NO_AUTO_INSTALL` error text still says "Load the DriveDiT_EMCP handler addon". After the re-home, read it as "deploy the handlers into DataCapture and restart Workbench". The patch is kept byte-identical to the reviewed version (sha256 above).
 - `npm prune` rewrites the root `version` field in the build copy's `package-lock.json` (BK ships 0.7.0 there). No dependency changes.
 - Nobody has yet compiled BK's exact handler set on 1.8. All 108 method names exist in the 1.8 docs, and a sibling handler set compiled on 1.8.0.13. The `Module: WorkbenchGame` line in step 2 settles it.
-- BK cannot read Workbench logs or report compile errors. Use `console.log` and `script.log` under the E: profile.
+- BK cannot read Workbench logs or report compile errors. Use `console.log` and `script.log` under the data-drive profile.
 
 ## Verification record (2026-10-20)
 
@@ -300,7 +308,7 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
 - `find ~ -maxdepth 3 -newer <start stamp>` listed only Claude Code's own `~/.claude.json` and `~/.claude/backups/`. Its `enfusion-mcp` entry was unchanged.
 - `/tmp/node-compile-cache` was untouched.
 - Review (`p0/dd3-review.md`): the path guards, forced guards, host discovery, launcher refusals and the smoke assertion were
-  tested with stubs and E:-only roots; a second build run in a scratch E: root converged (idempotent). Workbench was not launched.
+  tested with stubs and data-drive-only roots; a second build run in a scratch data-drive root converged (idempotent). Workbench was not launched.
 
 ## Updating the pin
 

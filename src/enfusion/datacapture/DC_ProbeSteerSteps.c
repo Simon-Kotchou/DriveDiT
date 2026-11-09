@@ -47,10 +47,12 @@
 // under the base's 30 deg heading guard, and to the LATERAL_BUDGET_M budget (a doublet's sideways shift v x heading
 // change x (hold + mean gap) <= 2 m, DC_SteerTrainMath.HoldSteps), inside the +-7 m corridor of the 10 m area:
 // default holds 12 steps (10 km/h; 20 km/h x 0.5), 7 (20 km/h x 1.0; 30 km/h x 0.5), 4 (30 km/h x 1.0; 40 km/h x
-// 0.5), 2 (40 km/h x 1.0; 60 km/h x 0.5), 1 (60 km/h x 1.0). PRBS bits are cut to the heading budget: 5 steps (4 at
-// 60 km/h). The area (10 m, swept with the 60 km/h stopping envelope out to +-29 m) and the 30 deg heading guard are
-// unchanged. tests/test_t0eng_steer.py drives the translated DC_SteerTrainMath on a car calibrated from that Play:
-// the default grid ends every phase ok within about 7 m, the old schedule aborts.
+// 0.5), 2 (40 km/h x 1.0; 60 km/h x 0.5), 1 (60 km/h x 1.0). PRBS bits are cut to both budgets as well (the
+// sequence's largest running sum for the heading, the largest sum of the running sums for the sideways excursion,
+// DC_SteerTrainMath.PrbsBitSteps): 5 steps at 10 and 20 km/h, 4 at 30 and 40 km/h, 2 at 60 km/h. The area (10 m,
+// swept with the 60 km/h stopping envelope out to +-29 m) and the 30 deg heading guard are unchanged.
+// tests/test_t0eng_steer_play19.py drives the translated DC_SteerTrainMath on a car calibrated from that Play: the
+// default grid ends every phase ok within 6 m and 25 deg in about 210 s, the old schedule aborts.
 // The analysis is tools/probes/t0eng/e23_steer_steps.py.
 // ============================================================================
 

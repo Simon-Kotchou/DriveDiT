@@ -2,13 +2,20 @@
 rem ==========================================================================================
 rem DriveDiT pinned game-client launcher, rig R1, instance i01.
 rem Ticket DD-0 (capture program r2 TKT-0, Appendix B; decision D1).
-rem Install: E:\DriveDiT\tools\launch\client_R1_i01.bat. Copy it to client_R1_iNN.bat for more
-rem instances, changing DD_INSTANCE, -posX/-posY and -GPUAdapter (S2).
+rem Install: <DATA_ROOT>\tools\launch\client_R1_i01.bat, next to dd_local_config.cmd. Copy it to
+rem client_R1_iNN.bat for more instances, changing DD_INSTANCE, -posX/-posY and -GPUAdapter (S2).
+rem
+rem Local paths (DD-22): every machine path below comes from drivedit.local.env, the one untracked
+rem file that holds this machine's paths. dd_local_config.cmd (next to this file) finds it, by
+rem DRIVEDIT_LOCAL_CONFIG or else DATA_ROOT\config\drivedit.local.env two folders up, and sets
+rem DD_DATA_ROOT_WIN, DD_GAME_INSTALL_WIN, DD_WSL_DISTRO and DD_DATA_ROOT (WSL
+rem form); it passes the file on to WSL, so the preflight checks the same installs. Without the file,
+rem or with a key missing, nothing is started. <DATA_ROOT> below is that file's DATA_ROOT.
 rem
 rem 1. Refuses until the per-build settings below are filled in and engine_R1.conf exists.
 rem 2. Runs the build-pin preflight in WSL with --pin-active (see wb_R1.bat): it checks the pin
-rem    that E:\DriveDiT\pin\ACTIVE names. It prints a launch id on success and writes
-rem    E:\DriveDiT\pin\launches\launch_ID.json, which records the pin id and how it was
+rem    that <DATA_ROOT>\pin\ACTIVE names. It prints a launch id on success and writes
+rem    <DATA_ROOT>\pin\launches\launch_ID.json, which records the pin id and how it was
 rem    resolved; it prints nothing on failure. The launch logic names no game version.
 rem 3. Starts ArmaReforgerSteam.exe directly. The working directory is the game dir, as in a
 rem    Steam launch (its steam_appid.txt holds 1874880). The launch id goes to the game as
@@ -16,11 +23,12 @@ rem    -dcLaunchId, which joins the session to the preflight record (capture pro
 rem No pause on failure: a supervisor may run this unattended (exit code 1).
 rem Build: 1.8.0.13 is the INTERIM pin. The plan is to move to 1.9 and its new vehicle physics
 rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1_9.md in
-rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
-rem E:\DriveDiT\tools\pin\pin_activate.py. Never edit ACTIVE by hand.
+rem <REALIGN_ROOT> once written, and tools\pin\README.md. Switch pins only with
+rem <DATA_ROOT>\tools\pin\pin_activate.py. Never edit ACTIVE by hand.
 rem Launch path: GAME_DIR must stay the game install named in pinlib.LAUNCH_PATHS. The preflight
 rem check game.launch_path refuses any pin not made from that install, so the exe started here is
-rem always the one the pin checked. Change both together, never one alone.
+rem always the one the pin checked. Both read GAME_INSTALL of the same local config, so they cannot
+rem drift.
 rem
 rem Flag provenance. The flags are those of Appendix B. They come from the Startup Parameters
 rem wiki page, revision 2025-02-14 (trial-ladder.md 8.2, source S1), and are UNVERIFIED on
@@ -36,9 +44,9 @@ rem   -GPUAdapter 0   which physical GPU index 0 maps to is UNVERIFIED (S2).
 rem   -dcLaunchId     is custom. The capture scripts must read it with System.GetCLIParam
 rem                   (TKT-4); until then the game does not use it.
 rem Addon/world arguments are from trial-ladder.md 8.2:
-rem   -addonsDir      E:\DriveDiT\addons holds the UNPACKED DataCapture addon (DD-1 deploy). It is
+rem   -addonsDir      <DATA_ROOT>\addons holds the UNPACKED DataCapture addon (DD-1 deploy). It is
 rem                   UNVERIFIED that the client loads an unpacked addon (P-02). If it does not,
-rem                   pack to E:\DriveDiT\build\DataCapture_SHA8 and point DC_ADDONS_DIR there.
+rem                   pack to <DATA_ROOT>\build\DataCapture_SHA8 and point DC_ADDONS_DIR there.
 rem   -addons         is the GUID of the DataCapture addon, 88BEF4187E0D2DFC.
 rem   -world          is UNSET until TKT-2-min creates DC_Arland.ent. The format is
 rem                   {GUID}worlds/DataCapture/DC_Arland.ent. It is UNVERIFIED that -world starts
@@ -49,15 +57,21 @@ rem UNVERIFIED (capture program 4.2 item 2, P-06): that a direct exe launch neve
 rem update or relaunch the game, and that Steam allows concurrent instances. Steam must be running.
 rem ==========================================================================================
 setlocal
+if not exist "%~dp0dd_local_config.cmd" (
+  set "DD_ERR=Missing %~dp0dd_local_config.cmd: install it next to this launcher (tools\launch). Nothing was started."
+  goto :fail
+)
+call "%~dp0dd_local_config.cmd"
+if errorlevel 1 goto :fail
 set "DD_INSTANCE=i01"
-set "GAME_DIR=D:\SteamLibrary\steamapps\common\Arma Reforger"
+set "GAME_DIR=%DD_GAME_INSTALL_WIN%"
 set "GAME_EXE=%GAME_DIR%\ArmaReforgerSteam.exe"
-set "DC_PROFILE=E:\DriveDiT\client_profiles\%DD_INSTANCE%"
-set "DC_LOGS=E:\DriveDiT\logs\%DD_INSTANCE%"
-set "DC_CFG=E:\DriveDiT\tools\cfg\engine_R1.conf"
-set "DD_LAUNCHES=E:\DriveDiT\pin\launches"
+set "DC_PROFILE=%DD_DATA_ROOT_WIN%\client_profiles\%DD_INSTANCE%"
+set "DC_LOGS=%DD_DATA_ROOT_WIN%\logs\%DD_INSTANCE%"
+set "DC_CFG=%DD_DATA_ROOT_WIN%\tools\cfg\engine_R1.conf"
+set "DD_LAUNCHES=%DD_DATA_ROOT_WIN%\pin\launches"
 rem ---- per-build settings (trial-ladder.md 8.2) ----
-set "DC_ADDONS_DIR=E:\DriveDiT\addons"
+set "DC_ADDONS_DIR=%DD_DATA_ROOT_WIN%\addons"
 set "DC_ADDON_GUID=88BEF4187E0D2DFC"
 set "DC_WORLD=UNSET"
 rem ---------------------------------------------------
@@ -93,9 +107,9 @@ rem The interpreter is named (/usr/bin/python3) because -e starts no shell and i
 set "DD_ID_RE=^[0123456789][0123456789]*T[0123456789][0123456789]*Z-client-[0123456789abcdef][0123456789abcdef]*"
 set "DD_ID_BAD=[^-0123456789abcdefTZilnt]"
 rem preflight prints a launch id on success and writes launch_ID.json; it prints nothing on failure
-for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --exe client --instance %DD_INSTANCE% ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
+for /f %%i in ('wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B %DD_DATA_ROOT%/tools/pin/preflight.py --pin-active --exe client --instance %DD_INSTANCE% ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
 if not defined LID (
-  set "DD_ERR=PIN CHECK FAILED. The client was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --check"
+  set "DD_ERR=PIN CHECK FAILED. The client was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B %DD_DATA_ROOT%/tools/pin/preflight.py --pin-active --check"
   goto :fail
 )
 rem The record must exist: a launch id alone is not proof that this preflight run passed.

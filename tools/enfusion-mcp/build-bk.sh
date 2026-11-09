@@ -100,12 +100,29 @@ export npm_config_update_notifier=false npm_config_fund=false npm_config_audit=f
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1          # playwright is a devDependency (scraper only)
 export PLAYWRIGHT_BROWSERS_PATH="$ROOT/pw-browsers"
 export GIT_CONFIG_NOSYSTEM=1
-# Every derived dir is checked (derived_dir) before git, npm or any cache writes there; ROOT itself passed write_ok.
+APPLIED_DIR="$ROOT/build/applied-patches"          # copies of the patches the last build applied (step 1)
+APPLIED_LIST="$ROOT/build/applied-patches.list"     # their names
+DATA="$ROOT/data"                                  # the --data18 data dir (step 6)
+# Every directory this script (or git, npm, tsc, node run from it) writes into is checked (derived_dir) before
+# anything is written: ROOT itself passed write_ok. They are the redirected HOME, TMPDIR (also the scratch index)
+# and node compile cache, the npm cache and logs, the playwright dir, the four XDG dirs, build/, the build copy and
+# its node_modules/, dist/ and .git/, build/applied-patches/, and data/ with data/api/, data/patterns/,
+# data/recipes/ and data/wiki/. Files are written into them only as new temporary files (mktemp, exclusive) that
+# are then renamed over their names, so a stale symlink at a file name is replaced, never written through.
 mkdir -p -- "$ROOT"
 for d in "$HOME" "$TMPDIR" "$NODE_COMPILE_CACHE" "$npm_config_cache" "$npm_config_logs_dir" "$PLAYWRIGHT_BROWSERS_PATH" \
-         "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$ROOT/build" "$BUILD" "$ROOT/data"; do
+         "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$ROOT/build" "$BUILD" \
+         "$BUILD/node_modules" "$BUILD/dist" "$BUILD/.git" "$APPLIED_DIR" "$DATA" "$DATA/api" "$DATA/patterns" \
+         "$DATA/recipes" "$DATA/wiki"; do
   derived_dir "$d" "$ROOT" || EXIT_CODE=2 die "refusing the work dir $d (see the message above); nothing was written"
 done
+put_file() {   # put_file DIR NAME [SRC]: SRC (or stdin) to DIR/NAME through a new exclusive temp file in DIR, renamed
+  local tmp
+  tmp="$(mktemp -- "$1/.$2.XXXXXX")" || return 1
+  if [[ $# -ge 3 ]]; then cp -- "$3" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  else cat >"$tmp" || { rm -f -- "$tmp"; return 1; }; fi
+  mv -f -- "$tmp" "$1/$2"
+}
 mkdir -p "$HOME" "$TMPDIR" "$npm_config_cache" "$npm_config_logs_dir" "$ROOT/build" \
          "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"
 cd "$ROOT"                                         # never run anything from the caller's cwd
@@ -114,14 +131,17 @@ smoke() {
   # initialize + tools/list over stdio; the server never contacts Workbench for these. Belt and braces:
   # the wrapper forces all three guards on, and the NET API host/port point at a closed WSL loopback
   # port, not at Workbench.
-  local rc=0
+  local rc=0 out err
+  out="$(mktemp -- "$ROOT/.smoke.stdout.XXXXXX")" && err="$(mktemp -- "$ROOT/.smoke.stderr.XXXXXX")" \
+    || die "cannot create the smoke output files in $ROOT"
   { printf '%s\n' \
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
       '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
       '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
     sleep 8; } \
   | ENFUSION_WORKBENCH_HOST=127.0.0.1 ENFUSION_WORKBENCH_PORT=1 \
-    timeout 60 "$WRAPPER" 2>"$ROOT/smoke.stderr" > "$ROOT/smoke.stdout" || true
+    timeout 60 "$WRAPPER" 2>"$err" > "$out" || true
+  mv -f -- "$out" "$ROOT/smoke.stdout" && mv -f -- "$err" "$ROOT/smoke.stderr"
   python3 -I -B -c '
 import json, sys
 info, names = None, None
@@ -162,8 +182,6 @@ fi
 # the pin (checkout -f; untracked node_modules/ and dist/ are kept), after `git apply -R --check` of the previous
 # patches and a tree comparison prove the difference is exactly theirs. Anything else (another commit, staged
 # edits, any other change) refuses and touches nothing. Trees are compared through a scratch index under $TMPDIR.
-APPLIED_DIR="$ROOT/build/applied-patches"
-APPLIED_LIST="$ROOT/build/applied-patches.list"
 SCRATCH_INDEX="$TMPDIR/build-bk-scratch-index"
 for PATCH in "${PATCHES[@]}"; do [[ -f "$PATCH" ]] || die "missing guard patch $PATCH"; done
 tree_of() {   # tree_of [PATCH...]: the tree of PIN with the patches applied, in the scratch index
@@ -214,13 +232,13 @@ else
 fi
 # Record the patch set the build copy now holds, for the next run's proof (copies, then the list naming them).
 mkdir -p "$APPLIED_DIR"
-: >"$APPLIED_LIST.part"
+NAMES=()
 for i in "${!PATCHES[@]}"; do
   name="$(printf '%02d' "$i")-$(basename -- "${PATCHES[$i]}")"
-  cp -- "${PATCHES[$i]}" "$APPLIED_DIR/$name"
-  printf '%s\n' "$name" >>"$APPLIED_LIST.part"
+  put_file "$APPLIED_DIR" "$name" "${PATCHES[$i]}" || die "cannot record $name in $APPLIED_DIR"
+  NAMES+=("$name")
 done
-mv -f -- "$APPLIED_LIST.part" "$APPLIED_LIST"
+printf '%s\n' "${NAMES[@]}" | put_file "$ROOT/build" "$(basename -- "$APPLIED_LIST")" || die "cannot write $APPLIED_LIST"
 
 # ---- 3. install exactly the lockfile, no lifecycle scripts (skips 'prepare', esbuild postinstall) ---
 cd "$BUILD"
@@ -239,15 +257,19 @@ cd "$ROOT"
 # ---- 6 (optional). data dir with the Reforger 1.8 API index from fma-rc ------------------------------
 # Read from the pinned commit's objects (not the working tree), so a moved checkout cannot change the index.
 if [[ "${1:-}" == "--data18" ]]; then
-  DATA="$ROOT/data"
   git -C "$FMARC" cat-file -e "$FMARC_PIN^{commit}" 2>/dev/null || die "fma-rc commit $FMARC_PIN not in $FMARC (README: Build, prerequisite)"
   mkdir -p "$DATA/api"
+  # cp -r merges into existing copies, so nothing below them may be a symlink (derived_dir checked the dirs above)
+  for d in "$DATA/patterns" "$DATA/recipes" "$DATA/wiki" "$DATA/api"; do
+    if [[ -d "$d" && -n "$(find "$d" -type l -print -quit)" ]]; then
+      die "$d holds a symlink ($(find "$d" -type l -print -quit)); refusing to copy into it"
+    fi
+  done
   cp -r "$BUILD/data/patterns" "$BUILD/data/recipes" "$BUILD/data/wiki" "$DATA/"
   for f in arma-classes.json enfusion-classes.json groups.json hierarchy.json; do
-    git -C "$FMARC" show "$FMARC_PIN:data/api/$f" > "$DATA/api/$f.part"
-    mv -f "$DATA/api/$f.part" "$DATA/api/$f"
+    git -C "$FMARC" show "$FMARC_PIN:data/api/$f" | put_file "$DATA/api" "$f" || die "cannot write $DATA/api/$f"
   done
-  echo "$FMARC_PIN" > "$DATA/api/SOURCE_fma-rc_commit.txt"
+  echo "$FMARC_PIN" | put_file "$DATA/api" SOURCE_fma-rc_commit.txt || die "cannot write $DATA/api/SOURCE_fma-rc_commit.txt"
   echo "composed $DATA (wrapper exports ENFUSION_MCP_DATA_DIR automatically when api/ is populated)"
 fi
 

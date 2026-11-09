@@ -221,8 +221,9 @@ same_file_set game "$GAME_SRC" "$DEST/game"
 same_file_set tools "$TOOLS_SRC" "$DEST/tools"
 
 echo "== SHA256SUMS"
-( cd -- "$DEST" && find game tools -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$DEST/SHA256SUMS.tmp"
-mv -- "$DEST/SHA256SUMS.tmp" "$DEST/SHA256SUMS"
+SUMS_TMP="$(mktemp -- "$DEST/.SHA256SUMS.XXXXXX")"   # a new exclusive temp file, renamed over SHA256SUMS
+( cd -- "$DEST" && find game tools -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$SUMS_TMP"
+mv -- "$SUMS_TMP" "$DEST/SHA256SUMS"
 cp -- "$PIN" "$GAME_ACF" "$TOOLS_ACF" "$DEST/meta/"
 rm -f -- "$MARKER"
 echo "done: $DEST ($(wc -l < "$DEST/SHA256SUMS") files hashed; sha256 of SHA256SUMS $(sha256sum "$DEST/SHA256SUMS" | cut -c1-64))"

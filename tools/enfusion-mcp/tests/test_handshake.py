@@ -1043,5 +1043,50 @@ class DerivedDirTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+    def test_build_bk_checks_every_dir_it_writes_into(self):
+        # Codex round 4: data/api, the patch record and the build outputs are checked, not only their parents
+        with open(self.SCRIPTS[0]) as fh:
+            text = fh.read()
+        m = re.search(r'(?ms)^for d in (.*?); do\n  derived_dir "\$d" "\$ROOT"', text)
+        self.assertIsNotNone(m)
+        checked = re.findall(r'"([^"]+)"', m.group(1))
+        for want in ("$HOME", "$TMPDIR", "$NODE_COMPILE_CACHE", "$npm_config_cache", "$npm_config_logs_dir",
+                     "$PLAYWRIGHT_BROWSERS_PATH", "$XDG_CACHE_HOME", "$XDG_CONFIG_HOME", "$XDG_STATE_HOME",
+                     "$XDG_DATA_HOME", "$ROOT/build", "$BUILD", "$BUILD/node_modules", "$BUILD/dist", "$BUILD/.git",
+                     "$APPLIED_DIR", "$DATA", "$DATA/api", "$DATA/patterns", "$DATA/recipes", "$DATA/wiki"):
+            self.assertIn(want, checked)
+        self.assertLess(text.index('derived_dir "$d" "$ROOT"'), text.index('git clone'))
+        # no file is written by a fixed name: only through put_file or a fresh mktemp file
+        self.assertNotIn(".part", text)
+        self.assertNotIn(': >"', text)
+
+    def test_put_file_replaces_a_stale_symlink(self):
+        tmp = tempfile.mkdtemp(prefix="dd22-putfile-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        d = os.path.join(tmp, "api")
+        os.makedirs(d)
+        outside = os.path.join(tmp, "outside.json")
+        with open(outside, "w") as fh:
+            fh.write("untouched\n")
+        os.symlink(outside, os.path.join(d, "groups.json"))
+        with open(self.SCRIPTS[0]) as fh:
+            fn = re.search(r"(?ms)^put_file\(\) \{.*?^\}$", fh.read()).group(0)
+        r = subprocess.run(["bash", "-c", '%s\nprintf "new\\n" | put_file "$1" groups.json' % fn, "_", d],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.islink(os.path.join(d, "groups.json")))
+        with open(os.path.join(d, "groups.json")) as fh:
+            self.assertEqual(fh.read(), "new\n")
+        with open(outside) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+        self.assertEqual(os.listdir(d), ["groups.json"])
+        # the derived_dir check refuses a data/api that is a stale symlink to an old location
+        os.symlink("/tmp", os.path.join(tmp, "api_old"))
+        r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % self.function(self.SCRIPTS[0]), "_",
+                            os.path.join(tmp, "api_old"), tmp], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is a symlink", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

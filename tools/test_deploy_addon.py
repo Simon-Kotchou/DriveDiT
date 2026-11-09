@@ -847,6 +847,7 @@ class TargetPinTest(unittest.TestCase):
 
 
 LEGACY_REV = "f145aff"   # the last pre-DD-22 main commit
+DD22_REV = "eeb160766dbfaf09cfb2818509796790baf3d738"   # PR #28 (DD-22) merged into main: the tree this test is about
 CHANGED_SCRIPTS = ("src/enfusion/datacapture/DC_LaunchGuard.c", "src/enfusion/datacapture/DC_ProbeEngine.c",
                    "src/enfusion/datacapture/DC_ProbeRunner.c", "src/enfusion/datacapture/DC_Session.c")
 
@@ -890,13 +891,16 @@ class LegacyPayloadTest(unittest.TestCase):
     """Codex round 2 row 10: the payload the deploy writes with the config derived from the last pre-DD-22 revision,
     against that revision's files (git show at run time; no copy is committed). Every payload is byte-identical to
     then, the two world layers included, except the four scripts of CHANGED_SCRIPTS, which differ in comments and
-    string literals only (their code lines are the same). Runs only where that revision is in the history; a failure
-    names files, never their content (it is this machine's)."""
+    string literals only (their code lines are the same). The payloads are rendered from DD-22's own tree (DD22_REV,
+    git show), not the working tree: a later change to a deployed file (DD-14e's steering scripts and layer) is not a
+    DD-22 regression. Runs only where both revisions are in the history; a failure names files, never their content
+    (it is this machine's)."""
 
     @classmethod
     def setUpClass(cls):
-        if git_show(LEGACY_REV, "tools/pin/pinlib.py") is None:
-            raise unittest.SkipTest("%s is not in this clone's history (a shallow CI checkout)" % LEGACY_REV)
+        if git_show(LEGACY_REV, "tools/pin/pinlib.py") is None or git_show(DD22_REV, "tools/pin/pinlib.py") is None:
+            raise unittest.SkipTest("%s or %s is not in this clone's history (a shallow CI checkout)" % (
+                LEGACY_REV, DD22_REV))
         spec = importlib.util.spec_from_file_location("dd_test_deploy_migrate", os.path.join(HERE, "migrate_local_config.py"))
         mig = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mig)
@@ -907,10 +911,11 @@ class LegacyPayloadTest(unittest.TestCase):
     def payloads(self):
         for kind, src in manifest_entries():
             old = git_show(LEGACY_REV, src)
-            if old is None:
+            then = git_show(DD22_REV, src)
+            if old is None or then is None:
                 continue
             group = {"emcp": deploy_addon.GROUP_EMCP}.get(kind, kind)
-            yield src, old, deploy_addon.render_payload(group, src, source_bytes(src), self.root_value)
+            yield src, old, deploy_addon.render_payload(group, src, then, self.root_value)
 
     def test_payloads_are_the_old_bytes_but_four_scripts(self):
         differ, compared = [], 0

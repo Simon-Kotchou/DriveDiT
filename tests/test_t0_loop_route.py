@@ -559,13 +559,13 @@ class LoopRouteTest(unittest.TestCase):
 
     def test_generator_refuses_everon_and_outputs_outside_e(self):
         generator = load_generator()
-        self.assertIsNotNone(generator.sealed_reason("/mnt/x/a/Eden_road_dump"))
-        self.assertIsNotNone(generator.sealed_reason("/mnt/x/a/everon/e08a"))
+        self.assertIsNotNone(generator.sealed_reason("/mnt/x/DataRoot/Eden_road_dump"))
+        self.assertIsNotNone(generator.sealed_reason("/mnt/x/DataRoot/everon/e08a"))
         self.assertIsNone(generator.sealed_reason(DUMP))
         with self.assertRaises(generator.Refusal):
             generator.check_out_path("/tmp/arland_t0_loop.json")
         with self.assertRaises(generator.Refusal):
-            generator.check_out_path("/mnt/z/arland_t0_loop.json")
+            generator.check_out_path("/mnt/z/Synthetic Steam (x86)/arland_t0_loop.json")
         tmp = tempfile.mkdtemp(prefix="t0_loop_", dir=self.tmp_base())
         try:
             sealed = os.path.join(tmp, "Eden_e08a")

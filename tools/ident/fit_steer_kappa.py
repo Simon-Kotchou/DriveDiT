@@ -318,27 +318,47 @@ PLACEHOLDER_MPS_PER_KRPM = (1.54871, 2.772066, 4.169103)
 # llc_v1 sessions on 1.8.0.13 are stamped with)
 PLACEHOLDER_MEASURED_PIN = "1.8.0.13"
 
-# DD-22: outputs only under /dev/shm/ or on the data drive of the local config (tools/local_config.py: the drive of
-# DATA_ROOT; never SYSTEM_DRIVE or /tmp/). Without the config only /dev/shm/ is writable.
+# DD-22: outputs only where the write boundary allows (tools/local_config.py check_write): RAM (/dev/shm) or the
+# verified data drive of the local config, never a volume whose root holds Windows/System32, never /tmp/.
+# Without the config only RAM is writable; without the loader nothing is.
 _LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "local_config.py")
 
 
-def write_refusal(path):
-    """None when an output may go to path, else the refusal message (tools/local_config.py simple_write_refusal)."""
+def _local_config_module():
+    """tools/local_config.py, loaded by path (shared as sys.modules["dd_local_config"]); None when it is missing."""
     import importlib.util
     import sys
     mod = sys.modules.get("dd_local_config")
     if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
         if not os.path.isfile(_LOCAL_CONFIG_PY):
-            real = os.path.realpath(os.path.abspath(path)) if path else ""
-            return None if path and real.startswith("/dev/shm/") else (
-                "refusing output %r: only /dev/shm/... here (%s, which knows the data drive, is missing)"
-                % (path, _LOCAL_CONFIG_PY))
+            return None
         spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
         mod = importlib.util.module_from_spec(spec)
         sys.modules["dd_local_config"] = mod
         spec.loader.exec_module(mod)
-    return mod.simple_write_refusal(path)
+    return mod
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary (tools/local_config.py check_write) allows writing to path, narrowed to roots
+    when given, else the refusal message. Without the loader nothing is writable."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (path, _LOCAL_CONFIG_PY)
+    return mod.write_refusal(path, roots)
+
+
+def child_refusal(parent, name):
+    """None when <parent>/<name> may be written: name a plain file name (no separator, not absolute, not '..') and the
+    final path allowed by the write boundary under parent; else the refusal message."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (name, _LOCAL_CONFIG_PY)
+    try:
+        mod.check_child(parent, name, (parent,))
+    except mod.WriteRefused as exc:
+        return str(exc)
+    return None
 
 
 SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
@@ -357,6 +377,13 @@ def sealed_reason(text):
     if text and SEALED_RE.search(text):
         return "refusing %s: it names the sealed map (eden / everon); Everon is the zero-shot test map" % text
     return None
+
+
+def open_no_follow(path):
+    """path opened for writing (created or truncated) without following a symlink there (O_NOFOLLOW)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                 0o644)
+    return os.fdopen(fd, "w", encoding="ascii", newline="")
 
 
 def check_out_path(path):
@@ -1540,7 +1567,7 @@ def main(argv=None):
         if args.out is not None:
             out = check_out_path(args.out or default_out(card))
             os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out, "w", encoding="ascii", newline="") as f:
+            with open_no_follow(out) as f:   # a symlink planted after the check is never followed
                 f.write(text)
     except Refusal as e:
         print("REFUSED: %s" % e)

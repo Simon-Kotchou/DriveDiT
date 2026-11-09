@@ -21,6 +21,11 @@ T0ENG = os.path.join(REPO, "tools", "probes", "t0eng")
 sys.path.insert(0, T0ENG)
 import probe_common as pc  # noqa: E402
 
+# DD-22: the synthetic local config (its drives are mounted nowhere), also when run with --noconftest.
+FIXTURE = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = FIXTURE
+SYSTEM_DRIVE = pc._local_config_module().load(FIXTURE).get("SYSTEM_DRIVE")
+
 
 class ProbeCommonTest(unittest.TestCase):
     def setUp(self):
@@ -120,16 +125,38 @@ class ProbeCommonTest(unittest.TestCase):
         self.assertIn("input error: missing file x", out.getvalue())
 
     def test_synthetic_play_refuses_c_and_tmp(self):
-        for bad in ("/mnt/z/dd4_should_not_exist/play_01", "/tmp/dd4_should_not_exist/play_01", "/home/x/play_01"):
+        system = SYSTEM_DRIVE + "/dd4_should_not_exist/play_01"
+        for bad in (system, "/tmp/dd4_should_not_exist/play_01", "/home/x/play_01"):
             with self.assertRaises(ValueError):
                 pc.write_synthetic_play(bad, {"probe": "e10"}, {})
             self.assertFalse(os.path.exists(os.path.dirname(bad)), bad)
         with self.assertRaises(ValueError):
             pc.write_synthetic_play(self.play_dir(), {"probe": "e10"}, {}, files={"../../../../../../../../tmp/x": b""})
 
+    def test_derived_names_never_leave_the_play(self):
+        # Codex round 2: an absolute CSV name, a '..' or nested file name and a planted run_header.txt symlink.
+        target = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(target)
+        for csvs, files in (({"/tmp/dd4_absolute": (["a"], [[1]])}, None),
+                            ({"../escape": (["a"], [[1]])}, None),
+                            ({}, {"/tmp/dd4_abs.bin": b"x"}),
+                            ({}, {"sub/../../escape.bin": b"x"})):
+            with self.assertRaises(ValueError, msg=(csvs, files)):
+                pc.write_synthetic_play(self.play_dir("play_03"), {"probe": "e10"}, csvs, files=files)
+        play = self.play_dir("play_04")
+        os.makedirs(play)
+        os.symlink(os.path.join(target, "header"), os.path.join(play, pc.RUN_HEADER))
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            pc.write_synthetic_play(play, {"probe": "e10"}, {})
+        self.assertEqual(os.listdir(target), [])
+        self.assertFalse(os.path.exists("/tmp/dd4_absolute.csv"))
+        self.assertFalse(os.path.exists("/tmp/dd4_abs.bin"))
+        ok = pc.write_synthetic_play(self.play_dir("play_05"), {"probe": "e10"}, {}, files={"frames/f_1.png": b"x"})
+        self.assertTrue(os.path.isfile(os.path.join(ok, "frames", "f_1.png")))
+
     def test_check_out_path(self):
         self.assertEqual(pc.check_out_path(self.tmp), self.tmp)
-        for bad in ("/mnt/z/Users/x/out.json", "/tmp/out.json", "", "/home/x/out.json"):
+        for bad in (SYSTEM_DRIVE + "/Users/x/out.json", "/tmp/out.json", "", "/home/x/out.json"):
             with self.assertRaises(pc.InputError):
                 pc.check_out_path(bad)
 

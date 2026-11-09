@@ -1627,7 +1627,7 @@ class ScopeTest(unittest.TestCase):
 
     def test_roots_and_under_outside_the_root_are_refused(self):
         self.assertEqual(harvest.DATA_ROOT, "/mnt/x/DataRoot")
-        for bad in ("/tmp/x", "/mnt/z/Users/x", "Z:\\DataRoot", "/mnt/x/DataRoot", "/mnt/x/DataRoot/captures", "/",
+        for bad in ("/tmp/x", "/mnt/z/Synthetic Steam (x86)/Users/x", "Z:\\DataRoot", "/mnt/x/DataRoot", "/mnt/x/DataRoot/captures", "/",
                     "/dev/shm"):
             code, out = run(bad, "--apply")
             self.assertEqual(code, 3, (bad, out))

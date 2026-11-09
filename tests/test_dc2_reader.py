@@ -856,7 +856,7 @@ class DefectTest(unittest.TestCase):
 
     def test_c_drive_paths_are_refused(self):
         with self.assertRaisesRegex(reader.ReaderError, "system drive"):
-            reader.open_session("/mnt/z/__dd5_no_such_dir__/" + GOLDEN_ID)
+            reader.open_session("/mnt/z/Synthetic Steam (x86)/__dd5_no_such_dir__/" + GOLDEN_ID)
 
 
 crash_dv = load("dc2_crash_dv", "data/dc2/crash_dv.py")

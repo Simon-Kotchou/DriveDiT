@@ -103,9 +103,9 @@ run stopped on an unexpected error (every session is still whole at its source o
 carries on).
 
 --test-root DIR (tests only) replaces <DATA_ROOT> by DIR: an existing directory under /dev/shm/ or on the data drive,
-never on the system drive and never overlapping <DATA_ROOT>. Only then does DD6_HARVEST_KILL_AT=<hook> kill the run at
-that hook (HOOKS), for the kill-mid-run test. Without a local config (or with DATA_ROOT or SYSTEM_DRIVE missing) every
-run is refused (exit 3), --test-root ones included.
+never on a Windows system volume (the write boundary, tools/local_config.py check_write) and never overlapping
+<DATA_ROOT>. Only then does DD6_HARVEST_KILL_AT=<hook> kill the run at that hook (HOOKS), for the kill-mid-run test.
+Without a local config (or with DATA_ROOT missing) every run is refused (exit 3), --test-root ones included.
 """
 
 import argparse
@@ -141,13 +141,15 @@ RUN_SCHEMA = "drivedit.harvest-run/1"
 # From the local config (DD-22), computed on every read (module __getattr__; _get honours an assignment by a test):
 #   DATA_ROOT               DATA_ROOT
 #   TEST_ROOT_PREFIXES      (/dev/shm/, <data drive>/)
-#   FORBIDDEN_DEVICE_PATHS  paths whose device never receives a write: SYSTEM_DRIVE, and / (the WSL disk image,
-#                           which lives on the system drive)
+#   FORBIDDEN_DEVICE_PATHS  paths whose device never receives a write: / (the WSL disk image). The Windows system
+#                           drive is refused by the write boundary itself (check_write), whatever the config says.
+# Every root the harvester (and retention) writes under, and every directory ensure_dir creates, also passes the
+# write boundary of tools/local_config.py (check_write: RAM or the verified data drive, never a volume whose root
+# holds Windows/System32); the data root and --test-root only narrow it.
 LOCAL_CONFIG_PY = os.path.join(REPO, "tools", "local_config.py")
 
 
-def local_config():
-    """The parsed local config (tools/local_config.py, loaded by path). Refused when it or a key is missing."""
+def _lc():
     mod = sys.modules.get("dd_local_config")
     if mod is None or getattr(mod, "__file__", None) != LOCAL_CONFIG_PY:
         if not os.path.isfile(LOCAL_CONFIG_PY):
@@ -156,6 +158,22 @@ def local_config():
         mod = importlib.util.module_from_spec(spec)
         sys.modules["dd_local_config"] = mod
         spec.loader.exec_module(mod)
+    return mod
+
+
+def check_write(path, roots=None):
+    """The resolved path when the write boundary (tools/local_config.py check_write) allows writing there, narrowed
+    to roots; Refused otherwise."""
+    mod = _lc()
+    try:
+        return mod.check_write(path, roots)
+    except mod.WriteRefused as e:
+        raise Refused(str(e))
+
+
+def local_config():
+    """The parsed local config (tools/local_config.py, loaded by path). Refused when it or a key is missing."""
+    mod = _lc()
     try:
         return mod.load()
     except mod.LocalConfigError as e:
@@ -173,8 +191,7 @@ def _local(form, key):
 _COMPUTED = {
     "DATA_ROOT": lambda: _local("get", "DATA_ROOT"),
     "TEST_ROOT_PREFIXES": lambda: ("/dev/shm/", _local("drive", "DATA_ROOT") + "/"),
-    "FORBIDDEN_DEVICE_PATHS": lambda: ((_local("get", "SYSTEM_DRIVE"), "the system drive"),
-                                       ("/", "the WSL disk image, which lives on the system drive")),
+    "FORBIDDEN_DEVICE_PATHS": lambda: (("/", "the WSL disk image, which lives on the system drive"),),
 }
 
 
@@ -412,7 +429,7 @@ def get(obj, dotted):
 
 
 def forbidden_device_reason(path):
-    """Why path (or its nearest existing ancestor) is on the device of the system drive or of the WSL disk image, or
+    """Why path (or its nearest existing ancestor) is on the device of the WSL disk image (FORBIDDEN_DEVICE_PATHS), or
     None."""
     probe = path
     while not os.path.lexists(probe) and os.path.dirname(probe) != probe:
@@ -432,7 +449,7 @@ def forbidden_device_reason(path):
 
 def data_root(test_root):
     """<DATA_ROOT> (not reached through a symlink), or the --test-root (an existing directory under /dev/shm/ or on
-    the data drive, never on the system drive and never overlapping <DATA_ROOT>). Refused otherwise, and without a
+    the data drive, through the write boundary, never overlapping <DATA_ROOT>). Refused otherwise, and without a
     local config."""
     data = _get("DATA_ROOT")
     if test_root is None:
@@ -441,13 +458,13 @@ def data_root(test_root):
         reason = forbidden_device_reason(data)
         if reason:
             raise Refused(reason)
+        check_write(data)
         return data
     prefixes = _get("TEST_ROOT_PREFIXES")
     if re.match(r"^[A-Za-z]:", test_root) or test_root.startswith("\\\\"):
         raise Refused("--test-root %r uses Windows syntax; pass a path under %s" % (test_root, " or ".join(prefixes)))
     real = os.path.realpath(os.path.abspath(test_root))
-    if inside(real.lower(), _local("get", "SYSTEM_DRIVE")):
-        raise Refused("--test-root %s resolves to the system drive" % test_root)
+    check_write(test_root)
     if not any(real.startswith(prefix) and len(real) > len(prefix) for prefix in prefixes):
         raise Refused("--test-root %s resolves to %s, which is not inside %s" % (
             test_root, real, " or ".join(prefixes)))
@@ -472,6 +489,7 @@ def ensure_dir(root, rel):
         if os.path.islink(cur):
             raise Held("%s is a symlink; the harvester never writes through one" % cur)
         if not os.path.lexists(cur):
+            check_write(cur, (root,))
             os.mkdir(cur)
         elif not os.path.isdir(cur):
             raise Held("%s exists and is not a directory" % cur)

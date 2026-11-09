@@ -96,7 +96,7 @@ run: sessions are planned and applied one at a time under it, with the catalog r
 file at the start no session is retained in that run); probe plays are planned read-only first, then planned again
 and applied under the lock.
 
-Scope. Every path lies below <DATA_ROOT> (harvest.data_root: not reached through a symlink, not on the system drive).
+Scope. Every path lies below <DATA_ROOT> (harvest.data_root: not reached through a symlink, through the write boundary).
 --under
 DIR narrows the scan; it must lie below the root without a symlink, inside captures/arland (sessions) or a
 DC_Probes folder (--probes). A $profile:DrivingData (dc-1.0) path or session is refused, and a symlinked directory

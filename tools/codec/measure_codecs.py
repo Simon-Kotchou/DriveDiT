@@ -26,6 +26,8 @@ with HF_HOME on the data drive. The CADRE codecs need the verified DINOv3 checko
         --frames 128 --start 1000 --batch 8 --dtype bfloat16
 
 The derivative directory is only read. Weights download on first use unless ``--local-only``; code never downloads.
+``--out`` and every file under it pass the write boundary (``drivedit.local_paths.check_write``: RAM or the verified data
+drive of the local config, never a Windows system volume), checked before anything is computed or written.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ import numpy as np
 import torch
 
 from drivedit.codec import CODECS, codec_ids, get_codec
+from drivedit.local_paths import WriteRefusedError, check_write
 from drivedit.codec.base import fetch_weights
 from drivedit.codec.dinov3 import dinov3_dir, verify_checkout
 
@@ -83,8 +86,23 @@ def timed(fn, inputs: torch.Tensor, batch: int) -> tuple[torch.Tensor, float]:
     return torch.cat(outputs), (time.perf_counter() - begin) * 1000.0 / inputs.shape[0]
 
 
+# The checked --out (set first thing in main): every file this tool writes passes the write boundary, narrowed to it.
+_OUT_ROOT: list[Path] = []
+
+
+def checked(path: Path) -> Path:
+    """``path`` through the write boundary (``drivedit.local_paths.check_write``: RAM or the verified data drive of the
+    local config, never a volume whose root holds Windows/System32), narrowed to the checked --out once that is set;
+    SystemExit when refused, before anything is written there."""
+    try:
+        return Path(check_write(path, tuple(_OUT_ROOT) or None))
+    except WriteRefusedError as exc:
+        raise SystemExit(f"measure_codecs: {exc}") from exc
+
+
 def save_side_by_side(path: Path, *images: torch.Tensor) -> None:
     """``[3, H, W]`` uint8 RGB images side by side with a 4-pixel white gap, as a PNG."""
+    path = checked(path)
     gap = torch.full((3, images[0].shape[1], 4), 255, dtype=torch.uint8)
     parts = [part for image in images for part in (image.cpu(), gap)][:-1]
     rgb = torch.cat(parts, dim=2).permute(1, 2, 0).numpy()
@@ -224,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="bfloat16")
     parser.add_argument("--local-only", action="store_true", help="fail instead of downloading missing weights")
     args = parser.parse_args(argv)
+    _OUT_ROOT.clear()
+    args.out = checked(args.out)  # first: the report directory must pass the write boundary
+    _OUT_ROOT.append(args.out)
     if not torch.cuda.is_available():
         raise SystemExit("needs a CUDA device")
     if args.frames < CLIP:
@@ -251,9 +272,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"measuring {codec_id} ...", file=sys.stderr, flush=True)
         results.append(measure(codec_id, images, args))
         print(json.dumps({k: v for k, v in results[-1].items() if k != "pngs"}), file=sys.stderr, flush=True)
-    (args.out / "measurements.json").write_text(json.dumps({"header": header, "results": results}, indent=2) + "\n")
+    checked(args.out / "measurements.json").write_text(
+        json.dumps({"header": header, "results": results}, indent=2) + "\n"
+    )
     table = markdown(results, header)
-    (args.out / "measurements.md").write_text(table)
+    checked(args.out / "measurements.md").write_text(table)
     print(table)
     return 0
 

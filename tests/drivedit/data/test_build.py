@@ -20,13 +20,27 @@ from typing import Any
 import numpy as np
 import pytest
 
+from drivedit import local_paths
 from drivedit.data import build
 from drivedit.data.shard import Shard, WindowIndex
 from drivedit.data.spec import FeatureSpec, session_split
 
-from .conftest import CARD, GOLDEN_DIR, REPO, ROUTES_DIR
+from .conftest import CARD, GOLDEN_DIR, LOCAL_CONFIG_FIXTURE, REPO, ROUTES_DIR
 
 TOL = 1e-4
+LC = local_paths._loader()
+_FIXTURE = LC.load(str(LOCAL_CONFIG_FIXTURE))
+DATA_ROOT = _FIXTURE.get("DATA_ROOT")
+DATA_DRIVE = _FIXTURE.drive("DATA_ROOT")
+SYSTEM_DRIVE = _FIXTURE.get("SYSTEM_DRIVE")
+GAME_DRIVE = _FIXTURE.drive("GAME_INSTALL")
+_bv_spec = importlib.util.spec_from_file_location(
+    "dd22_boundary_vectors", REPO / "tests" / "fixtures" / "local_config" / "boundary_vectors.py"
+)
+assert _bv_spec is not None
+assert _bv_spec.loader is not None
+bv = importlib.util.module_from_spec(_bv_spec)
+_bv_spec.loader.exec_module(bv)
 
 
 def _shard(path: Path) -> Shard:
@@ -418,12 +432,19 @@ def test_overwrite_and_output_refusals(golden_session: Any, spec: FeatureSpec, t
         build.write_shard(
             golden_session, GOLDEN_DIR / "out", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(GOLDEN_DIR,)
         )
-    # the placeholder system drive (never mounted): refused by the forbidden root, before anything is written
-    with pytest.raises(build.BuildError, match="system drive"):
-        build.write_shard(golden_session, "/mnt/z/dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=("/mnt/z",))
-    # any other Windows drive than the data drive: refused by the allow-list (DD-22), whatever the forbidden root is
-    with pytest.raises(build.BuildError, match="only the data drive /mnt/x takes outputs"):
-        build.write_shard(golden_session, "/mnt/y/dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=("/mnt/y",))
+    # DD-22 round 2: the write boundary decides before anything is written; dataset roots only narrow it.
+    outs = (SYSTEM_DRIVE + "/dd11", DATA_DRIVE + "/elsewhere/dd11", GAME_DRIVE + "/dd11", "/tmp/dd22_build_never/out")
+    for out in outs:
+        root = str(Path(out).parent)
+        with pytest.raises(build.BuildError, match="writes go only to RAM"):  # unmounted drives, the Linux disk
+            build.write_shard(golden_session, out, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(root,))
+    with bv.patched_system_volume(LC, str(tmp)) as system:
+        with pytest.raises(build.BuildError, match="Windows system drive"):
+            build.write_shard(
+                golden_session, Path(system) / "dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(system, tmp)
+            )
+        assert os.listdir(system) == ["Windows"]
+    assert not os.path.exists("/tmp/dd22_build_never")
     with pytest.raises(build.BuildError, match="no dataset root"):
         build.write_shard(golden_session, datasets, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=())
     assert not (tmp / "elsewhere").exists()
@@ -494,8 +515,8 @@ def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monk
     can drop <DATA_ROOT>/captures; an out root there lies under no default dataset root."""
     default_captures = [Path(p) for p in build.default_capture_roots()]
     default_datasets = [Path(p) for p in build.default_dataset_roots()]
-    assert default_captures == [Path("/mnt/x/DataRoot/captures")]
-    assert default_datasets == [Path("/mnt/x/DataRoot/datasets")]
+    assert default_captures == [Path(DATA_ROOT) / "captures"]
+    assert default_datasets == [Path(DATA_ROOT) / "datasets"]
     session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
     for value in ("", " ", os.pathsep, f" {os.pathsep} "):
         monkeypatch.setenv(build.CAPTURE_ROOTS_ENV, value)
@@ -503,15 +524,15 @@ def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monk
         assert build.configured_capture_roots() == default_captures
         assert build.allowed_dataset_roots() == default_datasets
         with pytest.raises(build.BuildError, match="not under a dataset root"):
-            build.write_shard(session, "/mnt/x/DataRoot/captures/new-output", spec=None)
+            build.write_shard(session, f"{DATA_ROOT}/captures/new-output", spec=None)
         # a dataset root that holds the capture store is refused, whatever else is configured
         for extra in ((), (tmp / "other_store",)):
-            with pytest.raises(build.BuildError, match="overlaps /mnt/x/DataRoot/captures"):
+            with pytest.raises(build.BuildError, match=f"overlaps {DATA_ROOT}/captures"):
                 build.write_shard(
                     session,
-                    "/mnt/x/DataRoot/captures/new-output",
+                    f"{DATA_ROOT}/captures/new-output",
                     spec=None,
-                    dataset_roots=("/mnt/x/DataRoot",),
+                    dataset_roots=(DATA_ROOT,),
                     capture_roots=extra,
                 )
     monkeypatch.setenv(build.CAPTURE_ROOTS_ENV, str(tmp / "env_store"))
@@ -581,12 +602,12 @@ def test_drvfs_case_alias_of_the_capture_store_is_refused(tmp: Path, monkeypatch
 
 @pytest.mark.parametrize(
     "value",
-    ["X:/DataRoot/datasets", "X:\\DataRoot\\datasets", "x:/x", "X:", "X:relative", "/mnt/x/x\\y"],
+    ["X:/DataRoot/datasets", "X:\\DataRoot\\datasets", "x:/DataRoot", "X:", "X:relative", "/mnt/x/DataRoot\\y"],
 )
 def test_windows_spellings_are_refused(value: str, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review round 4: X:/x splits on ':' into X and /x, and backslashes name other paths, so a root given in Windows
-    spelling would protect or allow nothing it names. Refused in the variables (also inside a list), the keywords
-    and the CLI, with the WSL spelling in the message."""
+    """Review round 4: X:/DataRoot splits on ':' into X and /DataRoot, and backslashes name other paths, so a root
+    given in Windows spelling would protect or allow nothing it names. Refused in the variables (also inside a list),
+    the keywords and the CLI, with the WSL spelling in the message."""
     session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
     datasets = tmp / "datasets"
     for name in (build.CAPTURE_ROOTS_ENV, build.DATASET_ROOTS_ENV):

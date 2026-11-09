@@ -103,12 +103,18 @@ reader = harvest.reader
 
 
 def scratch_ok(path):
-    """True for an existing, writable directory under /dev/shm/ (symlinks resolved) that is not on the system-drive
-    or WSL-image device (DD-22: no real drive is a scratch base)."""
+    """True for an existing, writable directory under /dev/shm/ (symlinks resolved) that the write boundary takes
+    for RAM (DD-22: no real drive is a scratch base)."""
     real = os.path.realpath(path or "/")
     if not real.startswith("/dev/shm/"):
         return False
-    return os.path.isdir(real) and os.access(real, os.W_OK) and harvest.forbidden_device_reason(real) is None
+    if not (os.path.isdir(real) and os.access(real, os.W_OK)):
+        return False
+    try:
+        harvest.check_write(real, ("/dev/shm",))
+    except harvest.Refused:
+        return False
+    return harvest.forbidden_device_reason(real) is None
 
 
 def temp_dir(prefix):
@@ -1125,11 +1131,11 @@ class RefusalTest(unittest.TestCase):
     def test_roots(self):
         self.assertEqual(harvest.DATA_ROOT, "/mnt/x/DataRoot")
         self.assertEqual(harvest.TEST_ROOT_PREFIXES, ("/dev/shm/", "/mnt/x/"))
-        for bad in ("/mnt/z/Users/x", "Z:\\DataRoot", "/tmp/x", "/mnt/x/DataRoot", "/mnt/x/DataRoot/captures",
-                    "/mnt/x", "/dev/shm", "/mnt/x/__dd6_no_such_dir__", "/"):
+        for bad in ("/mnt/z/Synthetic Steam (x86)/Users/x", "Z:\\DataRoot", "/tmp/x", "/mnt/x/DataRoot", "/mnt/x/DataRoot/captures",
+                    "/mnt/x", "/dev/shm", "/mnt/x/DataRoot/__dd6_no_such_dir__", "/"):
             with self.assertRaises(harvest.Refused, msg=bad):
                 harvest.data_root(bad)
-        self.assertFalse(os.path.exists("/mnt/x/__dd6_no_such_dir__"))
+        self.assertFalse(os.path.exists("/mnt/x/DataRoot/__dd6_no_such_dir__"))
         self.assertEqual(harvest.data_root(self.root), os.path.realpath(self.root))
         code, out = run(self.root, "--session", os.path.join(self.root, "elsewhere", WB_ID))
         self.assertEqual(code, 3, out)
@@ -1214,15 +1220,16 @@ class EScratchTest(unittest.TestCase):
     def test_workbench_harvest_on_e(self):
         """The Workbench harvest on a real data drive (drvfs rename), only in a scratch directory the caller names,
         with the machine's own local config (DD_TEST_LOCAL_CONFIG)."""
-        scratch = os.environ.get("DC_TEST_E_SCRATCH")
-        machine = evidence.machine_config_path()
-        if not (scratch and machine and os.path.isdir(scratch)):
-            self.skipTest("set DC_TEST_E_SCRATCH (a directory on the data drive, outside DATA_ROOT) and "
-                          "DD_TEST_LOCAL_CONFIG to run this test")
-        patcher = mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": machine})
+        # Every check comes before anything is created (evidence.data_drive_scratch): the resolved directory, the write
+        # boundary of the machine's config (its verified data drive; never a system volume) and no overlap with the
+        # production DATA_ROOT.
+        scratch, why = evidence.data_drive_scratch()
+        if scratch is None:
+            self.skipTest(why)
+        patcher = mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": evidence.machine_config_path()})
         patcher.start()
         self.addCleanup(patcher.stop)
-        root = tempfile.mkdtemp(prefix="dd6_e_", dir=os.path.realpath(scratch))
+        root = tempfile.mkdtemp(prefix="dd6_e_", dir=scratch)
         try:
             src = make_session(root, pin_sha=write_pin(root))
             raw = snapshot(src)

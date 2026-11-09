@@ -105,27 +105,47 @@ import drivedit_nav  # noqa: E402
 
 STREAMS_JSON = os.path.join(REPO, "docs", "capture_contract", "dc-2.0.streams.json")
 CARD_FILE = os.path.join(HERE, "cards", "S105_synthetic.json")
-# DD-22: outputs only under /dev/shm/ or on the data drive of the local config (tools/local_config.py: the drive of
-# DATA_ROOT; never SYSTEM_DRIVE or /tmp/). Without the config only /dev/shm/ is writable.
+# DD-22: outputs only where the write boundary allows (tools/local_config.py check_write): RAM (/dev/shm) or the
+# verified data drive of the local config, never a volume whose root holds Windows/System32, never /tmp/.
+# Without the config only RAM is writable; without the loader nothing is.
 _LOCAL_CONFIG_PY = os.path.join(REPO, "tools", "local_config.py")
 
 
-def write_refusal(path):
-    """None when an output may go to path, else the refusal message (tools/local_config.py simple_write_refusal)."""
+def _local_config_module():
+    """tools/local_config.py, loaded by path (shared as sys.modules["dd_local_config"]); None when it is missing."""
     import importlib.util
     import sys
     mod = sys.modules.get("dd_local_config")
     if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
         if not os.path.isfile(_LOCAL_CONFIG_PY):
-            real = os.path.realpath(os.path.abspath(path)) if path else ""
-            return None if path and real.startswith("/dev/shm/") else (
-                "refusing output %r: only /dev/shm/... here (%s, which knows the data drive, is missing)"
-                % (path, _LOCAL_CONFIG_PY))
+            return None
         spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
         mod = importlib.util.module_from_spec(spec)
         sys.modules["dd_local_config"] = mod
         spec.loader.exec_module(mod)
-    return mod.simple_write_refusal(path)
+    return mod
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary (tools/local_config.py check_write) allows writing to path, narrowed to roots
+    when given, else the refusal message. Without the loader nothing is writable."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (path, _LOCAL_CONFIG_PY)
+    return mod.write_refusal(path, roots)
+
+
+def child_refusal(parent, name):
+    """None when <parent>/<name> may be written: name a plain file name (no separator, not absolute, not '..') and the
+    final path allowed by the write boundary under parent; else the refusal message."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (name, _LOCAL_CONFIG_PY)
+    try:
+        mod.check_child(parent, name, (parent,))
+    except mod.WriteRefused as exc:
+        return str(exc)
+    return None
 VARIANTS = ("gap", "missing_commit", "reused_slot", "crash", "crash_unexplained", "destroyed_unexplained")
 CRASH_VARIANTS = ("crash", "crash_unexplained", "destroyed_unexplained")
 # session.json events.* (contract 10.1, TBD-10 defaults)
@@ -191,6 +211,15 @@ def check_out(path):
     if why:
         raise ValueError(why)
     return os.path.realpath(path)
+
+
+def check_child(parent, name):
+    """<parent>/<name> for a plain file name whose final path the write boundary allows under parent (an absolute,
+    '..' or nested name never moves a write out of parent); ValueError otherwise."""
+    why = child_refusal(parent, name)
+    if why:
+        raise ValueError(why)
+    return os.path.join(parent, name)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1057,8 +1086,8 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
         schema = json.loads(f.read().decode("ascii"))
     route_obj = route_obj or ROUTES[spec["route"]]()
     route = drivedit_nav.route_from_dict(route_obj)
-    session_dir = os.path.join(out_dir, spec["session_id"])
-    if os.path.exists(session_dir):
+    session_dir = check_child(out_dir, spec["session_id"])
+    if os.path.lexists(session_dir):
         raise ValueError("refusing to overwrite %s" % session_dir)
     os.makedirs(session_dir)
     sim = simulate(spec, route)
@@ -1144,7 +1173,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
     if routes_dir is not None:
         routes_dir = check_out(routes_dir)
         os.makedirs(routes_dir, exist_ok=True)
-        with open(os.path.join(routes_dir, route.route_id + ".json"), "wb") as f:
+        with open(check_child(routes_dir, route.route_id + ".json"), "wb") as f:
             f.write((json.dumps(route_obj, indent=1) + "\n").encode("ascii"))
     golden = None
     if golden_json is not None:
@@ -1355,7 +1384,7 @@ def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, 
     intervals of 200 and 400 ms as in sessions 2702 and 4811), summary.txt and frames/frame_<id:06d>.bmp.png for
     frames_present only. Returns the session directory."""
     out_dir = check_out(out_dir)
-    sdir = os.path.join(out_dir, name)
+    sdir = check_child(out_dir, name)
     os.makedirs(os.path.join(sdir, "frames"))
     cols = legacy_header()
     lines = [",".join(cols)]

@@ -56,11 +56,13 @@ Not written by default (features_v1 classes): ``eval_only`` (``include_eval_only
 
 Outputs go only under a dataset root (``default_dataset_roots()``, <DATA_ROOT>/datasets; ``dataset_roots=``,
 ``--dataset-root`` or ``DRIVEDIT_DATASET_ROOTS`` replace it), checked on resolved paths before anything is computed or
-written. They never go inside the session, a capture store (``default_capture_roots()``, <DATA_ROOT>/captures;
-``capture_roots=``, ``--capture-root`` and ``DRIVEDIT_CAPTURE_ROOTS`` only add) or the system drive (SYSTEM_DRIVE), and
-a dataset root must lie apart from the session and every capture store. <DATA_ROOT> and SYSTEM_DRIVE come from the
-local config (``drivedit.local_paths``, DD-22); without it a build is refused (BuildError naming the key). An existing
-shard is replaced only with ``overwrite=True`` (written beside it first, then swapped).
+written. Every output path must pass the write boundary (``drivedit.local_paths.check_write``: RAM or the verified data
+drive of the local config, never a volume whose root holds Windows/System32); the dataset roots only narrow it. They
+never go inside the session or a capture store (``default_capture_roots()``, <DATA_ROOT>/captures; ``capture_roots=``,
+``--capture-root`` and ``DRIVEDIT_CAPTURE_ROOTS`` only add), and a dataset root must lie apart from the session and
+every capture store. <DATA_ROOT> comes from the local config (``drivedit.local_paths``, DD-22); without it a build is
+refused (BuildError naming the key). An existing shard is replaced only with ``overwrite=True`` (written beside it
+first, then swapped).
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ PREFIX_HASH_ROUTES = {
     "arland_t0_loop": "77838c1346f2c7a6b18be78570d9f8cb560ee10a0e69718b28eb0f028cc0f66f",
 }
 # A Windows spelling of a root (X:/..., X:\..., any backslash) splits wrongly on os.pathsep and names nothing on WSL.
-WINDOWS_PATH_RE = re.compile(r"^\s*[A-Za-z]:")  # a drive letter: X:/x, X:\x, X:x, X:
+WINDOWS_PATH_RE = re.compile(r"^\s*[A-Za-z]:")  # a drive letter: X:/..., X:\..., X:x, X:
 # Outputs go only under a dataset root (an allow-list: review round 3, after deny-list checks kept losing to path
 # aliases): default_dataset_roots(), <DATA_ROOT>/<DATASET_ROOT_REL> of the local config. Replaced by the dataset_roots
 # keyword, else by DRIVEDIT_DATASET_ROOTS (os.pathsep-separated; an empty or blank value counts as unset).
@@ -927,11 +929,6 @@ def default_capture_roots() -> tuple[str, ...]:
     return (f"{_local('DATA_ROOT')}/{CAPTURE_ROOT_REL}",)
 
 
-def forbidden_roots() -> tuple[str, ...]:
-    """Where nothing is ever written: the system drive (SYSTEM_DRIVE of the local config)."""
-    return (_local("SYSTEM_DRIVE"),)
-
-
 def _posix_root(value: str | Path, where: str) -> Path:
     """A root as a Path; BuildError for a Windows spelling (a drive letter such as ``X:/`` or ``X:\\``, or any
     backslash), which on WSL names another path or splits into several on os.pathsep."""
@@ -943,7 +940,8 @@ def _posix_root(value: str | Path, where: str) -> Path:
 
 def _env_roots(name: str) -> list[Path] | None:
     """The os.pathsep-separated roots of an environment variable, or None when it is unset, empty or blank. A value
-    with a Windows spelling anywhere is refused before it is split (``X:/x`` would split into ``X`` and ``/x``)."""
+    with a Windows spelling anywhere is refused before it is split (``X:/DataRoot`` would split into ``X`` and
+    ``/DataRoot``)."""
     raw = os.environ.get(name, "")
     if "\\" in raw or re.search(rf"(?:^|{re.escape(os.pathsep)})\s*[A-Za-z]:", raw):
         raise BuildError(
@@ -995,17 +993,13 @@ def _inside(path: Path, root: Path) -> bool:
     return any(_identity(p) == root_id for p in (path, *path.parents))
 
 
-def _check_drive(root: Path, forbidden: Sequence[Path]) -> None:
-    """BuildError for a dataset root on the system drive, or on any Windows drive other than the data drive: an
-    allow-list as well as the deny-list (DD-22), so a config naming the wrong system drive still writes nowhere else."""
-    if any(_inside(root, c) for c in forbidden):
-        raise BuildError(f"refusing dataset root {root}: it is on the system drive (no writes there)")
-    drive = re.match(r"^/mnt/[a-z](?=/|$)", str(root).lower())
-    data_drive = _local("DATA_ROOT", drive=True)
-    if drive and drive.group(0) != data_drive:
-        raise BuildError(
-            f"refusing dataset root {root}: on a Windows drive only the data drive {data_drive} takes outputs"
-        )
+def _check_boundary(path: Path, out_root: Path) -> None:
+    """BuildError unless the write boundary allows ``path`` (drivedit.local_paths.check_write: RAM or the verified data
+    drive of the local config, never a Windows system volume). The dataset roots only narrow it."""
+    try:
+        local_paths.check_write(path)
+    except local_paths.WriteRefusedError as exc:
+        raise BuildError(f"refusing {out_root}: {exc}") from exc
 
 
 def _shard_dir(
@@ -1015,8 +1009,10 @@ def _shard_dir(
 
     Every path the build creates, renames or removes lies in that parent (the staging directories ``.features_v1.*``
     are siblings of the shard). Symlinks resolved, and containment decided by filesystem identity (``_inside``):
-    - the out root, the parent ``<out_root>/<session_id>`` and the destination each lie under an allowed dataset root;
-    - none of them is on the system drive, inside the session directory or inside a capture store;
+    - the out root, the parent ``<out_root>/<session_id>`` and the destination each pass the write boundary
+      (``drivedit.local_paths.check_write``: RAM or the verified data drive, never a Windows system volume) and lie
+      under an allowed dataset root, which only narrows the boundary;
+    - none of them is inside the session directory or inside a capture store;
     - every allowed root lies apart from the session and each capture store (neither inside the other).
     A symlinked destination directory is refused: the shard is replaced by renames inside its parent.
     """
@@ -1025,27 +1021,24 @@ def _shard_dir(
     session = session_real.resolve()
     stores = [c.resolve() for c in captures]
     roots = [a.resolve() for a in allowed]
-    forbidden = [Path(r) for r in forbidden_roots()]
     if not roots:
         raise BuildError(f"refusing {out_root}: no dataset root is configured, so no output is allowed")
     for a in roots:
         for p in (session, *stores):
             if _inside(a, p) or _inside(p, a):
                 raise BuildError(f"refusing dataset root {a}: it overlaps {p} (sessions and captures are read-only)")
-        _check_drive(a, forbidden)
     root = out_root.resolve()
     parent = (root / session_id).resolve()
     dest = parent / SHARD_DIRNAME
     if dest.is_symlink():
         raise BuildError(f"refusing {dest}: the shard directory is a symlink")
     for path in (root, parent, dest.resolve()):
-        if any(_inside(path, c) for c in forbidden):
-            raise BuildError(f"refusing {out_root}: {path} is on the system drive (no writes there)")
         if not any(_inside(path, a) for a in roots):
             raise BuildError(
                 f"refusing {out_root}: {path} is not under a dataset root ({', '.join(map(str, roots))}; "
                 f"dataset_roots=, --dataset-root or {DATASET_ROOTS_ENV})"
             )
+        _check_boundary(path, out_root)
         # second line of defence: a path under both an allowed root and the session or a store would make those
         # roots nested, which the overlap check above already refuses
         for p in (session, *stores):

@@ -55,8 +55,11 @@ evidence = importlib.util.module_from_spec(_evidence_spec)
 _evidence_spec.loader.exec_module(evidence)
 PROGRAM_MD = evidence.evidence_path("REALIGN_ROOT", "program", "CAPTURE_PROGRAM.md")
 LEGACY_ROOT = evidence.evidence_path("DATA_ROOT", "captures", "_legacy_DrivingData_C")
-NO_SUCH_E_DIR = "/mnt/x/__dd5_no_such_dir__"   # on the placeholder data drive, never mounted
 LOCAL_CONFIG_FIXTURE = evidence.FIXTURE
+_bv_spec = importlib.util.spec_from_file_location(
+    "dd22_boundary_vectors", os.path.join(REPO, "tests", "fixtures", "local_config", "boundary_vectors.py"))
+bv = importlib.util.module_from_spec(_bv_spec)
+_bv_spec.loader.exec_module(bv)
 CHECK_IDS = ("C01", "C02", "C05", "C06", "C07", "C08", "C10", "C11", "C12", "C13a", "C13b", "C15", "C17", "C20",
              "C21", "C28", "C31", "C34", "C35", "C36", "C37")
 
@@ -73,6 +76,9 @@ def load(name, rel):
 os.environ["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
 
 dc_validate = load("dc_validate", "tools/validator/dc_validate.py")
+LC = dc_validate._lc()
+FIXTURE_CFG = LC.load(LOCAL_CONFIG_FIXTURE)
+NO_SUCH_E_DIR = FIXTURE_CFG.drive("DATA_ROOT") + "/__dd5_no_such_dir__"   # on the placeholder data drive, never mounted
 synth = load("dc2_make_synthetic_v", "tests/fixtures/capture_dc2/make_synthetic.py")
 reader = load("dc2_reader_v", "data/dc2/reader.py")
 
@@ -1506,20 +1512,38 @@ class CrashRulesOnGoldenTest(unittest.TestCase):
 class ReportTest(unittest.TestCase):
     def test_default_report_root(self):
         with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": LOCAL_CONFIG_FIXTURE}):
-            self.assertEqual(dc_validate.DEFAULT_REPORT_DIR, "/mnt/x/DataRoot/reports")
-            self.assertEqual(dc_validate.REPORT_ROOT, "/mnt/x/")
+            self.assertEqual(dc_validate.DEFAULT_REPORT_DIR, FIXTURE_CFG.get("DATA_ROOT") + "/reports")
+            self.assertEqual(dc_validate.REPORT_ROOT, FIXTURE_CFG.drive("DATA_ROOT") + "/")
+
+    def test_unmounted_data_drive_is_refused_before_any_mkdir(self):
+        """AP-R2 row 4: the synthetic config's data drive is mounted nowhere, so the default report dir lies on the
+        Linux root filesystem; the boundary refuses it before anything is created."""
+        with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": LOCAL_CONFIG_FIXTURE}):
+            code, text = run("--session", GOLDEN_DIR)
+            self.assertEqual(code, 3, text)
+            self.assertIn("is not mounted", text)
+            self.assertFalse(os.path.exists(dc_validate.DEFAULT_REPORT_DIR))
+
+    def test_report_dir_on_a_system_volume_is_refused(self):
+        tmp = temp_dir("dc2_sysvol_")
+        try:
+            with bv.patched_system_volume(LC, tmp) as system, \
+                    mock.patch.object(dc_validate, "REPORT_ROOT", tmp + "/"):
+                code, text = run("--session", GOLDEN_DIR, "--report-dir", os.path.join(system, "reports"))
+                self.assertEqual(code, 3, text)
+                self.assertIn("Windows system drive", text)
+                self.assertEqual(os.listdir(system), ["Windows"])
+        finally:
+            shutil.rmtree(tmp)
 
     def test_report_written_under_e(self):
         """Against a real data-drive report root: only in a scratch directory the caller names (DC_TEST_E_SCRATCH, an
         existing directory on the data drive of the DD_TEST_LOCAL_CONFIG config), never a hard-coded path."""
-        scratch = os.environ.get("DC_TEST_E_SCRATCH")
+        scratch, why = evidence.data_drive_scratch()   # every check before anything is created
+        if scratch is None:
+            self.skipTest(why)
         machine = evidence.machine_config_path()
-        if not (scratch and machine and os.path.isdir(scratch)):
-            self.skipTest("set DC_TEST_E_SCRATCH and DD_TEST_LOCAL_CONFIG to run this test")
-        with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": machine}):
-            if not os.path.realpath(scratch).startswith(dc_validate.REPORT_ROOT):
-                self.skipTest("DC_TEST_E_SCRATCH is not on the data drive of DD_TEST_LOCAL_CONFIG")
-        tmp = tempfile.mkdtemp(prefix="dc2_report_", dir=os.path.realpath(scratch))
+        tmp = tempfile.mkdtemp(prefix="dc2_report_", dir=scratch)
         try:
             with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": machine}):
                 code, text = run("--session", GOLDEN_DIR, "--report-dir", tmp)
@@ -1562,7 +1586,7 @@ class ReportTest(unittest.TestCase):
         tmp = temp_dir("dc2_refuse_")
         try:
             target = os.path.join(tmp, "reports")
-            for report_dir in (target, "/mnt/z/__dd5_no_such_dir__/reports"):
+            for report_dir in (target, FIXTURE_CFG.get("SYSTEM_DRIVE") + "/__dd5_no_such_dir__/reports", "/tmp/dd5_reports"):
                 code, text = run("--session", GOLDEN_DIR, "--report-dir", report_dir)
                 self.assertEqual(code, 3, text)
                 self.assertIn("refused", text)
@@ -1575,7 +1599,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(code, 3, text)
         code, text = run("--session", GOLDEN_DIR, "--no-report", "--checks", "C99")
         self.assertEqual(code, 3, text)
-        code, text = run("--session", "/mnt/z/__dd5_no_such_dir__/" + GOLDEN_ID, "--no-report")
+        code, text = run("--session", "/mnt/z/Synthetic Steam (x86)/__dd5_no_such_dir__/" + GOLDEN_ID, "--no-report")
         self.assertEqual(code, 3, text)
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as cm:

@@ -84,8 +84,8 @@ class _Parser(argparse.ArgumentParser):
         sys.exit(checks.EXIT_VALIDATOR_ERROR)
 
 
-def _local(form, key):
-    """A value of the local config (tools/local_config.py, loaded by path; DD-22). Refused when it is missing."""
+def _lc():
+    """tools/local_config.py, loaded by path (DD-22) and shared as sys.modules["dd_local_config"]."""
     import importlib.util
     mod = sys.modules.get("dd_local_config")
     if mod is None or getattr(mod, "__file__", None) != LOCAL_CONFIG_PY:
@@ -95,14 +95,31 @@ def _local(form, key):
         mod = importlib.util.module_from_spec(spec)
         sys.modules["dd_local_config"] = mod
         spec.loader.exec_module(mod)
+    return mod
+
+
+def _local(form, key):
+    """A value of the local config (tools/local_config.py; DD-22). Refused when it is missing."""
+    mod = _lc()
     try:
         return getattr(mod.load(), form)(key)
     except mod.LocalConfigError as e:
         raise Refused(str(e))
 
 
-# DEFAULT_REPORT_DIR (<DATA_ROOT>/reports), REPORT_ROOT (the data drive, /mnt/<x>/) and SYSTEM_DRIVE_ROOT
-# (<SYSTEM_DRIVE>/): computed from the local config on every read (DD-22); a test may assign one (_get honours it).
+def _boundary(path, roots):
+    """The resolved path when the write boundary (tools/local_config.py check_write: RAM or the verified data drive,
+    never a Windows system volume) allows it under roots; Refused otherwise."""
+    mod = _lc()
+    try:
+        return mod.check_write(path, roots)
+    except mod.WriteRefused as e:
+        raise Refused(str(e))
+
+
+# DEFAULT_REPORT_DIR (<DATA_ROOT>/reports), REPORT_ROOT (the data drive, /mnt/<x>/: it narrows the write boundary
+# for reports) and SYSTEM_DRIVE_ROOT (<SYSTEM_DRIVE>/: no input is read from there): computed from the local config
+# on every read (DD-22); a test may assign one (_get honours it).
 _COMPUTED = {"DEFAULT_REPORT_DIR": lambda: _local("get", "DATA_ROOT") + "/reports",
              "REPORT_ROOT": lambda: _local("drive", "DATA_ROOT") + "/",
              "SYSTEM_DRIVE_ROOT": lambda: _local("get", "SYSTEM_DRIVE") + "/"}
@@ -142,12 +159,13 @@ def check_read_path(path, what):
 
 
 def check_report_dir(path, sealed=False):
-    """Reports only on the data drive (never the system drive or anything else); an Everon report only under a
-    SEALED dir."""
+    """Reports only where the write boundary allows (the verified data drive or RAM, never a Windows system volume),
+    narrowed to REPORT_ROOT (the data drive); an Everon report only under a SEALED dir. Nothing is created here."""
     root = _get("REPORT_ROOT")
-    if _under(path, _get("SYSTEM_DRIVE_ROOT")) or not _under(path, root):
-        raise Refused("refusing report directory %s: reports are written only under %s" % (path, root))
-    real = os.path.realpath(path)
+    try:
+        real = _boundary(path, (root,))
+    except Refused as e:
+        raise Refused("refusing report directory %s: reports are written only under %s (%s)" % (path, root, e))
     if sealed and "sealed" not in real.lower().split("/"):
         raise Refused("refusing report directory %s for an Everon session: sealed reports go under a SEALED "
                       "directory (L12)" % path)
@@ -320,6 +338,7 @@ def write_report(report, report_dir, sealed):
     if os.path.realpath(path) != os.path.join(os.path.realpath(out_dir), "dc_validate.json") \
             or not _under(path, root.rstrip("/") + "/"):
         raise Refused("report file %s resolves outside %s" % (path, root))
+    _boundary(path, (root,))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
     with os.fdopen(fd, "wb") as f:
         f.write((json.dumps(report, indent=1, default=_json_default) + "\n").encode("ascii"))

@@ -33,6 +33,11 @@ sys.path.insert(0, HERE)
 import deploy_addon  # noqa: E402  (pure checks are tested in-process; the tool has no import side effects)
 REPO = os.path.dirname(HERE)
 LOCAL_CONFIG_FIXTURE = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 os.environ["DRIVEDIT_LOCAL_CONFIG"] = LOCAL_CONFIG_FIXTURE  # the tool's subprocesses read it too
 CFG = deploy_addon.local_config()
 DATA_ROOT = CFG.get("DATA_ROOT")                      # /mnt/x/DataRoot
@@ -71,12 +76,9 @@ CASE_VARIANT_REASON = ("is not spelled as in the repo" if os.path.isdir(os.path.
 
 
 def tmp_base():
-    base = os.environ.get("DEPLOY_ADDON_TEST_TMP")
-    if base:
-        return base
-    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
-        return "/dev/shm"
-    raise unittest.SkipTest("no $DEPLOY_ADDON_TEST_TMP and no writable /dev/shm; not using the system temp dir")
+    """The validated RAM scratch base: $DEPLOY_ADDON_TEST_TMP when set (it must pass), else $TMPDIR or /dev/shm
+    (tests/fixtures/local_config/scratch.py); the tests skip where the write boundary refuses RAM."""
+    return scratch.boundary_base("DEPLOY_ADDON_TEST_TMP")
 
 
 def sha(path):
@@ -129,8 +131,9 @@ def no_device_check():
         yield
 
 
-# An independent spelling of the token rule (not deploy_addon.TOKEN_RE): @DD_ then anything but '@' and white space.
-ANY_TOKEN = re.compile(rb"@DD_[^@\s]*@")
+# An independent spelling of the token rule (not deploy_addon.TOKEN_RE): @DD_, then anything but '@' (white space and
+# line breaks included), then @.
+ANY_TOKEN = re.compile(rb"@DD_[^@]*@", re.DOTALL)
 _bv_spec = importlib.util.spec_from_file_location(
     "dd22_boundary_vectors", os.path.join(REPO, "tests", "fixtures", "local_config", "boundary_vectors.py"))
 bv = importlib.util.module_from_spec(_bv_spec)
@@ -247,7 +250,8 @@ class DeployAddonTest(unittest.TestCase):
             with self.assertRaisesRegex(deploy_addon.Refusal, "only .* get the profile root", msg=(group, src)):
                 deploy_addon.render_payload(group, src, b'{"root": "@DD_PROFILE_ROOT@"}', value)
         # any other @DD_...@, whatever its characters, in any payload
-        for token in (b"@DD_OTHER@", b"@DD_typo@", b"@DD_FOO-BAR@", b"@DD_@", b"@DD_x.y/z@"):
+        for token in (b"@DD_OTHER@", b"@DD_typo@", b"@DD_FOO-BAR@", b"@DD_@", b"@DD_x.y/z@", b"@DD_FOO BAR@",
+                      b"@DD_FOO\nBAR@", b"@DD_\t@"):
             self.assertIsNotNone(ANY_TOKEN.search(token))
             for group in ("script", "addon", "config", "emcp"):
                 with self.assertRaisesRegex(deploy_addon.Refusal, re.escape(token.decode()), msg=(group, token)):
@@ -383,6 +387,28 @@ class DeployAddonTest(unittest.TestCase):
                        os.path.join(os.path.expanduser("~"), "__dd_deploy_selftest_missing__", "DataCapture"),
                        "/mnt/y/Game Library/__dd_deploy_selftest_missing__/DataCapture"):
             self.assertIsNotNone(deploy_addon.target_reason(target, [self.tmp]), target)
+
+    def test_atomic_write_never_writes_through_a_planted_temp_name(self):
+        # Codex round 3 F2: the temp sibling is created exclusively under a random name, never opened by a guessable
+        # one, and its parent passes the write boundary first.
+        outside = os.path.join(self.tmp, "outside.txt")
+        with open(outside, "w") as f:
+            f.write("untouched\n")
+        os.makedirs(self.target)
+        dst = os.path.join(self.target, "x.c")
+        for name in (".x.c.deploy-tmp-%d" % os.getpid(), ".x.c.deploy-tmp-"):
+            os.symlink(outside, os.path.join(self.target, name))
+        deploy_addon.atomic_write(dst, b"new\n")
+        with open(dst, "rb") as f:
+            self.assertEqual(f.read(), b"new\n")
+        with open(outside) as f:
+            self.assertEqual(f.read(), "untouched\n")
+        self.assertFalse(os.path.islink(dst))
+        self.assertEqual(sorted(n for n in os.listdir(self.target) if "deploy-tmp" in n),
+                         sorted([".x.c.deploy-tmp-%d" % os.getpid(), ".x.c.deploy-tmp-"]))   # only the planted ones
+        with self.assertRaisesRegex(OSError, "refusing to write"):
+            deploy_addon.atomic_write("/tmp/__dd_deploy_selftest_never__/x.c", b"x")
+        self.assertFalse(os.path.exists("/tmp/__dd_deploy_selftest_never__"))
 
     def test_refuses_the_system_drive_by_device(self):
         # A path whose device is the WSL disk image's (here: a stand-in directory on the device of the temp dir) is

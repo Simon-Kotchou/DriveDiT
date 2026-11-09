@@ -74,6 +74,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 TOOL_REL = "tools/deploy_addon.py"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -91,8 +92,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DEFAULT_DEPLOY_ROOT_RELS = {"stable": "addons", "cold-1.8.0.13": "addons_c18"}
 DEFAULT_MANIFEST = os.path.join(REPO_ROOT, "addons", "DataCapture", "deploy_manifest.txt")
 # The launch guard's profile root (DD-22): replaced by the data root (X:/...) in exactly these five sources, and
-# nowhere else. Any other @DD_...@ (any characters but '@' and white space between) left in any payload, the MCP
-# handlers included, refuses the deploy.
+# nowhere else. Any other @DD_...@ (any characters but '@' between, white space and line breaks included) left in
+# any payload, the MCP handlers included, refuses the deploy.
 PROFILE_ROOT_TOKEN = b"@DD_PROFILE_ROOT@"
 PROFILE_ROOT_SOURCES = frozenset((
     "src/enfusion/datacapture/DC_Session.c",
@@ -101,7 +102,7 @@ PROFILE_ROOT_SOURCES = frozenset((
     "addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
     "addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.layer",
 ))
-TOKEN_RE = re.compile(rb"@DD_[^@\s]*@")
+TOKEN_RE = re.compile(rb"@DD_[^@]*@")   # anything between, white space and line breaks included
 PROFILE_ROOT_RE = re.compile(r"[A-Z]:/[A-Za-z0-9_./-]+")
 
 
@@ -719,13 +720,27 @@ def current_sha(target, rel, refusals):
 
 
 def atomic_write(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = os.path.join(os.path.dirname(path), ".%s.deploy-tmp-%d" % (os.path.basename(path), os.getpid()))
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    """Write path atomically. The parent passes the write boundary before it is created; the temp sibling is created
+    exclusively under a random name (tempfile.mkstemp: O_CREAT | O_EXCL | O_NOFOLLOW), so a file or symlink already
+    there is never written through; then it is renamed over path. OSError on a refusal (the deploy reports it)."""
+    parent = os.path.dirname(path)
+    why = boundary_reason(parent)
+    if why:
+        raise OSError(why)
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".%s.deploy-tmp-" % os.path.basename(path), dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def backup_rel(stamp, rel):

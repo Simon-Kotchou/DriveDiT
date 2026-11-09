@@ -64,6 +64,26 @@ write_ok() {   # write_ok PATH: print the resolved path when the write boundary 
   [[ "${1:-}" == /* ]] || { echo "$NAME: '${1:-}' is not an absolute path" >&2; return 1; }
   /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" check-write "$1"
 }
+derived_dir() {   # derived_dir DIR ROOT: DIR, to be created or reused below the checked ROOT, is safe to write
+  # into: it lies below ROOT, no component from DIR up to ROOT is a symlink, and every existing one is a directory on
+  # ROOT's device (stat -c %d), so a redirected or foreign-mounted home, temp, cache or build dir is refused before
+  # anything is written there. A DIR that does not exist yet passes when its parent does (DD-22).
+  local d="${1:-}" root="${2%/}" root_dev="" dev="" p=""
+  [[ -n "$root" && "$d" == "$root"/* && "$d/" != */../* && "$d/" != */./* ]] \
+    || { echo "$NAME: refusing $d: it is not below ${2:-} (or holds . or ..)" >&2; return 1; }
+  root_dev="$(stat -c %d -- "$root" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $root" >&2; return 1; }
+  p="$d"
+  while [[ "$p" != "$root" ]]; do
+    [[ "$p" != / && "$p" != . ]] || { echo "$NAME: refusing $d: it is not below $root" >&2; return 1; }
+    if [[ -L "$p" ]]; then echo "$NAME: refusing $d: $p is a symlink" >&2; return 1; fi
+    if [[ -e "$p" ]]; then
+      [[ -d "$p" ]] || { echo "$NAME: refusing $d: $p is not a directory" >&2; return 1; }
+      dev="$(stat -c %d -- "$p" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $p" >&2; return 1; }
+      [[ "$dev" == "$root_dev" ]] || { echo "$NAME: refusing $d: $p is on device $dev, not on $root's ($root_dev)" >&2; return 1; }
+    fi
+    p="$(dirname -- "$p")"
+  done
+}
 win_write_ok() {   # a Windows drive path X:\... whose WSL form /mnt/x/... passes write_ok
   [[ "${1:1:2}" == ':\' && "${1:0:1}" == [[:alpha:]] ]] || return 1
   local drive="${1:0:1}" rest="${1:3}"
@@ -122,6 +142,7 @@ fi
 [[ -f "$PREFLIGHT" ]] || die "pin preflight not deployed ($PREFLIGHT). Deploy DD-0 or use wb_R1.bat; Workbench not started."
 write_ok "$PIN_DIR" >/dev/null \
   || die "refusing pin dir $PIN_DIR: the preflight writes its launch record under it, and the write boundary refuses it"
+derived_dir "$PIN_DIR/launches" "$PIN_DIR" || die "refusing $PIN_DIR/launches, where the preflight writes its launch record"
 [[ -e "$PIN_DIR/ACTIVE" || -L "$PIN_DIR/ACTIVE" ]] \
   || die "no active pin ($PIN_DIR/ACTIVE is missing). Activate one with: $PY -I -B $(dirname "$PREFLIGHT")/pin_activate.py <pin id>"
 [[ -x "$PY" ]] || die "cannot run $PY, so the pin cannot be checked; Workbench not started."

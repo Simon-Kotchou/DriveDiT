@@ -45,7 +45,28 @@ DEST=""
 RUN=0
 MARGIN=$((2 * 1024 * 1024 * 1024))   # 2 GiB free-space margin
 
+NAME=cold_copy
 die() { echo "cold_copy: $*" >&2; exit 1; }
+derived_dir() {   # derived_dir DIR ROOT: DIR, to be created or reused below the checked ROOT, is safe to write
+  # into: it lies below ROOT, no component from DIR up to ROOT is a symlink, and every existing one is a directory on
+  # ROOT's device (stat -c %d), so a redirected or foreign-mounted home, temp, cache or build dir is refused before
+  # anything is written there. A DIR that does not exist yet passes when its parent does (DD-22).
+  local d="${1:-}" root="${2%/}" root_dev="" dev="" p=""
+  [[ -n "$root" && "$d" == "$root"/* && "$d/" != */../* && "$d/" != */./* ]] \
+    || { echo "$NAME: refusing $d: it is not below ${2:-} (or holds . or ..)" >&2; return 1; }
+  root_dev="$(stat -c %d -- "$root" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $root" >&2; return 1; }
+  p="$d"
+  while [[ "$p" != "$root" ]]; do
+    [[ "$p" != / && "$p" != . ]] || { echo "$NAME: refusing $d: it is not below $root" >&2; return 1; }
+    if [[ -L "$p" ]]; then echo "$NAME: refusing $d: $p is a symlink" >&2; return 1; fi
+    if [[ -e "$p" ]]; then
+      [[ -d "$p" ]] || { echo "$NAME: refusing $d: $p is not a directory" >&2; return 1; }
+      dev="$(stat -c %d -- "$p" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $p" >&2; return 1; }
+      [[ "$dev" == "$root_dev" ]] || { echo "$NAME: refusing $d: $p is on device $dev, not on $root's ($root_dev)" >&2; return 1; }
+    fi
+    p="$(dirname -- "$p")"
+  done
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,6 +126,11 @@ case "$DEST_REAL/" in
   *) die "refusing to write outside the data drive ${DATA_MNT%/}: $DEST -> $DEST_REAL" ;;
 esac
 DEST="$DEST_REAL"
+# DEST passed the write boundary; what is written below it must stay on the data drive's device, never through a
+# symlink (derived_dir from the drive's mount point down)
+for d in "$DEST" "$DEST/game" "$DEST/tools" "$DEST/meta"; do
+  derived_dir "$d" "${DATA_MNT%/}" || die "refusing $d (see the message above); nothing was written"
+done
 for src in "$GAME_SRC" "$TOOLS_SRC"; do
   [[ -d "$src" ]] || die "install dir missing: $src"
   case "$(realpath -m -- "$src")/" in

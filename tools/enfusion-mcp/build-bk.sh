@@ -47,6 +47,26 @@ if [[ -z "$ROOT" ]]; then
 fi
 ROOT_OK="$(write_ok "$ROOT")" || EXIT_CODE=2 die "refusing EMCP_ROOT=$ROOT: the write boundary refuses it (see the message above)"
 ROOT="$ROOT_OK"
+derived_dir() {   # derived_dir DIR ROOT: DIR, to be created or reused below the checked ROOT, is safe to write
+  # into: it lies below ROOT, no component from DIR up to ROOT is a symlink, and every existing one is a directory on
+  # ROOT's device (stat -c %d), so a redirected or foreign-mounted home, temp, cache or build dir is refused before
+  # anything is written there. A DIR that does not exist yet passes when its parent does (DD-22).
+  local d="${1:-}" root="${2%/}" root_dev="" dev="" p=""
+  [[ -n "$root" && "$d" == "$root"/* && "$d/" != */../* && "$d/" != */./* ]] \
+    || { echo "$NAME: refusing $d: it is not below ${2:-} (or holds . or ..)" >&2; return 1; }
+  root_dev="$(stat -c %d -- "$root" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $root" >&2; return 1; }
+  p="$d"
+  while [[ "$p" != "$root" ]]; do
+    [[ "$p" != / && "$p" != . ]] || { echo "$NAME: refusing $d: it is not below $root" >&2; return 1; }
+    if [[ -L "$p" ]]; then echo "$NAME: refusing $d: $p is a symlink" >&2; return 1; fi
+    if [[ -e "$p" ]]; then
+      [[ -d "$p" ]] || { echo "$NAME: refusing $d: $p is not a directory" >&2; return 1; }
+      dev="$(stat -c %d -- "$p" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $p" >&2; return 1; }
+      [[ "$dev" == "$root_dev" ]] || { echo "$NAME: refusing $d: $p is on device $dev, not on $root's ($root_dev)" >&2; return 1; }
+    fi
+    p="$(dirname -- "$p")"
+  done
+}
 export EMCP_ROOT="$ROOT"                           # the wrapper reads the same root
 SRC="$ROOT/src/enfusion-mcp-BK"                    # pristine clone (untrusted content, never built in place)
 BUILD="$ROOT/build/enfusion-mcp-BK"                # build copy
@@ -80,6 +100,12 @@ export npm_config_update_notifier=false npm_config_fund=false npm_config_audit=f
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1          # playwright is a devDependency (scraper only)
 export PLAYWRIGHT_BROWSERS_PATH="$ROOT/pw-browsers"
 export GIT_CONFIG_NOSYSTEM=1
+# Every derived dir is checked (derived_dir) before git, npm or any cache writes there; ROOT itself passed write_ok.
+mkdir -p -- "$ROOT"
+for d in "$HOME" "$TMPDIR" "$NODE_COMPILE_CACHE" "$npm_config_cache" "$npm_config_logs_dir" "$PLAYWRIGHT_BROWSERS_PATH" \
+         "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$ROOT/build" "$BUILD" "$ROOT/data"; do
+  derived_dir "$d" "$ROOT" || EXIT_CODE=2 die "refusing the work dir $d (see the message above); nothing was written"
+done
 mkdir -p "$HOME" "$TMPDIR" "$npm_config_cache" "$npm_config_logs_dir" "$ROOT/build" \
          "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"
 cd "$ROOT"                                         # never run anything from the caller's cwd

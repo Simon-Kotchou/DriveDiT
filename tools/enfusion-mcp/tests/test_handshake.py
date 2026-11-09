@@ -996,5 +996,52 @@ class ShellGuardTests(unittest.TestCase):
         self.assertIn("refusing gproj", r.stderr)
 
 
+
+class DerivedDirTests(unittest.TestCase):
+    """Codex round 3 F5: one derived_dir function, the same text in the four shell scripts, refuses a derived home,
+    temp, cache or build dir that is a symlink, lies below one, or lies outside the checked root."""
+
+    SCRIPTS = (os.path.join(EMCP, "build-bk.sh"), os.path.join(EMCP, "enfusion-mcp-wsl.sh"),
+               os.path.join(EMCP, "launch-workbench.sh"), os.path.join(REPO, "tools", "pin", "cold_copy.sh"))
+
+    @staticmethod
+    def function(path):
+        with open(path) as fh:
+            text = fh.read()
+        m = re.search(r"(?ms)^derived_dir\(\) \{.*?^\}$", text)
+        return m.group(0) if m else None
+
+    def test_one_function_everywhere(self):
+        bodies = {path: self.function(path) for path in self.SCRIPTS}
+        self.assertTrue(all(bodies.values()), bodies)
+        self.assertEqual(len(set(bodies.values())), 1)
+
+    def test_it_refuses_redirected_dirs(self):
+        tmp = tempfile.mkdtemp(prefix="dd22-derived-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "root")
+        os.makedirs(os.path.join(root, "build"))
+        os.symlink("/tmp", os.path.join(root, "home"))
+        os.makedirs(os.path.join(tmp, "elsewhere"))
+        os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(root, "xdg"))
+        with open(os.path.join(root, "file"), "w") as fh:
+            fh.write("x")
+        fn = self.function(self.SCRIPTS[0])
+        cases = {"build": 0, "build/new/deeper": 0, "new": 0, "home": 1, "home/.cache": 1, "xdg/cache": 1,
+                 "file": 1, "file/sub": 1, "../outside": 1}
+        for rel, want in cases.items():
+            d = os.path.join(root, rel) if not rel.startswith("..") else os.path.join(root, rel)
+            r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % fn, "_", d, root],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, want, (rel, r.stderr))
+        r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % fn, "_", "/tmp/x", root],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not below", r.stderr)
+        r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % fn, "_", root + "/build", root + "/"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

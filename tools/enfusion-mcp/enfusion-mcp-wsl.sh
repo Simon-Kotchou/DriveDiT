@@ -57,6 +57,26 @@ fi
 if [[ "${1:-}" == "--print-root" ]]; then printf '%s\n' "$ROOT"; exit 0; fi
 ROOT_OK="$(write_ok "$ROOT")" || die 2 "refusing EMCP_ROOT=$ROOT: the write boundary refuses it (see the message above)"
 ROOT="$ROOT_OK"
+derived_dir() {   # derived_dir DIR ROOT: DIR, to be created or reused below the checked ROOT, is safe to write
+  # into: it lies below ROOT, no component from DIR up to ROOT is a symlink, and every existing one is a directory on
+  # ROOT's device (stat -c %d), so a redirected or foreign-mounted home, temp, cache or build dir is refused before
+  # anything is written there. A DIR that does not exist yet passes when its parent does (DD-22).
+  local d="${1:-}" root="${2%/}" root_dev="" dev="" p=""
+  [[ -n "$root" && "$d" == "$root"/* && "$d/" != */../* && "$d/" != */./* ]] \
+    || { echo "$NAME: refusing $d: it is not below ${2:-} (or holds . or ..)" >&2; return 1; }
+  root_dev="$(stat -c %d -- "$root" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $root" >&2; return 1; }
+  p="$d"
+  while [[ "$p" != "$root" ]]; do
+    [[ "$p" != / && "$p" != . ]] || { echo "$NAME: refusing $d: it is not below $root" >&2; return 1; }
+    if [[ -L "$p" ]]; then echo "$NAME: refusing $d: $p is a symlink" >&2; return 1; fi
+    if [[ -e "$p" ]]; then
+      [[ -d "$p" ]] || { echo "$NAME: refusing $d: $p is not a directory" >&2; return 1; }
+      dev="$(stat -c %d -- "$p" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $p" >&2; return 1; }
+      [[ "$dev" == "$root_dev" ]] || { echo "$NAME: refusing $d: $p is on device $dev, not on $root's ($root_dev)" >&2; return 1; }
+    fi
+    p="$(dirname -- "$p")"
+  done
+}
 export EMCP_ROOT="$ROOT"                           # mcp_gate.py serves the index of the same root
 DIST="${EMCP_DIST:-$ROOT/build/enfusion-mcp-BK/dist/index.js}"
 
@@ -181,6 +201,10 @@ esac
 [[ -f "$DIST" ]] || die 1 "missing $DIST - run build-bk.sh (tools/enfusion-mcp/README.md) first"
 guarded_build || die 1 "refusing to start $DIST: the WSL guard code is not compiled in (rebuild with build-bk.sh)"
 [[ -f "$GATE" && -x "$PY" ]] || die 1 "missing $GATE or $PY: the server never runs without the pin gate (DD-14a)"
+mkdir -p -- "$ROOT"
+for d in "$HOME" "$TMPDIR" "$WORK_CWD" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"; do
+  derived_dir "$d" "$ROOT" || die 2 "refusing the work dir $d (see the message above); nothing started"
+done
 mkdir -p "$HOME" "$TMPDIR" "$WORK_CWD"
 cd "$WORK_CWD"
 exec "$PY" -I -B "$GATE" -- "$NODE_BIN" "$DIST" "$@"

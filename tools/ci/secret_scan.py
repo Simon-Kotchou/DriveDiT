@@ -5,7 +5,9 @@ Flags, in every git-tracked text file (default) or in the files named on the com
 
   steam64       Steam64 account ids: 7656119 followed by 10 digits
   email         e-mail addresses, except noreply ones (noreply@anthropic.com, GitHub noreply addresses)
-  win-profile   Windows profile paths: X:\\Users\\<name>, X:/Users/<name>, /mnt/x/Users/<name> (any drive letter)
+  win-profile   Windows profile paths: <X>:\\Users\\<name>, <X>:/Users/<name>, /mnt/<x>/Users/<name> (any drive
+                letter), and the environment forms %SystemDrive%\\Users\\<name>, $env:SystemDrive\\Users\\<name>,
+                ${HOMEDRIVE}/Users/<name> with a literal name
   home-path     Linux home paths: /home/<name>, with or without a child path
   private-ip    RFC 1918 IPv4 addresses (10/8, 172.16/12, 192.168/16). Loopback and the RFC 5737 documentation
                 ranges are not RFC 1918 and pass; so does a dotted quad in a version context (`version = "..."`,
@@ -15,8 +17,17 @@ Flags, in every git-tracked text file (default) or in the files named on the com
   wsl-version   WSL versions (WSL followed by a three-part version) and WSL kernel release strings
   machine-path  machine-absolute paths (DD-22): a WSL drive mount /mnt/<letter>, alone or with a child path, and a
                 Windows drive path <letter>:\\ or <letter>:/. A machine's paths live in its untracked local config
-                (tools/local_config.py), never in the repo. The placeholder drives X, Y and Z pass (the synthetic test
-                config and the examples use them, as /home/x is a placeholder home)
+                (tools/local_config.py), never in the repo. The placeholder drives X, Y and Z pass only in the
+                synthetic config's own folder (tests/fixtures/local_config/) and in *.example files; anywhere else
+                only in that config's synthetic forms: the bare drive (/mnt/x, X:\\), an ellipsis (X:\\...) or a path
+                under one of its roots
+                (DataRoot, PlanRoot, ...; read from tests/fixtures/local_config/placeholder.local.env). A JavaScript
+                object key followed by a regular expression literal ({ e:/value/ }) is code, not a path
+  wsl-path      WSL UNC paths \\\\wsl$\\<distro>\\... and \\\\wsl.localhost\\<distro>\\... (also JSON-escaped)
+  wsl-distro    WSL distro names: after the -d or --distribution option of wsl.exe, as the value of WSL_DISTRO or
+                WSL_DISTRO_NAME,
+                and the versioned names of the WSL store distros (<name>-<version>). Placeholders pass (<distro>,
+                %VAR%, $VAR, Placeholder-*, No-Such-*), as does everything in the synthetic config's folder
 
 The patterns are generic on purpose: this file names no real account, host or address. Matches are
 printed redacted (kind, file, line, first characters only) so a CI log never repeats what it found.
@@ -44,7 +55,8 @@ import sys
 PATTERNS = {
     "steam64": re.compile(r"(?<!\d)7656119\d{10}(?!\d)"),
     "email": re.compile(r"(?<![\w.%+-])[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
-    "win-profile": re.compile(r"(?i)(?:\b[A-Z]:[\\/]+|/mnt/[a-z]/)Users[\\/]+(?P<name>[^\\/\s\"'`<>|:*?]+)"),
+    "win-profile": re.compile(r"(?i)(?:\b[A-Z]:[\\/]+|/mnt/[a-z]/|%\w+%[\\/]+|\$env:\w+[\\/]+|\$\{?\w+\}?[\\/]+)"
+                              r"Users[\\/]+(?P<name>[^\\/\s\"'`<>|:*?%$]+)"),
     # The name ends at "/" or at a quote, space, separator or bracket, or at the end of the line (a bare /home/<name>).
     "home-path": re.compile(r"(?<![\w.~-])/home/(?P<name>[^/\s\"'`<>|:*?,;=()\[\]]+)"),
     # A dotted quad of 0-255 octets, not inside a longer dotted number; findings() keeps only RFC 1918 addresses.
@@ -63,10 +75,53 @@ PATTERNS = {
     "machine-path": re.compile(
         r"(?<![\w./~-])/mnt/(?P<name>[A-Za-z])(?![\w-])|(?<![\w%$\\])(?P<drive>[A-Za-z]):[\\/]"
     ),
+    # \\wsl$\<distro> or \\wsl.localhost\<distro> (two or more backslashes or slashes, so JSON escapes count too)
+    "wsl-path": re.compile(r"(?i)(?:\\{2,}|//)wsl(?:\$|\.localhost)(?:\\+|/)(?P<name>[^\\/\s\"'`<>|:*?]+)"),
+    # a distro name where a launcher or a config names one, or a versioned WSL store distro anywhere
+    "wsl-distro": re.compile(
+        r"(?:\b[Ww][Ss][Ll](?:\.[Ee][Xx][Ee])?\s+(?:-d|--distribution)\s+|\bWSL_DISTRO(?:_NAME)?\s*[=:]\s*[\"']?)"
+        r"(?P<name>[A-Za-z0-9%$<{][A-Za-z0-9._%${}<>-]*)"
+        r"|\b(?:Ubuntu|Debian|Kali|kali-linux|openSUSE|SUSE|OracleLinux|AlmaLinux|FedoraLinux|archlinux)"
+        r"[-_ ](?:\d+(?:\.\d+)*(?:-LTS)?|Leap-\d+(?:\.\d+)*|Tumbleweed)\b"
+    ),
 }
 
-# Drive letters that are placeholders, never a machine's drive (machine-path).
+# Drive letters that are placeholders, never a machine's drive (machine-path): exempt in the synthetic config's own
+# folder and in *.example files; elsewhere only as the bare drive or under one of SYNTHETIC_ROOTS.
 PLACEHOLDER_DRIVES = ("x", "y", "z")
+PLACEHOLDER_HOMES = ("tests/fixtures/local_config/",)
+PLACEHOLDER_SUFFIXES = (".example",)
+SYNTHETIC_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                "tests", "fixtures", "local_config", "placeholder.local.env")
+
+
+def synthetic_roots(path: str = SYNTHETIC_CONFIG) -> tuple[str, ...]:
+    """The first path component of every placeholder-drive value of the synthetic config (DataRoot, PlanRoot, ...):
+    the only places on X, Y and Z a file outside that folder may name. None without the file."""
+    roots = set()
+    try:
+        with open(path, encoding="ascii") as fh:
+            for line in fh:
+                m = re.match(r"^[A-Z_]+=/mnt/([a-z])/([^/\n]+)", line)
+                if m and m.group(1) in PLACEHOLDER_DRIVES:
+                    roots.add(m.group(2).rstrip("\r"))
+    except OSError:
+        pass
+    return tuple(sorted(roots))
+
+
+SYNTHETIC_ROOTS = synthetic_roots()
+# What may follow /mnt/<placeholder> or <placeholder>:\ outside the synthetic config's folder: nothing path-like (the
+# bare drive) or a synthetic root as a whole component.
+_BARE_DRIVE_TAIL = re.compile(r"(?:$|[^\w\\/.~-])|[\\/]+(?:$|[^\w\\/.~(-])")
+# A string escape right after a placeholder drive (the bare drive in source text): \n, \r, \t, \" or \'.
+_ESCAPE_TAIL = re.compile(r"^\\[nrt\"']")
+# A JavaScript object key followed by a regular expression literal: { e:/value/ } or , e:/x/g }
+_JS_KEY_BEFORE = re.compile(r"[{,]\s*$")
+_JS_REGEX_AFTER = re.compile(r"^/(?:[^/\\\s]|\\.)+/[dgimsuy]*\s*[,};)]")
+# Distro names that are placeholders.
+PLACEHOLDER_DISTROS = re.compile(r"(?i)^(?:placeholder[-\w.]*|no-such[-\w.]*|example[-\w.]*|distro|<.*|%\w+%.*|"
+                                 r"\$\{?\w+\}?.*|x|y|z)$")
 
 # RFC 1918 private networks: 10/8, 172.16/12, 192.168/16 (as integers, so this file holds no dotted quad). Loopback
 # (127/8), link-local and the RFC 5737 documentation ranges are not in them.
@@ -95,6 +150,10 @@ ALLOWLIST: set[tuple[str, str, str]] = {
     # A version-shaped pin id in DD-0's pin-id validator test (PinIdTests.test_valid_ids): a version, not an address.
     # Assembled, so this file holds no dotted quad.
     ("tools/pin/tests/test_pin.py", "private-ip", ".".join(("10", "0", "1", "2"))),
+    # The guard patch's comment shows the WSL-to-Windows rewrite on the placeholder drive X (DD-22 wording); the patch
+    # bytes are pinned by their sha256 in tools/enfusion-mcp/README.md, so its example stays as reviewed.
+    ("tools/enfusion-mcp/patches/bk-wsl-guard.patch", "machine-path", "x"),
+    ("tools/enfusion-mcp/patches/bk-wsl-guard.patch", "machine-path", "X"),
 }
 
 BOMS = (  # UTF-32 first: its little-endian BOM begins with the UTF-16 one
@@ -168,6 +227,30 @@ def is_private_address(text: str, before: str) -> bool:
     return any(addr in net for net in PRIVATE_NETWORKS)
 
 
+def in_placeholder_home(path: str) -> bool:
+    """The synthetic config's own folder, or an *.example file: placeholders of every kind pass there."""
+    rel = path.replace(os.sep, "/")
+    return rel.startswith(PLACEHOLDER_HOMES) or "/" + PLACEHOLDER_HOMES[0] in rel or rel.endswith(PLACEHOLDER_SUFFIXES)
+
+
+def placeholder_drive_ok(path: str, line: str, m) -> bool:
+    """A placeholder drive (X, Y, Z) passes in the synthetic config's folder and in *.example files; elsewhere only as
+    the bare drive or under one of SYNTHETIC_ROOTS (a real path on such a drive is still found)."""
+    if in_placeholder_home(path):
+        return True
+    rest = line[m.end():] if m.group("name") else line[m.end() - 1:]
+    if _BARE_DRIVE_TAIL.match(rest):
+        return True
+    if _ESCAPE_TAIL.match(rest):   # a string escape after the drive: "X:\n", "/mnt/z\n"
+        return True
+    rest = rest.lstrip("\\/")
+    if rest.startswith("..."):   # an ellipsis: X:\..., /mnt/x/...
+        return True
+    low = rest.lower()   # drvfs is case-insensitive: x:/dataroot is X:\DataRoot
+    return any(low.startswith(root.lower()) and (len(rest) == len(root) or not re.match(r"[\w.~(-]", rest[len(root)]))
+               for root in SYNTHETIC_ROOTS)
+
+
 def findings(path: str, text: str):
     for lineno, line in enumerate(text.splitlines(), 1):
         for kind, rx in PATTERNS.items():
@@ -180,7 +263,15 @@ def findings(path: str, text: str):
                 name = m.groupdict().get("name")
                 if kind == "machine-path":
                     name = name or m.group("drive")
-                    if name.lower() in PLACEHOLDER_DRIVES:
+                    if m.group("drive") and _JS_KEY_BEFORE.search(line[: m.start()]) \
+                            and _JS_REGEX_AFTER.match(line[m.end() - 1:]):
+                        continue
+                    if name.lower() in PLACEHOLDER_DRIVES and placeholder_drive_ok(path, line, m):
+                        continue
+                elif kind in ("wsl-path", "wsl-distro"):
+                    if name is not None and PLACEHOLDER_DISTROS.match(name):
+                        continue
+                    if in_placeholder_home(path):
                         continue
                 elif kind != "private-ip" and name is not None and is_placeholder(name):
                     continue

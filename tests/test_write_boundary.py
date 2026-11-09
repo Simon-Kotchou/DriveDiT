@@ -267,3 +267,32 @@ def test_a_hidden_ram_mount_skips_only_real_boundary_tests(world, monkeypatch, t
         with monkeypatch.context() as m:
             m.setattr(lc, "MOUNTINFO", fake)
             lc.check_write("/dev/shm/dd22-hidden-probe/x")
+
+
+BAD_NAMES = ("/tmp/dd22-r4-never", "a/b", "../x", "", "..", ".", "/")
+
+
+@pytest.mark.parametrize("name", BAD_NAMES)
+def test_scratch_mkdtemp_refuses_non_plain_prefixes(name):
+    """Codex round 4: an absolute, nested, traversing or empty prefix is refused before tempfile runs."""
+    for real in (False, True):
+        with pytest.raises(ValueError, match="refusing the temporary directory prefix"):
+            scratch.mkdtemp(name, real_boundary=real)
+    assert not os.path.exists("/tmp/dd22-r4-never")
+
+
+@pytest.mark.parametrize("name", BAD_NAMES)
+def test_tmp_path_factory_refuses_non_plain_basenames(tmp_path_factory, name):
+    with pytest.raises(ValueError, match="refusing the temporary directory basename"):
+        tmp_path_factory.mktemp(name)
+    with pytest.raises(ValueError, match="refusing the temporary directory basename"):
+        tmp_path_factory.mktemp(name, numbered=False)
+    assert not os.path.exists("/tmp/dd22-r4-never")
+
+
+def test_tmp_path_factory_keeps_plain_names(tmp_path_factory):
+    a = tmp_path_factory.mktemp("toy")
+    b = tmp_path_factory.mktemp("toy-2.x", numbered=False)
+    base = tmp_path_factory.getbasetemp()
+    assert a.parent == base and a.name.startswith("toy_") and b == base / "toy-2.x"
+    assert os.path.realpath(str(base)).startswith("/dev/shm/")

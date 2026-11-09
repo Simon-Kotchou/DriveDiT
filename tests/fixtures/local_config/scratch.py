@@ -94,7 +94,25 @@ def boundary_base(override=None):
     return base
 
 
+def check_name(name, what="prefix"):
+    """name as a plain relative directory name under a checked base, else ValueError: not empty, not absolute, no
+    os.sep or os.altsep, not '.' or '..' (checked before tempfile is called, so dir= can never be overridden by an
+    absolute or traversing name). Returns name."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("refusing the temporary directory %s %r: it is empty" % (what, name))
+    seps = [s for s in (os.sep, os.altsep) if s]
+    if os.path.isabs(name) or any(s in name for s in seps) or name in (".", "..") or "\0" in name:
+        raise ValueError("refusing the temporary directory %s %r: not a plain relative name (no separator, not "
+                         "absolute, not . or ..)" % (what, name))
+    return name
+
+
 def mkdtemp(prefix, real_boundary=True, override=None):
-    """A new directory under boundary_base() (real_boundary) or ram_base(), named prefix + random."""
+    """A new directory under boundary_base() (real_boundary) or ram_base(), named prefix + random; prefix must be a
+    plain name (check_name), refused before anything is created."""
+    check_name(prefix)
     base = boundary_base(override) if real_boundary else ram_base(override)
-    return tempfile.mkdtemp(prefix=prefix, dir=base)
+    path = tempfile.mkdtemp(prefix=prefix, dir=base)
+    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(base):   # never reached after check_name
+        raise ValueError("refusing %s: not directly under %s" % (path, base))
+    return path

@@ -63,7 +63,18 @@ class _RamTempPathFactory:
         return self._base
 
     def mktemp(self, basename: str, numbered: bool = True) -> Path:
-        return Path(tempfile.mkdtemp(prefix=basename + "_", dir=self._base))
+        """A new directory under the base. basename must be a plain name (scratch.check_name: no separator, not
+        absolute, not . or .., not empty), refused before anything is created, and it must stay a direct child of the
+        base after normalisation (pytest's own TempPathFactory._ensure_relative_to_basetemp rule)."""
+        _scratch.check_name(basename, "basename")
+        basename = os.path.normpath(basename)
+        if (self._base / basename).resolve().parent != self._base.resolve():
+            raise ValueError(f"{basename} is not a normalized and relative path")
+        if numbered:
+            return Path(tempfile.mkdtemp(prefix=basename + "_", dir=self._base))
+        path = self._base / basename
+        path.mkdir()
+        return path
 
 
 @pytest.fixture(scope="session")
@@ -79,8 +90,8 @@ def tmp_path(request: pytest.FixtureRequest) -> Iterator[Path]:
     """pytest's tmp_path in validated RAM (scratch.ram_base(); never the system temp dir), removed afterwards. The test
     skips, with the reason, where there is no usable RAM scratch."""
     base = _scratch.ram_base()
-    prefix = re.sub(r"[^A-Za-z0-9_]", "_", request.node.name)[:40]
-    path = Path(tempfile.mkdtemp(prefix=prefix + "_", dir=base))
+    prefix = _scratch.check_name(re.sub(r"[^A-Za-z0-9_]", "_", request.node.name)[:40] + "_")
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=base))
     yield path
     shutil.rmtree(path, ignore_errors=True)
 

@@ -6,12 +6,13 @@ get the `torch` marker, and without torch they are not collected at all. Whole d
 codec, model and train tests) are listed in TORCH_TEST_DIRS and treated the same way. A new test module that imports
 torch must be added to one of the two lists.
 
-This file imports neither torch nor any project module.
+This file imports neither torch nor any project module, and sets DRIVEDIT_LOCAL_CONFIG (below).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,11 @@ TORCH_TEST_DIRS = [
 ]
 
 _HERE = Path(__file__).parent
+
+# DD-22: every test reads the synthetic local config (placeholder drives X:, Y:, Z:, none of them mounted), never this
+# machine's, so no default root names a real drive. Tests that compare with files of a real machine opt in with
+# DD_TEST_LOCAL_CONFIG (tests/fixtures/local_config/evidence.py).
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = str(_HERE / "fixtures" / "local_config" / "placeholder.local.env")
 _TORCH_PATHS = {(_HERE / p).resolve() for p in TORCH_TEST_MODULES}
 _TORCH_DIRS = [(_HERE / d).resolve() for d in TORCH_TEST_DIRS]
 

@@ -67,3 +67,9 @@ build/
 # Python tooling
 .venv/
 .ruff_cache/
+
+# Local machine paths (DD-22): each machine's own drivedit.local.env is never committed (copy
+# drivedit.local.env.example). Wherever it lies: at the repo root, in config/, or anywhere else.
+drivedit.local.env
+# The Windows launchers' helper is versioned, although *.cmd above is ignored.
+!/tools/launch/dd_local_config.cmd

@@ -77,9 +77,14 @@ PATTERNS = {
     ),
     # \\wsl$\<distro> or \\wsl.localhost\<distro> (two or more backslashes or slashes, so JSON escapes count too)
     "wsl-path": re.compile(r"(?i)(?:\\{2,}|//)wsl(?:\$|\.localhost)(?:\\+|/)(?P<name>[^\\/\s\"'`<>|:*?]+)"),
-    # a distro name where a launcher or a config names one, or a versioned WSL store distro anywhere
+    # a distro name where a launcher or a config names one, or a versioned WSL store distro anywhere: the -d or
+    # --distribution option of wsl(.exe), also after other options, with a space or =, quoted or not; WSL_DISTRO or
+    # WSL_DISTRO_NAME set or used as a key; a JSON/YAML key such as "distro", "wslDistro" or "distribution"
     "wsl-distro": re.compile(
-        r"(?:\b[Ww][Ss][Ll](?:\.[Ee][Xx][Ee])?\s+(?:-d|--distribution)\s+|\bWSL_DISTRO(?:_NAME)?\s*[=:]\s*[\"']?)"
+        r"(?:\b[Ww][Ss][Ll](?:\.[Ee][Xx][Ee])?(?:\s+-{1,2}[A-Za-z][\w-]*(?:[= ][^\s-]\S*)?)*?\s+(?:-d|--distribution)"
+        r"(?:\s+|=)[\"']?"
+        r"|\bWSL_DISTRO(?:_NAME)?(?:\s*[=:]\s*[\"']?|[\"']\s*:\s*[\"'])"
+        r"|[\"'](?i:distro|wsl_?distro|distribution|distro_?name|wsl_?distro_?name)[\"']\s*:\s*[\"'])"
         r"(?P<name>[A-Za-z0-9%$<{][A-Za-z0-9._%${}<>-]*)"
         r"|\b(?:Ubuntu|Debian|Kali|kali-linux|openSUSE|SUSE|OracleLinux|AlmaLinux|FedoraLinux|archlinux)"
         r"[-_ ](?:\d+(?:\.\d+)*(?:-LTS)?|Leap-\d+(?:\.\d+)*|Tumbleweed)\b"
@@ -114,8 +119,14 @@ SYNTHETIC_ROOTS = synthetic_roots()
 # What may follow /mnt/<placeholder> or <placeholder>:\ outside the synthetic config's folder: nothing path-like (the
 # bare drive) or a synthetic root as a whole component.
 _BARE_DRIVE_TAIL = re.compile(r"(?:$|[^\w\\/.~-])|[\\/]+(?:$|[^\w\\/.~(-])")
-# A string escape right after a placeholder drive (the bare drive in source text): \n, \r, \t, \" or \'.
-_ESCAPE_TAIL = re.compile(r"^\\[nrt\"']")
+# A string escape right after a placeholder drive that ends it (the bare drive in source text): \n, \r, \t, \" or
+# \' not followed by a path character (a quoted X: with an escaped n after it is the bare drive; with otes after the
+# n it is a path).
+_ESCAPE_TAIL = re.compile(r"^\\[nrt\"'](?![\w.~(+-])")
+# What may follow a synthetic root for it to be a whole path component: the end, a separator, white space, a quote,
+# a closing bracket or punctuation, or a full stop that ends a sentence. Anything else (DataRoot+x, DataRoot2) is
+# another name.
+_COMPONENT_END = re.compile(r"$|[\\/\s\"'`)\]},;:>|]|\.(?:$|[\s\"'`)])")
 # A JavaScript object key followed by a regular expression literal: { e:/value/ } or , e:/x/g }
 _JS_KEY_BEFORE = re.compile(r"[{,]\s*$")
 _JS_REGEX_AFTER = re.compile(r"^/(?:[^/\\\s]|\\.)+/[dgimsuy]*\s*[,};)]")
@@ -146,14 +157,19 @@ PLACEHOLDER_NAMES = re.compile(
 
 # Reviewed exceptions, as (tracked path, kind, matched name, or the whole match for a kind without a name). Keep
 # this list short and specific, with the reason.
+# Reviewed exceptions for one exact piece of one line, as (tracked path, kind, the exact text): a finding passes only
+# when it lies inside an occurrence of that text in that file, never anywhere else in it.
+ALLOWED_TEXT: set[tuple[str, str, str]] = {
+    # The guard patch's comment shows the WSL-to-Windows rewrite on the placeholder drive X (DD-22 wording); the patch
+    # bytes are pinned by their sha256 in tools/enfusion-mcp/README.md, so its example stays as reviewed.
+    ("tools/enfusion-mcp/patches/bk-wsl-guard.patch", "machine-path",
+     '+ * in WSL form ("/mnt/' + 'x/Data/...") must reach it as drive paths ("X' + ':/Data/..."), e.g. the'),
+}
+
 ALLOWLIST: set[tuple[str, str, str]] = {
     # A version-shaped pin id in DD-0's pin-id validator test (PinIdTests.test_valid_ids): a version, not an address.
     # Assembled, so this file holds no dotted quad.
     ("tools/pin/tests/test_pin.py", "private-ip", ".".join(("10", "0", "1", "2"))),
-    # The guard patch's comment shows the WSL-to-Windows rewrite on the placeholder drive X (DD-22 wording); the patch
-    # bytes are pinned by their sha256 in tools/enfusion-mcp/README.md, so its example stays as reviewed.
-    ("tools/enfusion-mcp/patches/bk-wsl-guard.patch", "machine-path", "x"),
-    ("tools/enfusion-mcp/patches/bk-wsl-guard.patch", "machine-path", "X"),
 }
 
 BOMS = (  # UTF-32 first: its little-endian BOM begins with the UTF-16 one
@@ -247,8 +263,21 @@ def placeholder_drive_ok(path: str, line: str, m) -> bool:
     if rest.startswith("..."):   # an ellipsis: X:\..., /mnt/x/...
         return True
     low = rest.lower()   # drvfs is case-insensitive: x:/dataroot is X:\DataRoot
-    return any(low.startswith(root.lower()) and (len(rest) == len(root) or not re.match(r"[\w.~(-]", rest[len(root)]))
-               for root in SYNTHETIC_ROOTS)
+    return any(low.startswith(root.lower()) and _COMPONENT_END.match(rest[len(root):]) for root in SYNTHETIC_ROOTS)
+
+
+def allowed_text(path: str, kind: str, line: str, m) -> bool:
+    """The match lies inside an occurrence of an ALLOWED_TEXT entry for this file and kind."""
+    rel = path.replace(os.sep, "/")
+    for p, k, text in ALLOWED_TEXT:
+        if (p, k) != (rel, kind):
+            continue
+        start = line.find(text)
+        while start >= 0:
+            if start <= m.start() and m.end() <= start + len(text):
+                return True
+            start = line.find(text, start + 1)
+    return False
 
 
 def findings(path: str, text: str):
@@ -276,6 +305,8 @@ def findings(path: str, text: str):
                 elif kind != "private-ip" and name is not None and is_placeholder(name):
                     continue
                 if (path, kind, hit if name is None else name) in ALLOWLIST:
+                    continue
+                if allowed_text(path, kind, line, m):
                     continue
                 yield lineno, kind, hit
 

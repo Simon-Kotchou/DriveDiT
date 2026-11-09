@@ -16,15 +16,16 @@ dc_validate runs in-process through its main(argv) (stdout captured). Acceptance
     threshold and onset, the start/end pairs, crash terminations, ego_destroyed), C35 (unknown vehicle slots) and
     C15 (only the ego's events mask its rows) fail or hold on mutations of it;
   * dc-1.0 sessions FAIL for their known reasons (synthetic legacy session; the real sessions 4811, 2702 and 2929
-    when their E: copy exists, else that test skips: TICKETS_UNIFIED decision 13 is open);
-  * reports are written only under /mnt/e (a refusal for /dev/shm and /mnt/c), never to a path built from
+    when their data-drive copy exists (DD_TEST_LOCAL_CONFIG opt-in), else that test skips: TICKETS_UNIFIED decision 13 is open);
+  * reports are written only on the data drive (a refusal for /dev/shm and the system drive), never to a path built from
     session.json; thresholds equal CAPTURE_PROGRAM 5.2 verbatim, chosen by pin.
 FailLoudTest turns each probe of the 2026-10-22 review (t0b/review/REVIEW_DD5_MIN.md) into a test: one defect on a
 copy of the golden session (commit lines kept true), and the exit code and failing check it must produce.
-Sessions are generated under $TMPDIR (on /dev/shm/ or /mnt/e/, else /dev/shm/). The report-writing tests point the
-validator's report root at a temporary directory; the one test against the real /mnt/e root runs only when
-DC_TEST_E_SCRATCH names an existing directory under /mnt/e (else it skips). The default report root
-/mnt/e/DriveDiT/reports is never used here.
+Sessions are generated under $TMPDIR (on /dev/shm/, else /dev/shm/). The report-writing tests point the validator's
+report root at a temporary directory; the one test against a real data drive runs only when DC_TEST_E_SCRATCH names
+an existing directory on the data drive of the local config DD_TEST_LOCAL_CONFIG names (else it skips). Every other
+test reads the synthetic local config (DD-22; data drive /mnt/x, system drive /mnt/z), or none: a real default report
+root is never used here.
 """
 
 import contextlib
@@ -47,9 +48,15 @@ GOLDEN_ID = "arland_T0b_20261025T091512Z_wb_i00_5e00"
 GOLDEN_DIR = os.path.join(FIXTURES, "golden", GOLDEN_ID)
 ROUTES = os.path.join(FIXTURES, "routes")
 CARD = os.path.join(FIXTURES, "cards", "S105_synthetic.json")
-PROGRAM_MD = "/mnt/e/drivedit_realign/program/CAPTURE_PROGRAM.md"
-LEGACY_ROOT = "/mnt/e/DriveDiT/captures/_legacy_DrivingData_C"
-NO_SUCH_E_DIR = "/mnt/e/__dd5_no_such_dir__"
+# DD-22: documents of a real machine are compared only when DD_TEST_LOCAL_CONFIG names its local config (opt-in).
+_evidence_spec = importlib.util.spec_from_file_location(
+    "dd_test_evidence", os.path.join(REPO, "tests", "fixtures", "local_config", "evidence.py"))
+evidence = importlib.util.module_from_spec(_evidence_spec)
+_evidence_spec.loader.exec_module(evidence)
+PROGRAM_MD = evidence.evidence_path("REALIGN_ROOT", "program", "CAPTURE_PROGRAM.md")
+LEGACY_ROOT = evidence.evidence_path("DATA_ROOT", "captures", "_legacy_DrivingData_C")
+NO_SUCH_E_DIR = "/mnt/x/__dd5_no_such_dir__"   # on the placeholder data drive, never mounted
+LOCAL_CONFIG_FIXTURE = evidence.FIXTURE
 CHECK_IDS = ("C01", "C02", "C05", "C06", "C07", "C08", "C10", "C11", "C12", "C13a", "C13b", "C15", "C17", "C20",
              "C21", "C28", "C31", "C34", "C35", "C36", "C37")
 
@@ -61,6 +68,10 @@ def load(name, rel):
     return module
 
 
+# DD-22: the synthetic local config (also set by tests/conftest.py under pytest), so the repo's fixtures on any
+# drive are readable and no real drive is the system drive here.
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+
 dc_validate = load("dc_validate", "tools/validator/dc_validate.py")
 synth = load("dc2_make_synthetic_v", "tests/fixtures/capture_dc2/make_synthetic.py")
 reader = load("dc2_reader_v", "data/dc2/reader.py")
@@ -68,10 +79,10 @@ reader = load("dc2_reader_v", "data/dc2/reader.py")
 
 def temp_dir(prefix):
     base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
+    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
         base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
+    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
+        raise unittest.SkipTest("no usable temporary base under /dev/shm/")
     return tempfile.mkdtemp(prefix=prefix, dir=base)
 
 
@@ -108,7 +119,7 @@ _RAM = []
 
 
 def copy_golden(tmp, name=GOLDEN_ID):
-    """A copy of the golden session under tmp (from one RAM copy; copies from /mnt/e are slow)."""
+    """A copy of the golden session under tmp (from one RAM copy; copies from drvfs are slow)."""
     if not _RAM:
         base = temp_dir("dc2_golden_src_")
         _RAM.append(base)
@@ -1494,17 +1505,24 @@ class CrashRulesOnGoldenTest(unittest.TestCase):
 
 class ReportTest(unittest.TestCase):
     def test_default_report_root(self):
-        self.assertEqual(dc_validate.DEFAULT_REPORT_DIR, "/mnt/e/DriveDiT/reports")
+        with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": LOCAL_CONFIG_FIXTURE}):
+            self.assertEqual(dc_validate.DEFAULT_REPORT_DIR, "/mnt/x/DataRoot/reports")
+            self.assertEqual(dc_validate.REPORT_ROOT, "/mnt/x/")
 
     def test_report_written_under_e(self):
-        """Against the real /mnt/e report root: only in a scratch directory the caller names (DC_TEST_E_SCRATCH, an
-        existing directory under /mnt/e/), never a hard-coded path."""
+        """Against a real data-drive report root: only in a scratch directory the caller names (DC_TEST_E_SCRATCH, an
+        existing directory on the data drive of the DD_TEST_LOCAL_CONFIG config), never a hard-coded path."""
         scratch = os.environ.get("DC_TEST_E_SCRATCH")
-        if not scratch or not os.path.isdir(scratch) or not os.path.realpath(scratch).startswith("/mnt/e/"):
-            self.skipTest("set DC_TEST_E_SCRATCH to an existing directory under /mnt/e/ to run this test")
+        machine = evidence.machine_config_path()
+        if not (scratch and machine and os.path.isdir(scratch)):
+            self.skipTest("set DC_TEST_E_SCRATCH and DD_TEST_LOCAL_CONFIG to run this test")
+        with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": machine}):
+            if not os.path.realpath(scratch).startswith(dc_validate.REPORT_ROOT):
+                self.skipTest("DC_TEST_E_SCRATCH is not on the data drive of DD_TEST_LOCAL_CONFIG")
         tmp = tempfile.mkdtemp(prefix="dc2_report_", dir=os.path.realpath(scratch))
         try:
-            code, text = run("--session", GOLDEN_DIR, "--report-dir", tmp)
+            with mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": machine}):
+                code, text = run("--session", GOLDEN_DIR, "--report-dir", tmp)
             self.assertEqual(code, 0, text)
             path = os.path.join(tmp, GOLDEN_ID, "dc_validate.json")
             self.assertIn("report: %s" % path, text)
@@ -1544,7 +1562,7 @@ class ReportTest(unittest.TestCase):
         tmp = temp_dir("dc2_refuse_")
         try:
             target = os.path.join(tmp, "reports")
-            for report_dir in (target, "/mnt/c/__dd5_no_such_dir__/reports"):
+            for report_dir in (target, "/mnt/z/__dd5_no_such_dir__/reports"):
                 code, text = run("--session", GOLDEN_DIR, "--report-dir", report_dir)
                 self.assertEqual(code, 3, text)
                 self.assertIn("refused", text)
@@ -1557,7 +1575,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(code, 3, text)
         code, text = run("--session", GOLDEN_DIR, "--no-report", "--checks", "C99")
         self.assertEqual(code, 3, text)
-        code, text = run("--session", "/mnt/c/__dd5_no_such_dir__/" + GOLDEN_ID, "--no-report")
+        code, text = run("--session", "/mnt/z/__dd5_no_such_dir__/" + GOLDEN_ID, "--no-report")
         self.assertEqual(code, 3, text)
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as cm:
@@ -1599,8 +1617,9 @@ class ReportTest(unittest.TestCase):
 
 class ThresholdsTest(unittest.TestCase):
     def test_thresholds_are_capture_program_5_2_verbatim(self):
-        if not os.path.isfile(PROGRAM_MD):
-            self.skipTest("%s not on this machine" % PROGRAM_MD)
+        if not PROGRAM_MD or not os.path.isfile(PROGRAM_MD):
+            self.skipTest(evidence.skip_reason("CAPTURE_PROGRAM.md") if not PROGRAM_MD else
+                          "%s not on this machine" % PROGRAM_MD)
         with open(PROGRAM_MD, "rb") as f:
             lines = f.read().decode("utf-8").split("\n")
         start = next(i for i, line in enumerate(lines) if line.startswith("### 5.2 Thresholds"))
@@ -1752,9 +1771,9 @@ class LegacyTest(unittest.TestCase):
             shutil.rmtree(tmp)
 
     def test_legacy_sessions_4811_2702_2929(self):
-        if not os.path.isdir(LEGACY_ROOT):
-            self.skipTest("%s does not exist: the E: copy of the legacy sessions is TICKETS_UNIFIED decision 13, "
-                          "still open" % LEGACY_ROOT)
+        if not LEGACY_ROOT or not os.path.isdir(LEGACY_ROOT):
+            self.skipTest("%s does not exist: the data-drive copy of the legacy sessions is TICKETS_UNIFIED "
+                          "decision 13, still open" % (LEGACY_ROOT or evidence.skip_reason("the legacy sessions")))
         reasons = {"session_4811": ["C01", "C05", "C08", "C10"], "session_2702": ["C01", "C05", "C08", "C10"],
                    "session_2929": ["C01", "C05"]}
         for name, expected in reasons.items():

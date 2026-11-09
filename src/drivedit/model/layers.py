@@ -107,7 +107,7 @@ class Attention(nn.Module):
 
     Training uses PyTorch SDPA with the explicit boolean frame-causal mask; a single-frame rollout step needs no mask.
     The KV heads are repeated to the query heads before SDPA (the cache keeps ``kv_heads``): with a mask,
-    ``enable_gqa=True`` falls back to the math kernel, measured on the RTX 3080 Ti (torch 2.9.1, B 8, 8/2 heads, 1440
+    ``enable_gqa=True`` falls back to the math kernel, measured on a local CUDA GPU (torch 2.9.1, B 8, 8/2 heads, 1440
     tokens, fwd + bwd): 1.23 ms and 2156 MiB, against 0.62 ms and 161 MiB for the memory-efficient kernel after the
     repeat.
     FlexAttention (efficiency 2.2, ADOPT-NOW for training masks) is not used in v1: at 144 tokens per frame a 10-frame

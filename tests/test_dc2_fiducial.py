@@ -6,7 +6,7 @@
 
 The module is loaded by file path, as the probe tools load it. Images are
 synthetic and built in memory; the one file round trip (load_rgb) writes into a temporary directory under $TMPDIR
-when that lies in /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp: the WSL root is on C:), and removes it.
+when that lies in /dev/shm/, else under /dev/shm/ (never /tmp: the WSL root is on the system drive), and removes it.
 """
 
 import importlib.util
@@ -36,10 +36,10 @@ M = fiducial.CODE_MODULUS
 def temp_dir(prefix):
     """The make_temp_dir rule of tools/probes/t0eng/probe_common.py, kept local so this test needs no other tool."""
     base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
+    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
         base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
+    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
+        raise unittest.SkipTest("no usable temporary base under /dev/shm/")
     return tempfile.mkdtemp(prefix=prefix, dir=base)
 
 

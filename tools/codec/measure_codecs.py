@@ -19,7 +19,7 @@ Every codec also gets a few side-by-side PNGs (original | reconstruction) in ``<
 ``<out>/measurements.json`` and ``<out>/measurements.md``.
 
 Run it in an environment with CUDA torch and the ``codec`` extra (``uv sync --extra model --extra cuda --extra codec``),
-with HF_HOME on E:. The CADRE codecs need the verified DINOv3 checkout of ``drivedit.codec.dinov3``
+with HF_HOME on the data drive. The CADRE codecs need the verified DINOv3 checkout of ``drivedit.codec.dinov3``
 (``DRIVEDIT_DINOV3_DIR`` or its default directory); it is checked first and never fetched::
 
     python -I -B tools/codec/measure_codecs.py --deriv <session>/_harvest/deriv --out <reports>/codec \\

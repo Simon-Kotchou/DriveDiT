@@ -4,8 +4,9 @@ SHA256SUMS verification of tools/harvester/harvest.py.
 
     TMPDIR=/dev/shm HOME=/dev/shm python3 -I -B -m pytest --noconftest -p no:cacheprovider -q tests/test_retention.py
 
-Every test builds a synthetic data root in a temporary directory under $TMPDIR (on /dev/shm/ or /mnt/e/ outside
-/mnt/e/DriveDiT, else /dev/shm/) and passes it with --test-root, so nothing below /mnt/e/DriveDiT is read or
+Every test builds a synthetic data root in a temporary directory under $TMPDIR (on /dev/shm/, else /dev/shm/) and
+passes it with --test-root (the synthetic local config of tests/test_harvest.py, DD-22), so nothing below a real data
+root is read or
 written. Harvested sessions are built by hand (make_captured: the layout harvest.py leaves at captures/arland/..., a
 tiny PNG per slot, img and events streams written with the DD-5-min generator's writer, _harvest/ with result.json,
 dc_validate.json, deriv/, SHA256SUMS and a catalog row); one test harvests the generator's golden session with the
@@ -1078,7 +1079,7 @@ class ReReviewFindingsTest(unittest.TestCase):
     # -- 3: the location is checked right before the first mutation -----------------------------------
     def test_r3_a_unit_moved_after_its_descriptors_were_opened_is_held(self):
         """Where a directory with open descriptors can be renamed (tmpfs, ext4), the move is caught right before the
-        first mutation. On drvfs (E:) the rename itself is refused (EACCES) while retention holds the descriptors,
+        first mutation. On drvfs the rename itself is refused (EACCES) while retention holds the descriptors,
         so nothing moves and the run completes in place."""
         _, dest = make_captured(self.root)
         moved = dest + "_moved"
@@ -1507,7 +1508,7 @@ class Round4FindingsTest(unittest.TestCase):
     # -- H1 ------------------------------------------------------------------------------------------
     def test_h1_an_in_place_rewrite_with_its_mtime_restored_is_held(self):
         """Where the filesystem restores the nanosecond mtime (tmpfs, ext4) only the ctime tells the rewrite apart;
-        drvfs (E:) restores whole seconds only, so there the mtime itself differs. Held either way."""
+        drvfs restores whole seconds only, so there the mtime itself differs. Held either way."""
         restored = []
         for mode in ("probe", "session"):
             with self.subTest(mode):
@@ -1625,8 +1626,8 @@ class ScopeTest(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_roots_and_under_outside_the_root_are_refused(self):
-        self.assertEqual(harvest.DATA_ROOT, "/mnt/e/DriveDiT")
-        for bad in ("/tmp/x", "/mnt/c/Users/x", "C:\\DriveDiT", "/mnt/e/DriveDiT", "/mnt/e/DriveDiT/captures", "/",
+        self.assertEqual(harvest.DATA_ROOT, "/mnt/x/DataRoot")
+        for bad in ("/tmp/x", "/mnt/z/Users/x", "Z:\\DataRoot", "/mnt/x/DataRoot", "/mnt/x/DataRoot/captures", "/",
                     "/dev/shm"):
             code, out = run(bad, "--apply")
             self.assertEqual(code, 3, (bad, out))

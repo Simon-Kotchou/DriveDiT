@@ -1,6 +1,6 @@
 """Read-only features_v1 shards, their pre-encoded latents, and the episode-aware window index (numpy only).
 
-    shard = Shard("/mnt/e/DriveDiT/datasets/features_v1/<session_id>/features_v1")   # sha256 verified
+    shard = Shard("<DATA_ROOT>/datasets/features_v1/<session_id>/features_v1")   # sha256 verified
     shard.array("action_cmd")             # [T, 3] float32, a read-only memmap
     shard.segments                         # usable decision ranges [start, stop), never across an episode
     index = WindowIndex([shard], length=10)

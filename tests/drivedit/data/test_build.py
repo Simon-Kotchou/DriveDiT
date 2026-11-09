@@ -418,8 +418,12 @@ def test_overwrite_and_output_refusals(golden_session: Any, spec: FeatureSpec, t
         build.write_shard(
             golden_session, GOLDEN_DIR / "out", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=(GOLDEN_DIR,)
         )
-    with pytest.raises(build.BuildError, match="C: drive"):
-        build.write_shard(golden_session, "/mnt/c/dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=("/mnt/c",))
+    # the placeholder system drive (never mounted): refused by the forbidden root, before anything is written
+    with pytest.raises(build.BuildError, match="system drive"):
+        build.write_shard(golden_session, "/mnt/z/dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=("/mnt/z",))
+    # any other Windows drive than the data drive: refused by the allow-list (DD-22), whatever the forbidden root is
+    with pytest.raises(build.BuildError, match="only the data drive /mnt/x takes outputs"):
+        build.write_shard(golden_session, "/mnt/y/dd11", spec=spec, routes_dir=ROUTES_DIR, dataset_roots=("/mnt/y",))
     with pytest.raises(build.BuildError, match="no dataset root"):
         build.write_shard(golden_session, datasets, spec=spec, routes_dir=ROUTES_DIR, dataset_roots=())
     assert not (tmp / "elsewhere").exists()
@@ -487,11 +491,11 @@ def test_probe_write_shard_after_opening_through_a_symlinked_root(spec: FeatureS
 
 def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Review round 3, probe 3: an empty or blank variable counts as unset, and capture roots only add, so neither
-    can drop /mnt/e/DriveDiT/captures; an out root there lies under no default dataset root."""
-    default_captures = [Path(p) for p in build.CAPTURE_ROOTS]
-    default_datasets = [Path(p) for p in build.DATASET_ROOTS]
-    assert default_captures == [Path("/mnt/e/DriveDiT/captures")]
-    assert default_datasets == [Path("/mnt/e/DriveDiT/datasets")]
+    can drop <DATA_ROOT>/captures; an out root there lies under no default dataset root."""
+    default_captures = [Path(p) for p in build.default_capture_roots()]
+    default_datasets = [Path(p) for p in build.default_dataset_roots()]
+    assert default_captures == [Path("/mnt/x/DataRoot/captures")]
+    assert default_datasets == [Path("/mnt/x/DataRoot/datasets")]
     session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
     for value in ("", " ", os.pathsep, f" {os.pathsep} "):
         monkeypatch.setenv(build.CAPTURE_ROOTS_ENV, value)
@@ -499,15 +503,15 @@ def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monk
         assert build.configured_capture_roots() == default_captures
         assert build.allowed_dataset_roots() == default_datasets
         with pytest.raises(build.BuildError, match="not under a dataset root"):
-            build.write_shard(session, "/mnt/e/DriveDiT/captures/new-output", spec=None)
+            build.write_shard(session, "/mnt/x/DataRoot/captures/new-output", spec=None)
         # a dataset root that holds the capture store is refused, whatever else is configured
         for extra in ((), (tmp / "other_store",)):
-            with pytest.raises(build.BuildError, match="overlaps /mnt/e/DriveDiT/captures"):
+            with pytest.raises(build.BuildError, match="overlaps /mnt/x/DataRoot/captures"):
                 build.write_shard(
                     session,
-                    "/mnt/e/DriveDiT/captures/new-output",
+                    "/mnt/x/DataRoot/captures/new-output",
                     spec=None,
-                    dataset_roots=("/mnt/e/DriveDiT",),
+                    dataset_roots=("/mnt/x/DataRoot",),
                     capture_roots=extra,
                 )
     monkeypatch.setenv(build.CAPTURE_ROOTS_ENV, str(tmp / "env_store"))
@@ -526,7 +530,7 @@ def test_probe_empty_or_partial_configuration_keeps_the_defaults(tmp: Path, monk
 
 
 def test_containment_is_decided_by_filesystem_identity(tmp: Path) -> None:
-    """Review round 4: on drvfs /mnt/e/drivedit and /mnt/e/DriveDiT are one directory while resolve() keeps each
+    """Review round 4: on drvfs /mnt/x/dataroot and /mnt/x/DataRoot are one directory while resolve() keeps each
     spelling. tmpfs is case-sensitive, so an unresolved symlink alias stands in for the second spelling here: only
     (st_dev, st_ino) can tell that alias/x lies in store, also for an output that does not exist yet."""
     store = tmp / "store"
@@ -543,20 +547,33 @@ def test_containment_is_decided_by_filesystem_identity(tmp: Path) -> None:
     assert build._inside(tmp / "missing_root" / "x", tmp / "missing_root")  # no root yet: the string decides
 
 
-DRVFS_CAPTURES = Path("/mnt/e/DriveDiT/captures")
+def _machine_captures() -> Path | None:
+    """<DATA_ROOT>/captures of the local config DD_TEST_LOCAL_CONFIG names (opt-in, DD-22), else None."""
+    machine = os.environ.get("DD_TEST_LOCAL_CONFIG", "").strip()
+    if not machine:
+        return None
+    text = Path(machine).read_text(encoding="ascii")
+    data_root = next((line.split("=", 1)[1] for line in text.splitlines() if line.startswith("DATA_ROOT=")), None)
+    return Path(data_root) / "captures" if data_root else None
+
+
+DRVFS_CAPTURES = _machine_captures()
 
 
 @pytest.mark.skipif(
-    not (DRVFS_CAPTURES.is_dir() and Path("/mnt/e/drivedit/captures").is_dir()),
-    reason="needs the case-insensitive /mnt/e (drvfs) capture store",
+    DRVFS_CAPTURES is None or not DRVFS_CAPTURES.is_dir(),
+    reason="needs a real case-insensitive (drvfs) capture store: set DD_TEST_LOCAL_CONFIG to this machine's config",
 )
-def test_drvfs_case_alias_of_the_capture_store_is_refused(tmp: Path) -> None:
+def test_drvfs_case_alias_of_the_capture_store_is_refused(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The real case alias, read only: the guard refuses before anything is computed (a stand-in session, so even a
     wrong decision could write nothing)."""
-    assert os.path.samefile(DRVFS_CAPTURES, "/mnt/e/drivedit/captures")
-    assert Path("/mnt/e/drivedit/captures").resolve() != DRVFS_CAPTURES  # resolve() keeps the spelling
+    assert DRVFS_CAPTURES is not None
+    monkeypatch.setenv("DRIVEDIT_LOCAL_CONFIG", os.environ["DD_TEST_LOCAL_CONFIG"])
+    lower = Path(str(DRVFS_CAPTURES).lower())
+    assert os.path.samefile(DRVFS_CAPTURES, lower)
+    assert lower.resolve() != DRVFS_CAPTURES  # resolve() keeps the spelling
     session = SimpleNamespace(path=str(DRVFS_CAPTURES / "arland" / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)
-    for alias in ("/mnt/e/drivedit/captures", "/mnt/e/DRIVEDIT/CAPTURES", "/mnt/e/drivedit"):
+    for alias in (str(lower), str(DRVFS_CAPTURES).upper().replace("/MNT/", "/mnt/", 1), str(lower.parent)):
         with pytest.raises(build.BuildError, match="overlaps"):
             build.write_shard(session, Path(alias) / "new-output", spec=None, dataset_roots=(alias,))
     assert not (DRVFS_CAPTURES / "new-output").exists()
@@ -564,10 +581,10 @@ def test_drvfs_case_alias_of_the_capture_store_is_refused(tmp: Path) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["E:/DriveDiT/datasets", "E:\\DriveDiT\\datasets", "e:/x", "E:", "E:relative", "/mnt/e/x\\y"],
+    ["X:/DataRoot/datasets", "X:\\DataRoot\\datasets", "x:/x", "X:", "X:relative", "/mnt/x/x\\y"],
 )
 def test_windows_spellings_are_refused(value: str, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review round 4: E:/x splits on ':' into E and /x, and backslashes name other paths, so a root given in Windows
+    """Review round 4: X:/x splits on ':' into X and /x, and backslashes name other paths, so a root given in Windows
     spelling would protect or allow nothing it names. Refused in the variables (also inside a list), the keywords
     and the CLI, with the WSL spelling in the message."""
     session = SimpleNamespace(path=str(tmp / "s" / GOLDEN_DIR.name), session_id=GOLDEN_DIR.name)

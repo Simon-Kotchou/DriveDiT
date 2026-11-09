@@ -59,7 +59,7 @@ _READER = []
 
 class Refused(Exception):
     """A refusal: dc_validate prints one line and exits 3 (an Everon route or session outside the sealed evaluation
-    path, a C: path, a report directory outside /mnt/e, a lower --trial than the session's)."""
+    path, a system-drive path, a report directory off the data drive, a lower --trial than the session's)."""
 
 
 def severity(check_id, rank):

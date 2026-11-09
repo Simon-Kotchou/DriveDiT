@@ -5,7 +5,8 @@ is not vendored here. It is imported from a local checkout of ``facebookresearch
 ``DINOV3_COMMIT``, the commit the CADRE checkpoints were trained with:
 
 - **Where.** The ``directory`` keyword, else the ``DRIVEDIT_DINOV3_DIR`` environment variable, else
-  ``DEFAULT_DINOV3_DIR``. Fetch it once with the command ``fetch_command()`` prints; nothing here touches the network.
+  ``default_dinov3_dir()``: ``<CODE_ROOT>/third_party/dinov3`` of the local config (DD-22, ``drivedit.local_paths``).
+  Fetch it once with the command ``fetch_command()`` prints; nothing here touches the network.
 - **What runs.** Only the 17 files of ``DINOV3_SHA256``: the ``dinov3.hub.backbones`` entry point and the ViT code it
   builds. Every file's sha256 is checked before anything is imported, and each file is hashed again as it is executed
   (the bytes checked are the bytes run). A ``dinov3`` module outside the manifest cannot be imported: the import hook
@@ -35,6 +36,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
+from drivedit import local_paths
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from importlib.machinery import ModuleSpec
@@ -43,11 +46,12 @@ if TYPE_CHECKING:
     import torch
 
 __all__ = [
-    "DEFAULT_DINOV3_DIR",
     "DINOV3_COMMIT",
     "DINOV3_DIR_ENV",
+    "DINOV3_DIR_REL",
     "DINOV3_SHA256",
     "DinoV3SourceError",
+    "default_dinov3_dir",
     "dinov3_dir",
     "fetch_command",
     "load_dinov3_vitb16",
@@ -57,7 +61,7 @@ __all__ = [
 DINOV3_COMMIT: Final = "1e358a23bc05795715534db39fbca26fc442d8c8"
 DINOV3_REPO: Final = "https://github.com/facebookresearch/dinov3"
 DINOV3_DIR_ENV: Final = "DRIVEDIT_DINOV3_DIR"
-DEFAULT_DINOV3_DIR: Final = Path("/mnt/e/coding/third_party/dinov3")
+DINOV3_DIR_REL: Final = "third_party/dinov3"  # the default checkout, under CODE_ROOT of the local config (DD-22)
 PACKAGE: Final = "dinov3"
 # sha256 of every file that `from dinov3.hub.backbones import dinov3_vitb16; dinov3_vitb16(pretrained=False)` imports
 # at DINOV3_COMMIT (dinov3/hub is a namespace package: it has no __init__.py). A forward pass imports nothing more.
@@ -88,12 +92,20 @@ class DinoV3SourceError(RuntimeError):
     """The DINOv3 checkout is missing or differs from the manifest, or a foreign ``dinov3`` module is loaded."""
 
 
+def default_dinov3_dir() -> Path:
+    """``<CODE_ROOT>/third_party/dinov3`` of the local config (DD-22); DinoV3SourceError when no config names it."""
+    try:
+        return Path(local_paths.value("CODE_ROOT")) / DINOV3_DIR_REL
+    except local_paths.LocalPathsError as exc:
+        raise DinoV3SourceError(f"no DINOv3 checkout is configured: set {DINOV3_DIR_ENV}, or {exc}") from exc
+
+
 def dinov3_dir(directory: Path | str | None = None) -> Path:
-    """The checkout to use: ``directory``, else ``$DRIVEDIT_DINOV3_DIR``, else ``DEFAULT_DINOV3_DIR``."""
+    """The checkout to use: ``directory``, else ``$DRIVEDIT_DINOV3_DIR``, else ``default_dinov3_dir()``."""
     if directory is not None:
         return Path(directory)
     value = os.environ.get(DINOV3_DIR_ENV)
-    return Path(value) if value else DEFAULT_DINOV3_DIR
+    return Path(value) if value else default_dinov3_dir()
 
 
 def fetch_command(directory: Path) -> str:

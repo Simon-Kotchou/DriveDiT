@@ -15,9 +15,9 @@ join ctl and telemetry; segments at gaps, episode boundaries and masks (the obs 
 between the obs and the window, react_visible at the label step); the seal (a failed status, its fields, a lost
 tail) and salvage; duplicated keys, empty chunks, img paths and files outside the session; the vehicle card hash
 and gear mapping; dc-1.0 sessions raise; Everon (incl. an Eden root world), heldout/ and SEALED paths need
-sealed_eval; C: paths are refused; the crash events of contract 9.5.1 (payload parsing, the first terminal ego event,
+sealed_eval; system-drive paths are refused; the crash events of contract 9.5.1 (payload parsing, the first terminal ego event,
 policy_valid 0 from the crash on, ego_destroyed as a normal seal). Temporary sessions live under $TMPDIR when that is
-on /dev/shm/ or /mnt/e/, else /dev/shm/, and are removed.
+on /dev/shm/, else /dev/shm/, and are removed.
 """
 
 import importlib.util
@@ -54,14 +54,18 @@ reader = load("dc2_reader", "data/dc2/reader.py")
 synth = load("dc2_make_synthetic", "tests/fixtures/capture_dc2/make_synthetic.py")
 
 
+# DD-22: the synthetic local config (also set by tests/conftest.py under pytest), so the repo's fixtures on any
+# drive are readable and no real drive is the system drive here.
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+
 def temp_dir(prefix):
-    """A new directory under $TMPDIR when that is on /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp, which
-    is on the C: drive here). The caller removes it."""
+    """A new directory under $TMPDIR when that is on /dev/shm/, else under /dev/shm/ (never /tmp, which
+    is on the system drive here). The caller removes it."""
     base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
+    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
         base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
+    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
+        raise unittest.SkipTest("no usable temporary base under /dev/shm/")
     return tempfile.mkdtemp(prefix=prefix, dir=base)
 
 
@@ -110,7 +114,7 @@ _RAM = []
 
 
 def golden_source():
-    """A copy of the golden session in a temporary directory (made once; copies from /mnt/e are slow)."""
+    """A copy of the golden session in a temporary directory (made once; copies from drvfs are slow)."""
     if not _RAM:
         tmp = temp_dir("dc2_golden_src_")
         _RAM.append(tmp)
@@ -851,8 +855,8 @@ class DefectTest(unittest.TestCase):
             reader.open_session(session, sealed_eval=True, decode_images=False)
 
     def test_c_drive_paths_are_refused(self):
-        with self.assertRaisesRegex(reader.ReaderError, "C: drive"):
-            reader.open_session("/mnt/c/__dd5_no_such_dir__/" + GOLDEN_ID)
+        with self.assertRaisesRegex(reader.ReaderError, "system drive"):
+            reader.open_session("/mnt/z/__dd5_no_such_dir__/" + GOLDEN_ID)
 
 
 crash_dv = load("dc2_crash_dv", "data/dc2/crash_dv.py")

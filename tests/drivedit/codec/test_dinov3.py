@@ -1,7 +1,8 @@
 """drivedit.codec.dinov3: the DINOv3 checkout is verified file by file, never fetched, and nothing else is imported.
 
 The refusals run anywhere. The load of the real checkout runs in a subprocess (it registers ``dinov3`` modules) and
-skips when no verified checkout is present (CI): ``DRIVEDIT_DINOV3_DIR`` or the default directory.
+skips when no verified checkout is present (CI): ``DRIVEDIT_DINOV3_DIR`` or the default directory under CODE_ROOT of the
+local config (DD-22).
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import pytest
 
 from drivedit.codec import dinov3
 from drivedit.codec.dinov3 import (
-    DEFAULT_DINOV3_DIR,
     DINOV3_COMMIT,
     DINOV3_DIR_ENV,
     DINOV3_SHA256,
@@ -28,6 +28,7 @@ from drivedit.codec.dinov3 import (
 )
 
 SRC = Path(__file__).resolve().parents[3] / "src"
+LOCAL_CONFIG_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "local_config" / "placeholder.local.env"
 
 
 def _verified_checkout() -> Path | None:
@@ -49,7 +50,11 @@ def no_loaded_dinov3(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_the_directory_is_keyword_then_environment_then_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(DINOV3_DIR_ENV, raising=False)
-    assert dinov3_dir() == DEFAULT_DINOV3_DIR
+    monkeypatch.setenv("DRIVEDIT_LOCAL_CONFIG", str(LOCAL_CONFIG_FIXTURE))
+    assert dinov3_dir() == Path("/mnt/x/CodeRoot/third_party/dinov3")
+    monkeypatch.setenv("DRIVEDIT_LOCAL_CONFIG", str(LOCAL_CONFIG_FIXTURE.parent / "missing.env"))
+    with pytest.raises(DinoV3SourceError, match=f"set {DINOV3_DIR_ENV}"):
+        dinov3_dir()
     monkeypatch.setenv(DINOV3_DIR_ENV, "/elsewhere/dinov3")
     assert dinov3_dir() == Path("/elsewhere/dinov3")
     assert dinov3_dir("/given") == Path("/given")
@@ -84,7 +89,9 @@ def test_the_manifest_is_the_backbone_path() -> None:
     assert dinov3.PACKAGE == "dinov3"
 
 
-@pytest.mark.skipif(CHECKOUT is None, reason=f"no verified DINOv3 checkout ({DINOV3_DIR_ENV} or {DEFAULT_DINOV3_DIR})")
+@pytest.mark.skipif(
+    CHECKOUT is None, reason=f"no verified DINOv3 checkout ({DINOV3_DIR_ENV} or <CODE_ROOT>/third_party)"
+)
 def test_the_verified_checkout_builds_vitb16_from_manifest_files_only(tmp_path: Path) -> None:
     assert CHECKOUT is not None
     copy = tmp_path / "dinov3"

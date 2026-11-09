@@ -264,7 +264,7 @@ class LauncherTests(unittest.TestCase):
     def test_helper_grammar_is_the_loaders(self):
         # Codex round 2 row 8: the helper refuses what the Python grammar refuses, before it reads a value.
         text = bat(HELPER).replace("\r\n", "\n")
-        first = re.search(r'(?m)^findstr /R /V /B /C:"#" (.*) "%DD_LOCAL_CONFIG%" \| findstr /R /C:"\[\^ \]" >nul && '
+        first = re.search(r'(?m)^findstr /R /V /B /C:"#" (.*) "%DD_LOCAL_CONFIG%" \| findstr /R /C:"\." >nul && '
                           r'goto :ddlc_grammar$', text)
         self.assertIsNotNone(first)
         self.assertEqual(re.findall(r'/C:"([A-Z_]+)=\[\^=\]"', first.group(1)), list(lc.KEYS))
@@ -284,11 +284,16 @@ class LauncherTests(unittest.TestCase):
         order = ["setlocal DisableDelayedExpansion", ":ddlc_read", "goto :ddlc_grammar", "if defined DDLC_DUP",
                  'do set "DDLC_%%A=%%B"', 'if /I "%DD_DATA_DRIVE_WIN%"=="%SystemDrive%" goto :ddlc_system',
                  'if exist "%DD_DATA_DRIVE_WIN%\\Windows\\System32\\" goto :ddlc_system',
-                 "wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B -c", 'if not "%ERRORLEVEL%"=="0" goto :ddlc_python',
+                 "wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B -c", "if errorlevel 1 goto :ddlc_python",
+                 "if not errorlevel 0 goto :ddlc_python",
                  "endlocal & set \"DD_LOCAL_CONFIG="]
         at = [text.index(o) for o in order]
         self.assertEqual(at, sorted(at), list(zip(order, at)))
         self.assertIn("if not defined SystemDrive goto :ddlc_nosystem", text)
+        # Codex round 3 F13: the exit code is never read through %ERRORLEVEL% (an inherited variable shadows it)
+        code = [ln for ln in text.split("\n") if not ln.lower().startswith("rem")]
+        self.assertFalse([ln for ln in code if "%ERRORLEVEL%" in ln.upper()])
+        self.assertIn('set "ERRORLEVEL="', code)
 
     def test_launchers_read_with_delayed_expansion_off_and_check_first(self):
         # Codex round 2 row 5: the helper (system-drive refusal, grammar, Python check) runs before any mkdir, copy,
@@ -392,13 +397,15 @@ class HelperCmdTests(unittest.TestCase):
         import subprocess
         import tempfile
         cls.subprocess = subprocess
-        cls.tmp = tempfile.mkdtemp(prefix="dd22-helper-", dir="/dev/shm")
+        cls.tmp = base.scratch.mkdtemp("dd22-helper-", real_boundary=False)
         launch = os.path.join(cls.tmp, "tools", "launch")
         os.makedirs(launch)
         shutil.copyfile(os.path.join(LAUNCH_DIR, HELPER), os.path.join(launch, HELPER))
         shutil.copyfile(os.path.join(TOOLS_DIR, "local_config.py"), os.path.join(cls.tmp, "tools", "local_config.py"))
         with open(os.path.join(launch, "t.cmd"), "wb") as fh:
-            fh.write(b'@echo off\r\ncall "%~dp0dd_local_config.cmd" /print\r\necho RC=%ERRORLEVEL%\r\necho ERR=%DD_ERR%\r\n')
+            # the exit code read with "if errorlevel" (an inherited ERRORLEVEL variable shadows %ERRORLEVEL%)
+            fh.write(b'@echo off\r\ncall "%~dp0dd_local_config.cmd" /print\r\nif errorlevel 1 (echo RC=1) else (echo RC=0)\r\n'
+                     b'echo ERR=%DD_ERR%\r\n')
         cls.runner = cls.wslpath(os.path.join(launch, "t.cmd"))
         out = subprocess.run([CMD, "/d", "/c", "echo %SystemDrive%"], capture_output=True, text=True, cwd="/dev/shm")
         cls.system_letter = out.stdout.strip().rstrip(":").lower()
@@ -416,8 +423,8 @@ class HelperCmdTests(unittest.TestCase):
         path = os.path.join(self.tmp, name + ".local.env")
         with open(path, "w", encoding="ascii", newline="") as fh:
             fh.write(text)
-        env = dict(os.environ, DRIVEDIT_LOCAL_CONFIG=self.wslpath(path))
-        env["WSLENV"] = "DRIVEDIT_LOCAL_CONFIG"
+        env = dict(os.environ, DRIVEDIT_LOCAL_CONFIG=self.wslpath(path), ERRORLEVEL="0")   # an inherited shadow (F13)
+        env["WSLENV"] = "DRIVEDIT_LOCAL_CONFIG:ERRORLEVEL"   # both reach cmd.exe
         r = self.subprocess.run([CMD, "/d", "/c", self.runner], capture_output=True, env=env, cwd="/dev/shm",
                                 timeout=180)
         out = r.stdout.decode("utf-8", "replace").replace("\r", "")
@@ -432,7 +439,7 @@ class HelperCmdTests(unittest.TestCase):
             return fh.read().replace("WSL_DISTRO=" + CFG.get("WSL_DISTRO"), "WSL_DISTRO=" + self.distro)
 
     def test_the_synthetic_config_passes(self):
-        rc, err, values = self.helper(self.good(), "good")
+        rc, err, values = self.helper(self.good() + "\n\n", "good")   # empty lines pass
         self.assertEqual((rc, err), ("0", ""))
         self.assertIn("DD_DATA_ROOT=%s" % CFG.get("DATA_ROOT"), values)
 
@@ -459,6 +466,8 @@ class HelperCmdTests(unittest.TestCase):
                                      .replace("SYSTEM_DRIVE=" + CFG.get("SYSTEM_DRIVE"), "SYSTEM_DRIVE=/mnt/x"),
                                      "system drive"),
             "no_such_distro": (g.replace("WSL_DISTRO=" + self.distro, "WSL_DISTRO=No-Such-Distro-dd22"), "Python check"),
+            "space_line": (g + "   \n", "not a comment"),
+            "tab_line": (g + "\t\n", "not a comment"),
         }
         wrong = []
         for name, (text, fragment) in cases.items():

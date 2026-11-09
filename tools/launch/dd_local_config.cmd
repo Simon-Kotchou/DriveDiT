@@ -20,10 +20,11 @@ rem It also sets DRIVEDIT_LOCAL_CONFIG to the file it read and adds DRIVEDIT_LOC
 rem WSLENV, so the preflight in WSL reads the very same file.
 rem
 rem Nothing is set, created or started unless all of these hold, checked in this order:
-rem   1. The file has the grammar of tools/local_config.py: every line is a comment (#...), blank,
-rem      or KEY=VALUE with KEY one of its nine keys, each key at most once, and a VALUE of letters,
-rem      digits, space and _ . , + ( ) ~ / - only (so no line can start with =, hold ==, or carry a
-rem      cmd.exe metacharacter). It is read with delayed expansion off, so ! stays a character.
+rem   1. The file has the grammar of tools/local_config.py: every line is a comment (#...), empty
+rem      (a line of blanks or tabs is refused), or KEY=VALUE with KEY one of its nine keys, each key
+rem      at most once, and a VALUE of letters, digits, space and _ . , + ( ) ~ / - only (so no line
+rem      can start with =, hold a second =, or carry a tab or a cmd.exe metacharacter). It is read
+rem      with delayed expansion off, so ! stays a character.
 rem   2. The four keys used here are as tools/local_config.py requires: WSL_DISTRO [A-Za-z0-9._-],
 rem      DATA_ROOT /mnt/x/[A-Za-z0-9_./-], the installs /mnt/x/..., each a normalised path (no
 rem      trailing /, no //, no . or .. component, no white space at either end).
@@ -38,6 +39,7 @@ rem It reads one file and writes nothing. "dd_local_config.cmd /print" prints th
 rem instead of returning them (tools/local_config.py check --cmd compares them with Python's).
 rem ==========================================================================================
 setlocal DisableDelayedExpansion
+set "ERRORLEVEL="
 set "DD_ERR="
 set "DD_LOCAL_CONFIG="
 set "DDLC_KEYS=DATA_ROOT REALIGN_ROOT CODE_ROOT GAME_INSTALL TOOLS_INSTALL EXPERIMENTAL_GAME_INSTALL EXPERIMENTAL_TOOLS_INSTALL SYSTEM_DRIVE WSL_DISTRO"
@@ -64,8 +66,9 @@ goto :ddlc_fail
 
 :ddlc_read
 rem 1. The grammar, before any value is read (findstr also reads files with LF line ends; its /X does not):
-rem    a line that is not a comment, holds more than blanks and does not start KEY= plus a non-= ...
-findstr /R /V /B /C:"#" /C:"DATA_ROOT=[^=]" /C:"REALIGN_ROOT=[^=]" /C:"CODE_ROOT=[^=]" /C:"GAME_INSTALL=[^=]" /C:"TOOLS_INSTALL=[^=]" /C:"EXPERIMENTAL_GAME_INSTALL=[^=]" /C:"EXPERIMENTAL_TOOLS_INSTALL=[^=]" /C:"SYSTEM_DRIVE=[^=]" /C:"WSL_DISTRO=[^=]" "%DD_LOCAL_CONFIG%" | findstr /R /C:"[^ ]" >nul && goto :ddlc_grammar
+rem    a line that is not a comment, is not empty (blanks or tabs only refuse too, as in Python) and does not
+rem    start KEY= plus a non-= ...
+findstr /R /V /B /C:"#" /C:"DATA_ROOT=[^=]" /C:"REALIGN_ROOT=[^=]" /C:"CODE_ROOT=[^=]" /C:"GAME_INSTALL=[^=]" /C:"TOOLS_INSTALL=[^=]" /C:"EXPERIMENTAL_GAME_INSTALL=[^=]" /C:"EXPERIMENTAL_TOOLS_INSTALL=[^=]" /C:"SYSTEM_DRIVE=[^=]" /C:"WSL_DISTRO=[^=]" "%DD_LOCAL_CONFIG%" | findstr /R /C:"." >nul && goto :ddlc_grammar
 rem    ... a second = in a line that is not a comment, or a character outside the value characters
 findstr /R /V /B /C:"#" "%DD_LOCAL_CONFIG%" | findstr /R /C:"=.*=" >nul && goto :ddlc_grammar
 findstr /R /V /B /C:"#" "%DD_LOCAL_CONFIG%" | findstr /R /C:"[^-0123456789 (),+./ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~=]" >nul && goto :ddlc_grammar
@@ -109,8 +112,11 @@ if not exist "%DDLC_TOOLS%\local_config.py" goto :ddlc_noloader
 set "DDLC_LOADER=%DDLC_TOOLS%\local_config.py"
 set "WSLENV=%DDLC_ENV%:DDLC_LOADER/p"
 wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B -c "import os, runpy, sys; sys.argv = ['local_config.py', 'validate']; runpy.run_path(os.environ['DDLC_LOADER'], run_name='__main__')" >nul
-rem wsl.exe exits with a negative code when it cannot start the distro: only exactly 0 passes.
-if not "%ERRORLEVEL%"=="0" goto :ddlc_python
+rem wsl.exe exits with a negative code when it cannot start the distro: only exactly 0 passes. The exit code is
+rem tested with "if errorlevel 1" (1 or more) and "if not errorlevel 0" (below 0), never through %ERRORLEVEL%,
+rem which an inherited variable of that name would shadow.
+if errorlevel 1 goto :ddlc_python
+if not errorlevel 0 goto :ddlc_python
 set "WSLENV=%DDLC_ENV%"
 if /I "%~1"=="/print" set DD_
 endlocal & set "DD_LOCAL_CONFIG=%DD_LOCAL_CONFIG%" & set "DD_WSL_DISTRO=%DD_WSL_DISTRO%" & set "DD_DATA_ROOT=%DD_DATA_ROOT%" & set "DD_DATA_ROOT_WIN=%DD_DATA_ROOT_WIN%" & set "DD_DATA_DRIVE_WIN=%DD_DATA_DRIVE_WIN%" & set "DD_GAME_INSTALL_WIN=%DD_GAME_INSTALL_WIN%" & set "DD_TOOLS_INSTALL_WIN=%DD_TOOLS_INSTALL_WIN%" & set "DRIVEDIT_LOCAL_CONFIG=%DD_LOCAL_CONFIG%" & set "WSLENV=%WSLENV%" & set "DD_ERR="
@@ -145,7 +151,7 @@ set "DD_ERR=Local config %DD_LOCAL_CONFIG%: %DDLC_K% is not a normalised WSL pat
 exit /b 1
 
 :ddlc_grammar
-set "DD_ERR=Local config %DD_LOCAL_CONFIG% has a line that is not a comment, a blank line or KEY=VALUE with a known key and a plain value (run tools/local_config.py check). Nothing was started."
+set "DD_ERR=Local config %DD_LOCAL_CONFIG% has a line that is not a comment, an empty line or KEY=VALUE with a known key and a plain value (run tools/local_config.py check). Nothing was started."
 goto :ddlc_fail
 
 :ddlc_twice

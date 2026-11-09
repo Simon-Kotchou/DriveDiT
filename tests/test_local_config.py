@@ -75,10 +75,10 @@ class ParseTests(unittest.TestCase):
             cfg.get("NOPE")
 
     def test_malformed_lines_are_all_reported(self):
-        text = ("# comment\n\nDATA_ROOT=/mnt/x/Data Root\nGAME_INSTALL=Y:\\Lib\\steamapps\\common\\A\n"
-                "TOOLS_INSTALL=/mnt/z/T/steamapps/common/B/\nWSL_DISTRO=a b\nBOGUS=1\n DATA_ROOT=/mnt/x/a\n"
-                "REALIGN_ROOT=/mnt/x/a\nREALIGN_ROOT=/mnt/x/b\nSYSTEM_DRIVE=/mnt/Z\nCODE_ROOT=/mnt/x/<code>\n"
-                "EXPERIMENTAL_GAME_INSTALL=/mnt/x/no/steam/layout\nno equals sign\nCODE_ROOT=relative/path\n")
+        text = ("# comment\n\nDATA_ROOT=/mnt/x/DataRoot/a b\nGAME_INSTALL=Y:\\Game Library\\steamapps\\common\\A\n"
+                "TOOLS_INSTALL=/mnt/z/Synthetic Steam (x86)/steamapps/common/B/\nWSL_DISTRO=a b\nBOGUS=1\n DATA_ROOT=/mnt/x/DataRoot\n"
+                "REALIGN_ROOT=/mnt/x/PlanRoot\nREALIGN_ROOT=/mnt/x/PlanRoot/b\nSYSTEM_DRIVE=/mnt/Z\nCODE_ROOT=/mnt/x/CodeRoot/<code>\n"
+                "EXPERIMENTAL_GAME_INSTALL=/mnt/x/Experimental Library/no/layout\nno equals sign\nCODE_ROOT=relative/path\n")
         with self.assertRaises(lc.LocalConfigError) as caught:
             lc.parse(text, "bad.env")
         msg = str(caught.exception)
@@ -93,11 +93,11 @@ class ParseTests(unittest.TestCase):
         # cmd.exe metacharacters never reach a value; DATA_ROOT and WSL_DISTRO, unquoted on the wsl.exe line, are
         # stricter still
         for bad in ("&", "|", "<", ">", "^", "%", "!", '"', "'", ";", "=", "\\"):
-            self.assertIsNotNone(lc._value_problem("TOOLS_INSTALL", "/mnt/z/a%sb/steamapps/common/T" % bad), bad)
+            self.assertIsNotNone(lc._value_problem("TOOLS_INSTALL", "/mnt/z/Synthetic Steam (x86)/a%sb/steamapps/common/T" % bad), bad)
         for ok in (" ", "(", ")", "+", ",", "~", ".", "_", "-"):
-            self.assertIsNone(lc._value_problem("TOOLS_INSTALL", "/mnt/z/a%sb/steamapps/common/T" % ok), ok)
+            self.assertIsNone(lc._value_problem("TOOLS_INSTALL", "/mnt/z/Synthetic Steam (x86)/a%sb/steamapps/common/T" % ok), ok)
             if ok not in ".-_":
-                self.assertIsNotNone(lc._value_problem("DATA_ROOT", "/mnt/x/a%sb" % ok), ok)
+                self.assertIsNotNone(lc._value_problem("DATA_ROOT", "/mnt/x/DataRoot/a%sb" % ok), ok)
         self.assertIsNone(lc._value_problem("CODE_ROOT", "/dev/shm/code"))  # any absolute path
         self.assertIsNotNone(lc._value_problem("REALIGN_ROOT", "/dev/shm/plan"))  # a Windows drive is required
 
@@ -105,12 +105,12 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(lc.parse(read(FIXTURE).replace("\n", "\r\n")).values, self.cfg.values)
 
     def test_mapping(self):
-        self.assertEqual(lc.wsl_to_win("/mnt/x/a/b"), "X:\\a\\b")
+        self.assertEqual(lc.wsl_to_win("/mnt/x/DataRoot/b"), "X:\\DataRoot\\b")
         self.assertEqual(lc.wsl_to_win("/mnt/x"), "X:\\")
         self.assertIsNone(lc.wsl_to_win("/dev/shm/a"))
-        self.assertEqual(lc.win_to_wsl("X:\\a\\b"), "/mnt/x/a/b")
-        self.assertEqual(lc.win_to_wsl("y:/a"), "/mnt/y/a")
-        self.assertEqual(lc.win_to_wsl("/mnt/x/a"), "/mnt/x/a")
+        self.assertEqual(lc.win_to_wsl("X:\\DataRoot\\b"), "/mnt/x/DataRoot/b")
+        self.assertEqual(lc.win_to_wsl("y:/Game Library/a"), "/mnt/y/Game Library/a")
+        self.assertEqual(lc.win_to_wsl("/mnt/x/DataRoot/a"), "/mnt/x/DataRoot/a")
         self.assertIsNone(lc.drive_of("/dev/shm"))
 
     def test_example_lists_every_key_and_only_placeholders(self):
@@ -234,8 +234,22 @@ class CheckTests(unittest.TestCase):
         names = [r[1] for r in results]
         for key in lc.KEYS:
             self.assertIn("key." + key, names)
-        self.assertIn(("PASS", "data_root.off_system_drive"), [(r[0], r[1]) for r in results])
+        # the synthetic config's data drive is mounted nowhere: the write boundary cannot verify it
+        status = {r[1]: (r[0], r[2]) for r in results}
+        self.assertEqual(status["data_root.off_system_drive"][0], "FAIL")
+        self.assertIn("is not mounted", status["data_root.off_system_drive"][1])
         self.assertTrue(all(r[0] in ("PASS", "FAIL", "SKIP") for r in results))
+
+    def test_check_verifies_the_data_drive_like_the_boundary(self):
+        bv = load_module(os.path.join(REPO, "tests", "fixtures", "local_config", "boundary_vectors.py"), "dd22_bv_check")
+        with bv.world() as w:
+            for state, want in (("real_like", "PASS"), ("swapped", "FAIL"), ("marked_data", "FAIL"),
+                                ("wrong_system_drive", "FAIL"), ("unmounted_data", "FAIL")):
+                with w.use(lc, state):
+                    cfg = lc.load(w.config_path(state))
+                    status = {r[1]: (r[0], r[2]) for r in lc.check(cfg)}
+                    self.assertEqual(status["data_root.off_system_drive"][0], want,
+                                     (state, status["data_root.off_system_drive"]))
 
     def test_check_flags_a_missing_key_and_the_system_drive(self):
         cfg = lc.parse("DATA_ROOT=/mnt/z/DataRoot\nSYSTEM_DRIVE=/mnt/z\n", "partial.env")

@@ -17,6 +17,9 @@ Where the file is looked for, in this order (the first that exists is used; no p
 When none exists, or a key a caller needs is missing, the caller refuses with a message that names the file and the
 key (LocalConfigError). Importing this module reads nothing; a file is read on first use and re-read when it changes.
 
+The write boundary of every writer (check_write, "the write boundary" below) lives here too: RAM (/dev/shm) or the
+verified drive of DATA_ROOT only, never a volume whose root holds Windows/System32, whatever the config says.
+
 Format (the Windows launchers parse it with `for /f`, so it is deliberately plain):
   * one KEY=VALUE per line, no spaces around "=", no quotes, no variable expansion; a line starting with # is a
     comment, blank lines are ignored; a key may appear once; unknown keys are refused (a typo never goes unseen);
@@ -31,10 +34,12 @@ Keys (KEYS below): DATA_ROOT, REALIGN_ROOT, CODE_ROOT, GAME_INSTALL, TOOLS_INSTA
 EXPERIMENTAL_TOOLS_INSTALL, SYSTEM_DRIVE, WSL_DISTRO.
 
     python3 -I -B tools/local_config.py where              # which file is used (or where it was looked for)
+    python3 -I -B tools/local_config.py validate           # parse it (exit 2 when missing or malformed)
     python3 -I -B tools/local_config.py show               # every key, WSL and Windows form
     python3 -I -B tools/local_config.py get KEY [--win | --drive | --drive-win]   # one value, for shell scripts
     python3 -I -B tools/local_config.py render FILE        # FILE with every <KEY> / <KEY_WIN> filled in
     python3 -I -B tools/local_config.py check [--cmd]      # validate the file on this machine (writes nothing)
+    python3 -I -B tools/local_config.py check-write PATH [--root ROOT]...   # the write boundary, for shell scripts
 
 `check` exits 0 when every check passes, 1 when one fails, 2 when the file cannot be found or parsed. --cmd also
 runs tools/launch/dd_local_config.cmd /print through cmd.exe (it only reads) and compares what it derives, and runs
@@ -66,7 +71,8 @@ KEYS = {
     "TOOLS_INSTALL": ("steam", "the stable Arma Reforger Tools install the launchers start"),
     "EXPERIMENTAL_GAME_INSTALL": ("steam", "the Arma Reforger Experimental install (pins for --check only)"),
     "EXPERIMENTAL_TOOLS_INSTALL": ("steam", "the Arma Reforger Experimental Tools install (pins for --check only)"),
-    "SYSTEM_DRIVE": ("drive", "the mount of the Windows system drive; nothing is ever written there"),
+    "SYSTEM_DRIVE": ("drive", "the mount of the Windows system drive; advisory: it names the system drive in refusals "
+                             "(the write boundary finds a system volume by its Windows/System32 itself)"),
     "WSL_DISTRO": ("name", "the WSL distro the Windows launchers run the preflight in (wsl.exe -d)"),
 }
 PATH_KINDS = ("drvfs", "path", "steam", "drive")
@@ -89,7 +95,7 @@ class LocalConfigError(Exception):
 
 
 def win_to_wsl(path: str) -> str:
-    """'X:\\a\\b' or 'x:/a/b' -> '/mnt/x/a/b'. Other strings are returned unchanged."""
+    """'X:\\DataRoot\\b' or 'x:/DataRoot/b' -> '/mnt/x/DataRoot/b'. Other strings are returned unchanged."""
     m = _WIN_ABS.match(path)
     if not m:
         return path
@@ -98,7 +104,7 @@ def win_to_wsl(path: str) -> str:
 
 
 def wsl_to_win(path: str):
-    """'/mnt/x/a/b' -> 'X:\\a\\b' ('/mnt/x' -> 'X:\\'); None for a path outside /mnt/<letter>."""
+    """'/mnt/x/DataRoot/b' -> 'X:\\DataRoot\\b' ('/mnt/x' -> 'X:\\'); None for a path outside /mnt/<letter>."""
     m = _WSL_MNT.match(path)
     if not m:
         return None
@@ -107,7 +113,7 @@ def wsl_to_win(path: str):
 
 
 def drive_of(path: str):
-    """'/mnt/x/a/b' -> '/mnt/x'; None for a path outside /mnt/<letter>."""
+    """'/mnt/x/DataRoot/b' -> '/mnt/x'; None for a path outside /mnt/<letter>."""
     m = _WSL_MNT.match(path)
     return "/mnt/%s" % m.group(1) if m else None
 
@@ -307,35 +313,315 @@ def win(key: str) -> str:
     return load().win(key)
 
 
-# --------------------------------------------------------------------------- simple write guards
+# --------------------------------------------------------------------------- the write boundary
+#
+# One outer boundary for every writer of the repository (DD-22 round 2): the pin tools (pinlib.check_write_path), the
+# plain output guards (probes, routes, ident, test fixtures), the dataset builder, the validator, the harvester and
+# retention, the deploy, the migration's --write, the codec report and the MCP shell scripts (`check-write`). A
+# caller's own roots (dataset roots, allowed roots, an --out) may only NARROW it: check_write() first decides the
+# boundary, then requires the destination to lie under one of the roots as well.
+#
+# A destination is writable only when its resolved final path lies on
+#   * RAM: the tmpfs mounted at SCRATCH_MOUNT (/dev/shm), with or without a config; or
+#   * the data volume: the Windows drive of DATA_ROOT, verified in /proc/self/mountinfo as a drvfs (9p or drvfs)
+#     mount of that drive letter at MNT_ROOT/<letter>, of the whole drive (mount root "/"), not the Linux root
+#     filesystem (an unmounted /mnt/<x> is a directory of the WSL disk) and not a mount nested below it.
+# The device of the nearest existing ancestor (st_dev) must be the device mountinfo gives that mount, so a path that
+# merely carries the name of a mount, a moved mount or a nested one is refused.
+#
+# A config-independent backstop comes first: a destination on any mount whose root holds Windows/System32 (letter
+# case ignored) is refused, whatever DATA_ROOT, SYSTEM_DRIVE or the caller's roots say. SYSTEM_DRIVE is advisory: it
+# only names the system drive in a refusal; nothing is decided by it.
+#
+# The path itself: '..' components are refused (never normalised away), a symlink as the last component is refused
+# (a write would follow it), and a path that does not exist yet is resolved through its nearest existing ancestor
+# (realpath), a dangling symlink there refused. Without a usable config only RAM is writable.
+
+MOUNTINFO = "/proc/self/mountinfo"
+SCRATCH_MOUNT = "/dev/shm"          # RAM, writable without a config
+MNT_ROOT = "/mnt"                   # where WSL mounts the Windows drives: <MNT_ROOT>/<letter>
+DATA_FSTYPES = ("9p", "drvfs")      # the filesystem types of a WSL Windows-drive mount
+SYSTEM_MARKER = ("windows", "system32")   # <mount root>/Windows/System32, any letter case: a Windows system volume
+_MARKER_CACHE = {}
 
 
-SCRATCH_ROOTS = ("/dev/shm/",)   # always writable: RAM, never a drive
-NEVER_ROOTS = ("/tmp/",)         # never: the WSL disk image
+class WriteRefused(Exception):
+    """The write boundary refuses a destination; the message says why and what is allowed."""
 
 
-def simple_write_roots():
-    """(allowed, forbidden, why) prefixes of the plain output guards (probes, routes, ident, test fixtures): allowed
-    /dev/shm/ and the data drive of DATA_ROOT (/mnt/x/), forbidden /tmp/ and SYSTEM_DRIVE. Without a usable config
-    only /dev/shm/ is allowed and why says what is missing; nothing is guessed."""
+def _unescape_mount(s: str) -> str:
+    # mountinfo writes space, tab, newline and backslash as \040, \011, \012 and \134.
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def parse_mountinfo(text: str) -> list:
+    """[{mount_point, root, dev, fstype, source, options}] in file order (a later mount at the same point is on top).
+    Lines that are not mountinfo lines are skipped."""
+    mounts = []
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if "-" not in fields[6:]:
+            continue
+        sep = fields.index("-", 6)
+        if len(fields) < sep + 3:
+            continue
+        major, _, minor = fields[2].partition(":")
+        try:
+            dev = os.makedev(int(major), int(minor))
+        except ValueError:
+            continue
+        mounts.append({"mount_point": _unescape_mount(fields[4]), "root": _unescape_mount(fields[3]), "dev": dev,
+                       "fstype": fields[sep + 1], "source": _unescape_mount(fields[sep + 2]),
+                       "options": _unescape_mount(fields[sep + 3]) if len(fields) > sep + 3 else ""})
+    return mounts
+
+
+def read_mountinfo() -> list:
+    """The parsed MOUNTINFO; WriteRefused when it cannot be read (nothing can be verified without it)."""
     try:
-        cfg = load()
-        return ((cfg.drive("DATA_ROOT") + "/",) + SCRATCH_ROOTS, (cfg.get("SYSTEM_DRIVE") + "/",) + NEVER_ROOTS,
-                None)
-    except LocalConfigError as exc:
-        return SCRATCH_ROOTS, NEVER_ROOTS, str(exc)
+        with open(MOUNTINFO, "r", encoding="utf-8", errors="replace") as fh:
+            return parse_mountinfo(fh.read())
+    except OSError as exc:
+        raise WriteRefused("cannot read %s to verify where a write lands: %s" % (MOUNTINFO, exc))
 
 
-def simple_write_refusal(path: str):
-    """None when a plain output guard may write to path (resolved), else the refusal message."""
-    allowed, forbidden, why = simple_write_roots()
-    real = os.path.realpath(os.path.abspath(path)) if path else ""
-    probe = real if real.endswith("/") else real + "/"
-    if path and not any(probe.startswith(r) for r in forbidden) and any(probe.startswith(r) for r in allowed):
+def mount_of(resolved: str, mounts: list):
+    """The mount a resolved absolute path lies on: the longest mount point that contains it (the last one wins)."""
+    best = None
+    for m in mounts:
+        mp = m["mount_point"]
+        if mp == "/" or resolved == mp or resolved.startswith(mp.rstrip("/") + "/"):
+            if best is None or len(mp) >= len(best["mount_point"]):
+                best = m
+    return best
+
+
+def is_drive_mount(mount: dict, letter: str) -> bool:
+    """True if a mountinfo entry is the drvfs mount of the Windows drive letter (source X:\\ or option path=X:\\)."""
+    want = letter.upper().rstrip(":") + ":"
+    if mount["fstype"] not in DATA_FSTYPES:
+        return False
+    if mount["source"].replace("/", "\\").rstrip("\\").upper() == want:
+        return True
+    opts = re.split(r"[;,]", mount["options"])
+    return any(o.replace("/", "\\").rstrip("\\").upper() == "PATH=" + want for o in opts)
+
+
+def system_marker(mount: dict):
+    """The Windows/System32 directory at the root of a mount (any letter case), or None. A root that cannot be
+    listed counts as a system volume (refused), and is looked at again next time."""
+    key = (mount["mount_point"], mount["dev"])
+    if key in _MARKER_CACHE:
+        return _MARKER_CACHE[key]
+    found = None
+    try:
+        with os.scandir(mount["mount_point"]) as it:
+            wins = [e.path for e in it if e.name.lower() == SYSTEM_MARKER[0] and e.is_dir()]
+        for w in wins:
+            with os.scandir(w) as it:
+                hits = [e.path for e in it if e.name.lower() == SYSTEM_MARKER[1] and e.is_dir()]
+            if hits:
+                found = hits[0]
+                break
+    except OSError as exc:
+        return "%s (its root cannot be listed: %s)" % (mount["mount_point"], exc.strerror or exc)
+    _MARKER_CACHE[key] = found
+    return found
+
+
+def _system_drive_hint() -> str:
+    system = advisory_system_drive()
+    return "; the local config names %s as the system drive" % system if system else ""
+
+
+def resolve_destination(path):
+    """(resolved, existing): the final destination of path, resolved through its nearest existing ancestor
+    (`existing`, itself resolved). WriteRefused for an empty path, a '..' component, a symlink as the last component
+    or a dangling symlink on the way."""
+    if isinstance(path, bytes):
+        path = os.fsdecode(path)
+    text = os.fspath(path) if path is not None else ""
+    if not isinstance(text, str) or not text or "\0" in text:
+        raise WriteRefused("refusing to write %r: not a path" % (path,))
+    text = win_to_wsl(text)
+    if ".." in text.replace("\\", "/").split("/"):
+        raise WriteRefused("refusing to write %s: it holds a '..' component (write the path it means)" % text)
+    full = os.path.abspath(text)
+    if os.path.islink(full):
+        raise WriteRefused("refusing to write %s: it is a symlink (a write would follow it to %s)"
+                           % (full, os.path.realpath(full)))
+    anc, tail = full, []
+    while not os.path.lexists(anc):
+        anc, name = os.path.split(anc)
+        tail.append(name)
+    if os.path.islink(anc) and not os.path.exists(anc):
+        raise WriteRefused("refusing to write %s: %s is a dangling symlink" % (full, anc))
+    existing = os.path.realpath(anc)
+    return (os.path.join(existing, *reversed(tail)) if tail else existing), existing
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def mounted_path(path: str) -> str:
+    """A /mnt/<x>/... or /dev/shm/... path where it is mounted: under MNT_ROOT or SCRATCH_MOUNT (/mnt and /dev/shm, so
+    the same path, except in the fake worlds of the tests)."""
+    if path == "/dev/shm" or path.startswith("/dev/shm/"):
+        return SCRATCH_MOUNT + path[len("/dev/shm"):]
+    m = _WSL_MNT.match(path)
+    if not m:
+        return path
+    return os.path.join(MNT_ROOT, m.group(1), m.group(2)) if m.group(2) else os.path.join(MNT_ROOT, m.group(1))
+
+
+def data_drive():
+    """(drive mount /mnt/<x>, "X:") of DATA_ROOT: the drive whose mount (at mounted_path of it) the write boundary
+    verifies as the data volume (LocalConfigError without a config)."""
+    cfg = load()
+    return cfg.drive("DATA_ROOT"), cfg.drive_win("DATA_ROOT")
+
+
+def advisory_system_drive():
+    """SYSTEM_DRIVE of the config, or None: advisory, it only words a refusal."""
+    try:
+        return load().get("SYSTEM_DRIVE")
+    except LocalConfigError:
         return None
-    return "refusing output %r: only under %s (the data drive of the local config, or RAM), never %s%s" % (
-        path, " or ".join(r + "..." for r in allowed), " or ".join(forbidden),
-        "; no data drive is known: %s" % why if why else "")
+
+
+def data_volume(mounts: list):
+    """(mount, None) for the verified data volume (the drive of DATA_ROOT), or (None, why there is none)."""
+    try:
+        data_root = load().get("DATA_ROOT")
+    except LocalConfigError as exc:
+        return None, "no data drive is known: %s" % exc
+    letter = data_root[5]
+    point = mounted_path(data_drive()[0])
+    tops = [m for m in mounts if m["mount_point"] == point]
+    if not tops:
+        return None, ("DATA_ROOT's drive %s:, %s, is not mounted (only a directory of the Linux root filesystem)"
+                      % (letter.upper(), point))
+    top = tops[-1]
+    if not is_drive_mount(top, letter):
+        return None, ("%s is not the drvfs mount of drive %s: (it is %s from %r)"
+                      % (point, letter.upper(), top["fstype"], top["source"]))
+    if top["root"] != "/":
+        return None, "%s mounts %s of drive %s:, not the whole drive" % (point, top["root"], letter.upper())
+    marker = system_marker(top)
+    if marker:
+        return None, ("DATA_ROOT is on the Windows system drive: %s holds %s%s"
+                      % (point, marker, _system_drive_hint()))
+    return top, None
+
+
+def check_write(path, roots=None) -> str:
+    """The resolved destination of path when the write boundary allows writing there, else WriteRefused.
+
+    roots: None, or the caller's own roots (each resolved): the destination must ALSO lie under one of them. They can
+    only narrow the boundary; an empty sequence allows nothing."""
+    resolved, existing = resolve_destination(path)
+    mounts = read_mountinfo()
+    m = mount_of(resolved, mounts)
+    if m is None:
+        raise WriteRefused("refusing to write %s: %s lists no mount for it" % (resolved, MOUNTINFO))
+    try:
+        dev = os.stat(existing).st_dev
+    except OSError as exc:
+        raise WriteRefused("refusing to write %s: cannot stat %s: %s" % (resolved, existing, exc))
+    if dev != m["dev"]:
+        raise WriteRefused("refusing to write %s: %s is on device %d:%d, but the mount at %s is %d:%d (a nested or "
+                           "moved mount)" % (resolved, existing, os.major(dev), os.minor(dev), m["mount_point"],
+                                             os.major(m["dev"]), os.minor(m["dev"])))
+    marker = system_marker(m)
+    if marker:
+        raise WriteRefused("refusing to write %s: it is on the Windows system drive (the volume mounted at %s holds "
+                           "%s); nothing is ever written there%s" % (resolved, m["mount_point"], marker,
+                                                                     _system_drive_hint()))
+    if not (m["mount_point"] == SCRATCH_MOUNT and m["fstype"] == "tmpfs"):
+        data, why = data_volume(mounts)
+        if data is None or m is not data:
+            where = ("%s (%s from %r)" % (m["mount_point"], m["fstype"], m["source"]))
+            if why:
+                where += "; " + why
+            elif _under(m["mount_point"], data["mount_point"]):
+                where += ", a mount nested inside the data drive mounted at %s" % data["mount_point"]
+            else:
+                where += ", not on the data drive mounted at %s" % data["mount_point"]
+            raise WriteRefused("refusing to write %s: writes go only to RAM (%s) or to the data drive of the local "
+                               "config; it lies on %s" % (resolved, SCRATCH_MOUNT, where))
+    if roots is not None:
+        real_roots = [resolve_root(r) for r in roots]
+        if not any(_under(resolved, r) for r in real_roots):
+            raise WriteRefused("refusing to write outside %s: %s (resolves to %s)"
+                               % (", ".join(map(str, roots)) or "(no root)", path, resolved))
+    return resolved
+
+
+def resolve_root(root) -> str:
+    """A caller's root resolved like a destination's existing part (realpath), for narrowing only."""
+    return os.path.realpath(os.path.abspath(win_to_wsl(os.fspath(root))))
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary allows writing to path (check_write), else the refusal message."""
+    try:
+        check_write(path, roots)
+    except WriteRefused as exc:
+        return str(exc)
+    return None
+
+
+def simple_write_refusal(path):
+    """The plain output guards (probes, routes, ident, test fixtures): the write boundary with no narrower root."""
+    return write_refusal(path)
+
+
+def child_name_problem(name):
+    """Why name cannot be a single path component under a checked directory, or None."""
+    if not isinstance(name, str) or not name:
+        return "is empty"
+    if name in (".", ".."):
+        return "is %r" % name
+    if "/" in name or "\\" in name or "\0" in name:
+        return "holds a path separator (absolute or nested names are not file names)"
+    if re.match(r"^[A-Za-z]:", name):
+        return "is a Windows drive path"
+    return None
+
+
+def check_child(parent, name, roots=None) -> str:
+    """check_write of <parent>/<name>, name a plain file name (child_name_problem), so a derived name can never move
+    the write elsewhere."""
+    why = child_name_problem(name)
+    if why:
+        raise WriteRefused("refusing output name %r under %s: it %s" % (name, parent, why))
+    return check_write(os.path.join(os.fspath(parent), name), roots)
+
+
+def open_new(path, roots=None, mode: int = 0o644) -> tuple:
+    """(fd, resolved): path created for writing after check_write, O_CREAT | O_EXCL | O_NOFOLLOW, so an existing
+    file or a symlink put there after the check is never written through. The opened file's real path is compared
+    with the checked one (a parent swapped for a symlink in between); a mismatch closes it and raises WriteRefused."""
+    resolved = check_write(path, roots)
+    fd = os.open(resolved, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), mode)
+    try:
+        real = os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        real = resolved
+    if real != resolved:
+        os.close(fd)
+        raise WriteRefused("refusing %s: the file was created at %s (a parent changed after the check)"
+                           % (resolved, real))
+    return fd, resolved
+
+
+def write_new(path, data: bytes, roots=None, mode: int = 0o644) -> str:
+    """Write data to a new file at path (open_new); the resolved path."""
+    fd, resolved = open_new(path, roots, mode)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return resolved
 
 
 # --------------------------------------------------------------------------- launcher emulation
@@ -451,9 +737,14 @@ def _cmd_launchers(cfg: Config, cfg_win: str) -> list:
     out = []
     if not os.path.isdir("/dev/shm"):
         return [("launchers", False, "no /dev/shm for the echo copies")]
-    tmp = tempfile.mkdtemp(prefix="dd_launch_echo_", dir="/dev/shm")
+    tmp = tempfile.mkdtemp(prefix="dd_launch_echo_", dir=check_write(SCRATCH_MOUNT))
     try:
-        shutil.copyfile(os.path.join(TOOLS_DIR, "launch", "dd_local_config.cmd"), os.path.join(tmp, "dd_local_config.cmd"))
+        # <tmp>/tools/launch/ holds the helper and the echo copies, <tmp>/tools/local_config.py the loader the helper
+        # runs in WSL (validate), the installed layout.
+        launch = os.path.join(tmp, "tools", "launch")
+        os.makedirs(launch)
+        shutil.copyfile(os.path.join(TOOLS_DIR, "launch", "dd_local_config.cmd"), os.path.join(launch, "dd_local_config.cmd"))
+        shutil.copyfile(os.path.abspath(__file__), os.path.join(tmp, "tools", "local_config.py"))
         seed = bat_values(cfg)
         for name in LAUNCHERS:
             with open(os.path.join(TOOLS_DIR, "launch", name), "rb") as fh:
@@ -463,7 +754,7 @@ def _cmd_launchers(cfg: Config, cfg_win: str) -> list:
                 out.append((name, False, "not a launcher of the expected shape"))
                 continue
             body, _, wsl = made
-            copy = os.path.join(tmp, name.replace(".bat", "_echo.cmd"))
+            copy = os.path.join(launch, name.replace(".bat", "_echo.cmd"))
             with open(copy, "wb") as fh:
                 fh.write(body.encode("ascii"))
             env = dict(os.environ, DRIVEDIT_LOCAL_CONFIG=cfg_win)
@@ -521,9 +812,20 @@ def check(cfg: Config, with_cmd: bool = False) -> list:
             else:
                 add(got == want and back == value, "windows_form." + key,
                     "mapping %s, wslpath -w %s, wslpath -u of the mapping %s" % (want, got, back))
-    if cfg.has("DATA_ROOT") and cfg.has("SYSTEM_DRIVE"):
-        add(cfg.drive("DATA_ROOT") != cfg.get("SYSTEM_DRIVE"), "data_root.off_system_drive",
-            "DATA_ROOT is on %s, the system drive is %s" % (cfg.drive("DATA_ROOT"), cfg.get("SYSTEM_DRIVE")))
+    if cfg.has("DATA_ROOT"):
+        # The write boundary's own verification of the data drive (mountinfo, whole-drive drvfs mount, no
+        # Windows/System32 at its root); SYSTEM_DRIVE is only compared, as a hint that the config is consistent.
+        with override(cfg):
+            try:
+                vol, why = data_volume(read_mountinfo())
+            except WriteRefused as exc:
+                vol, why = None, str(exc)
+        system = cfg.get("SYSTEM_DRIVE") if cfg.has("SYSTEM_DRIVE") else None
+        ok = vol is not None and system != cfg.drive("DATA_ROOT")
+        add(ok, "data_root.off_system_drive",
+            "DATA_ROOT is on %s: %s; SYSTEM_DRIVE names %s" % (
+                cfg.drive("DATA_ROOT"), why or "a verified %s mount of the whole drive, no Windows/System32 at its "
+                "root" % vol["fstype"], system or "nothing"))
     if with_cmd:
         try:
             want = bat_values(cfg)
@@ -555,6 +857,8 @@ def main(argv=None) -> int:
                                  % CONFIG_NAME)
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("where", help="print the config file in use")
+    sub.add_parser("validate", help="parse the config in use (the whole grammar, every key); exit 2 when it is "
+                   "missing or malformed. tools/launch/dd_local_config.cmd runs it in WSL before a launcher acts")
     sub.add_parser("show", help="print every key with its WSL and Windows form")
     g = sub.add_parser("get", help="print one value (WSL form unless a flag says otherwise)")
     g.add_argument("key")
@@ -567,12 +871,32 @@ def main(argv=None) -> int:
     c = sub.add_parser("check", help="validate the config on this machine (reads only)")
     c.add_argument("--cmd", dest="with_cmd", action="store_true",
                    help="also run tools/launch/dd_local_config.cmd /print through cmd.exe and compare")
+    w = sub.add_parser("check-write", help="print the resolved path if the write boundary allows writing there, "
+                       "else the refusal (exit 1); for shell scripts")
+    w.add_argument("path")
+    w.add_argument("--root", action="append", default=None,
+                   help="a narrower root the path must also lie under (repeatable)")
     for p in sub.choices.values():
         p.add_argument("--config", default=None, help="this file instead of the lookup order")
     args = ap.parse_args(argv)
+    if args.command == "check-write":
+        try:
+            if args.config:
+                with override(load(args.config)):
+                    print(check_write(args.path, args.root))
+            else:
+                print(check_write(args.path, args.root))
+        except (WriteRefused, LocalConfigError) as exc:
+            print("local_config: %s" % exc, file=sys.stderr)
+            return 1
+        return 0
     try:
         if args.command == "where":
             print(load(args.config).path if args.config else find())
+            return 0
+        if args.command == "validate":
+            cfg = load(args.config)
+            print("local config %s: valid (%d keys)" % (cfg.path, len(cfg.values)))
             return 0
         cfg = load(args.config)
         if args.command == "render":

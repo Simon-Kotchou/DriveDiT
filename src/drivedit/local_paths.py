@@ -5,16 +5,22 @@ config, ``drivedit.local.env``, read by the repository's ``tools/local_config.py
 uses too (its lookup order and format are documented there). The package runs from the source tree, so the loader is
 found by path, and nothing is read before a value is asked for. A missing config or key raises ``LocalPathsError``,
 which names the file and the key; no path is ever guessed.
+
+The package writes through the same write boundary as every tool: ``check_write`` is the loader's ``check_write``
+(RAM, or the verified drive of DATA_ROOT; never a volume whose root holds Windows/System32; caller roots only narrow
+it), so there is one implementation, driven by one table of test vectors
+(``tests/fixtures/local_config/boundary_vectors.py``) through both entry points.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
-__all__ = ["LOADER", "LocalPathsError", "drive", "value"]
+__all__ = ["LOADER", "LocalPathsError", "WriteRefusedError", "check_write", "drive", "value"]
 
 # src/drivedit/local_paths.py -> the repository root, two levels above the package.
 LOADER = Path(__file__).resolve().parents[2] / "tools" / "local_config.py"
@@ -23,6 +29,10 @@ _MODULE = "dd_local_config"
 
 class LocalPathsError(RuntimeError):
     """The local config is missing or malformed, or lacks the key asked for."""
+
+
+class WriteRefusedError(LocalPathsError):
+    """The write boundary refuses a destination (the message says why)."""
 
 
 def _loader() -> ModuleType:
@@ -56,3 +66,13 @@ def value(key: str) -> str:
 def drive(key: str) -> str:
     """The drive mount (``/mnt/<x>``) of a path key of the local config."""
     return _call("drive", key)
+
+
+def check_write(path: str | Path, roots: Sequence[str | Path] | None = None) -> str:
+    """The resolved destination when the write boundary allows writing to ``path``; ``WriteRefusedError`` otherwise.
+    ``roots`` (the caller's own roots) can only narrow the boundary."""
+    module = _loader()
+    try:
+        return str(module.check_write(str(path), None if roots is None else [str(r) for r in roots]))
+    except module.WriteRefused as exc:
+        raise WriteRefusedError(str(exc)) from exc

@@ -48,7 +48,9 @@ Windows: the scored rows run from an event's onset to its end; the rows before a
 starts at the measured output of the row before the onset, the D_MAX engine steps of commands before feed the delay),
 so no row is scored twice. Every output is measured from its run's hold baseline (command 0 at speed). An event
 counts in a bin only when its mean measured speed is within SPEED_BIN_SHARE of the bin speed.
-Split: whole doublets (+A then -A), alternating train / held-out, so both sets hold both signs.
+Split: whole doublets (events 2k and 2k + 1: +A and -A in either order, the producer picks the order that keeps the
+car near the centre line), alternating train / held-out, so both sets hold both signs. The producer's heading trims
+(segment trim, event_idx -1) lie between doublets, outside every event window: never scored, never a history row.
 Gain: closed form for the linear structures; for a clamped M3 / M4 the gain is optimised against the full nonlinear
 simulation (golden section around the closed-form start) wherever the parameters are refined.
 Fit: a grid over d (0..D_MAX) and tau; joint grids of tau with R (M3) or sigma (M4); coordinate descent; golden-section

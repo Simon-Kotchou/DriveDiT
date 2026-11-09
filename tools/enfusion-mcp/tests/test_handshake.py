@@ -308,7 +308,7 @@ class IndexDiffTests(PinCase):
         self.addCleanup(shutil.rmtree, outside, True)
         link = os.path.join(self.tmp, "link")
         os.symlink(outside, link)
-        for tsv in ("/mnt/z/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
+        for tsv in ("/mnt/z/Synthetic Steam (x86)/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
             self.assertEqual(self.diff(expect, "--tsv", tsv)[0], 2, tsv)
         cwd = os.getcwd()
         os.chdir(outside)
@@ -571,10 +571,10 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "no Workbench exe hash", dict(self.ident, exe_sha256=None))
 
     def test_another_profile_or_project(self):
-        cmd = '"%s" -profile "Y:\\OneDrive\\ArmaReforgerWorkbench" -gproj "%s" -dcLaunchId %s' % (
+        cmd = '"%s" -profile "Y:\\Game Library\\OneDrive\\ArmaReforgerWorkbench" -gproj "%s" -dcLaunchId %s' % (
             self.exe, self.gproj, self.LID)
         self.refused(self.probes(cmd=cmd), "-profile is")
-        cmd = '"%s" -profile "%s" -gproj "Y:\\DataTest\\addon.gproj" -dcLaunchId %s' % (self.exe, self.profile, self.LID)
+        cmd = '"%s" -profile "%s" -gproj "Y:\\Game Library\\DataTest\\addon.gproj" -dcLaunchId %s' % (self.exe, self.profile, self.LID)
         self.refused(self.probes(cmd=cmd), "-gproj is")
 
     def test_started_by_hand(self):
@@ -611,7 +611,7 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "0 console.log(s)")
         self.write_log(gproj=os.path.join(self.tmp, "other.gproj"))
         self.refused(self.probes(), "names another -gproj")
-        self.write_log(cwd="Z:\\Elsewhere\\Workbench\\")
+        self.write_log(cwd="Z:\\Synthetic Steam (x86)\\Elsewhere\\Workbench\\")
         self.refused(self.probes(), "has working directory")
         self.write_log()
         self.write_log(name="logs_2026-11-05_22-25-00", start=REC_UNIX + 30)
@@ -643,10 +643,10 @@ class HandshakeTests(PinCase):
         with self.assertRaises(OSError):   # a temp dir off the data drive is refused before cscript runs
             eh.WindowsProbes(win_temp=self.tmp).check_env()
         # DD-22: the Windows tools and the temp dir come from the local config
-        self.assertEqual((p.netstat, p.cscript), ("/mnt/z/Windows/System32/NETSTAT.EXE",
-                                                  "/mnt/z/Windows/System32/cscript.exe"))
+        self.assertEqual((p.netstat, p.cscript), (base.SYSTEM_DRIVE + "/Windows/System32/NETSTAT.EXE",
+                                                  base.SYSTEM_DRIVE + "/Windows/System32/cscript.exe"))
         self.assertEqual(eh.MCP_WIN_TEMP, "/mnt/x/DataRoot/tmp/mcp")
-        self.assertEqual(eh.IPCONFIG, "/mnt/z/Windows/System32/ipconfig.exe")
+        self.assertEqual(eh.IPCONFIG, base.SYSTEM_DRIVE + "/Windows/System32/ipconfig.exe")
 
     def test_cli_main_reads_only(self):
         before = sorted(os.listdir(self.pin_dir))
@@ -660,9 +660,9 @@ class HandshakeTests(PinCase):
         self.assertEqual(sorted(os.listdir(self.pin_dir)), before)
 
     def test_parsing(self):
-        argv = eh.split_cmdline('"Z:\\Program Files (x86)\\x.exe" -profile "X:\\a b" -forceUpdate -maxFPS 60 -dcLaunchId X')
-        self.assertEqual(argv[0], "Z:\\Program Files (x86)\\x.exe")
-        self.assertEqual(eh.cli_args(argv[1:]), {"profile": "X:\\a b", "forceupdate": "", "maxfps": "60",
+        argv = eh.split_cmdline('"Z:\\Synthetic Steam (x86)\\x.exe" -profile "X:\\DataRoot\\a b" -forceUpdate -maxFPS 60 -dcLaunchId X')
+        self.assertEqual(argv[0], "Z:\\Synthetic Steam (x86)\\x.exe")
+        self.assertEqual(eh.cli_args(argv[1:]), {"profile": "X:\\DataRoot\\a b", "forceupdate": "", "maxfps": "60",
                                                  "dclaunchid": "X"})
         self.assertEqual(eh.listening_pids("  TCP    0.0.0.0:57750   0.0.0.0:0   LISTENING   9\n"
                                            "  TCP    [::]:5775       [::]:0      LISTENING   7\n", 5775), {7})
@@ -917,11 +917,8 @@ class WrapperTests(PinCase):
         self.assertEqual(subprocess.run(["bash", "-n", self.WRAPPER]).returncode, 0)
 
     def test_print_env_runs_the_gate(self):
-        # The wrapper accepts a work root only on a Windows drive other than the system drive (the fixture's is
-        # /mnt/z), so this runs only with DD_PIN_TEST_TMP on such a drive.
-        real = os.path.realpath(self.tmp)
-        if not re.match(r"^/mnt/[a-y]/", real):
-            self.skipTest("temp dir is not on a /mnt/<drive> other than the fixture's system drive")
+        # The wrapper accepts a work root the write boundary allows: RAM here (the synthetic config's drives are
+        # mounted nowhere).
         dist = os.path.join(self.root, "build", "enfusion-mcp-BK", "dist")
         os.makedirs(os.path.join(dist, "workbench"))
         os.makedirs(os.path.join(dist, "tools"))
@@ -937,6 +934,66 @@ class WrapperTests(PinCase):
         self.assertIn("REFUSED", r.stderr)
         self.assertIn("has no API index", r.stderr)
         self.assertEqual(r.stdout, "")
+
+
+class LazyPinToolsTests(unittest.TestCase):
+    """Codex round 2 row 15: importing endpoint_handshake (and mcp_gate) in an installed MCP layout reads no config;
+    tools/pin is found on first use."""
+
+    def test_import_reads_no_config(self):
+        tmp = tempfile.mkdtemp(prefix="dd22-lazy-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        installed = os.path.join(tmp, "mcp")   # no tools/pin next to it, no local_config.py
+        os.makedirs(installed)
+        shutil.copyfile(os.path.join(EMCP, "endpoint_handshake.py"), os.path.join(installed, "endpoint_handshake.py"))
+        code = ("import importlib.util, sys\n"
+                "spec = importlib.util.spec_from_file_location('eh_lazy', sys.argv[1])\n"
+                "eh = importlib.util.module_from_spec(spec); spec.loader.exec_module(eh)\n"
+                "print('imported')\n"
+                "try:\n    eh.pinlib.PinError\nexcept SystemExit as exc:\n    print('first use:', exc)\n")
+        env = {k: v for k, v in os.environ.items() if k != "DD_PIN_TOOLS"}
+        env["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(tmp, "no-such.local.env")
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code, os.path.join(installed, "endpoint_handshake.py")],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[0], "imported")
+        self.assertIn("first use: endpoint_handshake: cannot find tools/pin", r.stdout)
+
+    def test_the_lazy_modules_are_the_pin_tools(self):
+        self.assertIs(eh.pinlib.PinError, pinlib.PinError)
+        self.assertIs(gate_mod.pinlib.check_write_path, pinlib.check_write_path)
+
+
+class ShellGuardTests(unittest.TestCase):
+    """The MCP shell scripts write only where the write boundary allows (tools/local_config.py check-write), and
+    launch-workbench.sh has no way around the pin preflight (Codex round 2 rows 2, 14)."""
+
+    def run_script(self, name, *args, **env):
+        e = {"PATH": "/usr/bin:/bin", "HOME": "/dev/shm", "DRIVEDIT_LOCAL_CONFIG": base.LOCAL_CONFIG_FIXTURE}
+        e.update(env)
+        return subprocess.run(["bash", os.path.join(EMCP, name)] + list(args), env=e, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_work_roots_off_the_boundary_are_refused(self):
+        never = "/tmp/__dd22_emcp_never_written__"
+        for name in ("enfusion-mcp-wsl.sh", "build-bk.sh"):
+            for root in (never, "relative/root", base.SYSTEM_DRIVE + "/mcp", base.DATA_DRIVE + "mcp"):
+                r = self.run_script(name, "--print-env" if name.startswith("enfusion") else "--smoke",
+                                    EMCP_ROOT=root)
+                self.assertEqual(r.returncode, 2, (name, root, r.stderr))
+                self.assertIn("refusing EMCP_ROOT=%s" % root, r.stderr)
+        self.assertFalse(os.path.exists(never))
+
+    def test_launch_workbench_has_no_preflight_bypass(self):
+        with open(os.path.join(EMCP, "launch-workbench.sh")) as fh:
+            code = [ln for ln in fh.read().splitlines() if not ln.lstrip().startswith("#")]
+        self.assertFalse([ln for ln in code if "SKIP" in ln])
+        # a gproj off the boundary (the repo's own, on a drive the synthetic config does not verify) is refused
+        # before tasklist, the preflight or Workbench is touched
+        gproj = os.path.join(REPO, "addons", "DataCapture", "addon.gproj")
+        r = self.run_script("launch-workbench.sh", gproj, WB_SKIP_PREFLIGHT="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("refusing gproj", r.stderr)
 
 
 if __name__ == "__main__":

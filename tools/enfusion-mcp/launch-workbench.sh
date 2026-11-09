@@ -10,10 +10,11 @@
 #   default GPROJ: <DATA_ROOT>/addons/DataCapture/addon.gproj (re-homed capture addon; handlers live inside it)
 #   Added unless the extra args already carry them: -profile "<DATA_ROOT>\wb_profile" (WB_PROFILE_WIN overrides),
 #   -forceUpdate, -maxFPS 60 (the wb_R1.bat arguments).
-# DD-22: <DATA_ROOT>, the installs (GAME_INSTALL, TOOLS_INSTALL) and the system drive (SYSTEM_DRIVE) come from the
-# local config (tools/local_config.py), the file wb_R1.bat reads too; without it nothing is started.
+# DD-22: <DATA_ROOT>, the installs (GAME_INSTALL, TOOLS_INSTALL) and the system drive (SYSTEM_DRIVE, for tasklist.exe
+# only) come from the local config (tools/local_config.py), the file wb_R1.bat reads too; without it nothing starts.
 #
-# Refuses (exit 1): a GPROJ or -profile on the system drive or on the WSL disk (Workbench writes .meta files and
+# Refuses (exit 1): a GPROJ, -profile or pin dir the write boundary refuses (tools/local_config.py check-write: only
+# the verified data drive or RAM; never the system drive or the WSL disk. Workbench writes .meta files and
 # resourceDatabase.rdb into the opened project, and logs/captures into the profile); a running Workbench;
 # tasklist.exe not runnable; no active pin; a failed pin preflight. The preflight is
 # <DATA_ROOT>/tools/pin/preflight.py --pin-active --pin-dir <DATA_ROOT>/pin --exe wb (WB_PREFLIGHT and
@@ -27,7 +28,7 @@
 # Like wb_R1.bat, it starts Workbench only if the preflight's stdout is exactly one launch id
 # (YYYYMMDDTHHMMSSZ-wb-xxxx) and <pin dir>/launches/launch_<id>.json exists. The preflight runs on
 # /usr/bin/python3, the interpreter the .bat launchers use, not whatever python3 PATH holds.
-# Until DD-0 is deployed, WB_SKIP_PREFLIGHT=1 launches without the pin check (it says so loudly).
+# There is no launch without the preflight and its launch record (the WB_SKIP_PREFLIGHT bypass is gone, DD-22).
 #
 # Windows-side equivalent (PowerShell), same arguments, no preflight (values from the local config):
 #   Start-Process -WorkingDirectory "<TOOLS_INSTALL>\Workbench" `
@@ -35,6 +36,7 @@
 #     -ArgumentList '-profile','"<DATA_ROOT>\wb_profile"','-gproj','"<DATA_ROOT>\addons\DataCapture\addon.gproj"','-forceUpdate','-maxFPS','60'
 set -euo pipefail
 
+NAME=launch-workbench
 die() { echo "launch-workbench: $*" >&2; exit 1; }
 # DD-22: this machine's paths come from the untracked local config (tools/local_config.py, drivedit.local.env).
 # An installed MCP root holds a copy of local_config.py next to this script; tell it the file with
@@ -53,16 +55,19 @@ DATA_ROOT_WIN="$(local_config DATA_ROOT --win)" || die "no local config (see the
 DATA_DRIVE="$(local_config DATA_ROOT --drive)" || die "no local config (see the message above)"
 TOOLS_INSTALL="$(local_config TOOLS_INSTALL)" || die "no TOOLS_INSTALL in the local config (see above)"
 GAME_INSTALL="$(local_config GAME_INSTALL)" || die "no GAME_INSTALL in the local config (see above)"
-SYSTEM_DRIVE="$(local_config SYSTEM_DRIVE)" || die "no SYSTEM_DRIVE in the local config (see above)"
-off_c_drive() {   # absolute WSL path that resolves onto a Windows drive other than the system drive
-  local r="" re='^/mnt/[a-z](/|$)'
-  [[ "${1:-}" == /* ]] || return 1
-  r="$(realpath -m -- "$1" 2>/dev/null)" || return 1
-  [[ "$r" =~ $re && "${r:0:6}" != "$SYSTEM_DRIVE" ]]
+SYSTEM_DRIVE="$(local_config SYSTEM_DRIVE)" || die "no SYSTEM_DRIVE in the local config (see above)"   # tasklist.exe only
+# Every path Workbench or the preflight writes under goes through the write boundary.
+write_ok() {   # write_ok PATH: print the resolved path when the write boundary allows writing there, else fail
+  # (tools/local_config.py check-write: RAM or the verified data drive, never a volume whose root holds
+  # Windows/System32, whatever the config says). A relative path is refused: it would resolve against the cwd.
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  [[ "${1:-}" == /* ]] || { echo "$NAME: '${1:-}' is not an absolute path" >&2; return 1; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" check-write "$1"
 }
-win_off_c_drive() {   # Windows drive path X:\... with X not the system drive
-  local d="${1:0:1}"
-  [[ "${1:1:2}" == ':\' && "$d" == [[:alpha:]] && "${d,,}" != "${SYSTEM_DRIVE: -1}" ]]
+win_write_ok() {   # a Windows drive path X:\... whose WSL form /mnt/x/... passes write_ok
+  [[ "${1:1:2}" == ':\' && "${1:0:1}" == [[:alpha:]] ]] || return 1
+  local drive="${1:0:1}" rest="${1:3}"
+  write_ok "/mnt/${drive,,}/${rest//\\//}" >/dev/null
 }
 
 WB_DIR="$TOOLS_INSTALL/Workbench"
@@ -85,7 +90,7 @@ if [[ $# -gt 0 && "$1" != "--" ]]; then GPROJ="$1"; shift; fi
 EXTRA=("$@")
 
 [[ -f "$GPROJ" ]] || die "no such gproj: $GPROJ"
-off_c_drive "$GPROJ" || die "refusing gproj $GPROJ: Workbench writes into the opened project; it must be an absolute path off the system drive"
+write_ok "$GPROJ" >/dev/null || die "refusing gproj $GPROJ: Workbench writes into the opened project, and the write boundary refuses it (see above)"
 [[ -f "$WB_EXE" ]] || die "Workbench exe not found: $WB_EXE"
 [[ -f "$GAME_ADDONS/data/ArmaReforger.gproj" ]] || die "game addons not found: $GAME_ADDONS/data/ArmaReforger.gproj"
 
@@ -93,7 +98,7 @@ off_c_drive "$GPROJ" || die "refusing gproj $GPROJ: Workbench writes into the op
 has_arg() { local a; for a in "${EXTRA[@]}"; do [[ "$a" == "$1" ]] && return 0; done; return 1; }
 PROFILE="$PROFILE_WIN"
 for i in "${!EXTRA[@]}"; do [[ "${EXTRA[$i]}" == "-profile" ]] && PROFILE="${EXTRA[$((i + 1))]:-}"; done
-win_off_c_drive "$PROFILE" || die "refusing -profile '$PROFILE': Workbench writes logs and captures there; use a Windows path off the system drive"
+win_write_ok "$PROFILE" || die "refusing -profile '$PROFILE': Workbench writes logs and captures there; it must be a Windows drive path the write boundary allows"
 ARGS=()
 has_arg -profile || ARGS+=(-profile "$PROFILE_WIN")
 ARGS+=(-gproj "$(wslpath -w "$GPROJ")")
@@ -112,28 +117,24 @@ if grep -qiF "\"$WB_IMAGE\"" <<<"$TL"; then
   die "Workbench is already running - close it first (this script never kills it)."
 fi
 
-# Build-pin preflight (DD-0 / capture program TKT-0): refuses on any drift from the ACTIVE pin.
-if [[ "${WB_SKIP_PREFLIGHT:-0}" == "1" ]]; then
-  echo "launch-workbench: WARNING: WB_SKIP_PREFLIGHT=1 - the build pin is NOT checked for this launch" >&2
-else
-  [[ -f "$PREFLIGHT" ]] \
-    || die "pin preflight not deployed ($PREFLIGHT). Deploy DD-0, use wb_R1.bat, or set WB_SKIP_PREFLIGHT=1 knowingly."
-  off_c_drive "$PIN_DIR" \
-    || die "refusing pin dir $PIN_DIR: the preflight writes its launch record under it; use an absolute path off the system drive"
-  [[ -e "$PIN_DIR/ACTIVE" || -L "$PIN_DIR/ACTIVE" ]] \
-    || die "no active pin ($PIN_DIR/ACTIVE is missing). Activate one with: $PY -I -B $(dirname "$PREFLIGHT")/pin_activate.py <pin id>"
-  [[ -x "$PY" ]] || die "cannot run $PY, so the pin cannot be checked; Workbench not started."
-  LID="$(cd "$DATA_DRIVE" && DRIVEDIT_LOCAL_CONFIG="$(/usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" where)" \
-         "$PY" -I -B "$PREFLIGHT" --pin-active --pin-dir "$PIN_DIR" --exe wb)" \
-    || die "PIN CHECK FAILED; Workbench not started (preflight messages above)."
-  [[ -n "$LID" ]] || die "PIN CHECK FAILED: the preflight printed no launch id; Workbench not started."
-  [[ "$LID" =~ ^[0-9]{8}T[0-9]{6}Z-wb-[0-9a-f]{4}$ ]] \
-    || die "PIN CHECK FAILED: the preflight output is not exactly one launch id; Workbench not started."
-  REC="$PIN_DIR/launches/launch_$LID.json"
-  [[ -f "$REC" && ! -L "$REC" ]] \
-    || die "PIN CHECK FAILED: no launch record $REC; a launch id alone is not proof the check passed. Workbench not started."
-  echo "pin OK, launch id $LID" >&2
-fi
+# Build-pin preflight (DD-0 / capture program TKT-0): refuses on any drift from the ACTIVE pin. Every launch runs it
+# and needs its launch record; there is no way around it.
+[[ -f "$PREFLIGHT" ]] || die "pin preflight not deployed ($PREFLIGHT). Deploy DD-0 or use wb_R1.bat; Workbench not started."
+write_ok "$PIN_DIR" >/dev/null \
+  || die "refusing pin dir $PIN_DIR: the preflight writes its launch record under it, and the write boundary refuses it"
+[[ -e "$PIN_DIR/ACTIVE" || -L "$PIN_DIR/ACTIVE" ]] \
+  || die "no active pin ($PIN_DIR/ACTIVE is missing). Activate one with: $PY -I -B $(dirname "$PREFLIGHT")/pin_activate.py <pin id>"
+[[ -x "$PY" ]] || die "cannot run $PY, so the pin cannot be checked; Workbench not started."
+LID="$(cd "$DATA_DRIVE" && DRIVEDIT_LOCAL_CONFIG="$(/usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" where)" \
+       "$PY" -I -B "$PREFLIGHT" --pin-active --pin-dir "$PIN_DIR" --exe wb)" \
+  || die "PIN CHECK FAILED; Workbench not started (preflight messages above)."
+[[ -n "$LID" ]] || die "PIN CHECK FAILED: the preflight printed no launch id; Workbench not started."
+[[ "$LID" =~ ^[0-9]{8}T[0-9]{6}Z-wb-[0-9a-f]{4}$ ]] \
+  || die "PIN CHECK FAILED: the preflight output is not exactly one launch id; Workbench not started."
+REC="$PIN_DIR/launches/launch_$LID.json"
+[[ -f "$REC" && ! -L "$REC" ]] \
+  || die "PIN CHECK FAILED: no launch record $REC; a launch id alone is not proof the check passed. Workbench not started."
+echo "pin OK, launch id $LID" >&2
 
 # CWD = Workbench dir, exactly like the Steam launch (console.log: 'Current working directory:
 # <TOOLS_INSTALL>\Workbench\'); that dir's

@@ -72,11 +72,16 @@ class GateRefusal(Exception):
     pass
 
 
+def default_root(env: dict) -> str:
+    """The MCP work root: EMCP_ROOT, else <REALIGN_ROOT>/mcp of the local config (DD-22); PinError without it."""
+    return os.path.realpath(env.get("EMCP_ROOT") or pinlib.local_path("REALIGN_ROOT") + "/mcp")
+
+
 def resolve_config(env: dict) -> dict:
     """The pin, data dir, project root and install paths for this session; GateRefusal on any mismatch."""
     try:
         # DD-22: the MCP root defaults to <REALIGN_ROOT>/mcp and the pin dir to <DATA_ROOT>/pin, both of the local config.
-        root = os.path.realpath(env.get("EMCP_ROOT") or pinlib.local_path("REALIGN_ROOT") + "/mcp")
+        root = default_root(env)
         pin_dir = os.path.abspath(pinlib.win_to_wsl(env.get("EMCP_PIN_DIR") or pinlib.DEFAULT_PIN_DIR))
         if env.get("EMCP_PIN"):
             src = preflight.load_pin_by_id(pin_dir, pinlib.validate_pin_id(env["EMCP_PIN"]))

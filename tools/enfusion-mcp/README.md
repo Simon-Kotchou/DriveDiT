@@ -7,9 +7,11 @@ under WSL NAT), and it has no WSL path handling.
 
 Every write goes to the data drive. The system drive is never written (a project rule), and the WSL disk (`~`, `/tmp`,
 `/var`, ...) lives on it by default.
-The scripts accept a work root, project path, `.gproj` or Workbench profile only as an absolute path that resolves onto a
-drive other than the system drive (`/mnt/<x>/...`, or `<X>:\...` for the profile). Relative paths are refused as well:
-Claude Code starts the wrapper with its own cwd, its project folder.
+The scripts accept a work root, project path, `.gproj`, pin dir or Workbench profile only where the write boundary of
+`tools/local_config.py` allows (`local_config.py check-write PATH`, the same check every Python writer uses): the
+data drive of the local config, verified in `/proc/self/mountinfo` as that drive's own mount, or RAM (`/dev/shm`);
+never a volume whose root holds `Windows/System32`, whatever the config says (`SYSTEM_DRIVE` only words the refusal).
+Relative paths are refused as well: Claude Code starts the wrapper with its own cwd, its project folder.
 
 **Local paths (DD-22).** `<REALIGN_ROOT>`, `<DATA_ROOT>`, `<GAME_INSTALL>`, `<TOOLS_INSTALL>` and the system drive are
 keys of the machine's untracked local config `drivedit.local.env` (`<KEY_WIN>`: the Windows form), read through
@@ -82,6 +84,18 @@ bash <REALIGN_ROOT>/mcp/build-bk.sh --smoke    # expect serverInfo {name: enfusi
 ```
 
 Re-running either command is safe. To move the pin, see the last section.
+
+**When the build copy is reset (DD-22).** `build-bk.sh` never discards edits it cannot prove are its own. Before it
+applies the guard patches it compares the build copy's tracked files with three trees, each built in a scratch index
+under `$EMCP_ROOT/tmp`: the pinned commit, the pinned commit plus the current patches, and the pinned commit plus
+the *previous* patch set (the patches the last build applied: copies in `build/applied-patches/`, named by
+`build/applied-patches.list`, which every build writes). A clean copy gets the patches; a copy that already holds them
+is left alone; a copy that holds exactly the previous patch set is reset to the pin (`checkout -f`, after
+`git apply -R --check` of those patches and the tree comparison prove that the difference is theirs; untracked
+`node_modules/` and `dist/` stay). Anything else refuses and touches nothing: HEAD at another commit, staged
+changes, or any other edit. A build copy made before the record existed (its patches in the old wording) needs the
+old patch files once: `EMCP_PREVIOUS_PATCHES=<old bk-wsl-guard.patch>:<old 20-bk-mod-build-guard.patch>`, for example
+exported with `git show <last pre-DD-22 main commit>:tools/enfusion-mcp/patches/<name>` into the MCP root's `tmp/`.
 
 What the build redirects, and where to:
 
@@ -250,8 +264,7 @@ Then copy `mcp_gate.py`, `endpoint_handshake.py`, `bk_tools.py`, `wb_proc.js`, `
    - **preferred:** DD-0's `<DATA_ROOT_WIN>\tools\launch\wb_R1.bat` (pin preflight against the active pin + pinned arguments);
    - **from WSL (Steam running):** `bash <REALIGN_ROOT>/mcp/launch-workbench.sh`. It runs the same preflight
      (`--pin-active`, the pin named by `<DATA_ROOT_WIN>\pin\ACTIVE`) and refuses if DD-0 is not deployed yet or no pin is
-     active. Only before DD-0 is deployed, and knowing the build is unchecked:
-     `WB_SKIP_PREFLIGHT=1 bash <REALIGN_ROOT>/mcp/launch-workbench.sh`.
+     active. There is no launch without the preflight and its launch record (DD-22 removed `WB_SKIP_PREFLIGHT`).
 
    Do **not** launch from the Steam library or set Steam launch options: the capture program forbids library launches for
    the whole campaign (`CAPTURE_PROGRAM.md` §4.2 item 2, §7.1), and Steam would write its config on the system drive.

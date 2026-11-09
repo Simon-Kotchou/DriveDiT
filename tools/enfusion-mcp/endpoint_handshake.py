@@ -105,7 +105,34 @@ def load_pin_tools():
     raise SystemExit("endpoint_handshake: cannot find tools/pin (set DD_PIN_TOOLS)")
 
 
-pinlib, preflight = load_pin_tools()
+class _LazyPinModule:
+    """pinlib or preflight of tools/pin, loaded on first use (load_pin_tools): importing this module (or mcp_gate,
+    which shares these) reads no config, also in an installed MCP root whose tools/pin is found through DATA_ROOT.
+    Attribute reads, assignments and deletions go to the real module."""
+
+    def __init__(self, index: int):
+        self.__dict__["_index"] = index
+
+    def __getattr__(self, name: str):
+        return getattr(_pin_tools()[self.__dict__["_index"]], name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(_pin_tools()[self.__dict__["_index"]], name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(_pin_tools()[self.__dict__["_index"]], name)
+
+
+_PIN_TOOLS: list = []
+
+
+def _pin_tools() -> list:
+    if not _PIN_TOOLS:
+        _PIN_TOOLS.extend(load_pin_tools())
+    return _PIN_TOOLS
+
+
+pinlib, preflight = _LazyPinModule(0), _LazyPinModule(1)
 
 
 def system32(exe: str) -> str:

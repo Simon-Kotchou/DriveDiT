@@ -616,5 +616,91 @@ class FirstPlay19Tests(unittest.TestCase):
         self.assertIn('full.AppendHeaderLines(lines, "site.cross_full");', selfsteer)
 
 
+    # --- Codex review of PR #29: interrupted searches, the cap, the search time, trims in a history -----------
+    def test_a_search_cut_short_still_writes_what_it_saw(self):
+        base = read(ts.BASE_SOURCE)
+        stop = base[base.index("override void OnProbeStop("):]
+        stop = stop[:stop.index("m_Ctx = null;")]
+        # every stop reason, before the context goes: the snapshot of every search
+        self.assertRegex(stop, r"if \(m_eSegment == DC_ESteerSegment\.SEARCH && !m_bProbeDone\)\s*"
+                               r"AppendSearchSnapshot\(reason\);")
+        self.assertLess(stop.index("AppendSearchSnapshot(reason);"), stop.index("if (reason != DC_ProbeRunner.REASON_DELETE)"))
+        snap = base[base.index("protected void AppendSearchSnapshot("):]
+        snap = snap[:snap.index("protected bool RefuseStart(")]
+        for needle in ('"site.search_stopped=" + reason', "search.NoteProbeStop(reason);",
+                       'search.AppendHeaderLines(lines, "site." + kind);', "m_Ctx.AppendHeaderLines(lines)"):
+            self.assertIn(needle, snap)
+        sites = read(ts.SITE_SOURCE)
+        header = sites[sites.index("void AppendHeaderLines(notnull array<string> lines, string prefix)\n\t{\n\t\t"
+                                   "lines.Insert(prefix + \".kind=\""):]
+        for key in ('"rejects="', '"first_terrain_reject="', '"first_explicit_reject="', '"near_miss="',
+                    '"grid_total="', '"strips_capped="', '"grid_complete="', '"status="', '"stage="', '"pending="'):
+            self.assertIn(key, header)
+        status = sites[sites.index("string GetStatus()"):]
+        self.assertRegex(status[:300], r"if \(!m_sStopReason\.IsEmpty\(\)\)\s*return m_sStopReason;")
+
+    def test_grid_complete_needs_every_heading_under_the_cap(self):
+        sites = read(ts.SITE_SOURCE)
+        add = sites[sites.index("protected void AddCentredStrip("):]
+        self.assertRegex(add[:300], r"if \(m_iStrips >= m_iMaxStrips\)\s*\{\s*m_iStripsCapped\+\+;\s*return;")
+        complete = sites[sites.index("bool IsGridComplete()"):]
+        self.assertIn("m_bGrid && m_bGridDone && m_iGridCursor >= total && m_iStripsCapped == 0 && "
+                      "m_sStopReason.IsEmpty()", complete[:400])
+        self.assertIn('"grid_complete=" + DC_LaunchGuard.BoolText(IsGridComplete())', sites)
+
+    def test_the_search_time_is_capped_inside_e21s_timeout(self):
+        base = read(ts.BASE_SOURCE)
+        selfsteer = read(ts.SELF_SOURCE)
+        cap = float(attribute_default(base, "m_fSiteSearchMaxS"))
+        steps = base[base.index("protected void StepSearches()"):]
+        steps = steps[:steps.index("OnSearchesDone()")]
+        self.assertLess(steps.index('capped.StopSearch("time_cap");'), steps.index("m_Budget.Reset("))
+        self.assertIn("now - m_fSearchStartMs > m_fSiteSearchMaxS * 1000", steps)
+        self.assertRegex(selfsteer, r"if \(m_bSearchTimeCapped\)\s*return false;")
+        timeout = float(re.search(r"TIMEOUT_E21_S = (\d+)", selfsteer).group(1))
+        # the Play's four flat phases, measured; the two cross phases at the full lengths, estimated from the
+        # distances (run-up + held + no-call), a 3 s settle, the accel at the Play's 1.55 m/s2 and the stop
+        flat = sum(num(p, "end_world_ms") - num(p, "start_world_ms") for p in fixture_rows("e21_phases.csv")
+                   if p["kind"] == "flat") / 1000.0
+        layer = read(os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC_Probes_Arland_Layers",
+                                  "default.layer"))
+        distance = sum(float(re.search(r"%s (\S+)" % key, layer).group(1))
+                       for key in ("m_fCrossRunupM", "m_fCrossHeldM", "m_fCrossNocallM"))
+        cross = sum(3.0 + (v / 3.6) / 1.55 + distance / (v / 3.6) + 1.0 for v in (20.0, 40.0))
+        print("e21: search cap %.0f s + flat %.1f s + cross %.1f s = %.1f s of %.0f" % (
+            cap, flat, cross, cap + flat + cross, timeout))
+        self.assertLess(cap + flat + cross + 10.0, timeout)
+        # the budget is per render frame: the Play's fallback cross search made 497 frames in about 9 s
+        cross_header = fixture_kv("e21_site_header.txt")
+        self.assertEqual(cross_header["site.cross.search.calls"], "497")
+        self.assertIn("RENDER frames (the probe's OnProbeFrame, EOnFrame)", read(ts.SITE_SOURCE))
+
+    def test_an_event_with_a_trim_in_its_history_is_left_out(self):
+        play = ts.build_e23(self.path("e23", "play_01"), grid="10:0.5x6")
+        steps_path = os.path.join(play, "e23_steps.csv")
+        with open(steps_path, "r", encoding="ascii", newline="") as handle:
+            rows = list(csv.reader(handle))
+        events = fixture_rows_from(os.path.join(play, "e23_events.csv"))
+        onset = int(events[2]["onset_step"])
+        col_step, col_segment = rows[0].index("physics_step"), rows[0].index("segment")
+        for row in rows[1:]:
+            if onset - 4 <= int(row[col_step]) <= onset - 2:      # inside the D_MAX history of event 2
+                row[col_segment] = "trim"
+        with open(steps_path, "w", encoding="ascii", newline="") as handle:
+            csv.writer(handle, lineterminator="\n").writerows(rows)
+        p = probe_common.Play(play)
+        steps = steer_common.load_steps(p, "e23")
+        bins, dropped, gaps = e23.event_windows(steps, events, "input", None, None, DT)
+        # event 2 (the trim in its D_MAX history) and event 1 (the trim in its scored gap) are both left out
+        self.assertEqual(dropped.get("trim_history"), 2, dropped)
+        self.assertEqual(sum(len(w) for w in bins.values()), len(events) - 2)
+        self.assertGreater(float(attribute_default(read(ts.STEPS_SOURCE), "m_fStepOffS")) / DT, e23.D_MAX)
+
+
+def fixture_rows_from(path):
+    with open(path, "r", encoding="ascii", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 if __name__ == "__main__":
     unittest.main()

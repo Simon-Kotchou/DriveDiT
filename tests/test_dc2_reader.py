@@ -34,6 +34,11 @@ import zlib
 import numpy
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 FIXTURES = os.path.join(REPO, "tests", "fixtures", "capture_dc2")
 GOLDEN_ID = "arland_T0b_20261025T091512Z_wb_i00_5e00"
 GOLDEN_DIR = os.path.join(FIXTURES, "golden", GOLDEN_ID)
@@ -59,14 +64,8 @@ synth = load("dc2_make_synthetic", "tests/fixtures/capture_dc2/make_synthetic.py
 os.environ["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
 
 def temp_dir(prefix):
-    """A new directory under $TMPDIR when that is on /dev/shm/, else under /dev/shm/ (never /tmp, which
-    is on the system drive here). The caller removes it."""
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
-        base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/")
-    return tempfile.mkdtemp(prefix=prefix, dir=base)
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py); skipped where the write boundary refuses RAM."""
+    return scratch.mkdtemp(prefix, real_boundary=True)
 
 
 def png_content(data):
@@ -806,6 +805,27 @@ class DefectTest(unittest.TestCase):
         s = reader.open_session(golden_source(), vehicle_card=card, decode_images=False, strict=False)
         self.assertIsNone(s.vehicle_card)                       # a dict cannot be checked against the sha
         self.assertEqual(len(s.problems_for("C02")), 1)
+
+    def test_legacy_session_writer_never_writes_through_leftovers(self):
+        # Codex round 3 F3: an existing session directory is refused, and every file is created new (O_EXCL,
+        # O_NOFOLLOW), so a planted telemetry.csv symlink cannot redirect the write.
+        outside = os.path.join(self.tmp, "outside.csv")
+        with open(outside, "w") as fh:
+            fh.write("untouched\n")
+        sdir = os.path.join(self.tmp, "session_9001")
+        os.makedirs(sdir)
+        os.symlink(outside, os.path.join(sdir, "telemetry.csv"))
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+            synth.write_legacy_session(self.tmp)
+        with open(outside) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+        self.assertEqual(os.listdir(sdir), ["telemetry.csv"])
+        for name in ("../escape", "/tmp/dd22_legacy_never", "a/b"):
+            with self.assertRaises(ValueError, msg=name):
+                synth.write_legacy_session(self.tmp, name=name)
+        self.assertFalse(os.path.exists("/tmp/dd22_legacy_never"))
+        fresh = synth.write_legacy_session(self.tmp, name="session_9002")
+        self.assertEqual(sorted(os.listdir(fresh)), ["frames", "summary.txt", "telemetry.csv"])
 
     def test_legacy_sessions_raise(self):
         legacy = synth.write_legacy_session(self.tmp)

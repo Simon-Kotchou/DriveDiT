@@ -213,6 +213,21 @@ def check_out(path):
     return os.path.realpath(path)
 
 
+def write_new(root, rel, data):
+    """Create <root>/<rel> (rel: plain names joined by /) as a new file: each name checked (check_child), then
+    created through the write boundary with O_EXCL | O_NOFOLLOW (tools/local_config.py write_new), narrowed to root."""
+    parent = root
+    parts = rel.split("/")
+    for part in parts[:-1]:
+        parent = check_child(parent, part)
+    path = check_child(parent, parts[-1])
+    mod = _local_config_module()
+    try:
+        return mod.write_new(path, data, (root,))
+    except mod.WriteRefused as exc:
+        raise ValueError(str(exc))
+
+
 def check_child(parent, name):
     """<parent>/<name> for a plain file name whose final path the write boundary allows under parent (an absolute,
     '..' or nested name never moves a write out of parent); ValueError otherwise."""
@@ -1382,10 +1397,15 @@ def legacy_header():
 def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, frames_present=(0, 10, 20)):
     """A small dc-1.0 session as the DD-1 writer leaves it: telemetry.csv (CRLF, one row per vehicle per tick, tick
     intervals of 200 and 400 ms as in sessions 2702 and 4811), summary.txt and frames/frame_<id:06d>.bmp.png for
-    frames_present only. Returns the session directory."""
+    frames_present only. Returns the session directory. A session directory that exists already is refused, and every
+    file is created new (O_EXCL | O_NOFOLLOW through the write boundary), so nothing left there is written through."""
     out_dir = check_out(out_dir)
     sdir = check_child(out_dir, name)
-    os.makedirs(os.path.join(sdir, "frames"))
+    if os.path.lexists(sdir):
+        raise ValueError("refusing to overwrite %s" % sdir)
+    os.makedirs(out_dir, exist_ok=True)
+    os.mkdir(sdir)
+    os.mkdir(os.path.join(sdir, "frames"))
     cols = legacy_header()
     lines = [",".join(cols)]
     t = 2902.6
@@ -1397,14 +1417,11 @@ def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, 
                       "speed_kmh": "%.3f" % (20.0 + v), "gear": "2", "engine_rpm": "1500.0", "engine_on": "1"}
             lines.append(",".join(values.get(c, "0.0000") for c in cols))
         t += 200.0 if f % 2 == 0 else 400.0
-    with open(os.path.join(sdir, "telemetry.csv"), "wb") as fh:
-        fh.write(("\r\n".join(lines) + "\r\n").encode("ascii"))
-    with open(os.path.join(sdir, "summary.txt"), "wb") as fh:
-        fh.write(("total_frames=%d\r\nvehicles_tracked=%d\r\n" % (n_frames, vehicles)).encode("ascii"))
+    write_new(sdir, "telemetry.csv", ("\r\n".join(lines) + "\r\n").encode("ascii"))
+    write_new(sdir, "summary.txt", ("total_frames=%d\r\nvehicles_tracked=%d\r\n" % (n_frames, vehicles)).encode("ascii"))
     img = numpy.full((40, 64, 3), 128, dtype=numpy.uint8)
     for f in frames_present:
-        with open(os.path.join(sdir, "frames", "frame_%06d.bmp.png" % f), "wb") as fh:
-            fh.write(png_bytes(img))
+        write_new(sdir, "frames/frame_%06d.bmp.png" % f, png_bytes(img))
     return sdir
 
 

@@ -9,15 +9,26 @@
 //
 // One phase per group of m_sStepGrid ('<km/h>:<amplitude>x<doublets>,...;...'), on the flat site (the runway):
 //   reset on the centre line, settle, accel, hold (m_fCruiseS at the speed, steering 0), train, prbs, stop.
-//   train  the events of the group: doublets +A then -A for each amplitude, interleaved over the amplitudes (A1+,
-//          A1-, A2+, A2-, A1+, ...) until each amplitude has its count, so the heading comes back after every pair and
-//          0 -> +1.0 is always followed by 0 -> -1.0. Each event is a gap of m_fStepOffS plus a jitter of 0 ..
+//   train  the events of the group: doublets of +A and -A for each amplitude, interleaved over the amplitudes (A1,
+//          A1, A2, A2, A1, ...) until each amplitude has its count, so the heading comes back after every pair. The
+//          sign order of each doublet is chosen at its first onset (DC_SteerTrainMath.DoubletFirstSign): a doublet
+//          moves the car sideways by about v x its heading change x (hold + gap) to the side of its first step, so
+//          the first step points away from the side the car is on (its lateral offset predicted one on + off ahead
+//          from the heading). With every doublet +A first (the first 1.9.0.37 Play) each doublet moved the car the
+//          same way: 0.7 m at 10 km/h x 1.0, 2.2 m at 30 km/h x 0.5, and every phase ended aborted_area at the
+//          +-7 m corridor after 7..25 events. Each event is a gap of m_fStepOffS plus a jitter of 0 ..
 //          m_fStepJitterS (random phase; 8 bits of a seeded order-10 LFSR, DC_ProbePrbs, per event, logged) at
 //          steering 0, then m_fStepOnS at the amplitude (seg_flag 1), then the release to 0 (the next gap shows the
 //          centering). event_idx marks the event from its onset to the next onset. An event starts only when the
 //          site ahead holds its on and off time plus m_fTrainReserveS and the stop at m_fTrainDecelMs2; otherwise the
 //          run stops (note area_end) and the next run (reset .. stop) continues with the next event, at most
 //          m_iMaxRuns runs per phase;
+//   trim   before each doublet (and before the PRBS) whose start finds the heading more than TRIM_MIN_DEG off the
+//          strip (the doublets' small asymmetries add up, and a run resumed on a doublet's second event starts
+//          turned): one pulse of +-TRIM_AMPLITUDE for the steps that turn the heading back
+//          (DC_SteerTrainMath.TrimSteps), segment trim, event_idx -1, seg_flag 0, then the train's gap at steering 0
+//          (its release window) before the next onset. A trim lies outside every event window (an event ends before
+//          it, the next one's onset follows a full gap, longer than the analysis's D_MAX history);
 //   prbs   after the events, the group's PRBS amplitude of m_sPrbsAmplitudes (0 = none): +-A from an order
 //          m_iPrbsOrder LFSR (seed m_iPrbsSeed, the e01 generator), m_fPrbsBitS per bit, one period; it needs the same
 //          room and gets its own run when the site ahead is too short.
@@ -25,17 +36,111 @@
 // that result and the next run continues; after m_iMaxSpins spins the phase ends with its remaining events unrun
 // (note events_left). One row per event in e23_events.csv.
 //
-// BUDGET (defaults): 10 km/h 12 doublets of 0.5 and 8 of 1.0, 30 km/h 12 of 0.5 and 6 of 1.0, 60 km/h 10 of 0.5. This
-// is PREVIEW coverage of CC-08 (the spec asks for 50 repetitions of each step and 0 -> 1.0 at 60 km/h); the analysis
-// reports it as such. 80 km/h and 0 -> 1.0 at 60 km/h are grid entries away ('80:0.3x6', '60:1.0x4'). 20 and 40 km/h
+// BUDGET (defaults): 10 km/h 12 doublets of 0.5 and 8 of 1.0, 30 km/h 12 of 0.5 and 6 of 1.0, 60 km/h 10 of 0.5 and
+// 6 of 1.0, about 3.5 min with m_fTimeoutS 270. This is PREVIEW coverage of CC-08 (the spec asks for 50 repetitions
+// of each step); the analysis reports it as such. The full spec grid ('10:0.5x50,1.0x50;20:0.5x4;30:0.5x50,1.0x50;
+// 40:0.5x4;60:0.5x50,1.0x50', m_iMaxRuns 10) takes about 13 min (10 km/h 4.5, 30 km/h 4, 60 km/h 4 min, 4 runs):
+// a Play of its own with m_fTimeoutS about 1000, not the default plan. 80 km/h is a grid entry away ('80:0.3x6'). 20 and 40 km/h
 // (4 doublets of 0.5 and a PRBS each) are outside the CC-08 grid: they make e21's speeds validated cells of the
 // cmd -> steer_input model that CC-07 (a) may use to explain a readback deviation (no gap filling between speeds).
-// HEADING: every hold and PRBS bit is cut to the HEADING_BUDGET_DEG budget (20 deg at 0.24 1/m per unit), under the
-// base's 30 deg heading guard: default holds 12 steps (10 and 20 km/h), 10 / 5 steps (30 km/h, 0.5 / 1.0), 7 steps
-// (40 km/h), 5 steps (60 km/h); PRBS bits 5 steps (4 at 60 km/h). The vehicle fixture of tests/test_t0eng_steer.py
-// keeps every bin of the default grid under 18 deg off the strip.
+// HEADING AND LATERAL BUDGETS: every hold is cut to the HEADING_BUDGET_DEG budget (20 deg at 0.24 1/m per unit),
+// under the base's 30 deg heading guard, and to the LATERAL_BUDGET_M budget (a doublet's sideways shift v x heading
+// change x (hold + mean gap) <= 2 m, DC_SteerTrainMath.HoldSteps), inside the +-7 m corridor of the 10 m area:
+// default holds 12 steps (10 km/h; 20 km/h x 0.5), 7 (20 km/h x 1.0; 30 km/h x 0.5), 4 (30 km/h x 1.0; 40 km/h x
+// 0.5), 2 (40 km/h x 1.0; 60 km/h x 0.5), 1 (60 km/h x 1.0). PRBS bits are cut to the heading budget: 5 steps (4 at
+// 60 km/h). The area (10 m, swept with the 60 km/h stopping envelope out to +-29 m) and the 30 deg heading guard are
+// unchanged. tests/test_t0eng_steer.py drives the translated DC_SteerTrainMath on a car calibrated from that Play:
+// the default grid ends every phase ok within about 7 m, the old schedule aborts.
 // The analysis is tools/probes/t0eng/e23_steer_steps.py.
 // ============================================================================
+
+//------------------------------------------------------------------------------------------------
+//! The train's arithmetic, pure (tests/enforce_subset.py runs it on a vehicle model): hold steps under the heading
+//! and lateral budgets, the doublet's first sign, the trim pulse
+class DC_SteerTrainMath
+{
+	//------------------------------------------------------------------------------------------------
+	//! Hold steps of a step of amplitude at kmh: at most onSteps, the heading change kappaPerSteer x |A| x v x hold
+	//! within headingBudgetDeg, and the doublet's sideways shift v x that change x (hold + the mean gap of
+	//! offSteps + jitterMaxSteps / 2) within lateralBudgetM; at least 1
+	static int HoldSteps(float amplitude, float kmh, int onSteps, int offSteps, int jitterMaxSteps, float dt, float kappaPerSteer, float headingBudgetDeg, float lateralBudgetM)
+	{
+		float v = Math.Max(kmh, 1) / 3.6;
+		float rate = kappaPerSteer * Math.AbsFloat(amplitude) * v;
+		if (rate <= 0 || dt <= 0)
+			return Math.MaxInt(1, onSteps);
+
+		int heading = Math.Floor(headingBudgetDeg * Math.DEG2RAD / (rate * dt));
+		float gap = (offSteps + 0.5 * jitterMaxSteps) * dt;
+		float quota = lateralBudgetM / (v * rate);
+		float holdS = 0.5 * (Math.Sqrt(gap * gap + 4 * quota) - gap);
+		int lateral = Math.Floor(holdS / dt);
+		return Math.MaxInt(1, Math.MinInt(onSteps, Math.MinInt(heading, lateral)));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Steps per PRBS bit of amplitude at kmh: at most bitSteps, the heading within headingBudgetDeg at the
+	//! sequence's largest |running sum| maxRun, and its sideways excursion v x rate x bit^2 x maxDrift (maxDrift: the
+	//! largest |sum of the running sums| of the +-1 bits) within lateralBudgetM; at least 1
+	static int PrbsBitSteps(float amplitude, float kmh, int bitSteps, int maxRun, int maxDrift, float dt, float kappaPerSteer, float headingBudgetDeg, float lateralBudgetM)
+	{
+		float v = Math.Max(kmh, 1) / 3.6;
+		float rate = kappaPerSteer * Math.AbsFloat(amplitude) * v;
+		if (rate <= 0 || dt <= 0)
+			return Math.MaxInt(1, bitSteps);
+
+		int heading = Math.Floor(headingBudgetDeg * Math.DEG2RAD / (rate * dt * Math.MaxInt(1, maxRun)));
+		float bitS = Math.Sqrt(lateralBudgetM / (v * rate * Math.MaxInt(1, maxDrift)));
+		int lateral = Math.Floor(bitS / dt);
+		return Math.MaxInt(1, Math.MinInt(bitSteps, Math.MinInt(heading, lateral)));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! +1 or -1: the sign of a doublet's first step. A doublet shifts the car to the side of its first step's turn
+	//! (steerSign: the turn direction of positive steering, +1 right), so the first step turns away from the side of
+	//! the lateral offset predicted lookaheadS ahead from the heading off the strip (right positive)
+	static int DoubletFirstSign(float lateralM, float headingOffDeg, float kmh, float lookaheadS, int steerSign)
+	{
+		float v = Math.Max(kmh, 0) / 3.6;
+		float predicted = lateralM + v * Math.Sin(headingOffDeg * Math.DEG2RAD) * lookaheadS;
+		int side = -1;
+		if (predicted < 0)
+			side = 1;
+
+		if (steerSign < 0)
+			return -side;
+
+		return side;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Steps of a trim pulse of amplitude that turns the heading back by |headingOffDeg| at kappaPerSteer, within
+	//! 1 .. maxSteps
+	static int TrimSteps(float headingOffDeg, float kmh, float dt, float kappaPerSteer, float amplitude, int maxSteps)
+	{
+		float v = Math.Max(kmh, 1) / 3.6;
+		float perStep = kappaPerSteer * Math.AbsFloat(amplitude) * v * dt;
+		if (perStep <= 0)
+			return 1;
+
+		int steps = Math.Round(Math.AbsFloat(headingOffDeg) * Math.DEG2RAD / perStep);
+		return Math.MaxInt(1, Math.MinInt(maxSteps, steps));
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The trim command: amplitude against the heading off the strip (right positive) for the steer sign
+	static float TrimSteer(float headingOffDeg, int steerSign, float amplitude)
+	{
+		float steer = Math.AbsFloat(amplitude);
+		if (headingOffDeg > 0)
+			steer = -steer;
+
+		if (steerSign < 0)
+			steer = -steer;
+
+		return steer;
+	}
+}
 
 //------------------------------------------------------------------------------------------------
 [ComponentEditorProps(category: "GameScripted/DataCapture", description: "G19-1 probe e23: S2 steering steps 0 -> +-A with random phase and a held-out PRBS per speed (CC-08)")]
@@ -47,10 +152,9 @@ class DC_ProbeSteerStepsClass : DC_ProbeSteerBaseClass
 class DC_ProbeSteerSteps : DC_ProbeSteerBase
 {
 	static const string PROBE_E23 = "e23";
-	static const float TIMEOUT_E23_S = 240;
 	//! Caps checked before any event array is built
 	static const int MAX_DOUBLETS = 100;		//!< per amplitude of one speed
-	static const int MAX_EVENTS = 400;			//!< over the whole grid
+	static const int MAX_EVENTS = 640;			//!< over the whole grid (the full CC-08 grid has 616)
 	static const int MAX_SPEEDS = 6;
 	//! Heading budget of one step or one PRBS excursion [deg]: under the base's 30 deg heading guard with margin.
 	//! The hold of an event is cut to the steps that keep KAPPA_PER_STEER x |A| x v x hold under it; the PRBS bit to
@@ -59,10 +163,16 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	//! Curvature per unit command assumed for the budget [1/m]: above the measured S105 steady value (e02a 1.8.0.13
 	//! 0.229, 1.9.0.37 0.215 at 15..50 km/h)
 	static const float KAPPA_PER_STEER = 0.24;
+	//! A doublet's sideways shift budget [m] (DC_SteerTrainMath.HoldSteps), inside the +-7 m corridor
+	static const float LATERAL_BUDGET_M = 2.0;
+	//! Trim: a pulse when a doublet (or the PRBS) would start with the heading more than this off the strip [deg]
+	static const float TRIM_MIN_DEG = 1;
+	static const float TRIM_AMPLITUDE = 0.1;
+	static const int TRIM_MAX_STEPS = 45;
 	static const int JITTER_ORDER = 10;
 
 	// === S2 ===
-	[Attribute("10:0.5x12,1.0x8;20:0.5x4;30:0.5x12,1.0x6;40:0.5x4;60:0.5x10", UIWidgets.EditBox, "Step grid: groups '<speed km/h>:<amplitude>x<doublets>,...' separated by ';' (a doublet = 0 -> +A and 0 -> -A)", category: "S2")]
+	[Attribute("10:0.5x12,1.0x8;20:0.5x4;30:0.5x12,1.0x6;40:0.5x4;60:0.5x10,1.0x6", UIWidgets.EditBox, "Step grid: groups '<speed km/h>:<amplitude>x<doublets>,...' separated by ';' (a doublet = 0 -> +A and 0 -> -A)", category: "S2")]
 	protected string m_sStepGrid;
 
 	[Attribute("0.4", UIWidgets.Slider, "Hold of each step at its amplitude [s]", "0.05 5 0.05", category: "S2")]
@@ -104,6 +214,9 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	[Attribute("2", UIWidgets.Slider, "Spins after which a speed's remaining events are not run", "1 20 1", category: "S2")]
 	protected int m_iMaxSpins;
 
+	[Attribute("270", UIWidgets.Slider, "Probe timeout [world s]: 270 for the default (preview) grid, which takes about 210 s (e21 420 + e22 210 + e23 270 stay within 900 s); the full CC-08 grid needs about 800 s, in a Play of its own", "60 1200 10", category: "S2")]
+	protected float m_fTimeoutS;
+
 	// === STATE ===
 	protected ref DC_ProbePrbs m_Jitter;
 	protected ref DC_ProbePrbs m_Prbs;
@@ -132,8 +245,15 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	protected int m_iPrbsBitsApplied;		//!< bits applied for at least their planned engine steps
 	protected int m_iPrbsExtended;			//!< bits applied for more steps than planned (a dispatch covered more)
 	protected int m_iPrbsMaxRun;			//!< the largest |running sum| of +-1 over one PRBS period
+	protected int m_iPrbsMaxDrift;			//!< the largest |sum of the running sums| (the PRBS's sideways excursion)
 	protected int m_iHoldSteps;				//!< the open event's hold (HoldStepsFor)
 	protected float m_fPrbsSteer;
+	protected float m_fTrimSteer;			//!< the trim pulse's command
+	protected int m_iTrimSteps;				//!< its engine steps
+	protected bool m_bTrimDone;				//!< a trim ran in this gap (at most one before each doublet or the PRBS)
+	protected int m_iTrims;					//!< trims over the probe (s2.trims)
+	protected int m_iFlips;					//!< doublets started with -A first (s2.doublets_reordered)
+	protected int m_iDoublets;				//!< doublet starts
 
 	//------------------------------------------------------------------------------------------------
 	override string GetSteerProbeId()
@@ -144,7 +264,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	//------------------------------------------------------------------------------------------------
 	override float GetSteerTimeoutS()
 	{
-		return TIMEOUT_E23_S;
+		return Math.Max(m_fTimeoutS, 60);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -207,7 +327,9 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 		m_iPrbsPeriodBits = m_Prbs.GetPeriod();
 		m_iPrbsMaxRun = 1;
+		m_iPrbsMaxDrift = 1;
 		int runningSum = 0;
+		int drift = 0;
 		for (int bit = 0; bit < m_iPrbsPeriodBits; bit++)
 		{
 			if (m_Prbs.NextBit() == 1)
@@ -216,6 +338,8 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 				runningSum--;
 
 			m_iPrbsMaxRun = Math.MaxInt(m_iPrbsMaxRun, Math.AbsInt(runningSum));
+			drift += runningSum;
+			m_iPrbsMaxDrift = Math.MaxInt(m_iPrbsMaxDrift, Math.AbsInt(drift));
 		}
 
 		m_Prbs.Init(m_iPrbsOrder, m_iPrbsSeed);
@@ -384,6 +508,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 	override void OnBeginRun(notnull DC_ProbeSteerPhase phase)
 	{
 		m_bOn = false;
+		m_bTrimDone = false;
 		m_iOpenEvent = -1;
 		m_bOnsetPending = false;
 		m_bReleasePending = false;
@@ -457,6 +582,14 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			return;
 		}
 
+		if (m_eSegment == DC_ESteerSegment.TRIM)
+		{
+			m_bSegFlag = false;
+			m_iEventIdx = -1;
+			m_Actuator.SetSpeedHold(phase.m_fTargetKmh, m_fTrimSteer);
+			return;
+		}
+
 		m_bSegFlag = false;
 		m_iEventIdx = -1;
 		m_Actuator.SetSpeedHold(phase.m_fTargetKmh, 0);
@@ -481,6 +614,15 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		if (m_eSegment == DC_ESteerSegment.TRAIN)
 		{
 			AdvanceTrain(phase);
+			return;
+		}
+
+		// the trim pulse, then the train's gap at steering 0 (its release window) before the next onset or the PRBS
+		if (m_eSegment == DC_ESteerSegment.TRIM)
+		{
+			if (m_iSegStep >= m_iTrimSteps)
+				StartTrain();
+
 			return;
 		}
 
@@ -542,8 +684,12 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			return;
 		}
 
-		// gap over: close the open event, then the next onset if there is room
+		// gap over: close the open event; before a doublet (or the PRBS) a heading trim when it is due; then the next
+		// onset if there is room
 		CloseEvent(phase, "ok");
+		if (StartTrimIfDue(phase))
+			return;
+
 		if (phase.m_iEventCursor >= phase.m_aEvents.Count())
 		{
 			StartPrbsOrStop(phase);
@@ -560,6 +706,8 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 			return;
 		}
 
+		OrderDoublet(phase);
+		m_bTrimDone = false;
 		m_iOpenEvent = phase.m_iEventCursor;
 		m_fEventSteer = phase.m_aEvents[phase.m_iEventCursor];
 		phase.m_iEventCursor++;
@@ -579,28 +727,74 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 
 	//------------------------------------------------------------------------------------------------
 	//! Hold steps of a step of amplitude at kmh: the configured on steps, cut so the heading change stays within
-	//! HEADING_BUDGET_DEG at KAPPA_PER_STEER (at least 1)
+	//! HEADING_BUDGET_DEG and the doublet's sideways shift within LATERAL_BUDGET_M at KAPPA_PER_STEER (at least 1)
 	protected int HoldStepsFor(float amplitude, float kmh)
 	{
-		float perStep = KAPPA_PER_STEER * Math.AbsFloat(amplitude) * Math.Max(kmh, 1) / 3.6 * m_fDt;
-		if (perStep <= 0)
-			return m_iOnSteps;
+		return DC_SteerTrainMath.HoldSteps(amplitude, kmh, m_iOnSteps, m_iOffSteps, m_iJitterMaxSteps, m_fDt, KAPPA_PER_STEER, HEADING_BUDGET_DEG, LATERAL_BUDGET_M);
+	}
 
-		int budget = Math.Floor(HEADING_BUDGET_DEG * Math.DEG2RAD / perStep);
-		return Math.MaxInt(1, Math.MinInt(m_iOnSteps, budget));
+	//------------------------------------------------------------------------------------------------
+	//! At a doublet's first event (an even cursor with its partner of the opposite sign next): the two swapped when
+	//! the first one would push the car further to the side it is on (DC_SteerTrainMath.DoubletFirstSign)
+	protected void OrderDoublet(notnull DC_ProbeSteerPhase phase)
+	{
+		int cursor = phase.m_iEventCursor;
+		if (cursor % 2 != 0 || cursor + 1 >= phase.m_aEvents.Count() || !m_Area)
+			return;
+
+		float first = phase.m_aEvents[cursor];
+		float second = phase.m_aEvents[cursor + 1];
+		if (first * second >= 0)
+			return;
+
+		m_iDoublets++;
+		float lateral = m_Area.LateralM(m_Actuator.GetPosition());
+		float headingOff = WrapDeg(m_Actuator.GetHeadingDeg() - m_Area.m_fHeadingDeg);
+		float lookahead = (m_iOnSteps + m_iOffSteps) * m_fDt;
+		int sign = DC_SteerTrainMath.DoubletFirstSign(lateral, headingOff, m_Actuator.GetSpeedKmh(), lookahead, GetSteerSign());
+		if (first * sign > 0)
+			return;
+
+		phase.m_aEvents[cursor] = second;
+		phase.m_aEvents[cursor + 1] = first;
+		m_iFlips++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Before a doublet (an even cursor) or the PRBS (no event left), once per gap: a trim pulse when the heading is
+	//! more than TRIM_MIN_DEG off the strip (segment trim; DC_SteerTrainMath.TrimSteps / TrimSteer). true when it
+	//! started
+	protected bool StartTrimIfDue(notnull DC_ProbeSteerPhase phase)
+	{
+		if (m_bTrimDone || !m_Area)
+			return false;
+
+		int left = phase.m_aEvents.Count() - phase.m_iEventCursor;
+		if (left > 0 && phase.m_iEventCursor % 2 != 0)
+			return false;
+
+		if (left <= 0 && phase.m_bPrbsDone)
+			return false;
+
+		float headingOff = WrapDeg(m_Actuator.GetHeadingDeg() - m_Area.m_fHeadingDeg);
+		if (Math.AbsFloat(headingOff) <= TRIM_MIN_DEG)
+			return false;
+
+		float kmh = Math.Max(m_Actuator.GetSpeedKmh(), phase.m_fTargetKmh);
+		m_iTrimSteps = DC_SteerTrainMath.TrimSteps(headingOff, kmh, m_fDt, KAPPA_PER_STEER, TRIM_AMPLITUDE, TRIM_MAX_STEPS);
+		m_fTrimSteer = DC_SteerTrainMath.TrimSteer(headingOff, GetSteerSign(), TRIM_AMPLITUDE);
+		m_bTrimDone = true;
+		m_iTrims++;
+		EnterSegment(DC_ESteerSegment.TRIM);
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! PRBS bit steps at amplitude and kmh: the configured bit, cut so the largest running sum of the sequence keeps
-	//! the heading change within HEADING_BUDGET_DEG (at least 1)
+	//! the heading change within HEADING_BUDGET_DEG and its sideways excursion within LATERAL_BUDGET_M (at least 1)
 	protected int PrbsBitStepsFor(float amplitude, float kmh)
 	{
-		float perStep = KAPPA_PER_STEER * Math.AbsFloat(amplitude) * Math.Max(kmh, 1) / 3.6 * m_fDt * m_iPrbsMaxRun;
-		if (perStep <= 0)
-			return m_iPrbsBitSteps;
-
-		int budget = Math.Floor(HEADING_BUDGET_DEG * Math.DEG2RAD / perStep);
-		return Math.MaxInt(1, Math.MinInt(m_iPrbsBitSteps, budget));
+		return DC_SteerTrainMath.PrbsBitSteps(amplitude, kmh, m_iPrbsBitSteps, m_iPrbsMaxRun, m_iPrbsMaxDrift, m_fDt, KAPPA_PER_STEER, HEADING_BUDGET_DEG, LATERAL_BUDGET_M);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -624,6 +818,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		}
 
 		m_Prbs.Init(m_iPrbsOrder, m_iPrbsSeed);
+		m_bTrimDone = false;
 		m_iPrbsBitsDrawn = 0;
 		m_bPrbsBitOpen = false;
 		m_iPrbsBitApplied = 0;
@@ -732,6 +927,7 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		outKeyValues.Insert("m_fTrainDecelMs2=" + m_fTrainDecelMs2.ToString(-1, 3));
 		outKeyValues.Insert("m_iMaxRuns=" + m_iMaxRuns.ToString());
 		outKeyValues.Insert("m_iMaxSpins=" + m_iMaxSpins.ToString());
+		outKeyValues.Insert("m_fTimeoutS=" + m_fTimeoutS.ToString(-1, 1));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -743,9 +939,24 @@ class DC_ProbeSteerSteps : DC_ProbeSteerBase
 		lines.Insert("s2.prbs_bit_steps=" + m_iPrbsBitSteps.ToString());
 		lines.Insert("s2.prbs_period_bits=" + m_iPrbsPeriodBits.ToString());
 		lines.Insert("s2.prbs_max_running_sum=" + m_iPrbsMaxRun.ToString());
+		lines.Insert("s2.prbs_max_drift=" + m_iPrbsMaxDrift.ToString());
 		float budgetDeg = HEADING_BUDGET_DEG;
 		float kappaPerSteer = KAPPA_PER_STEER;
 		lines.Insert("s2.heading_budget_deg=" + budgetDeg.ToString(-1, 1) + " at kappa " + kappaPerSteer.ToString(-1, 3) + " 1/m per unit (holds and PRBS bits cut to it; the phases file has the bit steps per phase)");
 		lines.Insert("s2.rule=train: per event a gap at 0 (off + jitter steps), then the amplitude for hold_steps (seg_flag 1), released into the next gap; event_idx from the onset to the next onset; e23_events.csv onset_step / release_step = the first step with the new command; prbs: seg_flag 1, event_idx -1, the e01 generator with this probe's order and seed, one period, every bit applied for at least prbs_bit_steps engine steps (a dispatch covering more extends the bit, prbs_extended counts them; no bit is skipped)");
+		float lateralBudget = LATERAL_BUDGET_M;
+		float trimMin = TRIM_MIN_DEG;
+		float trimAmplitude = TRIM_AMPLITUDE;
+		lines.Insert("s2.lateral_budget_m=" + lateralBudget.ToString(-1, 2) + " (a doublet's sideways shift v x heading change x (hold + mean gap); holds cut to it)");
+		lines.Insert("s2.doublet_rule=events 2k and 2k + 1 are one doublet (opposite signs, one amplitude); its first step turns away from the side of the lateral offset predicted one on + off ahead (e23_events.csv amplitude is the applied sign)");
+		lines.Insert("s2.trim_rule=segment trim, event_idx -1, seg_flag 0: before a doublet or the PRBS whose start finds the heading more than " + trimMin.ToString(-1, 2) + " deg off the strip, one pulse of +-" + trimAmplitude.ToString(-1, 2) + " turning it back, then a train gap at 0 before the next onset; outside every event window");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void AppendProbeSummary(notnull array<string> lines)
+	{
+		lines.Insert("s2.trims=" + m_iTrims.ToString());
+		lines.Insert("s2.doublets=" + m_iDoublets.ToString());
+		lines.Insert("s2.doublets_reordered=" + m_iFlips.ToString());
 	}
 }

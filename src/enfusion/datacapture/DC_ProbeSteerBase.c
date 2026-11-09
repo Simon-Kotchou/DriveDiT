@@ -67,6 +67,7 @@ enum DC_ESteerSegment
 	BRAKE,		//!< e22: the load command, braking at the decel target
 	TRAIN,		//!< e23: steering steps
 	PRBS,		//!< e23: held-out PRBS
+	TRIM,		//!< e23: a heading trim pulse between two doublets (outside every event window)
 	STOP		//!< brake 1 until below m_fSpeedTolKmh
 }
 
@@ -218,7 +219,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	[Attribute("120", UIWidgets.Slider, "TracePosition / TraceMove calls per render frame, shared by every search of the probe (benign retries included)", "1 5000 1", category: "Search")]
 	protected int m_iSiteTracesPerFrame;
 
-	[Attribute("3000", UIWidgets.Slider, "Max strips the grid generates per search", "10 50000 10", category: "Search")]
+	[Attribute("20000", UIWidgets.Slider, "Max strips the grid generates per search (a grid strip costs its exact pre-check, the zone's centre tyre pair, until it passes it; 3000 ended the 1.9.0.37 cross grid at 2591 of 3300 points)", "10 50000 10", category: "Search")]
 	protected int m_iSiteMaxStrips;
 
 	[Attribute("48", UIWidgets.Slider, "Max candidates checked for obstacles per search", "1 1000 1", category: "Search")]
@@ -309,6 +310,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	protected ref array<IEntity> m_aExcludes;
 	protected int m_iCursor;
 	protected int m_iPhasesStarted;
+	protected int m_iPhasesOk;				//!< phases that ended ok (none: the probe ends with reason no_evidence)
 	protected bool m_bProbeDone;
 	protected DC_ESteerSegment m_eSegment;
 	protected int m_iSegStep;
@@ -360,6 +362,13 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	float GetFlatHalfWidthM()
 	{
 		return 10;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Length of the flat site's strip for this probe [m]: m_fFlatLengthM unless the probe needs less (e22)
+	float GetFlatLengthM()
+	{
+		return m_fFlatLengthM;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -533,8 +542,10 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		outKeyValues.Insert("m_fFlatLengthM=" + m_fFlatLengthM.ToString(-1, 2));
 		outKeyValues.Insert("m_fSiteStepM=" + m_fSiteStepM.ToString(-1, 2));
 		float flatHalfWidth = GetFlatHalfWidthM();
+		float flatLength = GetFlatLengthM();
 		float maxKmh = GetMaxSpeedKmh();
 		outKeyValues.Insert("flat_half_width_m=" + flatHalfWidth.ToString(-1, 2));
+		outKeyValues.Insert("flat_length_m=" + flatLength.ToString(-1, 2));
 		outKeyValues.Insert("max_speed_kmh=" + maxKmh.ToString(-1, 1));
 		outKeyValues.Insert("m_fFlatGradeMax=" + m_fFlatGradeMax.ToString(-1, 5));
 		outKeyValues.Insert("m_fFlatCrossMax=" + m_fFlatCrossMax.ToString(-1, 5));
@@ -733,10 +744,10 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	{
 		DC_SteerSiteCriteria c = new DC_SteerSiteCriteria();
 		c.m_sKind = SITE_FLAT;
-		c.m_fLengthM = m_fFlatLengthM;
+		c.m_fLengthM = GetFlatLengthM();
 		SetSiteGeometry(c, GetFlatHalfWidthM());
 		c.m_fZoneFromM = 0;
-		c.m_fZoneToM = m_fFlatLengthM;
+		c.m_fZoneToM = c.m_fLengthM;
 		c.m_fGradeMax = m_fFlatGradeMax;
 		c.m_fGradeWindowMax = m_fFlatCrossMax;
 		c.m_fGradeWindowMaxAll = m_fFlatCrossMax;
@@ -1013,6 +1024,17 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! no_evidence when no phase ended ok (every phase skipped for want of a site, or aborted): the footer then says
+	//! stopped, not complete, and no analysis takes the play as evidence (the phases file says what happened)
+	override string GetProbeDoneReason(string probeId)
+	{
+		if (probeId == m_sActiveProbe && m_iPhasesOk <= 0)
+			return DC_ProbeRunner.REASON_NO_EVIDENCE;
+
+		return DC_ProbeRunner.REASON_DONE;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Idempotent. Sets the driving-assistance mode back on every reason (an engine global, see the header); parks
 	//! the car, records an interrupted phase and gives the camera back, except on reason delete (world teardown: the
 	//! files are closed, nothing else is touched)
@@ -1096,6 +1118,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		m_aExcludes = null;
 		m_iCursor = 0;
 		m_iPhasesStarted = 0;
+		m_iPhasesOk = 0;
 		m_bProbeDone = false;
 		m_eSegment = DC_ESteerSegment.SEARCH;
 		m_iSegStep = 0;
@@ -1200,7 +1223,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 
 		if (!phase)
 		{
-			m_bProbeDone = true;
+			FinishProbeRun();
 			return;
 		}
 
@@ -1509,11 +1532,20 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		m_iPhaseStep = 0;
 		if (m_iCursor >= m_aPhases.Count())
 		{
-			m_bProbeDone = true;
+			FinishProbeRun();
 			return;
 		}
 
 		BeginPhase();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every phase has run (or was skipped): the probe is done; without one ok phase it says so (no_evidence)
+	protected void FinishProbeRun()
+	{
+		m_bProbeDone = true;
+		if (m_iPhasesOk <= 0)
+			LogWarning(string.Format("no phase of the %1 planned ended ok - the probe ends with reason no_evidence (footer status stopped)", m_aPhases.Count()));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1524,6 +1556,9 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		phase.m_fEndWorldMs = GetWorldMs();
 		if (phase.m_sResult.IsEmpty())
 			phase.m_sResult = "ok";
+
+		if (phase.m_sResult == "ok")
+			m_iPhasesOk++;
 
 		float maxSpeed = phase.m_fMaxSpeedKmh;
 		float turn = phase.m_fTurnDeg;
@@ -1705,6 +1740,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 			case DC_ESteerSegment.BRAKE: return "brake";
 			case DC_ESteerSegment.TRAIN: return "train";
 			case DC_ESteerSegment.PRBS: return "prbs";
+			case DC_ESteerSegment.TRIM: return "trim";
 			case DC_ESteerSegment.STOP: return "stop";
 		}
 

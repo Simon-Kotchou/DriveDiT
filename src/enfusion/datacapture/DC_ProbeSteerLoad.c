@@ -9,13 +9,22 @@
 //   (d)     at fixed commands, steady cornering at a_lat 2.0, 2.75 and 3.5 m/s2 and braking at 3 m/s2 in a turn:
 //           |delta_eff - delta_eff,ref(command)| p95 <= max(0.25 deg, 5% of |delta_eff,ref|), delta_eff,ref = the
 //           step-0 low-load value.
+// SITE: the flat site of the base at +-15 m and E22_SITE_LENGTH_M (the first 1.9.0.37 Play asked for 1000 m x
+// +-22 m: the runway's GetSurfaceY is exactly flat within +-15.65 m but not at +-19.65..22 m, the explicit candidate
+// failed cross_all and no grid strip of that size exists, so every phase was skipped). Within +-15 m everything fits
+// (kappa = 0.21..0.22 x steer at 15..50 km/h, 1.9.0.37 e02a: no understeer up to a_lat 5 m/s2):
 // Phases on the flat site (the runway; DC_ProbeSteerBase):
 //   stair_<v>    one per group of m_sStairGrid ('<km/h>:<steer>,...;...'): reset on the centre line, settle, accel,
 //                then the steering levels one after another, m_fStairHoldS each, with the speed hold (segment
 //                stair; event_idx = the level index, seg_flag 1 after the first m_fStairSettleS of each level), stop.
 //                The defaults keep a_lat below 1 m/s2 at kappa ~0.21 x steer (1.9.0.37 e02a): 12 km/h up to 0.3,
-//                18 km/h up to 0.15. The levels alternate in sign, so the heading comes back after each pair;
-//   load_<c>     one per fixed command of m_sLoadSteers: reset near the side of the area away from the turn
+//                18 km/h up to 0.15. The levels come in pairs of opposite sign, so the heading comes back after each
+//                pair, and the pairs alternate their order (+a -a, -b +b, ...) so their lateral offsets cancel: the
+//                default staircase stays within about 4 m of the centre line (17 m with every pair +a first);
+//   load_<c>     one per fixed command of m_sLoadSteers (+-0.5: R about 9.5 m, so the circle spans 19 m of the
+//                24 m corridor, from 11 m on the far side; a_lat 2.0 / 2.75 / 3.5 m/s2 at about 15.6 / 18.4 / 20.8
+//                km/h, under the 25 km/h cap):
+//                reset near the side of the area away from the turn
 //                (m_fCircleEdgeM inside the area edge, m_fCircleStartAlongM along), settle, accel straight to
 //                m_fRefKmh, ref (the command c at m_fRefKmh for m_fRefHoldS: the low-load reference of (d), seg_flag
 //                1 in its second half), alat (for each target of m_sALatTargets: the speed-hold target is adapted
@@ -39,7 +48,8 @@ class DC_ProbeSteerLoadClass : DC_ProbeSteerBaseClass
 class DC_ProbeSteerLoad : DC_ProbeSteerBase
 {
 	static const string PROBE_E22 = "e22";
-	static const float TIMEOUT_E22_S = 240;
+	//! The staircase (about 45 s) and two load phases (35..60 s each) take 115..165 s
+	static const float TIMEOUT_E22_S = 210;
 	//! Max stair groups and levels per group (validation before anything is built)
 	static const int MAX_STAIR_GROUPS = 6;
 	static const int MAX_STAIR_LEVELS = 20;
@@ -51,10 +61,13 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	static const float ALAT_MIN_KMH = 5;
 	//! The speed cap of every e22 phase [km/h]: the adaptive a_lat controller never targets more, the obstacle envelope
 	//! is swept for it in every exit direction, and the base ends a run above it + 3 km/h (overspeed)
-	static const float SPEED_CAP_KMH = 35;
+	static const float SPEED_CAP_KMH = 25;
+	//! Length of e22's flat strip [m]: the staircase needs about 120 m from its start, the circles 20 m around
+	//! m_fCircleStartAlongM
+	static const float E22_SITE_LENGTH_M = 300;
 
 	// === STEP 0 ===
-	[Attribute("10.5:0.1,-0.1,0.2,-0.2,0.3,-0.3,0.05,-0.05,0.15,-0.15,0.25,-0.25", UIWidgets.EditBox, "Step-0 staircase: groups '<speed km/h>:<steer>,...' separated by ';' (low-slip regime: 10-20 km/h, a_lat <= 1 m/s2; 10.5 km/h keeps every level change inside e23's 10 km/h bin, the scope of CC-07 (a)'s model exception)", category: "Step 0")]
+	[Attribute("10.5:0.1,-0.1,-0.2,0.2,0.3,-0.3,-0.05,0.05,-0.15,0.15,0.25,-0.25", UIWidgets.EditBox, "Step-0 staircase: groups '<speed km/h>:<steer>,...' separated by ';' (low-slip regime: 10-20 km/h, a_lat <= 1 m/s2; 10.5 km/h keeps every level change inside e23's 10 km/h bin, the scope of CC-07 (a)'s model exception; pairs of opposite sign in alternating order keep the car within about 4 m of the centre line)", category: "Step 0")]
 	protected string m_sStairGrid;
 
 	[Attribute("3", UIWidgets.Slider, "Hold of each staircase level [s]", "0.5 20 0.5", category: "Step 0")]
@@ -64,10 +77,10 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	protected float m_fStairSettleS;
 
 	// === LOAD ===
-	[Attribute("0.3,-0.3", UIWidgets.EditBox, "Fixed commands of CC-07 (d), one phase each (0.3: kappa ~0.064 1/m, R ~16 m, so the circles fit the 50 m runway)", category: "Load")]
+	[Attribute("0.5,-0.5", UIWidgets.EditBox, "Fixed commands of CC-07 (d), one phase each (0.5: kappa ~0.105 1/m, R ~9.5 m on 1.9.0.37, so the circles fit the +-12 m corridor of the +-15 m area)", category: "Load")]
 	protected string m_sLoadSteers;
 
-	[Attribute("10", UIWidgets.Slider, "Low-load reference speed of each command [km/h] (a_lat ~0.5 m/s2 at 0.3)", "3 30 0.5", category: "Load")]
+	[Attribute("10", UIWidgets.Slider, "Low-load reference speed of each command [km/h] (a_lat ~0.8 m/s2 at 0.5, inside the low-slip 1 m/s2)", "3 30 0.5", category: "Load")]
 	protected float m_fRefKmh;
 
 	[Attribute("6", UIWidgets.Slider, "Hold of the reference [s]; its second half is flagged steady", "1 30 0.5", category: "Load")]
@@ -106,7 +119,7 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	[Attribute("40", UIWidgets.Slider, "Circle runs start this far along the site [m]", "5 500 1", category: "Load")]
 	protected float m_fCircleStartAlongM;
 
-	[Attribute("5", UIWidgets.Slider, "Circle runs start this far inside the area edge away from the turn [m]", "1 50 0.5", category: "Load")]
+	[Attribute("4", UIWidgets.Slider, "Circle runs start this far inside the area edge away from the turn [m] (4: the +-0.5 circle spans -11 .. +8 m of the +-12 m corridor, inside it with 15% more radius)", "1 50 0.5", category: "Load")]
 	protected float m_fCircleEdgeM;
 
 	// === STATE ===
@@ -147,14 +160,22 @@ class DC_ProbeSteerLoad : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! The circles at the fixed commands need +-20 m (radius about 16 m, the start 5 m inside the edge)
+	//! +-15 m: the runway band whose surface is flat (the circles at +-0.5 need 19 m of the +-12 m corridor, starting
+	//! 4 m inside the edge; the staircase stays within about 4 m of the centre line)
 	override float GetFlatHalfWidthM()
 	{
-		return 22;
+		return 15;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! a_lat 3.5 m/s2 at kappa about 0.064 1/m is about 27 km/h; the cap leaves room for understeer
+	//! The staircase and the circles need the first 150 m only (E22_SITE_LENGTH_M)
+	override float GetFlatLengthM()
+	{
+		return Math.Min(m_fFlatLengthM, E22_SITE_LENGTH_M);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! a_lat 3.5 m/s2 at kappa about 0.105 1/m is about 21 km/h; the cap leaves 20% for the speed adaptation
 	override float GetMaxSpeedKmh()
 	{
 		return SPEED_CAP_KMH;

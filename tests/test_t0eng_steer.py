@@ -402,10 +402,23 @@ BIT_STEPS = 5          # m_fPrbsBitS 0.15 s at 30 Hz (DC_ProbeSequences.StepsFor
 PRBS_AMPLITUDES = {10.0: 0.5, 20.0: 0.4, 30.0: 0.3, 40.0: 0.25, 60.0: 0.2}
 
 
+LATERAL_BUDGET_M = float(re.search(r"LATERAL_BUDGET_M = ([0-9.]+);", STEPS_TEXT).group(1))
+OFF_STEPS = 18         # m_fStepOffS 0.6 s
+JITTER_STEPS = 9       # m_fStepJitterS 0.3 s
+_TRAIN_MATH = []
+
+
+def train_math():
+    """The producer's DC_SteerTrainMath, translated from DC_ProbeSteerSteps.c"""
+    if not _TRAIN_MATH:
+        _TRAIN_MATH.append(enforce_subset.translate(STEPS_TEXT, ["DC_SteerTrainMath"])["DC_SteerTrainMath"]())
+    return _TRAIN_MATH[0]
+
+
 def hold_steps(amplitude, kmh):
-    """DC_ProbeSteerSteps.HoldStepsFor"""
-    per_step = KAPPA_PER_STEER * abs(amplitude) * max(kmh, 1.0) / 3.6 * DT
-    return max(1, min(ON_STEPS, int(math.floor(math.radians(HEADING_BUDGET_DEG) / per_step))))
+    """DC_ProbeSteerSteps.HoldStepsFor (the translated DC_SteerTrainMath.HoldSteps: heading and lateral budgets)"""
+    return int(train_math().HoldSteps(amplitude, kmh, ON_STEPS, OFF_STEPS, JITTER_STEPS, DT, KAPPA_PER_STEER,
+                                      HEADING_BUDGET_DEG, LATERAL_BUDGET_M))
 
 
 def max_running_sum(bits):
@@ -416,10 +429,19 @@ def max_running_sum(bits):
     return top
 
 
+def max_drift(bits):
+    total, drift, top = 0, 0, 1
+    for bit in bits:
+        total += 1 if bit else -1
+        drift += total
+        top = max(top, abs(drift))
+    return top
+
+
 def prbs_bit_steps(amplitude, kmh, bits):
-    """DC_ProbeSteerSteps.PrbsBitStepsFor"""
-    per_step = KAPPA_PER_STEER * abs(amplitude) * max(kmh, 1.0) / 3.6 * DT * max_running_sum(bits)
-    return max(1, min(BIT_STEPS, int(math.floor(math.radians(HEADING_BUDGET_DEG) / per_step))))
+    """DC_ProbeSteerSteps.PrbsBitStepsFor (the translated DC_SteerTrainMath.PrbsBitSteps)"""
+    return int(train_math().PrbsBitSteps(amplitude, kmh, BIT_STEPS, max_running_sum(bits), max_drift(bits), DT,
+                                         KAPPA_PER_STEER, HEADING_BUDGET_DEG, LATERAL_BUDGET_M))
 
 
 def rows_for(engine_steps, merge):
@@ -1230,8 +1252,10 @@ class Cc08Tests(unittest.TestCase):
                 for name in ("input_10kmh_0.5", "input_10kmh_1", "input_30kmh_0.5"):
                     tag, structure = self.selected(text, name)
                     self.assertEqual(structure, expected, text)
-                    if expected == "M3" and name == "input_10kmh_1":
-                        # 2 /s never reaches 1.0 in the 0.4 s on-time: the gain is not identified, not a pass
+                    if expected == "M3" and name in ("input_10kmh_1", "input_30kmh_0.5"):
+                        # 2 /s never reaches 1.0 in the 0.4 s on-time, nor 0.5 in the 0.23 s that the lateral
+                        # budget leaves at 30 km/h (DD-14e): the gain is not identified, not a pass. The 1.9.0.37
+                        # input path has no rate limit (tau 13 ms, the first steering Play), so its holds identify it
                         self.assertEqual(tag, "INCOMPLETE", text)
                         self.assertIn("g unresolved", detail(text, name))
                     else:
@@ -1513,8 +1537,10 @@ class ContractTests(unittest.TestCase):
         natives = {name: (len(re.findall(r"\.GetSurfaceY\(", text)), len(re.findall(r"\.Trace(?:Position|Move)\(", text)))
                    for name, text in methods.items()}
         self.assertEqual({n: c for n, c in natives.items() if c != (0, 0)},
-                         {"GenerateStrips": (4, 0), "ContinueSampling": (1, 0), "SweepEnds": (2, 0),
-                          "TraceOnce": (0, 2)})
+                         {"GenerateStrips": (4, 0), "ContinuePreCheck": (1, 0), "ContinueSampling": (1, 0),
+                          "SweepEnds": (2, 0), "TraceOnce": (0, 2)})
+        self.assertRegex(methods["ContinuePreCheck"], r"if \(!budget\.TakeSamples\(1\)\)\s*return false;(?:.*\n)*?.*"
+                                                      r"GetSurfaceY")
         once = methods["TraceOnce"]                                        # one call: an if / else of the two
         self.assertRegex(once, r"if \(m_Plan\.GetCall\(\) == DC_SteerSweepPlan\.CALL_POSITION\)\s*\{\s*blocked = world\."
                                r"TracePosition\(m_Box, null\) < 0;\s*\}\s*else\s*\{\s*fraction = world\.TraceMove")
@@ -1524,7 +1550,7 @@ class ContractTests(unittest.TestCase):
         self.assertRegex(methods["StepObstacles"], r"if \(!budget\.TakeSamples\(2\)\)\s*return;\s*SweepEnds\(")
         self.assertRegex(methods["StepObstacles"], r"if \(!budget\.TakeTrace\(\)\)\s*return;\s*m_Plan\.Report\("
                                                    r"TraceOnce\(")
-        for name in ("StepGrid", "ContinueSampling", "StepObstacles", "StepStages"):
+        for name in ("StepGrid", "ContinuePreCheck", "ContinueSampling", "StepObstacles", "StepStages"):
             self.assertNotIn("m_iSiteSamplesPerFrame", methods.get(name, ""))
 
     def test_undersized_budgets_are_refused(self):
@@ -1617,7 +1643,13 @@ class ContractTests(unittest.TestCase):
         self.assertIn("c.m_fEnvelopeLatM = stopping * Math.Sin(GetEnvelopeAngleDeg() * Math.DEG2RAD);", base)
         # the steering probes stay within 15 min of Play together
         timeouts = [float(re.search(r"TIMEOUT_E2%d_S = (\d+)" % k, read(path)).group(1))
-                    for k, path in ((1, SELF_SOURCE), (2, LOAD_SOURCE), (3, STEPS_SOURCE))]
+                    for k, path in ((1, SELF_SOURCE), (2, LOAD_SOURCE))]
+        # e23's timeout is its m_fTimeoutS attribute (the full CC-08 grid raises it in a Play of its own)
+        timeouts.append(float(re.search(r'\[Attribute\("(\d+)", UIWidgets\.Slider, "Probe timeout', steps).group(1)))
+        self.assertRegex(steps, r"override float GetSteerTimeoutS\(\)\s*\{\s*return Math\.Max\(m_fTimeoutS, 60\);")
+        layer = read(os.path.join(REPO, "addons", "DataCapture", "worlds", "DataCapture", "DC_Probes_Arland_Layers",
+                                  "default.layer"))
+        self.assertIn("m_fTimeoutS %d" % timeouts[-1], layer)
         self.assertLessEqual(sum(timeouts), 900)
 
 

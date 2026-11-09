@@ -18,7 +18,7 @@
 //   - the test sites from a runtime search (DC_SteerSites.c) before the first phase: the flat site (explicit
 //     candidate: the Arland main runway of e01, with the grid as fallback; no trust override, a blocking hit rejects
 //     it like any candidate), and the subclass's other sites (e21: the cross-slope site). Each probe searches with its
-//     own area half width (GetFlatHalfWidthM: e21 15 m, e22 22 m, e23 10 m) and the stopping envelope of its top speed
+//     own area half width (GetFlatHalfWidthM: e21 15 m, e22 15 m over 300 m, e23 10 m) and the stopping envelope of its top speed
 //     (GetMaxSpeedKmh; v^2 / 2 m_fEnvelopeDecelMs2 + v m_fEnvelopeReactS along, x sin GetEnvelopeAngleDeg sideways;
 //     e22's circles may exit in any direction: the full stopping distance sideways and backwards). The motion is held
 //     to those assumptions: a driving segment ends with overspeed above GetMaxSpeedKmh() + 3 km/h and, outside

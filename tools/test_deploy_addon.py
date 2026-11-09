@@ -4,11 +4,16 @@
     python3 -I -B tools/test_deploy_addon.py -v
 
 Every case deploys into a fresh temporary target and removes it afterwards. The temporary base directory is
-$DEPLOY_ADDON_TEST_TMP if set (it must be under /mnt/e/ or /dev/shm/, the only places deploy_addon.py accepts as
---allow-root), else $TMPDIR when it is on E: (tools/run_tests.sh sets that), else /dev/shm (RAM, so nothing lands on
-the WSL disk image on C:). Without any of them the tests are skipped; they never fall back to /tmp. The repo itself
-is only read. C: and WSL-disk targets are checked in-process on the pure target_reason(), so no such path is ever
-passed to the tool; other refused targets run with --dry-run under a parent that does not exist.
+$DEPLOY_ADDON_TEST_TMP if set (it must be under /dev/shm/, which deploy_addon.py accepts as --allow-root), else
+/dev/shm (RAM, so nothing lands on the WSL disk image). Without it the tests are skipped; they never fall back to
+/tmp. The repo itself is only read. System-drive and WSL-disk targets are checked in-process on the pure
+target_reason(), so no such path is ever passed to the tool; other refused targets run with --dry-run under a parent
+that does not exist.
+
+DD-22: every test reads the synthetic local config tests/fixtures/local_config/placeholder.local.env (data drive
+/mnt/x, system drive /mnt/z, neither a real mount), set as DRIVEDIT_LOCAL_CONFIG below for the tool's subprocesses
+too; nothing here depends on, or names, a real machine. The data-root rules (allowed roots, protected per-pin roots)
+are checked in-process with the device check of the never-mounted /mnt/x lifted.
 """
 
 import hashlib
@@ -25,7 +30,15 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import deploy_addon  # noqa: E402  (pure checks are tested in-process; the tool has no import side effects)
 REPO = os.path.dirname(HERE)
+LOCAL_CONFIG_FIXTURE = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = LOCAL_CONFIG_FIXTURE  # the tool's subprocesses read it too
+CFG = deploy_addon.local_config()
+DATA_ROOT = CFG.get("DATA_ROOT")                      # /mnt/x/DataRoot
+DATA_DRIVE = CFG.drive("DATA_ROOT")                   # /mnt/x, never mounted
+SYSTEM_DRIVE = CFG.get("SYSTEM_DRIVE")                # /mnt/z, never mounted
+PROFILE_ROOT = CFG.win("DATA_ROOT").replace("\\", "/")  # X:/DataRoot, what the deploy writes for the token
 TOOL = os.path.join(HERE, "deploy_addon.py")
+LOADER = os.path.join(HERE, "local_config.py")
 MANIFEST = os.path.join(REPO, "addons", "DataCapture", "deploy_manifest.txt")
 SCRIPT_DST = "Scripts/Game/DataCapture"
 WORLD_LAYER = "worlds/DataCapture/DC_Arland_Layers/default.layer"
@@ -49,7 +62,7 @@ DENIED_SOURCES = (
     ("addon", "DriveDiT_DataCapture/DriveDiT_DataCapture.gproj", "the unloadable in-repo prototype addon"),
     ("script", "src/SCR_CaptureTests.c", "pre-1.8 test file with known compile errors"),
 )
-# E: (NTFS through drvfs) is case-insensitive, tmpfs and ext4 are not: a case variant of an existing repo file is
+# drvfs (NTFS) is case-insensitive, tmpfs and ext4 are not: a case variant of an existing repo file is
 # refused for its spelling on the former and as a missing file on the latter.
 CASE_VARIANT_REASON = ("is not spelled as in the repo" if os.path.isdir(os.path.join(REPO, "ADDONS"))
                        else "does not exist in the repo")
@@ -59,9 +72,6 @@ def tmp_base():
     base = os.environ.get("DEPLOY_ADDON_TEST_TMP")
     if base:
         return base
-    tmpdir = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if tmpdir.startswith("/mnt/e/") and os.path.isdir(tmpdir):  # tools/run_tests.sh points TMPDIR at E:
-        return tmpdir
     if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
         return "/dev/shm"
     raise unittest.SkipTest("no $DEPLOY_ADDON_TEST_TMP and no writable /dev/shm; not using the system temp dir")
@@ -93,6 +103,21 @@ def expected_dst(kind, src):
     return SCRIPT_DST + "/" + src.rsplit("/", 1)[1]
 
 
+def deployed_bytes(kind, src):
+    """What the deploy writes for a manifest entry: the source, with the profile-root token filled in (DD-22)."""
+    with open(os.path.join(REPO, *src.split("/")), "rb") as f:
+        data = f.read()
+    if kind in ("addon", "script"):
+        data = data.replace(deploy_addon.PROFILE_ROOT_TOKEN, PROFILE_ROOT.encode("ascii"))
+    return data
+
+
+def no_device_check():
+    """The data-root rules in-process: /mnt/x is never mounted, so its paths would lie on the device of / and be
+    refused by the device check first. This lifts that check for one block."""
+    return mock.patch.object(deploy_addon, "FORBIDDEN_DEVICE_PATHS", ())
+
+
 def listing(root):
     out = set()
     for dirpath, _, files in os.walk(root):
@@ -101,12 +126,11 @@ def listing(root):
     return out
 
 
-# In CI there is no E: drive at /mnt/e and the checkout lies on the device of /.
-E_MOUNTED = os.path.ismount("/mnt/e")
+# In CI the checkout lies on the device of /.
 REPO_ON_ROOT_DEVICE = os.stat(REPO).st_dev == os.stat("/").st_dev
-# E: targets outside the allowed root, and the allowed root itself. Refused everywhere; for the allowed-root reason
-# only where /mnt/e is mounted (elsewhere the device check of / refuses them first).
-E_OUTSIDE_PROBES = ("/mnt/e/__dd_deploy_selftest_missing__/DataCapture", "/mnt/e/DriveDiT/addons")
+# Data-drive targets outside the allowed root, and the allowed root itself. Refused everywhere; their allowed-root
+# reason is checked in-process (no_device_check), since the device check of / refuses them first.
+E_OUTSIDE_PROBES = (DATA_DRIVE + "/__dd_deploy_selftest_missing__/DataCapture", DATA_ROOT + "/addons")
 
 
 class DeployAddonTest(unittest.TestCase):
@@ -148,8 +172,8 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(listing(self.target), self.deployed_set())
         for kind, src in manifest_entries():
-            self.assertEqual(sha(os.path.join(REPO, src)), sha(os.path.join(self.target, expected_dst(kind, src))),
-                             "%s was not copied byte for byte" % src)
+            with open(os.path.join(self.target, expected_dst(kind, src)), "rb") as f:
+                self.assertEqual(deployed_bytes(kind, src), f.read(), "%s was not copied byte for byte" % src)
         for banned in ("SCR_AIDrivingSimulator.c", "SCR_MultiCameraRig.c", "SCR_CaptureTests.c",
                        "SCR_CaptureBuffer.c", "SCR_DepthModule.c"):
             self.assertNotIn(banned, " ".join(listing(self.target)))
@@ -173,6 +197,52 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(consts["CONTENT_FILE_COUNT"], str(len(manifest_entries())))
         self.assertEqual(consts["DEPLOY_PARTIAL"], "false")
         self.assertNotIn("\r", text)
+
+    def test_profile_root_token_is_filled_in(self):
+        # DD-22: the repo names no profile root; the deploy writes DATA_ROOT (X:/...) for the token, and only there.
+        token = deploy_addon.PROFILE_ROOT_TOKEN
+        holders = sorted(src for kind, src in manifest_entries()
+                         if token in open(os.path.join(REPO, *src.split("/")), "rb").read())
+        self.assertEqual(holders, ["addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
+                                   "addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.layer",
+                                   "src/enfusion/datacapture/DC_LaunchGuard.c", "src/enfusion/datacapture/DC_ProbeRunner.c",
+                                   "src/enfusion/datacapture/DC_Session.c"])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        for rel in listing(self.target):
+            with open(os.path.join(self.target, rel), "rb") as f:
+                self.assertIsNone(deploy_addon.TOKEN_RE.search(f.read()), rel)
+        with open(os.path.join(self.target, SCRIPT_DST, "DC_Session.c"), encoding="utf-8") as f:
+            self.assertIn('[Attribute("%s", UIWidgets.EditBox, "Launch guard:' % PROFILE_ROOT, f.read())
+        with open(os.path.join(self.target, *WORLD_LAYER.split("/")), encoding="utf-8") as f:
+            self.assertIn('m_sRequiredProfileRoot "%s"' % PROFILE_ROOT, f.read())
+
+    def test_tokens_are_refused_where_they_are_not_filled_in(self):
+        value = PROFILE_ROOT
+        with self.assertRaisesRegex(deploy_addon.Refusal, "config files are copied byte for byte"):
+            deploy_addon.render_payload("config", "x.json", b'{"root": "@DD_PROFILE_ROOT@"}', value)
+        with self.assertRaisesRegex(deploy_addon.Refusal, "@DD_OTHER@"):
+            deploy_addon.render_payload("script", "src/enfusion/datacapture/X.c", b'"@DD_OTHER@"', value)
+        self.assertEqual(deploy_addon.render_payload("addon", "a.layer", b'r "@DD_PROFILE_ROOT@"', value),
+                         b'r "X:/DataRoot"')
+
+    def test_no_local_config_refuses_before_anything(self):
+        env = dict(os.environ, DRIVEDIT_LOCAL_CONFIG=os.path.join(self.tmp, "missing.env"))
+        p = subprocess.run([sys.executable, "-I", "-B", TOOL, "--dry-run"], cwd=self.tmp, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out = p.stdout.decode() + p.stderr.decode()
+        self.assertEqual(p.returncode, 2, out)
+        self.assertIn("missing.env, which is not a file", out)
+        self.assertIn("nothing was written", out)
+        partial = os.path.join(self.tmp, "partial.env")
+        with open(partial, "w", encoding="ascii") as f:
+            f.write("SYSTEM_DRIVE=/mnt/z\n")
+        env["DRIVEDIT_LOCAL_CONFIG"] = partial
+        p = subprocess.run([sys.executable, "-I", "-B", TOOL, "--dry-run"], cwd=self.tmp, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out = p.stdout.decode() + p.stderr.decode()
+        self.assertEqual(p.returncode, 2, out)
+        self.assertIn("has no DATA_ROOT", out)
 
     def test_redeploy_is_idempotent(self):
         self.assertEqual(self.run_tool()[0], 0)
@@ -253,27 +323,37 @@ class DeployAddonTest(unittest.TestCase):
             self.assertIn("sealed", str(caught.exception))
 
     def test_refuses_c_drive_and_wsl_disk_targets(self):
-        # Checked in-process on the pure target_reason(): no C: or WSL-disk path is ever passed to the tool's argv.
-        probes = ["/mnt/c/__dd_deploy_selftest_missing__/DataCapture",
-                  "C:\\__dd_deploy_selftest_missing__\\DataCapture",
-                  "c:/__dd_deploy_selftest_missing__/DataCapture"]
-        if os.path.isdir("/mnt/c"):
-            link = os.path.join(self.tmp, "c_alias")
-            os.symlink("/mnt/c", link)
-            probes.append(os.path.join(link, "__dd_deploy_selftest_missing__", "DataCapture"))
+        # Checked in-process on the pure target_reason(): no system-drive or WSL-disk path is ever passed to the
+        # tool's argv. The fixture's system drive is /mnt/z (Z:).
+        probes = [SYSTEM_DRIVE + "/__dd_deploy_selftest_missing__/DataCapture",
+                  "Z:\\__dd_deploy_selftest_missing__\\DataCapture",
+                  "z:/__dd_deploy_selftest_missing__/DataCapture"]
         for target in probes:
             reason = deploy_addon.target_reason(target, [self.tmp])
             self.assertIsNotNone(reason, target)
-            self.assertIn("C: drive", reason)
-        # The WSL disk image (/tmp, ~) lives on C:; /mnt/d is the read-only game install.
+            self.assertIn("system drive", reason)
+        self.assertIn("uses Windows syntax", deploy_addon.target_reason("X:\\DataRoot\\addons\\DataCapture"))
+        # The WSL disk image (/tmp, ~) lives on the system drive; the game library (/mnt/y here) is read-only.
         for target in ("/tmp/__dd_deploy_selftest_missing__/DataCapture",
                        os.path.join(os.path.expanduser("~"), "__dd_deploy_selftest_missing__", "DataCapture"),
-                       "/mnt/d/__dd_deploy_selftest_missing__/DataCapture"):
+                       "/mnt/y/__dd_deploy_selftest_missing__/DataCapture"):
             self.assertIsNotNone(deploy_addon.target_reason(target, [self.tmp]), target)
+
+    def test_refuses_the_system_drive_by_device(self):
+        # A path whose device is the system drive's (here: a stand-in directory on the device of the temp dir) is
+        # refused by device, also through a symlink whose name says nothing.
+        stand_in = os.path.join(self.tmp, "system_drive")
+        os.makedirs(stand_in)
+        link = os.path.join(self.tmp, "innocent")
+        os.symlink(stand_in, link)
+        with mock.patch.object(deploy_addon, "FORBIDDEN_DEVICE_PATHS", ((stand_in, "the system drive"),)):
+            for target in (os.path.join(link, "DataCapture"), self.target):
+                reason = deploy_addon.target_reason(target, [self.tmp])
+                self.assertIn("same device as %s (the system drive)" % stand_in, reason)
 
     def test_refuses_targets_outside_the_allowed_roots(self):
         # Runs everywhere: a sibling of the allowed root is not inside it, and an allowed root itself is not a target.
-        # The E: probes are refused here too and nothing is created; their allowed-root reason is checked in
+        # The data-drive probes are refused here too and nothing is created; their allowed-root reason is checked in
         # test_refuses_e_targets_outside_the_allowed_roots.
         sibling = os.path.join(os.path.dirname(self.tmp), "__dd_deploy_selftest_missing__", "DataCapture")
         for target in (sibling, self.tmp):
@@ -289,13 +369,11 @@ class DeployAddonTest(unittest.TestCase):
         for target in (sibling, E_OUTSIDE_PROBES[0]):
             self.assertFalse(os.path.exists(os.path.dirname(target)), target)
 
-    @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
     def test_refuses_e_targets_outside_the_allowed_roots(self):
-        # E: outside DriveDiT/addons is not allowed, and the allowed root itself is not a target
-        for target in E_OUTSIDE_PROBES:
-            rc, out = self.run_tool("--dry-run", target=target)
-            self.assertEqual(rc, 2, "%s: %s" % (target, out))
-            self.assertIn("not inside an allowed deploy root", out, target)
+        # The data drive outside <DATA_ROOT>/addons is not allowed, and the allowed root itself is not a target
+        with no_device_check():
+            for target in E_OUTSIDE_PROBES:
+                self.assertIn("not inside an allowed deploy root", deploy_addon.target_reason(target), target)
 
     def test_temp_target_needs_allow_root(self):
         # Runs everywhere: a scratch target is refused without --allow-root and accepted with it
@@ -304,21 +382,24 @@ class DeployAddonTest(unittest.TestCase):
         self.assertIn("not inside an allowed deploy root", reason)
         self.assertIsNone(deploy_addon.target_reason(self.target, [self.tmp]))
 
-    @unittest.skipUnless(E_MOUNTED, "/mnt/e is not mounted (its paths would lie on /, refused by device first)")
     def test_default_root_is_accepted_without_allow_root(self):
-        self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/DataCapture"))
-        self.assertIsNone(deploy_addon.target_reason("/mnt/e/DriveDiT/addons/__dd_deploy_selftest__/DataCapture"))
+        self.assertEqual(deploy_addon.DEFAULT_TARGET, DATA_ROOT + "/addons/DataCapture")
+        self.assertEqual(deploy_addon.ALLOWED_TARGET_ROOTS, (DATA_ROOT + "/addons",))
+        self.assertEqual(deploy_addon.ALLOW_ROOT_PREFIXES, (DATA_DRIVE + "/", "/dev/shm/"))
+        with no_device_check():
+            self.assertIsNone(deploy_addon.target_reason(DATA_ROOT + "/addons/DataCapture"))
+            self.assertIsNone(deploy_addon.target_reason(DATA_ROOT + "/addons/__dd_deploy_selftest__/DataCapture"))
 
     def test_refuses_bad_allow_roots(self):
-        for root in ("/tmp", os.path.expanduser("~"), "/mnt/e", "/mnt/d", "/mnt/e/__dd_deploy_selftest_missing__"):
+        for root in ("/tmp", os.path.expanduser("~"), DATA_DRIVE, "/mnt/y", DATA_DRIVE + "/__dd_deploy_selftest_missing__"):
             reason = deploy_addon.allow_root_reason(root)
             self.assertIsNotNone(reason, root)
             self.assertIn("--allow-root", reason)
         self.assertIsNone(deploy_addon.allow_root_reason(self.tmp))
-        rc, out = self.run_tool("--dry-run", "--allow-root", "/mnt/e", target="/mnt/e/__dd_deploy_selftest__/x",
+        rc, out = self.run_tool("--dry-run", "--allow-root", DATA_DRIVE, target=DATA_DRIVE + "/__dd_deploy_selftest__/x",
                                 allow_root=False)
         self.assertEqual(rc, 2, out)
-        self.assertIn("--allow-root /mnt/e resolves to /mnt/e", out)
+        self.assertIn("--allow-root %s resolves to %s" % (DATA_DRIVE, DATA_DRIVE), out)
 
     def test_refuses_target_inside_repo(self):
         # Runs everywhere: the overlap rule, in-process against a scratch repo root under the temp dir (a device that
@@ -344,7 +425,7 @@ class DeployAddonTest(unittest.TestCase):
         self.assertIn("overlaps the repo", out)
 
     def test_refuses_case_variants_of_manifest_paths(self):
-        # E: is case-insensitive: a case variant opens the real file, so it must neither bypass the denylist nor
+        # drvfs is case-insensitive: a case variant opens the real file, so it must neither bypass the denylist nor
         # deploy under a second spelling.
         for line, reason in (
                 ("script src/enfusion/datacapture/scr_binaryserializer.c", "auxiliary prototype (ENFCAP)"),
@@ -369,6 +450,7 @@ class DeployAddonTest(unittest.TestCase):
         allowed = "src/enfusion/datacapture/DC_SelfTestAllowed.c"
         os.makedirs(os.path.dirname(tool))
         shutil.copyfile(TOOL, tool)
+        shutil.copyfile(LOADER, os.path.join(repo, "tools", "local_config.py"))  # the tool reads its paths through it
         for rel in ["addons/DataCapture/addon.gproj", allowed] + [src for _, src, _ in DENIED_SOURCES]:
             path = os.path.join(repo, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -400,7 +482,7 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(self.run_tool()[0], 0)
         outside = os.path.join(self.tmp, "outside")
         os.makedirs(outside)
-        # A Scripts folder that points elsewhere (e.g. a junction into an old C: addon) must not receive the scripts.
+        # A Scripts folder that points elsewhere (e.g. a junction into an old addon) must not receive the scripts.
         shutil.rmtree(os.path.join(self.target, "Scripts"))
         os.symlink(outside, os.path.join(self.target, "Scripts"))
         rc, out = self.run_tool()
@@ -478,7 +560,8 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(sha(layer), edited, "refused deploy still overwrote the layer")
         rc, out = self.run_tool("--force")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(sha(layer), sha(os.path.join(REPO, "addons", "DataCapture", *WORLD_LAYER.split("/"))))
+        with open(layer, "rb") as f:
+            self.assertEqual(f.read(), deployed_bytes("addon", "addons/DataCapture/" + WORLD_LAYER))
         backups = [p for p in listing(self.target) if p.startswith(".deploy_backup/")]
         self.assertEqual(len(backups), 1, backups)
         self.assertTrue(backups[0].endswith(WORLD_LAYER + ".bak"))
@@ -548,7 +631,7 @@ class TargetPinTest(unittest.TestCase):
     tearDown = DeployAddonTest.tearDown
     run_tool = DeployAddonTest.run_tool
 
-    ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
+    ROOTS = {"stable": DATA_ROOT + "/addons", "cold-1.8.0.13": DATA_ROOT + "/addons_c18"}
 
     def test_isolation_rules(self):
         r = deploy_addon.isolation_reason
@@ -578,16 +661,16 @@ class TargetPinTest(unittest.TestCase):
         self.assertIn("deploys to %s" % cold, r(scratch, roots, (), cold_pin))
 
     def test_case_aliases_reach_the_protected_roots(self):
-        # Codex round 2 N1: drvfs is case-insensitive, so /mnt/e/DriveDiT/ADDONS is the production root
+        # Codex round 2 N1: drvfs is case-insensitive, so <DATA_ROOT>/ADDONS is the production root
         r = deploy_addon.isolation_reason
         cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
-        wide = ("/mnt/e/DriveDiT",)
-        self.assertIn("belongs to stable pins", r("/mnt/e/DriveDiT/ADDONS/DataCapture", self.ROOTS, wide, cold_pin))
-        self.assertIn("belongs to stable pins", r("/mnt/e/DriveDiT/Addons/datacapture", self.ROOTS, wide, cold_pin))
-        self.assertIn("takes only a deploy with --target-pin", r("/mnt/e/DriveDiT/ADDONS_C18/DataCapture",
+        wide = (DATA_ROOT,)
+        self.assertIn("belongs to stable pins", r(DATA_ROOT + "/ADDONS/DataCapture", self.ROOTS, wide, cold_pin))
+        self.assertIn("belongs to stable pins", r(DATA_ROOT + "/Addons/datacapture", self.ROOTS, wide, cold_pin))
+        self.assertIn("takes only a deploy with --target-pin", r(DATA_ROOT + "/ADDONS_C18/DataCapture",
                                                                   self.ROOTS, wide))
-        self.assertIsNone(r("/mnt/e/DriveDiT/ADDONS_C18/DATACAPTURE", self.ROOTS, wide, cold_pin))
-        self.assertIn("only deploy target", r("/mnt/e/DriveDiT/ADDONS_C18/Other", self.ROOTS, wide, cold_pin))
+        self.assertIsNone(r(DATA_ROOT + "/ADDONS_C18/DATACAPTURE", self.ROOTS, wide, cold_pin))
+        self.assertIn("only deploy target", r(DATA_ROOT + "/ADDONS_C18/Other", self.ROOTS, wide, cold_pin))
 
     def test_identity_alias_reaches_the_protected_root(self):
         # The same directory under another name (any alias the path strings do not show) is found by (st_dev,
@@ -609,15 +692,6 @@ class TargetPinTest(unittest.TestCase):
         with mock.patch.object(deploy_addon, "_identity", identity):
             why = deploy_addon.isolation_reason(os.path.join(alias, "DataCapture"), roots, (self.tmp,), cold_pin)
         self.assertIn("belongs to stable pins", why)
-
-    def test_live_case_alias_of_the_production_root(self):
-        # Where E: is mounted: the real ADDONS alias is the production root (read-only stat; nothing deployed)
-        if not os.path.isdir("/mnt/e/DriveDiT/addons/DataCapture"):
-            self.skipTest("the production addon is not here")
-        cold_pin = {"pin_id": "1.8.0.13-cold", "launch_path_id": "cold-1.8.0.13", "is_active": False}
-        self.assertTrue(deploy_addon.same_dir("/mnt/e/DriveDiT/ADDONS/DataCapture", "/mnt/e/DriveDiT/addons/DataCapture"))
-        self.assertIn("belongs to stable pins", deploy_addon.isolation_reason(
-            os.path.realpath("/mnt/e/DriveDiT/ADDONS/DataCapture"), self.ROOTS, ("/mnt/e/DriveDiT",), cold_pin))
 
     def test_pinlib_and_launchers_agree(self):
         pinlib, _ = deploy_addon.load_pin_tools()
@@ -665,14 +739,10 @@ class TargetPinTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
 
     def test_wide_allow_root_cannot_reach_the_cold_root(self):
-        # Runs only where E: is mounted; --dry-run, and the cold root's parent need not exist (nothing is written).
-        if deploy_addon.forbidden_device_reason(os.path.realpath("/mnt/e/DriveDiT"), "target") or \
-                not os.path.isdir("/mnt/e/DriveDiT"):
-            self.skipTest("/mnt/e/DriveDiT is not on a mounted E: drive here")
-        rc, out = self.run_tool("--dry-run", "--allow-root", "/mnt/e/DriveDiT",
-                                target="/mnt/e/DriveDiT/addons_c18/DataCapture", allow_root=False)
-        self.assertEqual(rc, 2, out)
-        self.assertIn("takes only a deploy with --target-pin", out)
+        # An --allow-root of the whole data root never opens the cold root to a deploy without its target pin (the
+        # rule main() applies before target_reason; in-process, as /mnt/x is never mounted).
+        self.assertIn("takes only a deploy with --target-pin", deploy_addon.isolation_reason(
+            DATA_ROOT + "/addons_c18/DataCapture", deploy_addon.DEFAULT_DEPLOY_ROOTS, (DATA_ROOT,)))
 
     def test_bad_target_pin_refused_before_writing(self):
         for args in (("--target-pin", "../x", "--pin-dir", self.tmp), ("--target-pin", "9.9.0.3", "--pin-dir", self.tmp)):
@@ -683,12 +753,11 @@ class TargetPinTest(unittest.TestCase):
 
     def test_cold_root_needs_its_target_pin(self):
         # addons_c18 is not an allowed root without a target pin naming it (pure check, no write)
-        target = "/mnt/e/DriveDiT/addons_c18/DataCapture"
+        target = DATA_ROOT + "/addons_c18/DataCapture"
         self.assertIsNotNone(deploy_addon.target_reason(target))
-        if deploy_addon.forbidden_device_reason(os.path.realpath("/mnt/e/DriveDiT"), "target"):
-            self.skipTest("/mnt/e is not mounted here (it is the WSL disk), so every E: target is refused anyway")
-        self.assertIn("not inside an allowed deploy root", deploy_addon.target_reason(target))
-        self.assertIsNone(deploy_addon.target_reason(target, ("/mnt/e/DriveDiT/addons_c18",)))
+        with no_device_check():
+            self.assertIn("not inside an allowed deploy root", deploy_addon.target_reason(target))
+            self.assertIsNone(deploy_addon.target_reason(target, (DATA_ROOT + "/addons_c18",)))
 
 
 if __name__ == "__main__":

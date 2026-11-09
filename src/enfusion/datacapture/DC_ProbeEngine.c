@@ -1045,7 +1045,7 @@ class DC_ProbeEngine : DC_ProbeComponent
 			}
 
 			WriteE19Case("c09_readonly_target", "target_created_set_it_read_only", E19_RO_TARGET, "WRITE", created != null, 2, createdReturned, "", "", "ret:0_or_open_null", false, "prepared");
-			m_E19Context.Log("c09: created " + E19_RO_TARGET + ". Make it read-only (cmd: attrib +R E:\\DriveDiT\\wb_profile\\profile\\DC_Probes\\e19\\ro_target.txt) and run e19 again in a later Play");
+			m_E19Context.Log("c09: created " + E19_RO_TARGET + ". Make it read-only (cmd: attrib +R on ro_target.txt in profile\\DC_Probes\\e19\\ under the -profile folder) and run e19 again in a later Play");
 			return;
 		}
 

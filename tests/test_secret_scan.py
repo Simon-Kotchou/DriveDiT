@@ -27,12 +27,12 @@ def kinds(text, path="x.txt"):
 
 
 def temp_dir():
-    """A new directory under $TMPDIR when that is on /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp)."""
+    """A new directory under $TMPDIR when that is on /dev/shm/, else under /dev/shm/ (never /tmp)."""
     base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
+    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
         base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
+    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
+        raise unittest.SkipTest("no usable temporary base under /dev/shm/")
     return tempfile.mkdtemp(prefix="dd_secret_scan_", dir=base)
 
 
@@ -58,9 +58,9 @@ class SecretScanTest(unittest.TestCase):
         self.assertEqual(kinds("@pytest.mark.slow  y = a @ b.T"), [])
 
     def test_windows_profile(self):
-        for bad in ("C:\\Users\\" + "Jdoe\\x", "c:/Users/" + "jdoe", "/mnt/c/Users/" + "jdoe/y", "/mnt/d/Users/" + "jdoe"):
+        for bad in ("X:\\Users\\" + "Jdoe\\x", "x:/Users/" + "jdoe", "/mnt/x/Users/" + "jdoe/y", "/mnt/y/Users/" + "jdoe"):
             self.assertEqual(kinds(bad), ["win-profile"], bad)
-        for ok in ("/mnt/c/Users/x/out.json", "C:\\Users\\<name>", "/mnt/c/Users/$USER/a", "C:\\Users\\Public"):
+        for ok in ("/mnt/x/Users/x/out.json", "X:\\Users\\<name>", "/mnt/x/Users/$USER/a", "X:\\Users\\Public"):
             self.assertEqual(kinds(ok), [], ok)
 
     def test_home_path(self):
@@ -115,6 +115,18 @@ class SecretScanTest(unittest.TestCase):
                     "Linux 5.15.167.4" + "-microsoft-standard-WSL2"):
             self.assertEqual(kinds(bad), ["wsl-version"], bad)
         for ok in ("WSL 2", "WSL2", "WSL in NAT mode", "under WSL; use it", "wslinfo --networking-mode"):
+            self.assertEqual(kinds(ok), [], ok)
+
+    def test_machine_path(self):
+        # DD-22: drive paths of a machine; the letters are assembled so this file holds none
+        mnt, sep = "/mnt/", ":\\"
+        for bad in (mnt + "e" + "/Data", mnt + "c", "under " + mnt + "d" + ".", "E" + sep + "Data", "d" + ":/x",
+                    "`" + "C" + sep + "Program Files`", '"' + "E" + ":\\\\Data" + '"', "(" + mnt + "e" + "/x)",
+                    "cd " + mnt + "e" + " && ls"):
+            self.assertEqual(kinds(bad), ["machine-path"], bad)
+        for ok in (mnt + "x/DataRoot", "Z" + sep + "Steam", "y" + ":/a", mnt + "<drive>/x", "https://example.com/a",
+                   "%s" + sep + "%s", "%DDLC_R:/=\\%", r"\d\d" + ":\\d", mnt + "wsl/x", mnt + "eagle", "a" + mnt + "e/x",
+                   "$ROOT" + mnt + "e", "<X>" + sep + "Data", "re:/x", "Q" + ":"):
             self.assertEqual(kinds(ok), [], ok)
 
     def test_allowlist_is_path_specific(self):

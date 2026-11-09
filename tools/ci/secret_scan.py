@@ -5,7 +5,7 @@ Flags, in every git-tracked text file (default) or in the files named on the com
 
   steam64       Steam64 account ids: 7656119 followed by 10 digits
   email         e-mail addresses, except noreply ones (noreply@anthropic.com, GitHub noreply addresses)
-  win-profile   Windows profile paths: C:\\Users\\<name>, C:/Users/<name>, /mnt/c/Users/<name>
+  win-profile   Windows profile paths: X:\\Users\\<name>, X:/Users/<name>, /mnt/x/Users/<name> (any drive letter)
   home-path     Linux home paths: /home/<name>, with or without a child path
   private-ip    RFC 1918 IPv4 addresses (10/8, 172.16/12, 192.168/16). Loopback and the RFC 5737 documentation
                 ranges are not RFC 1918 and pass; so does a dotted quad in a version context (`version = "..."`,
@@ -13,6 +13,10 @@ Flags, in every git-tracked text file (default) or in the files named on the com
   windows-build Windows release or build strings: Windows 10/11 followed by a release or build (a release like
                 21H2, or a five-digit build), and `Version 10.0.<build>` as `ver` and `systeminfo` print it
   wsl-version   WSL versions (WSL followed by a three-part version) and WSL kernel release strings
+  machine-path  machine-absolute paths (DD-22): a WSL drive mount /mnt/<letter>, alone or with a child path, and a
+                Windows drive path <letter>:\\ or <letter>:/. A machine's paths live in its untracked local config
+                (tools/local_config.py), never in the repo. The placeholder drives X, Y and Z pass (the synthetic test
+                config and the examples use them, as /home/x is a placeholder home)
 
 The patterns are generic on purpose: this file names no real account, host or address. Matches are
 printed redacted (kind, file, line, first characters only) so a CI log never repeats what it found.
@@ -53,7 +57,16 @@ PATTERNS = {
     "wsl-version": re.compile(
         r"(?i)\bWSL\s*2?\s*(?:version:?\s*)?v?\d+\.\d+\.\d+|\b\d+\.\d+\.\d+(?:\.\d+)?-microsoft-standard\b"
     ),
+    # The drive letter is the name: /mnt/<letter> not inside a longer path or word, or <letter>:\ / <letter>:/ not
+    # after a word character, %, $ or a backslash (so https://, a %s:\ format, a %VAR:/=\% substitution and a regex
+    # such as \d:\d are not paths).
+    "machine-path": re.compile(
+        r"(?<![\w./~-])/mnt/(?P<name>[A-Za-z])(?![\w-])|(?<![\w%$\\])(?P<drive>[A-Za-z]):[\\/]"
+    ),
 }
+
+# Drive letters that are placeholders, never a machine's drive (machine-path).
+PLACEHOLDER_DRIVES = ("x", "y", "z")
 
 # RFC 1918 private networks: 10/8, 172.16/12, 192.168/16 (as integers, so this file holds no dotted quad). Loopback
 # (127/8), link-local and the RFC 5737 documentation ranges are not in them.
@@ -165,7 +178,11 @@ def findings(path: str, text: str):
                 if kind == "private-ip" and not is_private_address(hit, line[: m.start()]):
                     continue
                 name = m.groupdict().get("name")
-                if kind != "private-ip" and name is not None and is_placeholder(name):
+                if kind == "machine-path":
+                    name = name or m.group("drive")
+                    if name.lower() in PLACEHOLDER_DRIVES:
+                        continue
+                elif kind != "private-ip" and name is not None and is_placeholder(name):
                     continue
                 if (path, kind, hit if name is None else name) in ALLOWLIST:
                     continue

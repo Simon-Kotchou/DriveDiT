@@ -212,7 +212,7 @@ class LaunchRecordV2Tests(V2Case):
 
 
 class FakeExperimental:
-    """The E: library layout of the Experimental apps 1890860/1890880."""
+    """The library layout of the Experimental apps 1890860/1890880 (EXPERIMENTAL_*_INSTALL)."""
 
     def __init__(self, tmp):
         lib = os.path.join(tmp, "elib", "steamapps")
@@ -242,9 +242,7 @@ class ExperimentalTests(V2Case):
     def setUp(self):
         super().setUp()
         self.exp = FakeExperimental(self.tmp)
-        saved = pinlib.EXPERIMENTAL_LAUNCH_PATHS
-        pinlib.EXPERIMENTAL_LAUNCH_PATHS = self.exp.launch_paths()
-        self.addCleanup(setattr, pinlib, "EXPERIMENTAL_LAUNCH_PATHS", saved)
+        base.override(self, pinlib, "EXPERIMENTAL_LAUNCH_PATHS", self.exp.launch_paths())
         rc, _, err = run_main(make_pin.main, ["--channel", "experimental", "--pin-id", "1.9.0.10-exp",
                                               "--out", self.pin_file("1.9.0.10-exp"), "--game-acf", self.exp.game_acf,
                                               "--tools-acf", self.exp.tools_acf], self.roots)
@@ -564,9 +562,8 @@ class FreezeCase(V2Case):
         super().setUp()
         self.put_active(b"1.8.0.13\n")
         self.profile = os.path.join(self.tmp, "wb_profile")
-        saved = pinlib.WB_LAUNCH
-        pinlib.WB_LAUNCH = {"stable": {"profile": self.profile, "gproj": "x.gproj", "launcher": "wb_R1.bat"}}
-        self.addCleanup(setattr, pinlib, "WB_LAUNCH", saved)
+        base.override(self, pinlib, "WB_LAUNCH",
+                      {"stable": {"profile": self.profile, "gproj": "x.gproj", "launcher": "wb_R1.bat"}})
 
     def before(self, steam="online"):
         rc, out, err = run_main(freeze_check.main, ["before", "--pin-active", "--pin-dir", self.pin_dir, "--steam",

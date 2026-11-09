@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# cold_copy.sh - copy the pinned Arma Reforger and Arma Reforger Tools installs to E: and write SHA256SUMS.
-# Ticket DD-0 (capture program r2 TKT-0, P0 step 3; decision D2b). The copy lets a pinned build be restored
-# if Steam updates anyway. It is about 27.9 GB: game about 27.2 GB from D:, Tools about 0.7 GB from C:.
+# cold_copy.sh - copy the pinned Arma Reforger and Arma Reforger Tools installs to the data drive and write
+# SHA256SUMS. Ticket DD-0 (capture program r2 TKT-0, P0 step 3; decision D2b). The copy lets a pinned build be
+# restored if Steam updates anyway. It is about 27.9 GB: the game about 27.2 GB, the Tools about 0.7 GB, each read
+# from the install the local config names (GAME_INSTALL, TOOLS_INSTALL; tools/local_config.py).
 #
 #   cold_copy.sh [--run] [--pin PIN_JSON | --pin-dir PIN_DIR] [--dest DEST_DIR]
 #     default PIN_JSON  the ACTIVE pin: PIN_DIR/pin_<id>.json, where PIN_DIR/ACTIVE names <id> (the pin the
-#                       launchers check). PIN_DIR defaults to /mnt/e/DriveDiT/pin. The pointer is validated as in
+#                       launchers check). PIN_DIR defaults to <DATA_ROOT>/pin. The pointer is validated as in
 #                       preflight --pin-active: a regular file, no symlink, one valid id, a pin holding that id.
-#     default DEST_DIR  /mnt/e/DriveDiT/pin/<pin_id>    (results: DEST/game, DEST/tools, DEST/SHA256SUMS, DEST/meta)
+#     default DEST_DIR  <DATA_ROOT>/pin/<pin_id>    (results: DEST/game, DEST/tools, DEST/SHA256SUMS, DEST/meta)
 #   1.8.0.13 is the interim pin. Before moving to 1.9, cold-copy 1.8 (while it is still the active pin) if a
 #   rollback to 1.8 should stay possible; see README "1.8 is an interim pin; moving to 1.9".
 #   A restore from this copy cannot bring back sub-second mtimes (drvfs sets whole seconds), so pin_activate.py
@@ -16,18 +17,19 @@
 #   see README "Rollback". The pin file in DEST/meta keeps every pak and exe mtime_ns exactly.
 #
 # DRY RUN BY DEFAULT: without --run it only reads, checks the live installs against the pin, and prints the plan.
-# The sources are only read. DEST must pass pinlib.check_write_path: under /mnt/e, on the E: drive's own mount
-# (an unmounted /mnt/e is a directory on the WSL disk, on C:), and never on C:.
+# The sources are only read. DEST must pass pinlib.check_write_path: on the data drive (the drive of DATA_ROOT), on
+# that drive's own mount (an unmounted drive mount is a directory on the WSL disk, which lives on the system drive),
+# and never on the system drive (SYSTEM_DRIVE).
 #
 # With --run:
 #   1. preflight --check on the live installs. AutoUpdateBehavior is waived here, because the copy is the
 #      fallback if it stays "0". Every other check must pass, so a half-updated install is never copied.
 #   2. rsync -rt each install into DEST/game and DEST/tools. A marker file, DEST/.cold_copy_incomplete, lets an
 #      interrupted run be resumed by running the script again. A DEST that already contains a symlink is refused
-#      (rsync -rt never makes one, and one could lead a write off E:).
+#      (rsync -rt never makes one, and one could lead a write off the data drive).
 #   3. preflight --check on the live installs again, to show nothing changed during the copy.
 #   4. preflight --check on the copy (--game-root/--tools-root) with 1 s mtime resolution: WSL drvfs truncates
-#      the mtimes it sets to whole seconds (measured on E:). Then each copy must hold exactly the regular files
+#      the mtimes it sets to whole seconds (measured on the data drive). Then each copy must hold exactly the regular files
 #      of its source: none missing, none extra (such as an rsync temp file left by a killed run).
 #   5. SHA256SUMS for every file in the copy, paths relative to DEST (sha256sum -c format).
 #   6. The pin JSON and both appmanifests are copied to DEST/meta.
@@ -83,24 +85,27 @@ GAME_SRC="${F[3]}"; GAME_ACF="${F[4]}"; TOOLS_SRC="${F[5]}"; TOOLS_ACF="${F[6]}"
 [[ -n "$DEST" ]] || DEST="$(dirname "$PIN")/$PIN_ID"
 
 # Write guard, first pinlib.check_write_path (the guard every pin tool uses; it also checks /proc/self/mountinfo that
-# DEST lies on the E: drive's mount), then the same rules again in bash on the resolved path.
-DEST_REAL="$("${PY[@]}" -c '
+# DEST lies on the data drive's mount), then the same rules again in bash on the resolved path: never under the
+# system drive's mount, and strictly inside the data drive's (both from the local config, through pinlib).
+mapfile -t G < <("${PY[@]}" -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("dd_pin_pinlib", sys.argv[1])
 pl = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = pl
 spec.loader.exec_module(pl)
 try:
-    print(pl.check_write_path(sys.argv[2]))
+    print(pl.check_write_path(sys.argv[2])); print(pl.FORBIDDEN_WRITE_PREFIXES[0]); print(pl.DEFAULT_WRITE_ROOTS[0])
 except pl.PinError as exc:
     sys.exit("cold_copy: %s" % exc)
-' "$HERE/pinlib.py" "$DEST")" || exit 1
+' "$HERE/pinlib.py" "$DEST")
+[[ ${#G[@]} -eq 3 && "${G[1]}" == /mnt/?/ && "${G[2]}" == /mnt/?/ ]] || exit 1
+DEST_REAL="${G[0]}"; SYSTEM_MNT="${G[1]}"; DATA_MNT="${G[2]}"
 case "${DEST_REAL,,}/" in
-  /mnt/c/*) die "refusing to write on C: ($DEST -> $DEST_REAL)" ;;
+  "$SYSTEM_MNT"*) die "refusing to write on the system drive ($DEST -> $DEST_REAL)" ;;
 esac
 case "$DEST_REAL/" in
-  /mnt/e/?*) ;;
-  *) die "refusing to write outside /mnt/e: $DEST -> $DEST_REAL" ;;
+  "$DATA_MNT"?*) ;;
+  *) die "refusing to write outside the data drive ${DATA_MNT%/}: $DEST -> $DEST_REAL" ;;
 esac
 DEST="$DEST_REAL"
 for src in "$GAME_SRC" "$TOOLS_SRC"; do
@@ -119,8 +124,8 @@ elif [[ -e "$MARKER" ]]; then
 elif [[ -d "$DEST" && -n "$(ls -A -- "$DEST" 2>/dev/null)" ]]; then
   die "$DEST exists and is not empty, and has no resume marker; refusing to mix copies"
 fi
-# rsync -rt never creates symlinks. One inside DEST (for example DEST/game -> /mnt/c/...) was put there by
-# something else and would lead rsync's writes off E:, so refuse it before anything is written.
+# rsync -rt never creates symlinks. One inside DEST (for example DEST/game -> a system-drive path) was put there by
+# something else and would lead rsync's writes off the data drive, so refuse it before anything is written.
 if [[ -d "$DEST" ]]; then
   LINK="$(find "$DEST" -type l -print -quit)"
   [[ -z "$LINK" ]] || die "$DEST contains a symlink ($LINK); a copy holds only regular files and directories"

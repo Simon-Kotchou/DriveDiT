@@ -1,6 +1,6 @@
 """Shared helpers for the DriveDiT build pin (ticket DD-0, capture program TKT-0).
 
-Stdlib only. Must run on the WSL system interpreter (Ubuntu 22.04: Python 3.10),
+Stdlib only. Must run on the WSL system interpreter (/usr/bin/python3; Python 3.10 or later),
 because the Windows launchers call `wsl.exe -e python3 -I -B ...` without a login
 shell. make_pin.py and preflight.py load this file by explicit path (their
 _load_pinlib): `python3 -I` does not put the script directory on sys.path, and
@@ -10,12 +10,19 @@ the stdlib.
 DD-14a adds pin channels (stable, experimental, cold), the build identity build_key/1, the dd-pin/2 schema and the
 two write-once sidecars of a pin (pin_<id>.build_key.json for a dd-pin/1 pin, pin_<id>.engine.json); see README.
 
+Local paths (DD-22): the repo names no machine path. The installs, the data root and the drives below come from
+the untracked local config (tools/local_config.py, drivedit.local.env; the DATA_ROOT, GAME_INSTALL, TOOLS_INSTALL,
+EXPERIMENTAL_*_INSTALL and SYSTEM_DRIVE keys), read on first use and never at import. A missing file or key is a
+PinError that names it, so every tool refuses rather than guess. LAUNCH_PATHS, DEFAULT_PIN_DIR, WB_LAUNCH,
+DEPLOY_ROOTS and the other path tables are computed when read (module __getattr__); a test may assign one, and every
+reader here honours the assignment (_get).
+
 Write safety: every path this package writes to goes through check_write_path().
-Writes are allowed only under /mnt/e/ (the E: drive). /mnt/c/ is always refused,
-whatever the allowed roots are, because C: is never written (a project rule) and holds the live
-Workbench addon. /mnt/e is only a name, so the guard also reads /proc/self/mountinfo
-and requires the path to lie on the mount of the E: drive itself (WRITE_ROOT_DRIVES):
-an unmounted /mnt/e is an empty directory on the WSL disk, which lives on C:.
+Writes are allowed only on the data drive (the drive of DATA_ROOT, DEFAULT_WRITE_ROOTS). The system drive
+(SYSTEM_DRIVE) is always refused, whatever the allowed roots are, because it is never written (a project rule) and
+holds the live Workbench addon. A drive mount such as /mnt/x is only a name, so the guard also reads
+/proc/self/mountinfo and requires the path to lie on the mount of the data drive itself (WRITE_ROOT_DRIVES):
+an unmounted /mnt/x is an empty directory on the WSL disk, which lives on the system drive.
 pin_activate.py writes through one opened directory fd (open_guarded_dir and the
 *_at helpers), so a directory swapped after the check cannot redirect its writes.
 """
@@ -37,10 +44,8 @@ LAUNCH_SCHEMA_V2 = "dd-launch/2"   # adds top-level build_key, channel, pin_chan
 
 APPS = ("game", "tools")
 APPIDS = {"game": 1874880, "tools": 1874910}
-DEFAULT_ACF = {
-    "game": "/mnt/d/SteamLibrary/steamapps/appmanifest_1874880.acf",
-    "tools": "/mnt/c/Program Files (x86)/Steam/steamapps/appmanifest_1874910.acf",
-}
+# DEFAULT_ACF (computed, _default_acf): {app: <library>/steamapps/appmanifest_<appid>.acf} of the local config's
+# GAME_INSTALL and TOOLS_INSTALL (each <library>/steamapps/common/<install dir>).
 # Executables recorded in the pin and checked by preflight (paths relative to the install dir).
 BINARIES = {
     "game": ("ArmaReforgerSteam.exe", "ArmaReforgerSteamDiag.exe"),
@@ -63,7 +68,7 @@ CHANNELS = ("stable", "experimental", "cold")
 RELEASE_CHANNEL = {"stable": "stable", "experimental": "experimental", "cold": "stable"}
 CHANNEL_APPIDS = {"stable": APPIDS, "experimental": {"game": 1890860, "tools": 1890880}, "cold": APPIDS}
 # The Experimental game exe is ArmaReforgerSteam_Experimental.exe (its Steam launch option; RELEASE_STATUS 4.1),
-# read from the install on E: on 2026-11-06. The Workbench exe has the same name in both.
+# read from the Experimental install on 2026-11-06. The Workbench exe has the same name in both.
 CHANNEL_BINARIES = {
     "stable": BINARIES,
     "experimental": {"game": ("ArmaReforgerSteam_Experimental.exe", "ArmaReforgerSteamDiag.exe"),
@@ -72,11 +77,8 @@ CHANNEL_BINARIES = {
 }
 CHANNEL_STEAM_APPID_FILES = {"stable": STEAM_APPID_FILES, "experimental": STEAM_APPID_FILES,
                              "cold": STEAM_APPID_FILES}
-DEFAULT_ACF_BY_CHANNEL = {
-    "stable": DEFAULT_ACF,
-    "experimental": {"game": "/mnt/e/SteamLibrary/steamapps/appmanifest_1890860.acf",
-                     "tools": "/mnt/e/SteamLibrary/steamapps/appmanifest_1890880.acf"},
-}
+# DEFAULT_ACF_BY_CHANNEL (computed): stable is DEFAULT_ACF; experimental the appmanifests of the local config's
+# EXPERIMENTAL_GAME_INSTALL and EXPERIMENTAL_TOOLS_INSTALL.
 
 # ---- build identity (MIGRATION_1_9 2.2; dc-2.0 section 11) ----
 # build_key/1 = sha256 of the ASCII text "build_key/1\n" + "<app>.appid=..\n<app>.buildid=..\n<app>.exe_sha256=..\n"
@@ -121,27 +123,23 @@ AUTO_UPDATE_ALLOWED = ("1",)
 # StateFlags 4 = fully installed, no update queued or running (community-documented, UNVERIFIED).
 STATE_FLAGS_SETTLED = "4"
 
-# The installs the launchers start: wb_R1.bat WB_DIR (Tools install + \Workbench), client_R1_i01.bat GAME_DIR,
-# and DD-3's launch-workbench.sh WB_DIR. A pin is checked against the appmanifests and install dirs stored in it,
-# so preflight's <app>.launch_path check requires those to be exactly these paths. pin_activate.py (no waivers) and
-# every launch therefore refuse a pin made from any other tree: the exe a launcher starts is always the one the pin
-# checked. Change these only together with the three launchers.
-LAUNCH_PATHS = {
-    "game": {"acf": DEFAULT_ACF["game"],
-             "install": "/mnt/d/SteamLibrary/steamapps/common/Arma Reforger"},
-    "tools": {"acf": DEFAULT_ACF["tools"],
-              "install": "/mnt/c/Program Files (x86)/Steam/steamapps/common/Arma Reforger Tools"},
-}
+# LAUNCH_PATHS (computed, _launch_paths): the installs the launchers start, wb_R1.bat WB_DIR (Tools install +
+# \Workbench), client_R1_i01.bat GAME_DIR, and DD-3's launch-workbench.sh WB_DIR, i.e. the local config's
+# GAME_INSTALL and TOOLS_INSTALL with their appmanifests. A pin is checked against the appmanifests and install dirs
+# stored in it, so preflight's <app>.launch_path check requires those to be exactly these paths. pin_activate.py (no
+# waivers) and every launch therefore refuse a pin made from any other tree: the exe a launcher starts is always the
+# one the pin checked. The launchers and this table read the same two keys of the same file, so they cannot drift.
 
 # Launch paths per launch-path id (DD-14a). Every launcher starts fixed exes and names its launch-path id to the
 # preflight (--launch-path; default "stable", which is LAUNCH_PATHS above, read at call time so tests can point it
 # at a fake layout). A pin records the id it was made for (dd-pin/2 launch_path_id; a dd-pin/1 pin is "stable"), and
 # <app>.launch_path refuses a pin whose id or paths differ from the launcher's. Change an entry only together with
 # its launchers (tools/pin/tests compares them with the .bat files).
-#   cold-1.8.0.13: the working copy E:\DriveDiT\pin\1.8.0.13-run (MIGRATION_1_9 7.1, decision 16), made from the
-#   verified reference copy E:\DriveDiT\pin\1.8.0.13; its appmanifests are the saved ones in meta\.
+#   cold-1.8.0.13: the working copy <DATA_ROOT>/pin/1.8.0.13-run (MIGRATION_1_9 7.1, decision 16), made from the
+#   verified reference copy <DATA_ROOT>/pin/1.8.0.13; its appmanifests are the saved ones in meta/.
 #   Launchers: tools/launch/wb_C18.bat and client_C18_i01.bat.
-COLD_RUN_ROOTS = {"cold-1.8.0.13": "/mnt/e/DriveDiT/pin/1.8.0.13-run"}
+# COLD_RUN_ROOTS (computed): {launch path: <DATA_ROOT>/<rel>} for these.
+COLD_RUN_RELS = {"cold-1.8.0.13": "pin/1.8.0.13-run"}
 
 
 def _cold_paths(root: str) -> dict:
@@ -149,58 +147,53 @@ def _cold_paths(root: str) -> dict:
             "tools": {"acf": root + "/meta/appmanifest_1874910.acf", "install": root + "/tools"}}
 
 
-COLD_LAUNCH_PATHS = {lp: _cold_paths(root) for lp, root in COLD_RUN_ROOTS.items()}
-# The Experimental apps on the E: library (decision 3). No launcher starts them (wb_X19.bat is moot after the
-# 2026-11-05 stable re-pin), so an experimental pin is for --check only.
-EXPERIMENTAL_LAUNCH_PATHS = {
-    "game": {"acf": DEFAULT_ACF_BY_CHANNEL["experimental"]["game"],
-             "install": "/mnt/e/SteamLibrary/steamapps/common/Arma Reforger Experimental"},
-    "tools": {"acf": DEFAULT_ACF_BY_CHANNEL["experimental"]["tools"],
-              "install": "/mnt/e/SteamLibrary/steamapps/common/Arma Reforger Experimental Tools"},
-}
+# COLD_LAUNCH_PATHS (computed): _cold_paths of every COLD_RUN_ROOTS entry.
+# EXPERIMENTAL_LAUNCH_PATHS (computed): the Experimental apps of the local config (decision 3). No launcher starts
+# them (wb_X19.bat is moot after the 2026-11-05 stable re-pin), so an experimental pin is for --check only.
 STABLE_LAUNCH_PATH = "stable"
 EXPERIMENTAL_LAUNCH_PATH = "experimental"
 
-# What each Workbench launcher passes as -profile and -gproj, per launch-path id (Windows form). The MCP endpoint
-# handshake compares the running Workbench's command line with these; tools/pin/tests compares them with the .bat
-# files. The cold Workbench gets its own profile and addon copy, so a 1.8 Workbench never re-saves the 1.9 addon.
-WB_LAUNCH = {
-    "stable": {"profile": "E:\\DriveDiT\\wb_profile", "gproj": "E:\\DriveDiT\\addons\\DataCapture\\addon.gproj",
-               "launcher": "wb_R1.bat"},
-    "cold-1.8.0.13": {"profile": "E:\\DriveDiT\\wb_profile_c18",
-                      "gproj": "E:\\DriveDiT\\addons_c18\\DataCapture\\addon.gproj", "launcher": "wb_C18.bat"},
+# WB_LAUNCH (computed): what each Workbench launcher passes as -profile and -gproj, per launch-path id (Windows form,
+# <DATA_ROOT>\<rel>). The MCP endpoint handshake compares the running Workbench's command line with these;
+# tools/pin/tests compares them with the .bat files. The cold Workbench gets its own profile and addon copy, so a
+# 1.8 Workbench never re-saves the 1.9 addon.
+WB_LAUNCH_RELS = {
+    "stable": {"profile": "wb_profile", "gproj": "addons/DataCapture/addon.gproj", "launcher": "wb_R1.bat"},
+    "cold-1.8.0.13": {"profile": "wb_profile_c18", "gproj": "addons_c18/DataCapture/addon.gproj",
+                      "launcher": "wb_C18.bat"},
 }
-# The deploy root (parent of DataCapture/) each launch-path id's Workbench and client load (tools/deploy_addon.py
-# --target-pin).
-DEPLOY_ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
+# DEPLOY_ROOTS (computed): the deploy root (parent of DataCapture/) each launch-path id's Workbench and client load
+# (tools/deploy_addon.py --target-pin), <DATA_ROOT>/<rel>.
+DEPLOY_ROOT_RELS = {"stable": "addons", "cold-1.8.0.13": "addons_c18"}
 
 
 def launch_path_ids() -> tuple:
-    return (STABLE_LAUNCH_PATH, EXPERIMENTAL_LAUNCH_PATH) + tuple(sorted(COLD_LAUNCH_PATHS))
+    cold = globals()["COLD_RUN_ROOTS"] if "COLD_RUN_ROOTS" in globals() else COLD_RUN_RELS
+    return (STABLE_LAUNCH_PATH, EXPERIMENTAL_LAUNCH_PATH) + tuple(sorted(cold))
 
 
 def launch_paths_for(lp_id: str) -> dict:
-    """{app: {acf, install}} the launchers of launch-path id lp_id start. PinError for an unknown id."""
+    """{app: {acf, install}} the launchers of launch-path id lp_id start. PinError for an unknown id, or when the
+    local config lacks a key the id needs."""
     if lp_id == STABLE_LAUNCH_PATH:
-        return LAUNCH_PATHS
+        return _get("LAUNCH_PATHS")
     if lp_id == EXPERIMENTAL_LAUNCH_PATH:
-        return EXPERIMENTAL_LAUNCH_PATHS
-    if lp_id in COLD_LAUNCH_PATHS:
-        return COLD_LAUNCH_PATHS[lp_id]
+        return _get("EXPERIMENTAL_LAUNCH_PATHS")
+    if lp_id in launch_path_ids()[2:]:
+        return _get("COLD_LAUNCH_PATHS")[lp_id]
     raise PinError("unknown launch path %r (known: %s)" % (lp_id, ", ".join(launch_path_ids())))
 
-DEFAULT_WRITE_ROOTS = ("/mnt/e/",)
-FORBIDDEN_WRITE_PREFIXES = ("/mnt/c/",)
-# A write under one of these mount points must land on the mount of that Windows drive (checked in
-# /proc/self/mountinfo), not on whatever directory happens to carry the name.
-WRITE_ROOT_DRIVES = {"/mnt/e": "E:"}
+# DEFAULT_WRITE_ROOTS (computed): (<data drive>/,), the drive mount of DATA_ROOT. FORBIDDEN_WRITE_PREFIXES
+# (computed): (<SYSTEM_DRIVE>/,). WRITE_ROOT_DRIVES (computed): {<data drive mount>: "<X>:"}: a write under that
+# mount point must land on the mount of that Windows drive (checked in /proc/self/mountinfo), not on whatever
+# directory happens to carry the name.
 MOUNTINFO = "/proc/self/mountinfo"
 
 # Active pin pointer. <pin dir>/ACTIVE holds one line, the id of the pin every launcher checks
 # (preflight --pin-active), and that pin is <pin dir>/pin_<id>.json. Only pin_activate.py writes ACTIVE: it
 # refuses a pin that does not match the live installs and appends every switch to <pin dir>/ACTIVE.log.
 # 1.8.0.13 is the interim pin; the plan is to move to 1.9 once it is stable and compatibility is checked.
-DEFAULT_PIN_DIR = "/mnt/e/DriveDiT/pin"
+# DEFAULT_PIN_DIR (computed): <DATA_ROOT>/pin.
 ACTIVE_NAME = "ACTIVE"
 ACTIVE_LOG_NAME = "ACTIVE.log"
 # Held by pin_activate.py (O_CREAT|O_EXCL) from reading the old ACTIVE to the read-back, so switches are serialized.
@@ -214,7 +207,136 @@ PIN_ID_RE = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,9}){1,3}(?:-[a-z0-9]{1,16})?")
 
 
 class PinError(Exception):
-    """A configuration or safety error (bad path, unreadable file, malformed data)."""
+    """A configuration or safety error (bad path, unreadable file, malformed data, no local config)."""
+
+
+# --------------------------------------------------------------------------- local paths (DD-22)
+
+
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "local_config.py")
+
+
+def _local_config_module():
+    """tools/local_config.py next to tools/pin, loaded by path (the pin tools run with python3 -I)."""
+    name = "dd_local_config"
+    import sys
+    mod = sys.modules.get(name)
+    if mod is not None and getattr(mod, "__file__", None) == _LOCAL_CONFIG_PY:
+        return mod
+    if not os.path.isfile(_LOCAL_CONFIG_PY):
+        raise PinError("%s is missing: the pin tools read this machine's paths through it (install tools/"
+                       "local_config.py next to tools/pin)" % _LOCAL_CONFIG_PY)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, _LOCAL_CONFIG_PY)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def local_config():
+    """The parsed local config (tools/local_config.py Config). PinError when it is missing or malformed."""
+    lc = _local_config_module()
+    try:
+        return lc.load()
+    except lc.LocalConfigError as exc:
+        raise PinError(str(exc))
+
+
+def _local(form: str, key: str) -> str:
+    lc = _local_config_module()
+    try:
+        return getattr(local_config(), form)(key)
+    except lc.LocalConfigError as exc:
+        raise PinError(str(exc))
+
+
+def local_path(key: str) -> str:
+    """A path key of the local config, WSL form. PinError naming the key when it is missing."""
+    return _local("get", key)
+
+
+def local_win(key: str) -> str:
+    """A path key of the local config, Windows form (X:\\...)."""
+    return _local("win", key)
+
+
+def _steam_acf(key: str, appid: int) -> str:
+    """<library>/steamapps/appmanifest_<appid>.acf of the install <library>/steamapps/common/<dir> named by key."""
+    return os.path.dirname(os.path.dirname(local_path(key))) + "/appmanifest_%d.acf" % appid
+
+
+def _default_acf() -> dict:
+    return {"game": _steam_acf("GAME_INSTALL", APPIDS["game"]), "tools": _steam_acf("TOOLS_INSTALL", APPIDS["tools"])}
+
+
+def _default_acf_by_channel() -> dict:
+    exp = CHANNEL_APPIDS["experimental"]
+    return {"stable": _get("DEFAULT_ACF"),
+            "experimental": {"game": _steam_acf("EXPERIMENTAL_GAME_INSTALL", exp["game"]),
+                             "tools": _steam_acf("EXPERIMENTAL_TOOLS_INSTALL", exp["tools"])}}
+
+
+def _launch_paths() -> dict:
+    acf = _get("DEFAULT_ACF")
+    return {"game": {"acf": acf["game"], "install": local_path("GAME_INSTALL")},
+            "tools": {"acf": acf["tools"], "install": local_path("TOOLS_INSTALL")}}
+
+
+def _experimental_launch_paths() -> dict:
+    acf = _get("DEFAULT_ACF_BY_CHANNEL")["experimental"]
+    return {"game": {"acf": acf["game"], "install": local_path("EXPERIMENTAL_GAME_INSTALL")},
+            "tools": {"acf": acf["tools"], "install": local_path("EXPERIMENTAL_TOOLS_INSTALL")}}
+
+
+def _cold_run_roots() -> dict:
+    root = local_path("DATA_ROOT")
+    return {lp: root + "/" + rel for lp, rel in COLD_RUN_RELS.items()}
+
+
+def _wb_launch() -> dict:
+    root = local_win("DATA_ROOT")
+    return {lp: {"profile": root + "\\" + v["profile"].replace("/", "\\"),
+                 "gproj": root + "\\" + v["gproj"].replace("/", "\\"), "launcher": v["launcher"]}
+            for lp, v in WB_LAUNCH_RELS.items()}
+
+
+def _write_root_drives() -> dict:
+    lc = _local_config_module()
+    cfg = local_config()
+    try:
+        return {cfg.drive("DATA_ROOT"): cfg.drive_win("DATA_ROOT")}
+    except lc.LocalConfigError as exc:
+        raise PinError(str(exc))
+
+
+_COMPUTED = {
+    "DEFAULT_ACF": _default_acf,
+    "DEFAULT_ACF_BY_CHANNEL": _default_acf_by_channel,
+    "LAUNCH_PATHS": _launch_paths,
+    "COLD_RUN_ROOTS": _cold_run_roots,
+    "COLD_LAUNCH_PATHS": lambda: {lp: _cold_paths(root) for lp, root in _get("COLD_RUN_ROOTS").items()},
+    "EXPERIMENTAL_LAUNCH_PATHS": _experimental_launch_paths,
+    "WB_LAUNCH": _wb_launch,
+    "DEPLOY_ROOTS": lambda: {lp: local_path("DATA_ROOT") + "/" + rel for lp, rel in DEPLOY_ROOT_RELS.items()},
+    "DEFAULT_WRITE_ROOTS": lambda: (sorted(_get("WRITE_ROOT_DRIVES"))[0] + "/",),
+    "FORBIDDEN_WRITE_PREFIXES": lambda: (local_path("SYSTEM_DRIVE") + "/",),
+    "WRITE_ROOT_DRIVES": _write_root_drives,
+    "DEFAULT_PIN_DIR": lambda: local_path("DATA_ROOT") + "/pin",
+}
+
+
+def _get(name: str):
+    """A path table: the module attribute when a caller assigned one (tests), else computed from the local config."""
+    g = globals()
+    return g[name] if name in g else _COMPUTED[name]()
+
+
+def __getattr__(name: str):
+    """pinlib.LAUNCH_PATHS and the other path tables, computed from the local config on every read (PEP 562)."""
+    if name in _COMPUTED:
+        return _COMPUTED[name]()
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
 # --------------------------------------------------------------------------- paths
@@ -225,7 +347,7 @@ _WSL_MNT = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
 
 
 def win_to_wsl(path: str) -> str:
-    """'E:\\DriveDiT\\pin' -> '/mnt/e/DriveDiT/pin'. Other strings are returned unchanged."""
+    """'X:\\DataRoot\\pin' -> '/mnt/x/DataRoot/pin'. Other strings are returned unchanged."""
     m = _WIN_ABS.match(path)
     if not m:
         return path
@@ -234,7 +356,7 @@ def win_to_wsl(path: str) -> str:
 
 
 def wsl_to_win(path: str):
-    """'/mnt/d/SteamLibrary/x' -> 'D:\\SteamLibrary\\x'; None for paths outside /mnt/<drive>."""
+    """'/mnt/y/Library/x' -> 'Y:\\Library\\x'; None for paths outside /mnt/<drive>."""
     m = _WSL_MNT.match(path)
     if not m:
         return None
@@ -288,7 +410,7 @@ def mount_of(resolved: str, mounts: list) -> dict:
 
 
 def _is_drive(mount: dict, drive: str) -> bool:
-    """True if a mountinfo entry is the drvfs mount of the Windows drive "E:" (source E:\\ or option path=E:\\)."""
+    """True if a mountinfo entry is the drvfs mount of the Windows drive "X:" (source X:\\ or option path=X:\\)."""
     want = drive.upper().rstrip(":") + ":"
     if mount["source"].replace("/", "\\").rstrip("\\").upper() == want:
         return True
@@ -300,9 +422,10 @@ def drive_mount_for(resolved: str):
     """For a resolved path under a WRITE_ROOT_DRIVES root, the mountinfo entry of that drive's mount; else None.
 
     Raises PinError unless the path lies on a mount at exactly that root whose source is that drive. An unmounted
-    /mnt/e (an empty directory on the WSL disk), a redirected one, or another filesystem mounted below it is refused.
+    data drive mount (an empty directory on the WSL disk), a redirected one, or another filesystem mounted below it is
+    refused.
     """
-    for root, drive in WRITE_ROOT_DRIVES.items():
+    for root, drive in _get("WRITE_ROOT_DRIVES").items():
         if resolved == root or resolved.startswith(root.rstrip("/") + "/"):
             m = mount_of(resolved, parse_mountinfo(_read_mountinfo()))
             if m is None or m["mount_point"] != root or not _is_drive(m, drive):
@@ -314,20 +437,23 @@ def drive_mount_for(resolved: str):
     return None
 
 
-def check_write_path(path: str, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+def check_write_path(path: str, allowed_roots=None) -> str:
     """Return the resolved absolute path if writing there is allowed, else raise PinError.
 
-    The path is resolved with realpath first, so a symlink under /mnt/e that points to C: is refused.
-    /mnt/c is refused even when a caller passes an allowed root that would contain it. A path under /mnt/e must
-    also lie on the E: drive's own mount (drive_mount_for), not merely carry the name.
+    allowed_roots: None for DEFAULT_WRITE_ROOTS (the data drive). The path is resolved with realpath first, so a
+    symlink on the data drive that points to the system drive is refused. The system drive (FORBIDDEN_WRITE_PREFIXES)
+    is refused even when a caller passes an allowed root that would contain it. A path on the data drive's mount
+    point must also lie on that drive's own mount (drive_mount_for), not merely carry the name.
     """
+    if allowed_roots is None:
+        allowed_roots = _get("DEFAULT_WRITE_ROOTS")
     if not path:
         raise PinError("empty output path")
     resolved = os.path.realpath(os.path.abspath(win_to_wsl(path)))
     low = resolved.lower() + "/"
-    for bad in FORBIDDEN_WRITE_PREFIXES:
+    for bad in _get("FORBIDDEN_WRITE_PREFIXES"):
         if low.startswith(bad):
-            raise PinError("refusing to write on C: (%s resolves to %s)" % (path, resolved))
+            raise PinError("refusing to write on the system drive (%s resolves to %s)" % (path, resolved))
     for root in allowed_roots:
         r = os.path.realpath(os.path.abspath(root))
         if resolved == r or resolved.startswith(r.rstrip("/") + "/"):
@@ -759,13 +885,13 @@ def _rename_noreplace(src: str, dst: str) -> bool:
     raise OSError(err, os.strerror(err), dst)
 
 
-def publish_new(path: str, data: bytes, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+def publish_new(path: str, data: bytes, allowed_roots=None) -> str:
     """Write a new file atomically and never replace one (DD-14a; Codex round 1).
 
     The bytes go to a uniquely named temp file in the same directory (O_EXCL|O_NOFOLLOW), are fsynced, and are then
     published without replacement: a hard link to the final name (link() fails if it exists), else
-    renameat2(RENAME_NOREPLACE); a filesystem with neither refuses (PinError, nothing written). E: (drvfs) supports
-    link(): uv's hard-linked venvs on E: have st_nlink > 1 (checked 2026-11-07). The temp file is always removed and the
+    renameat2(RENAME_NOREPLACE); a filesystem with neither refuses (PinError, nothing written). drvfs (the data
+    drive) supports link(): uv's hard-linked venvs there have st_nlink > 1 (checked 2026-11-07). The temp file is always removed and the
     directory fsynced (best effort). A reader sees no file or the whole file, a crash leaves at most a temp file under
     its own name, and a retry is never blocked by a partial write. PinError if the target exists.
     """
@@ -817,12 +943,12 @@ def publish_new(path: str, data: bytes, allowed_roots=DEFAULT_WRITE_ROOTS) -> st
     return target
 
 
-def write_json_once(path: str, obj, allowed_roots=DEFAULT_WRITE_ROOTS) -> str:
+def write_json_once(path: str, obj, allowed_roots=None) -> str:
     """JSON through publish_new: atomic, write-once (sidecars, freeze records, check results)."""
     return publish_new(path, (json.dumps(obj, indent=2) + "\n").encode("utf-8"), allowed_roots)
 
 
-def write_json_new(path: str, obj, allowed_roots=DEFAULT_WRITE_ROOTS, overwrite: bool = False) -> str:
+def write_json_new(path: str, obj, allowed_roots=None, overwrite: bool = False) -> str:
     """Write JSON to a guarded path. Never creates parent directories.
 
     overwrite=False uses exclusive create, so an existing file is never replaced.
@@ -998,7 +1124,7 @@ def _check_name(name: str) -> str:
     return name
 
 
-def open_guarded_dir(path: str, allowed_roots=DEFAULT_WRITE_ROOTS) -> int:
+def open_guarded_dir(path: str, allowed_roots=None) -> int:
     """Open an existing directory that may be written to and return its fd, for the *_at helpers below.
 
     The path goes through check_write_path first. The guard then runs again on the directory the fd really refers to

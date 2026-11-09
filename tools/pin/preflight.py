@@ -4,8 +4,8 @@
 Every launcher runs this through `wsl.exe -e /usr/bin/python3 -I -B .../preflight.py --pin-active --exe wb|client`
 before it starts an exe.
 
-Which pin: --pin-active (what the launchers use) reads <pin dir>/ACTIVE (default pin dir /mnt/e/DriveDiT/pin;
---pin-dir overrides). ACTIVE must be a regular file, not a symlink, holding exactly one valid pin id, such as
+Which pin: --pin-active (what the launchers use) reads <pin dir>/ACTIVE (default pin dir <DATA_ROOT>/pin, from the
+local config, tools/local_config.py; --pin-dir overrides). ACTIVE must be a regular file, not a symlink, holding exactly one valid pin id, such as
 1.8.0.13 or 1.9.0.9-exp. The pin is then <pin dir>/pin_<id>.json, which must be a regular file, not a symlink,
 whose pin_id equals that id. Anything else is a config error (exit 2). Only pin_activate.py writes ACTIVE, and it
 refuses a pin that does not match the live installs. --pin PATH names a pin file explicitly; the two options are
@@ -17,8 +17,10 @@ It refuses the launch unless, for BOTH the game and the Tools app:
   - AutoUpdateBehavior is an allowed value ("1" = only update when launched; "0" and "2" auto-update);
   - every pinned *.pak exists with the pinned size and mtime, and no extra *.pak exists;
   - the launched exes and steam_appid.txt files match the pin;
-  - the pin was made from the appmanifest and install dir the launchers start (pinlib.LAUNCH_PATHS; check
-    <app>.launch_path), so a pin made from another tree can never vouch for the exe a launcher starts.
+  - the pin was made from the appmanifest and install dir the launchers start (pinlib.LAUNCH_PATHS, the local
+    config's GAME_INSTALL and TOOLS_INSTALL; check <app>.launch_path), so a pin made from another tree can never
+    vouch for the exe a launcher starts. The Windows launchers read the same file (tools/launch/dd_local_config.cmd)
+    and pass it on (DRIVEDIT_LOCAL_CONFIG through WSLENV), so both sides see the same paths.
 
 DD-14a (dd-pin/2): a pin has a channel (stable, experimental, cold) and a launch-path id; a launcher names its own
 (--launch-path, default stable) and <app>.launch_path refuses a pin made for another. When the pin's exe hashes are
@@ -37,7 +39,8 @@ Check mode (--check): prints a PASS/FAIL report on stdout, writes nothing, exits
 accepted only with --check, so a launch is always checked, in full, against the pinned paths.
 
 Exit codes: 0 ok; 1 refused; 2 usage/config error (pin unreadable, bad path); 3 launch record not written.
-Writes are allowed only under /mnt/e (C: is always refused).
+Writes are allowed only on the data drive (the system drive is always refused). Without a local config, or with
+a key it needs missing, it refuses (exit 2) and names the file and the key.
 """
 from __future__ import annotations
 
@@ -94,8 +97,8 @@ def _same_mtime(have_ns: int, want_ns, resolution_s: int) -> bool:
 def _cmp_entry(pinned: dict, path: str, mtime_resolution_s: int = 0):
     """None if the file at path matches the pinned size and mtime, else a short reason.
 
-    mtime_resolution_s=0 compares mtime_ns exactly (live installs). A copy on E: needs 1: WSL drvfs
-    reads sub-second mtimes but truncates them to whole seconds when setting them (measured on E:).
+    mtime_resolution_s=0 compares mtime_ns exactly (live installs). A copy on the data drive needs 1: WSL
+    drvfs reads sub-second mtimes but truncates them to whole seconds when setting them (measured there).
     """
     try:
         st = os.stat(path)
@@ -593,7 +596,8 @@ def resolve_use_class(requested, ident: dict) -> str:
     return requested or pinlib.DEFAULT_USE_CLASS
 
 
-def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
+def main(argv=None, write_roots=None) -> int:
+    """write_roots: None for pinlib.DEFAULT_WRITE_ROOTS (the data drive of the local config)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     which = ap.add_mutually_exclusive_group(required=True)
     which.add_argument("--pin", default=None, help="explicit pin JSON written by make_pin.py")
@@ -601,8 +605,8 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
                        help="check the pin named by <pin dir>/ACTIVE (set it with pin_activate.py); the launchers "
                             "use this")
     ap.add_argument("--pin-dir", default=None,
-                    help="with --pin-active only: the directory holding ACTIVE and pin_<id>.json (default %s)"
-                         % pinlib.DEFAULT_PIN_DIR)
+                    help="with --pin-active only: the directory holding ACTIVE and pin_<id>.json (default "
+                         "<DATA_ROOT>/pin of the local config)")
     ap.add_argument("--exe", choices=("wb", "client"), default=None,
                     help="which exe the launcher is about to start (required unless --check)")
     ap.add_argument("--instance", default=None, help="client instance id, e.g. i01 (recorded only)")
@@ -610,7 +614,7 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     ap.add_argument("--allow-fail", action="append", default=[], metavar="CHECK",
                     help="with --check only: do not count this check as a failure (e.g. for the cold copy)")
     ap.add_argument("--mtime-resolution-s", type=int, default=0, metavar="N",
-                    help="with --check only: compare mtimes at N-second resolution (1 for a copy on E:)")
+                    help="with --check only: compare mtimes at N-second resolution (1 for a copy on drvfs)")
     ap.add_argument("--launch-dir", default=None, help="where launch records go (default: <pin dir>/launches)")
     ap.add_argument("--game-acf", default=None, help="with --check only: override the appmanifest path in the pin")
     ap.add_argument("--tools-acf", default=None, help="with --check only")

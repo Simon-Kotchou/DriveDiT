@@ -206,7 +206,7 @@ class LauncherTests(unittest.TestCase):
         # Another config (other drives, other names) moves every path of the start lines and nothing else.
         with open(base.LOCAL_CONFIG_FIXTURE, encoding="ascii") as fh:
             text = fh.read()
-        other = lc.parse(text.replace("/mnt/x/DataRoot", "/mnt/y/Other-Root").replace("/mnt/y/Game Library", "/mnt/x/G"),
+        other = lc.parse(text.replace("/mnt/x/DataRoot", "/mnt/y/PlanRoot/Other-Root").replace("/mnt/y/Game Library", "/mnt/x/CodeRoot/G"),
                          "other.env")
         for name, template in golden_lines().items():
             self.assertEqual(resolved_start(name, other), lc.render(template, other), name)
@@ -256,10 +256,54 @@ class LauncherTests(unittest.TestCase):
         printable = [chr(c) for c in range(32, 127)]
         for key, cls in classes.items():
             allowed = {c for c in printable if c in cls}
-            probe = "/mnt/x/a%sb/steamapps/common/c" if key.endswith("INSTALL") else "/mnt/x/a%sb" if key == "DATA_ROOT" \
+            probe = "/mnt/x/DataRoot/a%sb/steamapps/common/c" if key.endswith("INSTALL") else "/mnt/x/DataRoot/a%sb" if key == "DATA_ROOT" \
                 else "a%sb"
             py = {c for c in printable if lc._value_problem(key, probe % c) is None}
             self.assertEqual(allowed, py, key)
+
+    def test_helper_grammar_is_the_loaders(self):
+        # Codex round 2 row 8: the helper refuses what the Python grammar refuses, before it reads a value.
+        text = bat(HELPER).replace("\r\n", "\n")
+        first = re.search(r'(?m)^findstr /R /V /B /C:"#" (.*) "%DD_LOCAL_CONFIG%" \| findstr /R /C:"\[\^ \]" >nul && '
+                          r'goto :ddlc_grammar$', text)
+        self.assertIsNotNone(first)
+        self.assertEqual(re.findall(r'/C:"([A-Z_]+)=\[\^=\]"', first.group(1)), list(lc.KEYS))
+        self.assertIn('findstr /R /V /B /C:"#" "%DD_LOCAL_CONFIG%" | findstr /R /C:"=.*=" >nul && goto :ddlc_grammar',
+                      text)
+        bad = re.search(r'(?m)^findstr /R /V /B /C:"#" "%DD_LOCAL_CONFIG%" \| findstr /R /C:"\[\^([^\]]+)=\]" >nul && '
+                        r'goto :ddlc_grammar$', text)
+        self.assertIsNotNone(bad)
+        printable = [chr(c) for c in range(32, 127)]
+        self.assertEqual({c for c in printable if c in bad.group(1)},
+                         {c for c in printable if lc._VALUE_RE.fullmatch(c)})
+        self.assertEqual(re.search(r'(?m)^set "DDLC_KEYS=(.*)"$', text).group(1).split(), list(lc.KEYS))
+        self.assertIn('for /f %%N in (\'findstr /B /C:"%%K=" "%DD_LOCAL_CONFIG%" ^| find /C /V ""\') do if %%N GTR 1 '
+                      'set "DDLC_DUP=%%K"', text)
+        # order: delayed expansion off, grammar, duplicates, then the values; the system drive and the Python check
+        # before anything is returned
+        order = ["setlocal DisableDelayedExpansion", ":ddlc_read", "goto :ddlc_grammar", "if defined DDLC_DUP",
+                 'do set "DDLC_%%A=%%B"', 'if /I "%DD_DATA_DRIVE_WIN%"=="%SystemDrive%" goto :ddlc_system',
+                 'if exist "%DD_DATA_DRIVE_WIN%\\Windows\\System32\\" goto :ddlc_system',
+                 "wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B -c", 'if not "%ERRORLEVEL%"=="0" goto :ddlc_python',
+                 "endlocal & set \"DD_LOCAL_CONFIG="]
+        at = [text.index(o) for o in order]
+        self.assertEqual(at, sorted(at), list(zip(order, at)))
+        self.assertIn("if not defined SystemDrive goto :ddlc_nosystem", text)
+
+    def test_launchers_read_with_delayed_expansion_off_and_check_first(self):
+        # Codex round 2 row 5: the helper (system-drive refusal, grammar, Python check) runs before any mkdir, copy,
+        # tasklist or start in every launcher, with delayed expansion off.
+        for name in LAUNCHERS:
+            lines = bat(name).split("\r\n")
+            code = [ln for ln in lines if not ln.lower().startswith("rem")]
+            self.assertEqual([ln for ln in code if ln.startswith("setlocal")], ["setlocal DisableDelayedExpansion"])
+            call = code.index('call "%~dp0dd_local_config.cmd"')
+            self.assertEqual(code[call + 1], "if errorlevel 1 goto :fail", name)
+            for i, ln in enumerate(code):
+                low = ln.strip().lower()
+                if any(w in low for w in ("mkdir ", "copy ", "tasklist", 'start "" ', "wsl.exe ")):
+                    self.assertGreater(i, call, (name, ln))
+            self.assertNotIn("!", "\n".join(code), name)
 
     def test_cold_launchers_match_the_cold_launch_paths(self):
         lp = "cold-1.8.0.13"
@@ -330,6 +374,98 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(pinlib.PinError):
             pinlib.launch_paths_for("nonsense")
         self.assertEqual(pinlib.launch_paths_for("stable"), pinlib.LAUNCH_PATHS)
+
+
+
+CMD = shutil.which("cmd.exe")
+
+
+@unittest.skipUnless(CMD and shutil.which("wslpath") and os.path.isdir("/dev/shm") and os.environ.get("WSL_DISTRO_NAME"),
+                     "needs cmd.exe and wslpath (a WSL machine); the static tests above run everywhere")
+class HelperCmdTests(unittest.TestCase):
+    """dd_local_config.cmd run through cmd.exe on malformed configs (in RAM): each refuses with exit 1 and nothing
+    set, as the Python loader does (Codex round 2 rows 5 and 8). The helper only reads; the configs and the helper
+    copy (with the loader next to it, the installed layout) live in a temporary directory under /dev/shm."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        import tempfile
+        cls.subprocess = subprocess
+        cls.tmp = tempfile.mkdtemp(prefix="dd22-helper-", dir="/dev/shm")
+        launch = os.path.join(cls.tmp, "tools", "launch")
+        os.makedirs(launch)
+        shutil.copyfile(os.path.join(LAUNCH_DIR, HELPER), os.path.join(launch, HELPER))
+        shutil.copyfile(os.path.join(TOOLS_DIR, "local_config.py"), os.path.join(cls.tmp, "tools", "local_config.py"))
+        with open(os.path.join(launch, "t.cmd"), "wb") as fh:
+            fh.write(b'@echo off\r\ncall "%~dp0dd_local_config.cmd" /print\r\necho RC=%ERRORLEVEL%\r\necho ERR=%DD_ERR%\r\n')
+        cls.runner = cls.wslpath(os.path.join(launch, "t.cmd"))
+        out = subprocess.run([CMD, "/d", "/c", "echo %SystemDrive%"], capture_output=True, text=True, cwd="/dev/shm")
+        cls.system_letter = out.stdout.strip().rstrip(":").lower()
+        cls.distro = os.environ["WSL_DISTRO_NAME"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    @classmethod
+    def wslpath(cls, path):
+        return cls.subprocess.run(["wslpath", "-w", path], capture_output=True, text=True, check=True).stdout.strip()
+
+    def helper(self, text, name):
+        path = os.path.join(self.tmp, name + ".local.env")
+        with open(path, "w", encoding="ascii", newline="") as fh:
+            fh.write(text)
+        env = dict(os.environ, DRIVEDIT_LOCAL_CONFIG=self.wslpath(path))
+        env["WSLENV"] = "DRIVEDIT_LOCAL_CONFIG"
+        r = self.subprocess.run([CMD, "/d", "/c", self.runner], capture_output=True, env=env, cwd="/dev/shm",
+                                timeout=180)
+        out = r.stdout.decode("utf-8", "replace").replace("\r", "")
+        lines = out.splitlines()
+        rc = next(ln for ln in lines if ln.startswith("RC="))
+        err = next(ln for ln in lines if ln.startswith("ERR="))
+        return rc[3:], err[4:], [ln for ln in lines if ln.startswith("DD_")]
+
+    def good(self):
+        # the synthetic config, run in this machine's distro (the helper starts the Python check in it)
+        with open(base.LOCAL_CONFIG_FIXTURE, encoding="ascii") as fh:
+            return fh.read().replace("WSL_DISTRO=" + CFG.get("WSL_DISTRO"), "WSL_DISTRO=" + self.distro)
+
+    def test_the_synthetic_config_passes(self):
+        rc, err, values = self.helper(self.good(), "good")
+        self.assertEqual((rc, err), ("0", ""))
+        self.assertIn("DD_DATA_ROOT=%s" % CFG.get("DATA_ROOT"), values)
+
+    def test_malformed_files_refuse(self):
+        g = self.good()
+        root = CFG.get("DATA_ROOT")
+        cases = {
+            "duplicate": (g + "WSL_DISTRO=Placeholder-Other\n", "more than once"),
+            "unknown": (g + "DATA_ROOTS=/mnt/x/DataRoot/Other\n", "not a comment"),
+            "no_equals": (g + "DATA_ROOT\n", "not a comment"),
+            "double_equals": (g.replace("DATA_ROOT=", "DATA_ROOT=="), "not a comment"),
+            "leading_equals": (g + "=DATA_ROOT=/mnt/x/DataRoot/Other\n", "not a comment"),
+            "second_equals": (g.replace("CODE_ROOT=/mnt/x/CodeRoot", "CODE_ROOT=/mnt/x/CodeRoot/a=b"), "not a comment"),
+            "bang": (g.replace(root, root + "!x!"), "not a comment"),
+            "tab": (g.replace("CODE_ROOT=", "CODE_ROOT=\t"), "not a comment"),
+            "crlf_duplicate": ((g + "DATA_ROOT=/mnt/x/DataRoot/Two\n").replace("\n", "\r\n"), "more than once"),
+            "not_normalised": (g.replace(root, root + "//sub"), "normalised"),
+            "trailing_slash": (g.replace(root, root + "/"), "normalised"),
+            "dot_component": (g.replace(root, root + "/./sub"), "normalised"),
+            "dotdot_component": (g.replace(root, root + "/../Other"), "normalised"),
+            "python_only": (g.replace("CODE_ROOT=/mnt/x/CodeRoot", "CODE_ROOT=relative/CodeRoot"), "Python check"),
+            "system_drive": (g.replace(root, "/mnt/%s/DataRoot" % self.system_letter), "system drive"),
+            "system_drive_swapped": (g.replace(root, "/mnt/%s/DataRoot" % self.system_letter)
+                                     .replace("SYSTEM_DRIVE=" + CFG.get("SYSTEM_DRIVE"), "SYSTEM_DRIVE=/mnt/x"),
+                                     "system drive"),
+            "no_such_distro": (g.replace("WSL_DISTRO=" + self.distro, "WSL_DISTRO=No-Such-Distro-dd22"), "Python check"),
+        }
+        wrong = []
+        for name, (text, fragment) in cases.items():
+            rc, err, values = self.helper(text, name)
+            if rc != "1" or fragment not in err or values:
+                wrong.append("%s: rc %s, %r, %r" % (name, rc, err, values))
+        self.assertFalse(wrong, "\n".join(wrong))
 
 
 if __name__ == "__main__":

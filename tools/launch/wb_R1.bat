@@ -50,7 +50,7 @@ rem config, so they cannot drift.
 rem WSL: the distro is named explicitly (WSL_DISTRO of the local config), because a machine may have
 rem more than one.
 rem ==========================================================================================
-setlocal
+setlocal DisableDelayedExpansion
 if not exist "%~dp0dd_local_config.cmd" (
   set "DD_ERR=Missing %~dp0dd_local_config.cmd: install it next to this launcher (tools\launch). Nothing was started."
   goto :fail

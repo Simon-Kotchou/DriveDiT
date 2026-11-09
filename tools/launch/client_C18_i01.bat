@@ -26,7 +26,7 @@ rem pinlib.COLD_LAUNCH_PATHS and DEPLOY_ROOTS (tools/pin/tests compares them); b
 rem of the same local config.
 rem The flags are those of client_R1_i01.bat (see its provenance notes), plus -noBackend.
 rem ==========================================================================================
-setlocal
+setlocal DisableDelayedExpansion
 if not exist "%~dp0dd_local_config.cmd" (
   set "DD_ERR=Missing %~dp0dd_local_config.cmd: install it next to this launcher (tools\launch). Nothing was started."
   goto :fail

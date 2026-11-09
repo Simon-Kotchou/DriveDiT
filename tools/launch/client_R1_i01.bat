@@ -56,7 +56,7 @@ rem                   closed-loop runs (T6), per trial-ladder.md 8.2.
 rem UNVERIFIED (capture program 4.2 item 2, P-06): that a direct exe launch never makes Steam
 rem update or relaunch the game, and that Steam allows concurrent instances. Steam must be running.
 rem ==========================================================================================
-setlocal
+setlocal DisableDelayedExpansion
 if not exist "%~dp0dd_local_config.cmd" (
   set "DD_ERR=Missing %~dp0dd_local_config.cmd: install it next to this launcher (tools\launch). Nothing was started."
   goto :fail

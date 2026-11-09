@@ -66,6 +66,10 @@ class DC_SteerChannels
 	static const int AXIS_UNUSABLE = -2;
 	//! Armed reads with no usable axle before a source is unusable
 	static const int AXLE_MAX_TRIES = 30;
+	//! Animation.GetBoneIndex of a bone the mesh does not have. A TNodeId is a hash of the name, not an index: valid ids
+	//! are negative as often as not (1.9.0.37 S105: v_wheel_R01_rotator -1762403477, v_wheel_L01 -667475429), so a
+	//! source is missing only at exactly this value (vanilla AttachBoneRotationTrackModifier.c: boneId == -1)
+	static const int NO_BONE = -1;
 	//! Arm states of the axle choice
 	static const int ARM_OFF = 0;
 	static const int ARM_WAIT_FRAME = 1;
@@ -155,7 +159,7 @@ class DC_SteerChannels
 		SlotManagerComponent slots = SlotManagerComponent.Cast(vehicle.FindComponent(SlotManagerComponent));
 		for (int source = 0; source < SOURCE_COUNT; source++)
 		{
-			int bone = -1;
+			int bone = NO_BONE;
 			IEntity attached = null;
 			string name = m_aSourceNames[source];
 			if (IsBoneSource(source))
@@ -277,7 +281,7 @@ class DC_SteerChannels
 		{
 			bool present = m_aEntities[source] != null;
 			if (IsBoneSource(source))
-				present = m_aBones[source] >= 0;
+				present = m_aBones[source] != NO_BONE;
 
 			if (present && m_aAxis[source] == AXIS_NOT_CHOSEN)
 				return false;
@@ -311,7 +315,7 @@ class DC_SteerChannels
 	{
 		yaw = 0;
 		int bone = m_aBones[source];
-		if (bone < 0)
+		if (bone == NO_BONE)
 			return false;
 
 		Animation animation = m_Vehicle.GetAnimation();
@@ -486,6 +490,7 @@ class DC_SteerChannels
 			{
 				int bone = m_aBones[source];
 				lines.Insert(prefix + ".bone_index=" + bone.ToString());
+				lines.Insert(prefix + ".bone_found=" + DC_LaunchGuard.BoolText(bone != NO_BONE));
 			}
 			else
 			{
@@ -597,7 +602,7 @@ class DC_SteerChannels
 		{
 			bool present = false;
 			if (IsBoneSource(source))
-				present = m_aBones[source] >= 0;
+				present = m_aBones[source] != NO_BONE;
 			else
 				present = m_aEntities[source] != null;
 

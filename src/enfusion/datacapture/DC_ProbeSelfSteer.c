@@ -21,15 +21,19 @@
 // wheel-angle candidates, so the analysis (tools/probes/t0eng/e21_selfsteer.py) judges the readback (a), the
 // curvature over >= 200 m (b) and the applied angle and drift on the slope (c) per variant.
 //
-// CROSS-SLOPE SITE: DC_SteerSiteSearch kind cross over the grid region of the base (Arland road extent, 50 m): the
+// CROSS-SLOPE SITE: DC_SteerSiteSearch kind cross over the grid region of the base (Arland road extent, every
+// m_fCrossGridSpacingM, 25 m; the 50 m flat grid gave 2591 points and 0 terrain-ok strips on 1.9.0.37): the
 // strip is laid along the contour through every grid point whose gradient is within 0.8 x m_fCrossMin ..
 // 1.15 x m_fCrossMax, with the downhill on m_iCrossSide (+1 right), +-m_fCrossHeadingSpreadDeg; length = run-up +
 // held + nocall + stop, the measure zone [run-up, run-up + held + nocall] must keep side x cross within
 // m_fCrossMin..m_fCrossMax at every 5 m station, |mean grade| <= m_fCrossGradeMax, windowed grades and the whole
 // strip's cross-slope bounded, every sample above the base's minimum surface y, and no obstacle hit within
 // +-m_fCrossHalfWidthM. m_sCrossExplicit candidates ('x z heading;...') are tried first. If nothing passes at the full
-// segment lengths, the search runs once more with m_fCrossFallbackM per variant and the cross phases use those
-// lengths (header site.cross.fallback=1).
+// segment lengths, the search runs once more with the no-call distance cut to m_fCrossFallbackM (the held distance
+// stays m_fCrossHeldM: CC-07 c is judged on the held segment and the analysis needs >= 100 m of it, e21_selfsteer.py
+// MIN_CROSS_M; the old fallback cut both to 60 m, so a site found by it could never have been evidence) and the cross
+// phases use those lengths (header site.cross.fallback=1). Every refused candidate is counted by its reason
+// (site.cross.search.rejects, the near miss), so a search without a site says why.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -42,7 +46,7 @@ class DC_ProbeSelfSteerClass : DC_ProbeSteerBaseClass
 class DC_ProbeSelfSteer : DC_ProbeSteerBase
 {
 	static const string PROBE_E21 = "e21";
-	//! e21 + e22 + e23 stay within 15 min of Play: 420 + 240 + 240 s (a timeout ends the probe, footer stopped)
+	//! e21 + e22 + e23 stay within 15 min of Play: 420 + 210 + 270 s (a timeout ends the probe, footer stopped)
 	static const float TIMEOUT_E21_S = 420;
 	//! Assistance modes of the comparison (EVehicleDrivingAssistanceMode: 0 NONE, 2 FULL), set explicitly
 	static const int ASSIST_FULL = 2;
@@ -84,8 +88,11 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	[Attribute("100", UIWidgets.Slider, "S1 cross: no-call distance [m]", "0 500 5", category: "S1 cross")]
 	protected float m_fCrossNocallM;
 
-	[Attribute("60", UIWidgets.Slider, "S1 cross: held and no-call distance of the shorter fallback search [m] (0 = no fallback)", "0 500 5", category: "S1 cross")]
+	[Attribute("0", UIWidgets.Slider, "S1 cross: no-call distance of the shorter fallback search [m]; the held distance stays m_fCrossHeldM (the analysis needs >= 100 m held). No fallback when it is not below m_fCrossNocallM", "0 500 5", category: "S1 cross")]
 	protected float m_fCrossFallbackM;
+
+	[Attribute("25", UIWidgets.Slider, "S1 cross: grid spacing of the cross-slope search [m] (the grid region is the base's)", "10 500 5", category: "S1 cross")]
+	protected float m_fCrossGridSpacingM;
 
 	[Attribute("75", UIWidgets.Slider, "S1 cross: run-up before the measure zone [m] (accel to 40 km/h and the speed settle)", "10 300 5", category: "S1 cross")]
 	protected float m_fCrossRunupM;
@@ -204,9 +211,9 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 			return false;
 		}
 
-		if (m_bCross && (!InRange(m_fCrossMin, 0.01, 0.3) || !InRange(m_fCrossMax, m_fCrossMin, 0.3) || !InRange(m_fCrossHeldM, 20, 500) || !InRange(m_fCrossNocallM, 0, 500) || !InRange(m_fCrossHalfWidthM, 4, 50) || !InRange(m_fCrossRunupM, 10, 300) || !InRange(m_fCrossStopM, 10, 200)))
+		if (m_bCross && (!InRange(m_fCrossMin, 0.01, 0.3) || !InRange(m_fCrossMax, m_fCrossMin, 0.3) || !InRange(m_fCrossHeldM, 20, 500) || !InRange(m_fCrossNocallM, 0, 500) || !InRange(m_fCrossFallbackM, 0, 500) || !InRange(m_fCrossGridSpacingM, 10, 500) || !InRange(m_fCrossHalfWidthM, 4, 50) || !InRange(m_fCrossRunupM, 10, 300) || !InRange(m_fCrossStopM, 10, 200)))
 		{
-			failure = "a cross-slope attribute is out of range (m_fCrossMin 0.01..0.3 <= m_fCrossMax, distances, half width 4..50 m)";
+			failure = "a cross-slope attribute is out of range (m_fCrossMin 0.01..0.3 <= m_fCrossMax, distances, grid spacing 10..500 m, half width 4..50 m)";
 			return false;
 		}
 
@@ -294,7 +301,7 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 		DC_SteerSiteSearch search = new DC_SteerSiteSearch();
 		search.Configure(c, m_aExcludes, m_iSiteMaxStrips, m_iSiteMaxObstacleChecks);
 		AddExplicitCandidates(search, m_sCrossExplicit);
-		search.SetGrid(m_vGridMin[0], m_vGridMin[2], m_vGridMax[0], m_vGridMax[2], m_fGridSpacingM, 15, m_fCrossHeadingSpreadDeg);
+		search.SetGrid(m_vGridMin[0], m_vGridMin[2], m_vGridMax[0], m_vGridMax[2], m_fCrossGridSpacingM, 15, m_fCrossHeadingSpreadDeg);
 		return search;
 	}
 
@@ -323,24 +330,40 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! No cross site at the full lengths: one more search with m_fCrossFallbackM per variant
+	//! No cross site at the full lengths: one more search with the no-call distance cut to m_fCrossFallbackM (the
+	//! held distance stays m_fCrossHeldM, the segment CC-07 c is judged on); the search that failed is logged first
 	override bool OnSearchesDone()
 	{
-		if (!m_bCross || m_bCrossFallbackUsed || m_fCrossFallbackM <= 0 || m_aCrossSpeeds.IsEmpty())
+		if (!m_bCross || m_bCrossFallbackUsed || m_fCrossFallbackM >= m_fCrossNocallM || m_aCrossSpeeds.IsEmpty())
+			return false;
+
+		// the search time is used up (m_fSiteSearchMaxS): no fallback, the phases get the rest of the timeout
+		if (m_bSearchTimeCapped)
 			return false;
 
 		if (GetSite(SITE_CROSS))
 			return false;
 
+		// the full-length search's counts and refusals stay in the header (site.cross_full.*) and the log
+		int index = m_aSearchKinds.Find(SITE_CROSS);
+		if (index >= 0)
+		{
+			DC_SteerSiteSearch full = m_aSearches[index];
+			LogInfo(full.DescribeSearch());
+			array<string> lines = {};
+			full.AppendHeaderLines(lines, "site.cross_full");
+			if (m_Ctx && !m_Ctx.AppendHeaderLines(lines))
+				LogWarning("the full-length cross search lines could not be appended to the run header");
+		}
+
 		m_bCrossFallbackUsed = true;
-		LogWarning(string.Format("no cross-slope site for %1 m + %2 m - searching again with %3 m + %3 m", m_fCrossHeldM, m_fCrossNocallM, m_fCrossFallbackM));
-		ReplaceSearch(SITE_CROSS, BuildCrossSearch(m_fCrossFallbackM, m_fCrossFallbackM));
+		LogWarning(string.Format("no cross-slope site for %1 m + %2 m - searching again with %3 m + %4 m", m_fCrossHeldM, m_fCrossNocallM, m_fCrossHeldM, m_fCrossFallbackM));
+		ReplaceSearch(SITE_CROSS, BuildCrossSearch(m_fCrossHeldM, m_fCrossFallbackM));
 		foreach (DC_ProbeSteerPhase phase : m_aPhases)
 		{
 			if (phase.m_eKind != DC_ESteerPhaseKind.CROSS)
 				continue;
 
-			phase.m_fHeldM = m_fCrossFallbackM;
 			phase.m_fNocallM = m_fCrossFallbackM;
 			phase.AddNote("cross_fallback");
 		}
@@ -424,6 +447,7 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 		outKeyValues.Insert("m_fCrossHeldM=" + m_fCrossHeldM.ToString(-1, 2));
 		outKeyValues.Insert("m_fCrossNocallM=" + m_fCrossNocallM.ToString(-1, 2));
 		outKeyValues.Insert("m_fCrossFallbackM=" + m_fCrossFallbackM.ToString(-1, 2));
+		outKeyValues.Insert("m_fCrossGridSpacingM=" + m_fCrossGridSpacingM.ToString(-1, 2));
 		outKeyValues.Insert("m_fCrossRunupM=" + m_fCrossRunupM.ToString(-1, 2));
 		outKeyValues.Insert("m_fCrossStopM=" + m_fCrossStopM.ToString(-1, 2));
 		outKeyValues.Insert("m_fCrossMin=" + m_fCrossMin.ToString(-1, 4));

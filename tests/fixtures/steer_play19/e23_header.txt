@@ -1,0 +1,27 @@
+params.flat_half_width_m=10.00
+params.max_speed_kmh=60.0
+params.m_fEnvelopeDecelMs2=4.000
+params.m_fEnvelopeReactS=0.200
+params.m_fEnvelopeAngleDeg=30.00
+params.m_fAreaMarginM=3.000
+params.m_sStepGrid=10:0.5x12,1.0x8;20:0.5x4;30:0.5x12,1.0x6;40:0.5x4;60:0.5x10
+params.m_fStepOnS=0.400
+params.m_fStepOffS=0.600
+params.m_fStepJitterS=0.300
+params.m_iStepSeed=77
+params.m_sPrbsAmplitudes=10:0.5;20:0.4;30:0.3;40:0.25;60:0.2
+params.m_iPrbsOrder=5
+params.m_fPrbsBitS=0.150
+params.m_iPrbsSeed=11
+params.dt_s=0.033333
+s2.on_steps=12
+s2.off_steps=18
+s2.jitter_max_steps=9
+s2.prbs_bit_steps=5
+s2.prbs_period_bits=31
+s2.prbs_max_running_sum=3
+s2.heading_budget_deg=20.0 at kappa 0.240 1/m per unit (holds and PRBS bits cut to it; the phases file has the bit steps per phase)
+s2.rule=train: per event a gap at 0 (off + jitter steps), then the amplitude for hold_steps (seg_flag 1), released into the next gap; event_idx from the onset to the next onset; e23_events.csv onset_step / release_step = the first step with the new command; prbs: seg_flag 1, event_idx -1, the e01 generator with this probe's order and seed, one period, every bit applied for at least prbs_bit_steps engine steps (a dispatch covering more extends the bit, prbs_extended counts them; no bit is skipped)
+site.flat.crit.envelope_lat_m=19.03
+site.flat.crit.envelope_long_m=38.06
+site.flat.crit.envelope_back_m=0.00

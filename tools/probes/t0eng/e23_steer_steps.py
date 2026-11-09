@@ -48,7 +48,11 @@ Windows: the scored rows run from an event's onset to its end; the rows before a
 starts at the measured output of the row before the onset, the D_MAX engine steps of commands before feed the delay),
 so no row is scored twice. Every output is measured from its run's hold baseline (command 0 at speed). An event
 counts in a bin only when its mean measured speed is within SPEED_BIN_SHARE of the bin speed.
-Split: whole doublets (+A then -A), alternating train / held-out, so both sets hold both signs.
+Split: whole doublets (events 2k and 2k + 1: +A and -A in either order, the producer picks the order that keeps the
+car near the centre line), alternating train / held-out, so both sets hold both signs. The producer's heading trims
+(segment trim, event_idx -1) lie between doublets, outside every event window. The default gap (>= 18 steps) keeps
+them out of the D_MAX history as well; with a shorter gap an event (or a PRBS) whose history or scored rows hold a
+trim row is left out (trim_history), never fitted with it.
 Gain: closed form for the linear structures; for a clamped M3 / M4 the gain is optimised against the full nonlinear
 simulation (golden section around the closed-form start) wherever the parameters are refined.
 Fit: a grid over d (0..D_MAX) and tau; joint grids of tau with R (M3) or sigma (M4); coordinate descent; golden-section
@@ -581,14 +585,17 @@ def make_window(steps, first, last, path, channel, scale_rad, baselines, dt):
     if y0 is None:
         return None
     hist = []
+    trims = 0
     k = first - 1
     while k >= 0 and len(hist) < D_MAX:
         row = steps[k]
         if (row.phase, row.i.get("run_idx")) != key:
             break
+        trims += int(row.segment == "trim")
         hist[0:0] = [row.f.get("cmd_steer") or 0.0] * sc.covered_steps(row, dt)
         k -= 1
     hist = hist[-D_MAX:]
+    trims += sum(1 for step in rows if step.segment == "trim")
     u, n, y = [], [], []
     for step in rows:
         cmd = step.f.get("cmd_steer")
@@ -614,7 +621,7 @@ def make_window(steps, first, last, path, channel, scale_rad, baselines, dt):
         u_e.extend([cmd] * steps_n)
     speeds = [s.f.get("vel_l_z") for s in rows if s.f.get("vel_l_z") is not None]
     return {"u": u, "n": n, "y": y, "y0": y0 - base, "u_e": u_e, "offset": len(hist), "rows": rows,
-            "v": max(sc.mean(speeds) or 0.0, 0.1), "gaps": gaps, "merged": merged}
+            "v": max(sc.mean(speeds) or 0.0, 0.1), "gaps": gaps, "merged": merged, "trims": trims}
 
 
 def on_speed(kmh, target):
@@ -665,6 +672,9 @@ def event_windows(steps, events, path, channel, scale_rad, dt):
             continue
         key = (spec, round(abs(amplitude), 3))
         window = make_window(steps, by_step[onset], by_step[end], path, channel, scale_rad, baselines, dt)
+        if window is not None and window["trims"]:
+            drop("trim_history")
+            continue
         if window is None or window["gaps"]:
             drop("no_signal" if window is None else "transition_gap")
             missing, merged = gaps.get(key, (0, 0))
@@ -783,7 +793,7 @@ def prbs_windows(steps, path, channel, scale_rad, dt, status, planned=None):
         begin = index.get(id(rows[0]), 0)
         end = index.get(id(rows[-1]), begin)
         window = make_window(steps, begin, end, path, channel, scale_rad, baselines, dt)
-        if window is None or window["gaps"] or window["merged"]:
+        if window is None or window["gaps"] or window["merged"] or window["trims"]:
             continue
         speed_kmh = sc.mean([s.f.get("speed_kmh") for s in rows if s.f.get("speed_kmh") is not None])
         spec = on_speed(speed_kmh, rows[-1].f.get("seg_target"))

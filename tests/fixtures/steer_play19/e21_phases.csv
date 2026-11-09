@@ -1,0 +1,7 @@
+phase_idx,phase,kind,site,start_step,end_step,start_world_ms,end_world_ms,target_kmh,steer,assist,runs,result,note,prbs_bits,prbs_expected,prbs_bit_steps,prbs_extended,prbs_result
+0,flat_20,flat,flat,12097,14527,407026.406,488026.625,20.000,0.0000,2,1,ok,max_kmh:20.061/turn_deg:0.47/engine_off_steps:0/spins:0/stalls:0/restarts:0/sleep_wakes:0,,,,,
+1,flat_40,flat,flat,14528,15978,488060.156,536390.562,40.000,0.0000,2,1,ok,max_kmh:40.186/turn_deg:0.11/engine_off_steps:0/spins:0/stalls:0/restarts:0/sleep_wakes:0,,,,,
+2,flat_20_none,flat,flat,15979,17327,536424.250,581367.562,20.000,0.0000,0,1,ok,max_kmh:20.041/turn_deg:0.22/engine_off_steps:0/spins:0/stalls:0/restarts:0/sleep_wakes:0,,,,,
+3,flat_40_none,flat,flat,17328,18236,581400.875,611663.500,40.000,0.0000,0,1,ok,max_kmh:40.169/turn_deg:-0.36/engine_off_steps:0/spins:0/stalls:0/restarts:0/sleep_wakes:0,,,,,
+4,cross_20,cross,cross,,,,,20.000,0.0000,2,0,skipped,cross_fallback/no_site,,,,,
+5,cross_40,cross,cross,,,,,40.000,0.0000,2,0,skipped,cross_fallback/no_site,,,,,

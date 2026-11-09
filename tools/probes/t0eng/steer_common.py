@@ -22,8 +22,10 @@ passes and never selects a production mode):
   - every item is PASS, FAIL or INCOMPLETE (with the reason), and completeness is never lost in an aggregation:
     combine() is INCOMPLETE as soon as one part is (a FAIL seen in a part is kept as a diagnostic, observed()), so an
     item is FAIL only when all its parts are decided. StrictVerdict's RESULT is INCOMPLETE while any item is;
-  - a play counts only with a complete run footer (play_evidence); an interrupted, failed or missing play makes the
-    items that need it INCOMPLETE;
+  - a play counts only with a complete run footer (play_evidence) and at least one phase that ended ok: a footer
+    that says complete over a phases file in which every phase was skipped or aborted (the first 1.9.0.37 e22:
+    every phase skipped, no_site) is no evidence; the producers now end such a probe with status stopped, reason
+    no_evidence. An interrupted, failed, missing or empty play makes the items that need it INCOMPLETE;
   - identity: every input play must carry engine.build_version, launch.pin_id, ego.prefab, world.map_id and
     addon.git_sha, the same in all of them (launch.build_key too when any play has one); otherwise the analysis
     refuses (InputError, exit 2). A 1.8 baseline is checked on its own (baseline_identity): a 1.8 build with a
@@ -119,7 +121,9 @@ def withhold(verdict, names, reason):
 
 
 def play_evidence(play, name):
-    """(True, detail) for a play with a complete footer, else (None, the reason): the evidence is missing"""
+    """(True, detail) for a play with a complete footer and at least one phase that ended ok, else (None, the
+    reason): the evidence is missing. The phases file is the play's own (<probe>_phases.csv, probe from the run
+    header); a play without one is judged by its footer alone"""
     if play is None:
         return None, "%s: no play given" % name
     if play.footer is None:
@@ -127,6 +131,14 @@ def play_evidence(play, name):
     status = play.footer.get("status", "")
     if status != "complete":
         return None, "%s: footer status %s reason %s" % (name, status or "-", play.footer.get("reason", "") or "-")
+    probe = play.probe or name
+    results = phase_results(play, probe)
+    if play.has(probe + "_phases.csv") and not any(result == "ok" for result in results.values()):
+        seen = {}
+        for result in results.values():
+            seen[result or "-"] = seen.get(result or "-", 0) + 1
+        return None, "%s: footer complete but no phase ended ok (%s)" % (
+            name, ", ".join("%s %d" % kv for kv in sorted(seen.items())) or "no phase rows")
     return True, "%s: complete" % name
 
 
@@ -587,9 +599,10 @@ def run_cli(main, argv=None):
 
 
 def phase_rows_complete(steps, play, probe, expect_call):
-    """(True, detail) when every phase of <probe>_phases.csv with a start step has all its rows (physics_step
-    start_step..end_step, one row per dispatched step) and every row is called or not as expect_call(step) says,
-    with a finite cmd_steer and input_post_steer on every called row; else (None, what is missing)"""
+    """(True, detail) when every phase of <probe>_phases.csv has all its rows (physics_step start_step..end_step, one
+    row per dispatched step) and every row is called or not as expect_call(step) says, with a finite cmd_steer and
+    input_post_steer on every called row; else (None, what is missing). A phase without a start step (skipped: no
+    site) has no rows at all, so its called rows are missing too"""
     if not play.has(probe + "_phases.csv"):
         return None, "%s: no phases file" % probe
     by_phase = {}
@@ -604,6 +617,8 @@ def phase_rows_complete(steps, play, probe, expect_call):
         if start is None or end is None:
             if by_phase.get(name):
                 problems.append("%s: rows but no start / end step" % name)
+            else:
+                problems.append("%s: no rows (phase %s)" % (name, row.get("result", "") or "-"))
             continue
         rows = by_phase.get(name, [])
         numbers = [s.i.get("physics_step") for s in rows]

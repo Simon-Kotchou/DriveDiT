@@ -23,7 +23,9 @@
 //        watchdog    RunWatchdog on the game call queue (no entity event), WATCHDOG_GRACE_MS after the warm-up.
 //      A decision by the fixedframe path or the watchdog logs a WARNING that names the path that failed.
 //   6. Runs the exclusive probes one after another, m_fGapS world seconds apart. A probe stops when its context saw
-//      a failed write (write_fail), when IsProbeDone says so (done) or after GetProbeTimeoutS (timeout).
+//      a failed write (write_fail), when IsProbeDone says so (done, or no_evidence when GetProbeDoneReason says the
+//      probe ended without its evidence, e.g. every phase skipped: footer status stopped, not complete) or after
+//      GetProbeTimeoutS (timeout).
 //   7. Plan finished: stops the concurrent probes (done), clears the event mask, logs "plan complete".
 //
 // DISPATCH: EOnSimulate always counts; while the step source is "simulate" or undecided it also increments the
@@ -212,14 +214,24 @@ class DC_ProbeComponent : ScriptComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Polled every frame for the running exclusive probe; true makes the runner stop it with reason "done"
+	//! Polled every frame for the running exclusive probe; true makes the runner stop it with reason "done" (or the
+	//! reason GetProbeDoneReason gives)
 	bool IsProbeDone(string probeId)
 	{
 		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Idempotent. reason: done | timeout | write_fail | error | play_end | delete.
+	//! The stop reason once IsProbeDone is true: DC_ProbeRunner.REASON_DONE (footer status complete), or
+	//! DC_ProbeRunner.REASON_NO_EVIDENCE when the probe ran to its end without producing its evidence (footer status
+	//! stopped, so no analysis takes the play as complete). Any other value is taken as done
+	string GetProbeDoneReason(string probeId)
+	{
+		return DC_ProbeRunner.REASON_DONE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Idempotent. reason: done | no_evidence | timeout | write_fail | error | play_end | delete.
 	//! "delete" = world teardown (OnDelete): close files only, touch no other entity, camera or setting
 	void OnProbeStop(string probeId, string reason)
 	{
@@ -566,6 +578,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	static const float STEP_DT_TOLERANCE = 0.05;			//!< relative: engine time slice vs measured fixed step
 
 	static const string REASON_DONE = "done";
+	static const string REASON_NO_EVIDENCE = "no_evidence";
 	static const string REASON_TIMEOUT = "timeout";
 	static const string REASON_WRITE_FAIL = "write_fail";
 	static const string REASON_ERROR = "error";
@@ -1228,7 +1241,7 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 				if (m_CurrentRun.m_Context.HasWriteFailure())
 					StopProbe(m_CurrentRun, REASON_WRITE_FAIL);
 				else if (!m_CurrentRun.m_Component || m_CurrentRun.m_Component.IsProbeDone(m_CurrentRun.m_sProbeId))
-					StopProbe(m_CurrentRun, REASON_DONE);
+					StopProbe(m_CurrentRun, DoneReason(m_CurrentRun));
 				else if (now - m_CurrentRun.m_fStartWorldMs >= m_CurrentRun.m_fTimeoutS * 1000)
 					StopProbe(m_CurrentRun, REASON_TIMEOUT);
 			}
@@ -1500,6 +1513,21 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The reason of a probe whose IsProbeDone turned true: done, or no_evidence when its component says so
+	//! (GetProbeDoneReason); nothing else
+	protected string DoneReason(notnull DC_ProbeRunState state)
+	{
+		if (!state.m_Component)
+			return REASON_DONE;
+
+		string reason = state.m_Component.GetProbeDoneReason(state.m_sProbeId);
+		if (reason == REASON_NO_EVIDENCE)
+			return REASON_NO_EVIDENCE;
+
+		return REASON_DONE;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! AdvancePlan runs after the frame dispatch, so a probe frame callback that fails on every frame keeps the stop
 	//! checks from running. Once AdvancePlan has not run for WATCHDOG_GRACE_MS of world time, the watchdog stops the
 	//! running exclusive probe when its context saw a failed write or its timeout has passed. AdvancePlan logs the
@@ -1620,6 +1648,9 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 		string note = stopNote + state.m_Context.GetWriteFailure();
 		if (reason == REASON_TIMEOUT)
 			note = string.Format("timeout after %1 world s %2", state.m_fTimeoutS.ToString(-1, 1), note);
+
+		if (reason == REASON_NO_EVIDENCE)
+			note = "the probe ended without its evidence (see its phases file) " + note;
 
 		if (reason == REASON_WRITE_FAIL)
 			Print("[DC_Probe " + state.m_sProbeId + "] ERROR: write failure: " + note, LogLevel.ERROR);

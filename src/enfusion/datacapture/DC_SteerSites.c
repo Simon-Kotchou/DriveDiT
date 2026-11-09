@@ -19,8 +19,15 @@
 //      track cross = (y(p - h) - y(p + h)) / 2h, positive = the right side lower. Criteria (DC_SteerTerrainMath): mean
 //      and windowed grade of the centre line; side x track cross within cross_min..cross_max at every corridor
 //      position of every measure-zone station (flat: |track cross| <= cross_max); |track cross| and the edge-to-edge
-//      cross <= cross_abs_max_all over the whole strip; the rms about a plane fit; every sample above min_surface_y.
-//      A flat road between sloping shoulders therefore has a track cross of 0 and is refused as a cross-slope site;
+//      cross <= cross_abs_max_all over the whole strip; the rms of the measure zone's samples about its plane fit
+//      (flat: the zone is the whole strip; the run-up and stop parts of a cross strip only meet the lax criteria);
+//      every sample above min_surface_y. A flat road between sloping shoulders therefore has a track cross of 0 and
+//      is refused as a cross-slope site. A grid strip first gets an exact pre-check: the centre tyre pair at every
+//      measure-zone station against the zone's cross window (a subset of the full check, so it refuses nothing the
+//      full check would accept; reason cross_zone_pre) and is sampled in full only when it passes. Every refused
+//      candidate is counted by its first failed criterion (site.<kind>.search.rejects), the first refusal of any
+//      candidate and of an explicit one are kept, and so is the near miss (the fully sampled refused candidate with
+//      the largest share of zone tyre-pair samples inside the cross window), so a search without a site says why;
 //   4. OBSTACLES. The strips that pass are ranked by score; the best ones are swept with an oriented box of the car's
 //      size (TraceOBB: half width box_half_width_m, from box_bottom_m to box_top_m above the surface; BaseWorld.
 //      TraceMove, TraceFlags.ENTS, LayerMask EPhysicsLayerPresets.Vehicle, the ego and its children excluded) along
@@ -31,10 +38,16 @@
 //      entity's class or prefab is listed as benign (the probe's m_sBenignColliders, empty by default): then that one
 //      entity is excluded and the same sweep is traced again, so every remaining check still runs. The first clean
 //      strip is the site.
-// The work is spread over render frames with one budget per frame shared by every search of the probe
-// (DC_SteerBudget): each GetSurfaceY takes one sample and each TracePosition / TraceMove, benign retries included,
-// one trace, taken before the call; a strip's terrain and a candidate's sweeps continue in the next frame where they
-// stopped (DC_SteerSweepPlan keeps the pending call).
+// The work is spread over RENDER frames (the probe's OnProbeFrame, EOnFrame) with one budget per frame shared by every
+// search of the probe (DC_SteerBudget): each GetSurfaceY takes one sample and each TracePosition / TraceMove, benign
+// retries included, one trace, taken before the call; a strip's terrain and a candidate's sweeps continue in the
+// next frame where they stopped (DC_SteerSweepPlan keeps the pending call). A search therefore takes frames / fps of
+// world time (the first 1.9.0.37 Play: 497 frames in 9.0 s, 55 fps at 6000 samples per frame), and the probe caps the
+// world time of all its searches (DC_ProbeSteerBase m_fSiteSearchMaxS): a search it stops ends with status time_cap.
+// The header (site.<kind>.search.*) says how a search ended: status done, time_cap or the probe's stop reason when
+// the probe stopped while it searched (timeout, play_end, ...: its counts, refusals, near miss and the strip it was
+// sampling are written then), the stage it was in, and grid_complete 1 only when every grid point was visited and
+// the strip cap suppressed no heading (strips_capped).
 // The chosen site, its measured slopes, its centre tyre-pair height profile (track_profile, for the same-ground check
 // of a baseline), its definition as an explicit candidate (explicit = x z heading) and the search counts go into the
 // run header (site.<kind>.*).
@@ -227,6 +240,7 @@ class DC_SteerSite
 	float m_fMinY;
 	float m_fMaxY;
 	int m_iStations;
+	float m_fZoneShare;					//!< share of the zone tyre-pair samples inside the cross window (diagnostic)
 	bool m_bTerrainOk;
 	string m_sTerrainReason;
 	float m_fScore;
@@ -293,6 +307,7 @@ class DC_SteerSite
 		lines.Insert(prefix + ".min_y=" + m_fMinY.ToString(-1, 3));
 		lines.Insert(prefix + ".max_y=" + m_fMaxY.ToString(-1, 3));
 		lines.Insert(prefix + ".stations=" + m_iStations.ToString());
+		lines.Insert(prefix + ".zone_share=" + m_fZoneShare.ToString(-1, 4));
 		lines.Insert(prefix + ".score=" + m_fScore.ToString(-1, 4));
 		lines.Insert(prefix + ".obstacle_traces=" + m_iObstacleTraces.ToString());
 		lines.Insert(prefix + ".obstacle_hits=" + m_iObstacleHits.ToString());
@@ -308,6 +323,13 @@ class DC_SteerSite
 
 		lines.Insert(prefix + ".track_profile=" + profile.Trim());
 		lines.Insert(prefix + ".cross_rule=the tyre-track cross over the driving corridor (criteria line rule); *_signed = side x track cross over the measure zone");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A refused candidate in one line (the search's near miss)
+	string DescribeRefusal()
+	{
+		return string.Format("%1 start %2 heading %3: %4, zone share %5, side x cross %6..%7, grade %8, rms %9 m", m_sSource, DC_ProbeArea.FormatVector(m_vStart, 1), m_fHeadingDeg.ToString(-1, 2), m_sTerrainReason, m_fZoneShare.ToString(-1, 3), m_fCrossMin.ToString(-1, 4), m_fCrossMax.ToString(-1, 4), m_fGrade.ToString(-1, 4), m_fRmsM.ToString(-1, 3)) + string.Format(", grade windows %1 / %2, |cross| all %3, edge cross %4", m_fGradeWindowMax.ToString(-1, 4), m_fGradeWindowMaxAll.ToString(-1, 4), m_fCrossAbsMaxAll.ToString(-1, 4), m_fWideCrossAbsMax.ToString(-1, 4));
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -521,6 +543,9 @@ class DC_SteerSiteSearch
 	protected int m_iStage = STAGE_EXPLICIT;
 	protected int m_iExplicitCursor;
 
+	//! Reason of a grid strip refused by the pre-check (the centre tyre pair of the zone)
+	static const string REASON_PRE = "cross_zone_pre";
+
 	// the strip whose terrain is being sampled (across frames)
 	protected ref DC_SteerSite m_Sampling;
 	protected ref DC_ProbeArea m_SamplingStrip;
@@ -529,6 +554,12 @@ class DC_SteerSiteSearch
 	protected ref array<float> m_aHeights = {};
 	protected int m_iSampleIndex;
 	protected bool m_bSamplingExplicit;
+	// the pre-check of a grid strip: the centre tyre pair at the zone stations, one sample at a time
+	protected bool m_bPreCheck;
+	protected bool m_bPreRejected;
+	protected ref array<int> m_aPreStations = {};
+	protected int m_iPreIndex;
+	protected float m_fPreLeftY;
 
 	// the candidate being swept
 	protected bool m_bPlanReady;
@@ -555,8 +586,14 @@ class DC_SteerSiteSearch
 	protected int m_iRankedDropped;
 	protected int m_iMaxCallSamples;		//!< the most GetSurfaceY calls of one StepSearch call (<= the frame budget)
 	protected int m_iMaxCallTraces;			//!< the most trace calls of one StepSearch call (<= the frame budget)
-	protected string m_sFirstReject;		//!< first terrain refusal reason of an explicit candidate
+	protected string m_sFirstReject;		//!< first terrain refusal reason of any candidate (explicit or grid)
+	protected string m_sFirstExplicitReject;	//!< first terrain refusal reason of an explicit candidate
 	protected string m_sFirstObstacle;		//!< first blocking obstacle
+	protected int m_iStripsCapped;			//!< headings the strip cap suppressed (grid_complete needs none)
+	protected string m_sStopReason;			//!< why the search ended early (time_cap, the probe's stop reason); empty: it ran out
+	protected ref array<string> m_aRejectReasons = {};	//!< every refusal reason seen, with its count
+	protected ref array<int> m_aRejectCounts = {};
+	protected ref DC_SteerSite m_NearMiss;	//!< the fully sampled refused candidate with the largest zone share
 
 	//------------------------------------------------------------------------------------------------
 	//! excludes: the entities the obstacle sweeps ignore (the ego and its children)
@@ -764,7 +801,10 @@ class DC_SteerSiteSearch
 	protected void AddCentredStrip(float x, float z, float headingDeg)
 	{
 		if (m_iStrips >= m_iMaxStrips)
+		{
+			m_iStripsCapped++;
 			return;
+		}
 
 		float rad = headingDeg * Math.DEG2RAD;
 		float half = m_Criteria.m_fLengthM * 0.5;
@@ -796,6 +836,115 @@ class DC_SteerSiteSearch
 		{
 			m_aAlong.Insert(i * c.m_fStepM);
 		}
+
+		// grid strips: the exact pre-check of the zone's centre tyre pair first (explicit candidates are sampled in
+		// full at once, so their refusal names the first failed criterion with every metric)
+		m_aPreStations = {};
+		m_iPreIndex = 0;
+		m_bPreRejected = false;
+		if (!isExplicit)
+		{
+			foreach (int station, float along : m_aAlong)
+			{
+				if (along >= site.m_fZoneFromM && along <= site.m_fZoneToM)
+					m_aPreStations.Insert(station);
+			}
+		}
+
+		m_bPreCheck = !m_aPreStations.IsEmpty();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The pre-check of the strip being sampled, one GetSurfaceY at a time while the frame has samples: the centre
+	//! tyre pair (corridor position (points - 1) / 2, on the centre line) at every zone station against the zone's
+	//! cross window (DC_SteerTerrainMath.ZoneCrossOk, the full check's own test). false when the samples ran out;
+	//! true when it ended (m_bPreRejected at the first pair outside the window)
+	protected bool ContinuePreCheck(notnull BaseWorld world, notnull DC_SteerBudget budget)
+	{
+		DC_SteerSiteCriteria c = m_Criteria;
+		int centre = (Math.MaxInt(1, c.m_iCorridorPoints) - 1) / 2;
+		float leftLateral = c.OffsetAt(3 + 2 * centre);
+		float rightLateral = c.OffsetAt(4 + 2 * centre);
+		int total = 2 * m_aPreStations.Count();
+		while (m_iPreIndex < total)
+		{
+			if (!budget.TakeSamples(1))
+				return false;
+
+			int station = m_aPreStations[m_iPreIndex / 2];
+			bool left = m_iPreIndex % 2 == 0;
+			float lateral = rightLateral;
+			if (left)
+				lateral = leftLateral;
+
+			vector point = m_SamplingStrip.PointAt(m_aAlong[station], lateral);
+			float y = world.GetSurfaceY(point[0], point[2]);
+			m_iSamples++;
+			m_iPreIndex++;
+			if (left)
+			{
+				m_fPreLeftY = y;
+				continue;
+			}
+
+			float cross = (m_fPreLeftY - y) / (2 * c.m_fTrackHalfM);
+			if (!DC_SteerTerrainMath.ZoneCrossOk(c, m_Sampling.m_iSide, cross))
+			{
+				m_bPreRejected = true;
+				m_bPreCheck = false;
+				return true;
+			}
+		}
+
+		m_bPreCheck = false;
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A refused candidate: its reason counted, the first refusal (of any candidate and of an explicit one) kept, and
+	//! the near miss (fully sampled candidates only: the pre-check measures no zone share)
+	protected void CountReject(notnull DC_SteerSite site, bool isExplicit)
+	{
+		string reason = site.m_sTerrainReason;
+		int index = m_aRejectReasons.Find(reason);
+		if (index < 0)
+		{
+			m_aRejectReasons.Insert(reason);
+			m_aRejectCounts.Insert(1);
+		}
+		else
+		{
+			m_aRejectCounts[index] = m_aRejectCounts[index] + 1;
+		}
+
+		if (m_sFirstReject.IsEmpty())
+			m_sFirstReject = reason;
+
+		if (isExplicit && m_sFirstExplicitReject.IsEmpty())
+			m_sFirstExplicitReject = reason;
+
+		if (reason == REASON_PRE)
+			return;
+
+		if (!m_NearMiss || site.m_fZoneShare > m_NearMiss.m_fZoneShare)
+			m_NearMiss = site;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! 'reason:count;...' in the order the reasons first appeared
+	string DescribeRejects()
+	{
+		string text;
+		foreach (int i, string reason : m_aRejectReasons)
+		{
+			if (i > 0)
+				text += ";";
+
+			int count = m_aRejectCounts[i];
+			text += reason + ":" + count.ToString();
+		}
+
+		return text;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -803,6 +952,22 @@ class DC_SteerSiteSearch
 	//! criteria (DC_SteerTerrainMath) and ranks it. true when the strip is finished, false when the samples ran out
 	protected bool ContinueSampling(notnull BaseWorld world, notnull DC_SteerBudget budget)
 	{
+		if (m_bPreCheck)
+		{
+			if (!ContinuePreCheck(world, budget))
+				return false;
+
+			if (m_bPreRejected)
+			{
+				DC_SteerSite refused = m_Sampling;
+				m_Sampling = null;
+				refused.m_bTerrainOk = false;
+				refused.m_sTerrainReason = REASON_PRE;
+				CountReject(refused, m_bSamplingExplicit);
+				return true;
+			}
+		}
+
 		int offsets = m_aLateral.Count();
 		int total = m_aAlong.Count() * offsets;
 		while (m_iSampleIndex < total)
@@ -827,9 +992,9 @@ class DC_SteerSiteSearch
 			m_iTerrainOk++;
 			AddRanked(site);
 		}
-		else if (m_bSamplingExplicit && m_sFirstReject.IsEmpty())
+		else
 		{
-			m_sFirstReject = site.m_sTerrainReason;
+			CountReject(site, m_bSamplingExplicit);
 		}
 
 		return true;
@@ -1030,6 +1195,65 @@ class DC_SteerSiteSearch
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Ends an unfinished search now with reason (time_cap: the probe's search time is used up). No candidate is
+	//! selected that has not passed its obstacle sweeps; the counts so far stay for the header
+	void StopSearch(string reason)
+	{
+		if (m_iStage == STAGE_DONE)
+			return;
+
+		m_sStopReason = reason;
+		m_iStage = STAGE_DONE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The probe stopped while this search was unfinished (its stop reason): the header lines then say so
+	void NoteProbeStop(string reason)
+	{
+		if (m_iStage == STAGE_DONE)
+			return;
+
+		m_sStopReason = reason;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! done (the search ran out), or why it ended or was interrupted
+	string GetStatus()
+	{
+		if (!m_sStopReason.IsEmpty())
+			return m_sStopReason;
+
+		if (m_iStage == STAGE_DONE)
+			return "done";
+
+		return "running";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	static string StageName(int stage)
+	{
+		if (stage == STAGE_EXPLICIT)
+			return "explicit";
+
+		if (stage == STAGE_GRID)
+			return "grid";
+
+		if (stage == STAGE_OBSTACLES)
+			return "obstacles";
+
+		return "done";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every grid point visited, every strip generated (no heading suppressed by the cap), nothing pending, and the
+	//! search not stopped early
+	bool IsGridComplete()
+	{
+		int total = m_iGridNx * m_iGridNz;
+		return m_bGrid && m_bGridDone && m_iGridCursor >= total && m_iStripsCapped == 0 && m_sStopReason.IsEmpty();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! <prefix>.found and the site lines, the criteria and the search counts
 	void AppendHeaderLines(notnull array<string> lines, string prefix)
 	{
@@ -1057,7 +1281,31 @@ class DC_SteerSiteSearch
 		lines.Insert(s + "traces=" + m_iTraces.ToString());
 		lines.Insert(s + "calls=" + m_iCalls.ToString());
 		lines.Insert(s + "first_terrain_reject=" + DC_ProbeCsv.CleanField(m_sFirstReject));
+		lines.Insert(s + "first_explicit_reject=" + DC_ProbeCsv.CleanField(m_sFirstExplicitReject));
+		lines.Insert(s + "rejects=" + DC_ProbeCsv.CleanField(DescribeRejects()));
+		int gridTotal = m_iGridNx * m_iGridNz;
+		lines.Insert(s + "grid_total=" + gridTotal.ToString());
+		lines.Insert(s + "strips_capped=" + m_iStripsCapped.ToString());
+		lines.Insert(s + "grid_complete=" + DC_LaunchGuard.BoolText(IsGridComplete()));
+		lines.Insert(s + "status=" + DC_ProbeCsv.CleanField(GetStatus()));
+		lines.Insert(s + "stage=" + StageName(m_iStage));
+		string pending;
+		if (m_Sampling)
+		{
+			int sampled = m_iSampleIndex;
+			int total = m_aAlong.Count() * m_aLateral.Count();
+			float pendingHeading = m_Sampling.m_fHeadingDeg;
+			pending = string.Format("%1 start %2 heading %3, pre-check %4, %5 of %6 samples", m_Sampling.m_sSource, DC_ProbeArea.FormatVector(m_Sampling.m_vStart, 1), pendingHeading.ToString(-1, 2), DC_LaunchGuard.BoolText(m_bPreCheck), sampled, total);
+		}
+
+		lines.Insert(s + "pending=" + DC_ProbeCsv.CleanField(pending));
+		string nearMiss;
+		if (m_NearMiss)
+			nearMiss = m_NearMiss.DescribeRefusal();
+
+		lines.Insert(s + "near_miss=" + DC_ProbeCsv.CleanField(nearMiss));
 		lines.Insert(s + "first_obstacle=" + DC_ProbeCsv.CleanField(m_sFirstObstacle));
+		lines.Insert(s + "rule=rejects counts every refused candidate by its first failed criterion (cross_zone_pre: a grid strip whose centre tyre pair left the zone's cross window at a zone station, before the full sampling); first_terrain_reject is the first refusal of any candidate, first_explicit_reject of an explicit one; near_miss the fully sampled refused candidate with the largest zone share; grid_complete 1 only when every grid point was visited, the strip cap suppressed no heading (strips_capped 0) and the search was not stopped; status done, time_cap (the probe's search time ran out) or the probe's stop reason (the probe stopped while it searched: stage and pending say where)");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1068,7 +1316,23 @@ class DC_SteerSiteSearch
 			found = m_Selected.DescribeSite();
 
 		int explicitCount = m_aExplicit.Count();
-		return string.Format("%1 search: %2 explicit, %3 grid points (%4 with a usable gradient), %5 strips, %6 terrain ok, %7 obstacle-checked (%8 rejected): %9", m_Criteria.m_sKind, explicitCount, m_iGridPoints, m_iGradientOk, m_iStrips, m_iTerrainOk, m_iObstacleChecked, m_iObstacleRejected, found);
+		string text = string.Format("%1 search: %2 explicit, %3 grid points (%4 with a usable gradient), %5 strips, %6 terrain ok, %7 obstacle-checked (%8 rejected): %9", m_Criteria.m_sKind, explicitCount, m_iGridPoints, m_iGradientOk, m_iStrips, m_iTerrainOk, m_iObstacleChecked, m_iObstacleRejected, found);
+		if (!m_sStopReason.IsEmpty())
+			text += string.Format("; stopped (%1) in stage %2", m_sStopReason, StageName(m_iStage));
+
+		if (m_iStripsCapped > 0)
+			text += string.Format("; %1 headings over the strip cap", m_iStripsCapped);
+
+		if (!m_aRejectReasons.IsEmpty())
+			text += "; terrain refusals " + DescribeRejects();
+
+		if (!m_Selected && m_NearMiss)
+			text += "; near miss " + m_NearMiss.DescribeRefusal();
+
+		if (!m_Selected && !m_sFirstObstacle.IsEmpty())
+			text += "; first obstacle " + m_sFirstObstacle;
+
+		return text;
 	}
 }
 
@@ -1079,6 +1343,20 @@ class DC_SteerSiteSearch
 //! position k); heights[i x lateral.Count() + j] = the surface y of station i at offset j
 class DC_SteerTerrainMath
 {
+	//------------------------------------------------------------------------------------------------
+	//! One zone tyre-pair cross against the zone's window: cross criteria side x cross within cross_min..cross_max,
+	//! flat |cross| <= cross_max (the test of Apply's cross_zone criterion and of the search's pre-check)
+	static bool ZoneCrossOk(DC_SteerSiteCriteria c, int side, float cross)
+	{
+		if (c.IsCross())
+		{
+			float signedCross = side * cross;
+			return signedCross >= c.m_fCrossMin && signedCross <= c.m_fCrossMax;
+		}
+
+		return Math.AbsFloat(cross) <= c.m_fCrossMax;
+	}
+
 	//------------------------------------------------------------------------------------------------
 	//! Fills site.m_fGrade .. m_fRmsM, m_fMinY / m_fMaxY, m_bTerrainOk, m_sTerrainReason and m_fScore
 	static void Apply(DC_SteerSite site, DC_SteerSiteCriteria c, array<float> along, array<float> lateral, array<float> heights)
@@ -1135,6 +1413,7 @@ class DC_SteerTerrainMath
 		float halfWidth = (lateral[1] - lateral[0]) * 0.5;
 		float crossSum = 0;
 		int crossCount = 0;
+		int crossInWindow = 0;
 		float crossMin = 0;
 		float crossMax = 0;
 		float crossAbsMaxAll = 0;
@@ -1165,13 +1444,20 @@ class DC_SteerTerrainMath
 
 					crossSum += cross;
 					crossCount++;
+					if (ZoneCrossOk(c, site.m_iSide, cross))
+						crossInWindow++;
 				}
 			}
 		}
 
 		float crossMean = 0;
+		float zoneShare = 0;
 		if (crossCount > 0)
+		{
 			crossMean = crossSum / crossCount;
+			zoneShare = crossInWindow;
+			zoneShare = zoneShare / crossCount;
+		}
 
 		// windowed grade of the centre line (zone and whole strip)
 		int windowSteps = Math.Round(c.m_fGradeWindowM / c.m_fStepM);
@@ -1188,19 +1474,59 @@ class DC_SteerTerrainMath
 				gradeWindowMax = Math.Max(gradeWindowMax, windowGrade);
 		}
 
-		// rms of every sample about the plane y = meanY + grade (a - meanA) - crossMean x lateral (right positive)
-		float sq = 0;
-		for (int r = 0; r < n; r++)
+		// rms of the measure zone's samples about its plane y = meanY_z + grade_z (a - meanA_z) - crossMean x lateral
+		// (right positive; the centre-line regression of the zone stations): the run-up and stop parts of a cross
+		// strip only meet the lax criteria, and the flat zone is the whole strip (the same plane as the mean grade's)
+		float sumAz = 0;
+		float sumYz = 0;
+		int nz = 0;
+		for (int iz = 0; iz < n; iz++)
 		{
-			float planeY = meanY + grade * (along[r] - meanA);
-			for (int q = 0; q < m; q++)
+			if (along[iz] >= site.m_fZoneFromM && along[iz] <= site.m_fZoneToM)
 			{
-				float e = heights[r * m + q] - (planeY - crossMean * lateral[q]);
-				sq += e * e;
+				sumAz += along[iz];
+				sumYz += heights[iz * m + 2];
+				nz++;
 			}
 		}
 
-		float rms = Math.Sqrt(sq / (n * m));
+		float rms = 0;
+		if (nz > 0)
+		{
+			float meanAz = sumAz / nz;
+			float meanYz = sumYz / nz;
+			float sxyz = 0;
+			float sxxz = 0;
+			for (int jz = 0; jz < n; jz++)
+			{
+				if (along[jz] >= site.m_fZoneFromM && along[jz] <= site.m_fZoneToM)
+				{
+					float daz = along[jz] - meanAz;
+					sxyz += daz * (heights[jz * m + 2] - meanYz);
+					sxxz += daz * daz;
+				}
+			}
+
+			float gradeZone = 0;
+			if (sxxz > 0)
+				gradeZone = sxyz / sxxz;
+
+			float sq = 0;
+			for (int r = 0; r < n; r++)
+			{
+				if (along[r] >= site.m_fZoneFromM && along[r] <= site.m_fZoneToM)
+				{
+					float planeY = meanYz + gradeZone * (along[r] - meanAz);
+					for (int q = 0; q < m; q++)
+					{
+						float e = heights[r * m + q] - (planeY - crossMean * lateral[q]);
+						sq += e * e;
+					}
+				}
+			}
+
+			rms = Math.Sqrt(sq / (nz * m));
+		}
 		// the centre tyre pair (corridor position (points - 1) / 2) at every station: the same-ground check of a baseline
 		int centre = (points - 1) / 2;
 		site.m_aTrackProfile.Clear();
@@ -1219,6 +1545,7 @@ class DC_SteerTerrainMath
 		site.m_fCrossAbsMaxAll = crossAbsMaxAll;
 		site.m_fWideCrossAbsMax = wideAbsMax;
 		site.m_fRmsM = rms;
+		site.m_fZoneShare = zoneShare;
 		site.m_fMinY = minY;
 		site.m_fMaxY = maxY;
 

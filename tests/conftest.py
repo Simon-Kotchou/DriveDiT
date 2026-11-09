@@ -6,12 +6,19 @@ get the `torch` marker, and without torch they are not collected at all. Whole d
 codec, model and train tests) are listed in TORCH_TEST_DIRS and treated the same way. A new test module that imports
 torch must be added to one of the two lists.
 
-This file imports neither torch nor any project module.
+This file imports neither torch nor any project module, and sets DRIVEDIT_LOCAL_CONFIG (below). It also replaces pytest's
+tmp_path and tmp_path_factory with directories in validated RAM (tests/fixtures/local_config/scratch.py, DD-22): no test falls back to the
+system temp dir.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
+import re
+import shutil
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -31,8 +38,63 @@ TORCH_TEST_DIRS = [
 ]
 
 _HERE = Path(__file__).parent
+
+# DD-22: every test reads the synthetic local config (placeholder drives X:, Y:, Z:, none of them mounted), never this
+# machine's, so no default root names a real drive. Tests that compare with files of a real machine opt in with
+# DD_TEST_LOCAL_CONFIG (tests/fixtures/local_config/evidence.py).
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = str(_HERE / "fixtures" / "local_config" / "placeholder.local.env")
 _TORCH_PATHS = {(_HERE / p).resolve() for p in TORCH_TEST_MODULES}
 _TORCH_DIRS = [(_HERE / d).resolve() for d in TORCH_TEST_DIRS]
+
+_scratch_spec = importlib.util.spec_from_file_location("dd22_scratch", _HERE / "fixtures" / "local_config" / "scratch.py")
+assert _scratch_spec is not None
+assert _scratch_spec.loader is not None
+_scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(_scratch)
+
+
+class _RamTempPathFactory:
+    """The part of pytest's TempPathFactory the tests use (mktemp, getbasetemp), in validated RAM."""
+
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def getbasetemp(self) -> Path:
+        return self._base
+
+    def mktemp(self, basename: str, numbered: bool = True) -> Path:
+        """A new directory under the base. basename must be a plain name (scratch.check_name: no separator, not
+        absolute, not . or .., not empty), refused before anything is created, and it must stay a direct child of the
+        base after normalisation (pytest's own TempPathFactory._ensure_relative_to_basetemp rule)."""
+        _scratch.check_name(basename, "basename")
+        basename = os.path.normpath(basename)
+        if (self._base / basename).resolve().parent != self._base.resolve():
+            raise ValueError(f"{basename} is not a normalized and relative path")
+        if numbered:
+            return Path(tempfile.mkdtemp(prefix=basename + "_", dir=self._base))
+        path = self._base / basename
+        path.mkdir()
+        return path
+
+
+@pytest.fixture(scope="session")
+def tmp_path_factory() -> Iterator[_RamTempPathFactory]:
+    """pytest's tmp_path_factory in validated RAM (scratch.ram_base(); never the system temp dir)."""
+    base = Path(tempfile.mkdtemp(prefix="dd22_pytest_", dir=_scratch.ram_base()))
+    yield _RamTempPathFactory(base)
+    shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture
+def tmp_path(request: pytest.FixtureRequest) -> Iterator[Path]:
+    """pytest's tmp_path in validated RAM (scratch.ram_base(); never the system temp dir), removed afterwards. The test
+    skips, with the reason, where there is no usable RAM scratch."""
+    base = _scratch.ram_base()
+    prefix = _scratch.check_name(re.sub(r"[^A-Za-z0-9_]", "_", request.node.name)[:40] + "_")
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
 
 if importlib.util.find_spec("torch") is None:
     collect_ignore = [*TORCH_TEST_MODULES, *TORCH_TEST_DIRS]

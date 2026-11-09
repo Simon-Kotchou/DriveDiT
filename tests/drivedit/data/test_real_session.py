@@ -1,12 +1,14 @@
 """The first dc-2.0 production session (T0L, Arland, 2026-11-05), read-only: the shard has one decision step per
 decision callback (3101), and its action_cmd and state statistics, masks and segments equal the reader's.
 
-Skipped when the session is not on this machine (CI). Reading it decodes 3101 fiducials from 5.9 GB of PNGs, about
-8 minutes on /mnt/e, so the session is read once per module. The shard goes to the test scratch, never into the
+Skipped unless DD_TEST_LOCAL_CONFIG names this machine's local config and the session is under its DATA_ROOT (CI:
+skipped; DD-22). Reading it decodes 3101 fiducials from 5.9 GB of PNGs, about 8 minutes on drvfs, so the session is
+read once per module. The shard goes to the test scratch, never into the
 captures tree."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +19,22 @@ from drivedit.data import build
 from drivedit.data.shard import Shard, WindowIndex
 from drivedit.data.spec import FeatureSpec
 
-REAL = Path("/mnt/e/DriveDiT/captures/arland/2026-11-05/T0L/arland_T0L_20261105T072648Z_wb_i00_66b8")
+SESSION_REL = "captures/arland/2026-11-05/T0L/arland_T0L_20261105T072648Z_wb_i00_66b8"
 
-pytestmark = pytest.mark.skipif(not (REAL / "session.json").is_file(), reason="the T0L session is not on this machine")
+
+def _real_session_dir() -> Path:
+    machine = os.environ.get("DD_TEST_LOCAL_CONFIG", "").strip()
+    text = Path(machine).read_text(encoding="ascii") if machine and Path(machine).is_file() else ""
+    data_root = next((line.split("=", 1)[1] for line in text.splitlines() if line.startswith("DATA_ROOT=")), None)
+    return Path(data_root) / SESSION_REL if data_root else Path("/nonexistent-dd22-evidence") / SESSION_REL
+
+
+REAL = _real_session_dir()
+
+pytestmark = pytest.mark.skipif(
+    not (REAL / "session.json").is_file(),
+    reason="the T0L session is not on this machine (set DD_TEST_LOCAL_CONFIG to this machine's config)",
+)
 
 
 @pytest.fixture(scope="module")

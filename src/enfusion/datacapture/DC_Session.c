@@ -492,7 +492,8 @@ class DC_Session : SCR_BaseGameModeComponent
 	protected float m_fLatitudeTolDeg;
 
 	// === LAUNCH GUARD (DC_LaunchGuard of DD-4-probe) ===
-	[Attribute("E:/DriveDiT", UIWidgets.EditBox, "Launch guard: -profile and $profile must lie inside this folder (case-insensitive, either slash). Empty refuses: the guard has no off switch", category: "Launch")]
+	// The default below is a deploy token: tools/deploy_addon.py (PROFILE_ROOT_TOKEN) writes in the data root of the local config (DD-22)
+	[Attribute("@DD_PROFILE_ROOT@", UIWidgets.EditBox, "Launch guard: -profile and $profile must lie inside this folder (case-insensitive, either slash). Empty refuses: the guard has no off switch", category: "Launch")]
 	protected string m_sRequiredProfileRoot;
 
 	[Attribute("0", UIWidgets.CheckBox, "Launch guard: Workbench-only escape for a Play that cannot see the command line (TBD-6 / E-11). Off on DC_Arland (the probe layer alone has it on); escape sessions are dev data, marked launch_guard.launch_mode wb_escape", category: "Launch")]

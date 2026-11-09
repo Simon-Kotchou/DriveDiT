@@ -15,9 +15,11 @@ in the same JSON shape from Bohemia's Arma-Reforger-Script-Diff dump at the pin'
 The wrapper (enfusion-mcp-wsl.sh, mcp_pin.py) serves <mcp root>/pins/<pin id>/data only when INDEX_PIN.json names
 that pin and its build_key, so a 1.8 index can never answer for a 1.9 pin.
 
-    python3 -I -B api_index.py build --dump-git /mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable \
-        --pin-id 1.9.0.37 --out /mnt/e/drivedit_realign/mcp/pins/1.9.0.37/data \
-        --shared /mnt/e/drivedit_realign/mcp/data --dry-run          # then --apply
+    python3 -I -B api_index.py build --dump-git <REALIGN_ROOT>/program/1_9/work/dl/sd_stable \
+        --pin-id 1.9.0.37 --out <REALIGN_ROOT>/mcp/pins/1.9.0.37/data \
+        --shared <REALIGN_ROOT>/mcp/data --dry-run          # then --apply
+
+(<REALIGN_ROOT> is that key of the local config, tools/local_config.py; DD-22.)
 
 Provenance (Codex round 1): index_sources.json maps each pin id to a dump tag and its commit. A build refuses unless
 the pin is mapped, its engine sidecar's engine_version_expected gives the same tag (v<version>), and the tag resolves
@@ -27,7 +29,8 @@ the tag (never a checkout). The index is written to a temp dir and renamed into 
 'extends'), methods (multi-line declarations joined; public, protected/private, static), member variables and enums,
 with their '//!' doc lines. Bodies are skipped by brace depth.
 
-Exit codes: 0 built (or dry run); 2 usage, read or path error. Writes only under /mnt/e (or the test roots).
+Exit codes: 0 built (or dry run); 2 usage, read or path error. Writes only on the data drive (pinlib.check_write_path;
+or the test roots).
 """
 from __future__ import annotations
 
@@ -55,10 +58,29 @@ KEYWORDS = {"if", "for", "while", "switch", "return", "foreach", "new", "delete"
 GROUP_RE = re.compile(r"\\addtogroup\s+(\w+)")
 
 
+def _installed_pin_tools(here):
+    """<DATA_ROOT>/tools/pin of the local config (DD-22), read with the local_config.py next to this file (the copy in
+    an installed MCP root) or in the repo's tools/; None without a loader. SystemExit when the config is missing."""
+    for path in (os.path.join(here, "local_config.py"), os.path.join(os.path.dirname(here), "local_config.py")):
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location("dd_emcp_local_config", path)
+            lc = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(lc)
+            try:
+                return os.path.join(lc.get("DATA_ROOT"), "tools", "pin")
+            except lc.LocalConfigError as exc:
+                raise SystemExit("api_index: cannot find tools/pin (set DD_PIN_TOOLS): %s" % exc)
+    return None
+
+
 def _load_pinlib():
-    """tools/pin/pinlib.py from the repo layout, else the installed copy (E:\\DriveDiT\\tools\\pin)."""
+    """tools/pin/pinlib.py: $DD_PIN_TOOLS, else the repo layout, else the installed copy (<DATA_ROOT>/tools/pin of the
+    local config)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.environ.get("DD_PIN_TOOLS"), os.path.join(os.path.dirname(here), "pin"), "/mnt/e/DriveDiT/tools/pin"):
+    repo_pin = os.path.join(os.path.dirname(here), "pin")
+    for cand in (os.environ.get("DD_PIN_TOOLS"), repo_pin, None):
+        if cand is None and not os.path.isfile(os.path.join(repo_pin, "pinlib.py")):
+            cand = _installed_pin_tools(here)
         if cand and os.path.isfile(os.path.join(cand, "pinlib.py")):
             mods = {}
             for name in ("pinlib", "preflight"):
@@ -493,14 +515,14 @@ def write_index(out_dir: str, blobs: dict, stamp: dict, shared, check_write_path
 
 def main(argv=None, write_roots=None) -> int:
     pinlib, preflight = _load_pinlib()
-    roots = write_roots or pinlib.DEFAULT_WRITE_ROOTS
+    roots = write_roots  # None: pinlib.DEFAULT_WRITE_ROOTS, the data drive of the local config
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
     b.add_argument("--dump-git", metavar="REPO", required=True, help="a clone of Arma-Reforger-Script-Diff")
     b.add_argument("--tag", help="optional: must equal the tag the source map gives for the pin")
     b.add_argument("--pin-id", required=True)
-    b.add_argument("--pin-dir", default=pinlib.DEFAULT_PIN_DIR)
+    b.add_argument("--pin-dir", default=None, help="default <DATA_ROOT>/pin of the local config")
     b.add_argument("--sources", default=None, help="the index source map (default %s)" % DEFAULT_SOURCES)
     b.add_argument("--out", required=True, help="the per-pin data dir, <mcp root>/pins/<pin id>/data")
     b.add_argument("--shared", default=None, help="data dir to copy patterns/, recipes/ and wiki/ from")
@@ -509,7 +531,8 @@ def main(argv=None, write_roots=None) -> int:
     mode.add_argument("--apply", action="store_true")
     args = ap.parse_args(argv)
     try:
-        pin_src = preflight.load_pin_by_id(os.path.abspath(pinlib.win_to_wsl(args.pin_dir)), args.pin_id)
+        pin_dir = args.pin_dir or pinlib.DEFAULT_PIN_DIR
+        pin_src = preflight.load_pin_by_id(os.path.abspath(pinlib.win_to_wsl(pin_dir)), args.pin_id)
         ident = preflight.pin_identity(pin_src)
         out = os.path.abspath(args.out)
         if os.path.basename(os.path.dirname(out)) != args.pin_id or os.path.basename(out) != "data":

@@ -108,7 +108,8 @@ the sha256 of the file without its final LF is drivedit_nav's Route.sha256; DC_E
 that way.
 
 Sealed map: any input path naming eden or everon is refused with exit 2 before anything is read (Everon is the
-zero-shot test map). Outputs only under /mnt/e/ or /dev/shm/ (never /mnt/c or /tmp).
+zero-shot test map). Outputs only under /dev/shm/ or on the data drive of the local config (never the system drive
+or /tmp).
 Exit codes: 0 built (and written or equal), 1 --check found a difference, 2 refused (input, check or path problem).
 """
 
@@ -210,8 +211,49 @@ TRAIL_END_M = 8.0               # a trail ending within this of the route ends o
 CUT_EPS_M = 1e-6                # segments this close meet; meeting points this close along a trail are one
 GRID_M = 32.0
 
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# DD-22: outputs only where the write boundary allows (tools/local_config.py check_write): RAM (/dev/shm) or the
+# verified data drive of the local config, never a volume whose root holds Windows/System32, never /tmp/.
+# Without the config only RAM is writable; without the loader nothing is.
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "local_config.py")
+
+
+def _local_config_module():
+    """tools/local_config.py, loaded by path (shared as sys.modules["dd_local_config"]); None when it is missing."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            return None
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary (tools/local_config.py check_write) allows writing to path, narrowed to roots
+    when given, else the refusal message. Without the loader nothing is writable."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (path, _LOCAL_CONFIG_PY)
+    return mod.write_refusal(path, roots)
+
+
+def child_refusal(parent, name):
+    """None when <parent>/<name> may be written: name a plain file name (no separator, not absolute, not '..') and the
+    final path allowed by the write boundary under parent; else the refusal message."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (name, _LOCAL_CONFIG_PY)
+    try:
+        mod.check_child(parent, name, (parent,))
+    except mod.WriteRefused as exc:
+        return str(exc)
+    return None
+
+
 SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
 VEHICLE_RE = re.compile(r'^Vehicle\s+(\w+)\s*:')
 COORDS_RE = re.compile(r'^\s*coords\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*$')
@@ -232,12 +274,18 @@ def sealed_reason(path):
     return None
 
 
+def open_no_follow(path):
+    """path opened for writing (created or truncated) without following a symlink there (O_NOFOLLOW)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                 0o644)
+    return os.fdopen(fd, "w", encoding="ascii", newline="")
+
+
 def check_out_path(path):
-    real = os.path.realpath(os.path.abspath(path))
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS) or not any(probe.startswith(r) for r in WRITE_ROOTS):
-        raise Refusal("refusing output %s: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
-    return real
+    why = write_refusal(path)
+    if why:
+        raise Refusal(why)
+    return os.path.realpath(os.path.abspath(path))
 
 
 def sha256_file(path):
@@ -1259,7 +1307,7 @@ def main(argv=None):
         text = route_text(route)
         if args.out:
             out = check_out_path(args.out)
-            with open(out, "w", encoding="ascii", newline="") as f:
+            with open_no_follow(out) as f:   # a symlink planted after the check is never followed
                 f.write(text)
     except Refusal as e:
         print("REFUSED: %s" % e)

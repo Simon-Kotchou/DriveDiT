@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy the repo-versioned DataCapture Workbench addon to its E: target, from a manifest.
+"""Deploy the repo-versioned DataCapture Workbench addon to its target on the data drive, from a manifest.
 
 Run it with the isolated interpreter (stdlib only):
 
@@ -13,7 +13,8 @@ What it copies (nothing else, ever):
       config tools/ident/cards/<pin_id>/<id>.json     -> <target>/Configs/ident/cards/<pin_id>/<id>.json (vehicle
                                                          cards: the repo keeps them where the DD-5-min reader looks)
     Config files are copied byte for byte, so the sha256 llc_v1 and the expert compute in the engine is the
-    repo file's; a config path naming eden or everon (the sealed test map) is refused.
+    repo file's; a config path naming eden or everon (the sealed test map) is refused. Addon and script files are
+    copied byte for byte too, except for the one token PROFILE_ROOT_TOKEN (DD-22, below);
   * a generated build stamp <target>/Scripts/Game/DataCapture/DC_BuildInfo.c (git sha, branch, dirty flag,
     deploy UTC time, manifest hash, content hash), because Enforce Script cannot run git;
   * with --emcp-handlers DIR, the EMCP_WB_*.c files found directly in DIR
@@ -23,12 +24,14 @@ Safety rules:
   * Refuses (exit 2, before writing anything) when the manifest lists a file outside the allowed set
     (core/, modules/ or any subfolder of src/enfusion/datacapture/, DriveDiT_DataCapture/, src/SCR_CaptureTests.c,
     the auxiliary prototypes, SCR_AIDrivingSimulator, Workbench-generated files; compared without regard to case,
-    and every manifest path must match the repo's spelling exactly, because E: is case-insensitive), or when a FILE
-    argument is not in the manifest.
-  * Target allowlist: the resolved target must lie strictly inside /mnt/e/DriveDiT/addons/ (the default target is
-    /mnt/e/DriveDiT/addons/DataCapture). --allow-root DIR adds another root for scratch deploys and the self-test;
-    DIR must be an existing directory under /mnt/e/ or /dev/shm/. Targets on the C: drive (/mnt/c, C:\\..., the
-    same device as /mnt/c) or on the WSL disk image (the device of /, which lives on C:) are always refused.
+    and every manifest path must match the repo's spelling exactly, because drvfs is case-insensitive), or when a
+    FILE argument is not in the manifest.
+  * Target allowlist: the resolved target must lie strictly inside <DATA_ROOT>/addons/ (the default target is
+    <DATA_ROOT>/addons/DataCapture). --allow-root DIR adds another root for scratch deploys and the self-test;
+    DIR must be an existing directory on the data drive (the drive of DATA_ROOT) or under /dev/shm/. Every target,
+    --allow-root, destination, backup and the state file also pass the write boundary (tools/local_config.py
+    check_write: RAM or the data drive verified in /proc/self/mountinfo), which refuses the Windows system drive by
+    its Windows/System32 whatever the config says; the WSL disk image (the device of /) is always refused.
   * Never writes through a symlink or junction inside the target: every destination, the state file and every
     backup path are checked component by component before anything is written.
   * Never writes, overwrites or deletes Workbench-generated files (*.meta, resourceDatabase.rdb, UserMaps.desc).
@@ -40,8 +43,8 @@ Safety rules:
 
 Per-pin targets (DD-14a; MIGRATION_1_9 8.2 component 4): --target-pin PIN_ID [--pin-dir DIR] names the pin the
 deploy is for. The pin (tools/pin, sidecars included) gives its launch path, and the target must then be that launch
-path's addon, pinlib.DEPLOY_ROOTS[launch path]/DataCapture: /mnt/e/DriveDiT/addons/DataCapture for a stable pin,
-/mnt/e/DriveDiT/addons_c18/DataCapture for the cold pin 1.8.0.13-cold (wb_C18.bat loads it), so a 1.8 Workbench never
+path's addon, pinlib.DEPLOY_ROOTS[launch path]/DataCapture: <DATA_ROOT>/addons/DataCapture for a stable pin,
+<DATA_ROOT>/addons_c18/DataCapture for the cold pin 1.8.0.13-cold (wb_C18.bat loads it), so a 1.8 Workbench never
 re-saves the 1.9 addon. A cold or experimental pin is refused at the production root, and an experimental pin has no
 deploy root at all. The production root takes a --target-pin deploy only for the ACTIVE pin, and the protected roots
 (pinlib.DEPLOY_ROOTS) are checked before --allow-root, so a scratch root that covers one never reaches it; the cold
@@ -49,6 +52,16 @@ root takes only a --target-pin deploy of its own launch path. DC_BuildInfo then 
 TARGET_BUILD_KEY and TARGET_LAUNCH_PATH, and the state records target_pin; a target deployed for another pin is
 refused. Without --target-pin a deploy to the production root is as before: the default target, the stamp bytes and
 every check are unchanged.
+
+Local paths (DD-22): the repo names no machine path. <DATA_ROOT> and the system drive come from the untracked local
+config (tools/local_config.py, drivedit.local.env: DATA_ROOT; SYSTEM_DRIVE only words a refusal), read when a deploy
+runs and never at import; without it, or without DATA_ROOT, the deploy is refused before anything is read or written.
+The launch guard's profile root is the only machine value the engine needs: the repo writes it as PROFILE_ROOT_TOKEN
+in exactly five sources (PROFILE_ROOT_SOURCES: DC_Session.c, DC_ProbeRunner.c, DC_LaunchGuard.c and the two world
+layers), and the payload gets DATA_ROOT in the Windows form with forward slashes (X:/...) in its place. The two
+layers deploy exactly what they held before DD-22 on a machine whose config holds the same root; the three scripts
+differ from then in comments and in two diagnostic strings only (their code lines are unchanged). The token in any
+other file, or any other @DD_...@ in any payload (the MCP handlers included), refuses.
 
 Exit codes: 0 success (or dry run), 2 refused, 1 unexpected I/O error.
 """
@@ -61,21 +74,123 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 TOOL_REL = "tools/deploy_addon.py"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
-DEFAULT_TARGET = "/mnt/e/DriveDiT/addons/DataCapture"
-# Deploy targets must resolve strictly inside one of these roots (DD-1: deploys write only under E:\DriveDiT\addons).
-ALLOWED_TARGET_ROOTS = ("/mnt/e/DriveDiT/addons",)
-# An extra --allow-root must resolve strictly under one of these (E:, or RAM for the self-test).
-ALLOW_ROOT_PREFIXES = ("/mnt/e/", "/dev/shm/")
-# Paths whose device must never receive a deploy: the C: drive, and / (the WSL disk image, which lives on C:).
-FORBIDDEN_DEVICE_PATHS = (("/mnt/c", "the C: drive"), ("/", "the WSL disk image, which lives on the C: drive"))
+# The roots below come from the local config (DD-22), computed on every read (module __getattr__; a test may assign
+# one, and _get honours that):
+#   DEFAULT_TARGET           <DATA_ROOT>/addons/DataCapture
+#   ALLOWED_TARGET_ROOTS     (<DATA_ROOT>/addons,): deploy targets resolve strictly inside one of them (DD-1)
+#   ALLOW_ROOT_PREFIXES      (<data drive>/, /dev/shm/): an extra --allow-root resolves strictly under one of them
+#   FORBIDDEN_DEVICE_PATHS   / (the WSL disk image): a path on its device never receives a deploy (the Windows
+#                            system drive is refused by the write boundary itself, boundary_reason)
+#   DEFAULT_DEPLOY_ROOTS     the protected per-pin roots (DD-14a), <DATA_ROOT>/<DEFAULT_DEPLOY_ROOT_RELS>, the same as
+#                            tools/pin/pinlib.py DEPLOY_ROOTS (the self-test compares them); used only when this file
+#                            runs without tools/pin next to it, so the protection holds there too
+DEFAULT_DEPLOY_ROOT_RELS = {"stable": "addons", "cold-1.8.0.13": "addons_c18"}
 DEFAULT_MANIFEST = os.path.join(REPO_ROOT, "addons", "DataCapture", "deploy_manifest.txt")
-# The protected per-pin roots (DD-14a), the same as tools/pin/pinlib.py DEPLOY_ROOTS (the self-test compares them); used
-# only when this file runs without tools/pin next to it, so the protection holds there too.
-DEFAULT_DEPLOY_ROOTS = {"stable": "/mnt/e/DriveDiT/addons", "cold-1.8.0.13": "/mnt/e/DriveDiT/addons_c18"}
+# The launch guard's profile root (DD-22): replaced by the data root (X:/...) in exactly these five sources, and
+# nowhere else. Any other @DD_...@ (any characters but '@' between, white space and line breaks included) left in
+# any payload, the MCP handlers included, refuses the deploy.
+PROFILE_ROOT_TOKEN = b"@DD_PROFILE_ROOT@"
+PROFILE_ROOT_SOURCES = frozenset((
+    "src/enfusion/datacapture/DC_Session.c",
+    "src/enfusion/datacapture/DC_ProbeRunner.c",
+    "src/enfusion/datacapture/DC_LaunchGuard.c",
+    "addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
+    "addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.layer",
+))
+TOKEN_RE = re.compile(rb"@DD_[^@]*@")   # anything between, white space and line breaks included
+PROFILE_ROOT_RE = re.compile(r"[A-Z]:/[A-Za-z0-9_./-]+")
+
+
+
+class Refusal(Exception):
+    pass
+
+
+def _lc():
+    """tools/local_config.py next to this file, loaded by path (shared as sys.modules["dd_local_config"])."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "local_config.py")
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != path:
+        if not os.path.isfile(path):
+            raise Refusal("%s is missing: the deploy reads this machine's paths through it" % path)
+        spec = importlib.util.spec_from_file_location("dd_local_config", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def boundary_reason(path, roots=None):
+    """Why the write boundary (tools/local_config.py check_write: RAM or the verified data drive, never a Windows
+    system volume) refuses path, or None. Every target, --allow-root, destination, backup and the state file pass it."""
+    return _lc().write_refusal(path, roots)
+
+
+def local_config():
+    """The parsed local config (tools/local_config.py next to this file, loaded by path). Refusal when it or the
+    loader is missing or malformed."""
+    mod = _lc()
+    try:
+        return mod.load()
+    except mod.LocalConfigError as e:
+        raise Refusal(str(e))
+
+
+def _local(form, key):
+    cfg = local_config()
+    try:
+        return getattr(cfg, form)(key)
+    except sys.modules["dd_local_config"].LocalConfigError as e:  # a missing key
+        raise Refusal(str(e))
+
+
+_COMPUTED = {
+    "DEFAULT_TARGET": lambda: _local("get", "DATA_ROOT") + "/addons/DataCapture",
+    "ALLOWED_TARGET_ROOTS": lambda: (_local("get", "DATA_ROOT") + "/addons",),
+    "ALLOW_ROOT_PREFIXES": lambda: (_local("drive", "DATA_ROOT") + "/", "/dev/shm/"),
+    "FORBIDDEN_DEVICE_PATHS": lambda: (("/", "the WSL disk image, which lives on the system drive"),),
+    "DEFAULT_DEPLOY_ROOTS": lambda: {lp: _local("get", "DATA_ROOT") + "/" + rel
+                                     for lp, rel in DEFAULT_DEPLOY_ROOT_RELS.items()},
+}
+
+
+def _get(name):
+    g = globals()
+    return g[name] if name in g else _COMPUTED[name]()
+
+
+def __getattr__(name):
+    if name in _COMPUTED:
+        return _COMPUTED[name]()
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
+
+
+def profile_root_value():
+    """What PROFILE_ROOT_TOKEN becomes: DATA_ROOT in the Windows form with forward slashes (X:/...)."""
+    value = _local("win", "DATA_ROOT").replace("\\", "/")
+    if not PROFILE_ROOT_RE.fullmatch(value):
+        raise Refusal("DATA_ROOT %r cannot stand in an Enforce Script string as the profile root" % value)
+    return value
+
+
+def render_payload(group, src_rel, data, root_value):
+    """The deployed bytes of one source (every group): PROFILE_ROOT_TOKEN replaced in the five PROFILE_ROOT_SOURCES
+    (DD-22), everything else unchanged. Refusal for the token in any other file, or for any other @DD_...@ token."""
+    if src_rel in PROFILE_ROOT_SOURCES and group in (GROUP_ADDON, GROUP_SCRIPT):
+        data = data.replace(PROFILE_ROOT_TOKEN, root_value.encode("ascii"))
+    left = TOKEN_RE.search(data)
+    if left:
+        raise Refusal("%s holds the token %s, which the deploy does not fill in%s" % (
+            src_rel, left.group(0).decode("ascii", "replace"), " here (only %s get the profile root)"
+            % ", ".join(sorted(PROFILE_ROOT_SOURCES)) if left.group(0) == PROFILE_ROOT_TOKEN else ""))
+    return data
+
 
 ADDON_SRC_DIR = "addons/DataCapture/"
 SCRIPT_SRC_DIR = "src/enfusion/datacapture/"
@@ -118,7 +233,7 @@ DENIED_SCRIPTS = {
     "SCR_SceneEnumerator.c": "auxiliary prototype, never deployed (review TKT-10)",
     "DC_BuildInfo.c": "generated by this tool on every deploy; it is never copied from the repo",
 }
-# E: (NTFS through drvfs) is case-insensitive, so every denial check compares lower-cased paths.
+# drvfs (NTFS) is case-insensitive, so every denial check compares lower-cased paths.
 DENIED_SCRIPTS_LOWER = {name.lower(): reason for name, reason in DENIED_SCRIPTS.items()}
 
 GROUP_ADDON = "addon"
@@ -127,10 +242,6 @@ GROUP_CONFIG = "config"
 VERSIONED_GROUPS = (GROUP_ADDON, GROUP_SCRIPT, GROUP_CONFIG)
 GROUP_BUILDINFO = "buildinfo"
 GROUP_EMCP = "emcp"
-
-
-class Refusal(Exception):
-    pass
 
 
 def sha256_bytes(data):
@@ -192,7 +303,7 @@ def inside(path, root):
 def case_mismatch(src_rel):
     """Return the first component of src_rel whose spelling differs from the directory entry on disk, or None.
 
-    On a case-insensitive drive (E:) 'scr_binaryserializer.c' opens SCR_BinarySerializer.c, so only the exact
+    On a case-insensitive drive (drvfs) 'scr_binaryserializer.c' opens SCR_BinarySerializer.c, so only the exact
     spelling is accepted; otherwise a case variant could slip a denied file past the checks."""
     cur = REPO_ROOT
     for part in src_rel.split("/"):
@@ -316,44 +427,56 @@ def existing_ancestor(path):
 
 
 def forbidden_device_reason(real, what):
-    """Why `real` (or its nearest existing ancestor) is on a forbidden device (C:, the WSL disk image), or None."""
+    """Why `real` (or its nearest existing ancestor) is on a forbidden device (FORBIDDEN_DEVICE_PATHS: the WSL disk
+    image), or None."""
     try:
         dev = os.stat(existing_ancestor(real)).st_dev
     except OSError:
         return None
-    for path, label in FORBIDDEN_DEVICE_PATHS:
+    for path, label in _get("FORBIDDEN_DEVICE_PATHS"):
         try:
             if os.path.isdir(path) and os.stat(path).st_dev == dev:
-                return "%s %s is on the same device as %s (%s); deploys go to E:" % (what, real, path, label)
+                return "%s %s is on the same device as %s (%s); deploys go to the data drive" % (what, real, path,
+                                                                                                label)
         except OSError:
             pass
     return None
 
 
 def allow_root_reason(raw):
-    """Why `raw` cannot be an extra --allow-root (it must be an existing directory under /mnt/e/ or /dev/shm/)."""
+    """Why `raw` cannot be an extra --allow-root (it must be an existing directory on the data drive or under
+    /dev/shm/)."""
     real = os.path.realpath(os.path.abspath(raw))
-    if not any(real.startswith(prefix) and len(real) > len(prefix) for prefix in ALLOW_ROOT_PREFIXES):
-        return "--allow-root %s resolves to %s, which is not inside %s" % (raw, real, " or ".join(ALLOW_ROOT_PREFIXES))
+    prefixes = _get("ALLOW_ROOT_PREFIXES")
+    if not any(real.startswith(prefix) and len(real) > len(prefix) for prefix in prefixes):
+        return "--allow-root %s resolves to %s, which is not inside %s" % (raw, real, " or ".join(prefixes))
     if not os.path.isdir(real):
         return "--allow-root %s is not an existing directory" % raw
-    return forbidden_device_reason(real, "--allow-root")
+    return forbidden_device_reason(real, "--allow-root") or boundary_reason(raw)
+
+
+def _lc_value(key):
+    """A config value for a message only (advisory), or None."""
+    try:
+        return _local("get", key)
+    except Refusal:
+        return None
 
 
 def target_reason(raw, allow_roots=()):
     """Return why `raw` is not an acceptable target, or None.
 
-    Refused: Windows syntax, the C: drive or the WSL disk image (by path or by device), filesystem or drive roots,
-    anything overlapping the repo, and everything that does not resolve strictly inside ALLOWED_TARGET_ROOTS or an
-    accepted --allow-root."""
+    Refused: Windows syntax, the WSL disk image (by device), whatever the write boundary refuses (the Windows system
+    drive, found by its Windows/System32 whatever SYSTEM_DRIVE says; unmounted or unverified drives), filesystem or
+    drive roots, anything overlapping the repo, and everything that does not resolve strictly inside
+    ALLOWED_TARGET_ROOTS or an accepted --allow-root. SYSTEM_DRIVE only words a refusal."""
     if re.match(r"^[A-Za-z]:", raw) or raw.startswith("\\\\"):
-        if raw[:1].lower() == "c":
-            return "target %r is on the C: drive; deploys go to E: (/mnt/e/...)" % raw
-        return "target %r uses Windows syntax; pass the WSL form, e.g. /mnt/e/DriveDiT/addons/DataCapture" % raw
+        system = _lc_value("SYSTEM_DRIVE")
+        if system and raw[:1].lower() == system[-1]:
+            return "target %r is on the system drive; deploys go to the data drive (%s/...)" % (
+                raw, _local("drive", "DATA_ROOT"))
+        return "target %r uses Windows syntax; pass the WSL form, e.g. %s" % (raw, _get("DEFAULT_TARGET"))
     real = os.path.realpath(os.path.abspath(raw))
-    low = real.lower()
-    if low == "/mnt/c" or low.startswith("/mnt/c/"):
-        return "target %s resolves to the C: drive (%s); deploys go to E:" % (raw, real)
     reason = forbidden_device_reason(real, "target")
     if reason:
         return reason
@@ -361,10 +484,13 @@ def target_reason(raw, allow_roots=()):
         return "target %s is a filesystem or drive root" % raw
     if inside(real, REPO_ROOT) or inside(REPO_ROOT, real):
         return "target %s overlaps the repo %s" % (raw, REPO_ROOT)
-    roots = [os.path.realpath(r) for r in tuple(ALLOWED_TARGET_ROOTS) + tuple(allow_roots)]
+    reason = boundary_reason(raw)
+    if reason:
+        return reason
+    roots = [os.path.realpath(r) for r in tuple(_get("ALLOWED_TARGET_ROOTS")) + tuple(allow_roots)]
     if not any(real != root and inside(real, root) for root in roots):
         return ("target %s resolves to %s, which is not inside an allowed deploy root (%s); the capture addon "
-                "deploys to %s" % (raw, real, ", ".join(roots), DEFAULT_TARGET))
+                "deploys to %s" % (raw, real, ", ".join(roots), _get("DEFAULT_TARGET")))
     return None
 
 
@@ -386,7 +512,7 @@ def load_pin_tools():
 
 
 def _fold(path):
-    """Case-folded on /mnt/<drive>: drvfs (E:) is case-insensitive, so ADDONS and addons are one directory."""
+    """Case-folded on /mnt/<drive>: drvfs is case-insensitive, so ADDONS and addons are one directory."""
     return path.lower() if re.match(r"^/mnt/[A-Za-z](/|$)", path) else path
 
 
@@ -409,7 +535,7 @@ def same_dir(a, b):
 
 def inside_root(path, root):
     """True if path is root or below it, by case-folded path or by filesystem identity of an existing ancestor (Codex
-    round 2: a case alias such as /mnt/e/DriveDiT/ADDONS/DataCapture reaches the protected root)."""
+    round 2: a case alias such as <DATA_ROOT>/ADDONS/DataCapture reaches the protected root)."""
     p, r = _fold(os.path.normpath(path)), _fold(os.path.normpath(root))
     if p == r or p.startswith(r.rstrip(os.sep) + os.sep):
         return True
@@ -431,7 +557,7 @@ def isolation_reason(real_target, deploy_roots, allow_roots=(), target=None):
 
     deploy_roots is pinlib.DEPLOY_ROOTS ({launch path: root}); target is None (no --target-pin) or
     {"pin_id", "launch_path_id", "is_active"}. The protected roots are checked FIRST, so an --allow-root that covers
-    one (for example --allow-root /mnt/e/DriveDiT) never reaches it, and they are compared case-insensitively on
+    one (for example --allow-root <DATA_ROOT>) never reaches it, and they are compared case-insensitively on
     /mnt/<drive> and by filesystem identity (inside_root), so a case alias never reaches one either:
       - the stable (production) root: a deploy without --target-pin is as before; with --target-pin the pin must be
         a stable pin AND the active one (ACTIVE), and the target its DataCapture;
@@ -488,7 +614,7 @@ def escape_reason(target, rel):
     probe = existing_ancestor(cur)
     if inside(probe, target) and not inside(os.path.realpath(probe), target):
         return "%s: %s resolves outside the target (%s)" % (rel, probe, os.path.realpath(probe))
-    return None
+    return boundary_reason(os.path.join(target, *rel.split("/")))
 
 
 def git(args):
@@ -594,13 +720,27 @@ def current_sha(target, rel, refusals):
 
 
 def atomic_write(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = os.path.join(os.path.dirname(path), ".%s.deploy-tmp-%d" % (os.path.basename(path), os.getpid()))
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    """Write path atomically. The parent passes the write boundary before it is created; the temp sibling is created
+    exclusively under a random name (tempfile.mkstemp: O_CREAT | O_EXCL | O_NOFOLLOW), so a file or symlink already
+    there is never written through; then it is renamed over path. OSError on a refusal (the deploy reports it)."""
+    parent = os.path.dirname(path)
+    why = boundary_reason(parent)
+    if why:
+        raise OSError(why)
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".%s.deploy-tmp-" % os.path.basename(path), dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def backup_rel(stamp, rel):
@@ -630,10 +770,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("files", nargs="*", metavar="FILE",
                     help="deploy only these manifest entries (repo-relative source paths); never deletes")
-    ap.add_argument("--target", default=DEFAULT_TARGET, help="addon root to deploy into (default %(default)s)")
+    ap.add_argument("--target", default=None,
+                    help="addon root to deploy into (default <DATA_ROOT>/addons/DataCapture of the local config)")
     ap.add_argument("--allow-root", action="append", default=[], metavar="DIR",
-                    help="also accept targets strictly inside DIR, an existing directory under %s (scratch deploys, "
-                         "self-test); may be repeated" % " or ".join(ALLOW_ROOT_PREFIXES))
+                    help="also accept targets strictly inside DIR, an existing directory on the data drive or under "
+                         "/dev/shm/ (scratch deploys, self-test); may be repeated")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST, help="deploy manifest (default %(default)s)")
     ap.add_argument("--emcp-handlers", metavar="DIR",
                     help="also deploy DIR/EMCP_WB_*.c into %s/" % EMCP_DST_DIR)
@@ -644,8 +785,17 @@ def main(argv=None):
     ap.add_argument("--target-pin", metavar="PIN_ID", default=None,
                     help="the pin this deploy is for (DD-14a): the target must be its launch path's addon, and "
                          "DC_BuildInfo stamps TARGET_PIN")
-    ap.add_argument("--pin-dir", default="/mnt/e/DriveDiT/pin", help="with --target-pin: where pin_<id>.json lives")
+    ap.add_argument("--pin-dir", default=None,
+                    help="with --target-pin: where pin_<id>.json lives (default <DATA_ROOT>/pin of the local config)")
     args = ap.parse_args(argv)
+
+    # The local config first (DD-22): every root below and the profile root of the payload come from it.
+    try:
+        args.target = args.target or _get("DEFAULT_TARGET")
+        args.pin_dir = args.pin_dir or _local("get", "DATA_ROOT") + "/pin"
+        root_value = profile_root_value()
+    except Refusal as e:
+        return refuse([str(e)])
 
     refusals = []
     allow_roots = []
@@ -664,7 +814,7 @@ def main(argv=None):
     except Exception as e:  # a copy of this tool without tools/pin (the self-test's scratch repo)
         if args.target_pin:
             return refuse(["--target-pin needs tools/pin, which cannot be loaded: %s" % e])
-        deploy_roots = dict(DEFAULT_DEPLOY_ROOTS)
+        deploy_roots = dict(_get("DEFAULT_DEPLOY_ROOTS"))
     if args.target_pin:
         try:
             pin_dir = os.path.abspath(pinlib.win_to_wsl(args.pin_dir))
@@ -750,7 +900,13 @@ def main(argv=None):
     payload = {}
     for it in items:
         with open(it["src_abs"], "rb") as f:
-            payload[it["dst"]] = f.read()
+            data = f.read()
+        try:
+            payload[it["dst"]] = render_payload(it["group"], it["src_rel"], data, root_value)
+        except Refusal as e:
+            refusals.append(str(e))
+    if refusals:
+        return refuse(refusals)
 
     versioned = {rel: meta["sha256"] for rel, meta in old_files.items()
                  if meta.get("group") in VERSIONED_GROUPS} if partial else {}

@@ -4,13 +4,13 @@
 Ports program/1_9/work/planned_check.py and member_delta.py onto the per-pin index parser of
 tools/enfusion-mcp/api_index.py, so CC-02 and CC-05 read the dump the same way:
 
-    python3 -I -B tools/compat19/p19_api.py --dump-git /mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable \
+    python3 -I -B tools/compat19/p19_api.py --dump-git <REALIGN_ROOT>/program/1_9/work/dl/sd_stable \
         --old-tag v1.8.0.13 --new-tag v1.9.0.37 [--planned tools/compat19/planned_surface.txt] [--tsv OUT]
 
 Every member of the planned surface (one 'Class Member...' line each, looked up on the class and its ancestors)
 must be unchanged or new in the new dump; REMOVED, SIG_CHANGED and NOT_FOUND fail, unless the member is listed in a
 triage file (--triage FILE: 'Class.Member status reason' lines, the accepted differences of the G19 report). --tsv
-writes the planned rows (class, member, status, old, new) for the report, under the tools/pin write guard (E: only). Reads the dump through git only; writes
+writes the planned rows (class, member, status, old, new) for the report, under the tools/pin write guard (data drive only). Reads the dump through git only; writes
 only --tsv. Exit codes: 0 PASS; 1 FAIL; 2 usage or read error.
 """
 from __future__ import annotations
@@ -82,7 +82,7 @@ def main(argv=None, write_roots=None) -> int:
     if args.tsv:
         pinlib = api_index._load_pinlib()[0]
         try:
-            pinlib.check_write_path(args.tsv, write_roots or pinlib.DEFAULT_WRITE_ROOTS)
+            pinlib.check_write_path(args.tsv, write_roots)
         except pinlib.PinError as exc:
             print("p19_api: --tsv: %s" % exc, file=sys.stderr)
             return 2

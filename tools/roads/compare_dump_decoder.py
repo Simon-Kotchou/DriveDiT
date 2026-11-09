@@ -4,7 +4,7 @@
 Run it with the isolated interpreter (stdlib only):
 
     python3 -I -B tools/roads/compare_dump_decoder.py <e08a play_dir> \\
-        --decoder /mnt/e/drivedit_realign/program/evidence/maps/Arland_road_polylines_v2.tsv \\
+        --decoder <REALIGN_ROOT>/program/evidence/maps/Arland_road_polylines_v2.tsv \\
         [--match-m 2.0] [--expect-km 34.5] [--tol 0.05] [--sample-m 1.0] [--list 20] [--join-play <other play_dir>]
 
 Inputs (read only): <play_dir>/run_header.txt, run_footer.txt, <map_id>_roads.csv, <map_id>_road_points.csv,

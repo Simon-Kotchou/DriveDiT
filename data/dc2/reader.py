@@ -4,7 +4,7 @@ decision samples, masks and segments.
     spec = importlib.util.spec_from_file_location("dc2_reader", "<repo>/data/dc2/reader.py")
     reader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reader)
-    session = reader.open_session("/mnt/e/DriveDiT/captures/arland/2026-10-25/T0b/<session_id>")
+    session = reader.open_session("<DATA_ROOT>/captures/arland/2026-10-25/T0b/<session_id>")
     for step in session.decisions:
         ...
 
@@ -79,7 +79,7 @@ session end (end.physics_step for ctl and telemetry, end.render_frame: C34), so 
 Refusals (ReaderError subclasses): dc-1.0 sessions (LegacySessionError; never mixed with dc-2.0 data, section 14);
 Everon (map_id everon, terrain Eden, an Eden-rooted root_world, an everon_ session id, or a path under heldout/ or a
 SEALED directory) unless sealed_eval=True (SealedMapError, section 3.2), checked before any stream is opened; any
-path on the C: drive. With strict=True (the default, for dataset builders) every C01, C05, C07 (duplicated or
+path on the system drive (DD-22: SYSTEM_DRIVE of the local config). With strict=True (the default, for dataset builders) every C01, C05, C07 (duplicated or
 out-of-order key), C34 or C02 (vehicle card hash) problem and an unsealed or failed seal raise as well; salvage=True
 reads an unsealed or failed session's committed data (crash salvage) and still raises on the other problems.
 strict=False (the validator) records every problem in Session.problems and keeps going.
@@ -93,6 +93,7 @@ import json
 import math
 import os
 import re
+import sys
 
 import numpy
 
@@ -112,7 +113,9 @@ ENV_TRANSITION_MS = 15000       # features_v1 masks.env_transition: 1 for 15 s a
 LEGACY_MARKERS = ("telemetry.csv", "summary.txt", "session_info.txt")
 LEGACY_DIR_RE = re.compile(r"^session_[0-9]+$")
 SEALED_PATH_PARTS = ("heldout", "sealed")
-FORBIDDEN_ROOTS = ("/mnt/c/",)
+# DD-22: no session is read from the system drive (SYSTEM_DRIVE of the local config, tools/local_config.py). Without a
+# config the system drive cannot be told apart, so then no path on any Windows drive (/mnt/<x>/) is read.
+LOCAL_CONFIG_PY = os.path.join(REPO, "tools", "local_config.py")
 CHUNK_RE = re.compile(r"^chunk_([0-9]{5})\.csv$")
 INT_RE = re.compile(r"-?[0-9]+")
 FLOAT_RE = re.compile(r"-?[0-9]+(\.[0-9]+)?")     # '.' decimal point, no exponent; nan and inf never match
@@ -627,13 +630,36 @@ def _path_parts(path):
     return os.path.normpath(os.path.abspath(path)).replace("\\", "/").lower().split("/")
 
 
+def _system_drive():
+    """(SYSTEM_DRIVE of the local config, None) or (None, why it is unknown)."""
+    import importlib.util
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != LOCAL_CONFIG_PY:
+        if not os.path.isfile(LOCAL_CONFIG_PY):
+            return None, "%s is missing" % LOCAL_CONFIG_PY
+        spec = importlib.util.spec_from_file_location("dd_local_config", LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    try:
+        return mod.load().get("SYSTEM_DRIVE"), None
+    except mod.LocalConfigError as exc:
+        return None, str(exc)
+
+
 def check_paths(path, sealed_eval):
-    """realpath of a session path; ReaderError on the C: drive, SealedMapError under heldout/ or a SEALED directory
-    unless sealed_eval (the --legacy self-test calls it too)."""
+    """realpath of a session path; ReaderError on the system drive (or, without a local config, on any Windows
+    drive), SealedMapError under heldout/ or a SEALED directory unless sealed_eval (the --legacy self-test calls it
+    too)."""
     real = os.path.realpath(path)
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS):
-        raise ReaderError("refusing %s: no repo tool reads session data from the C: drive (E: copies only)" % path)
+    probe = real.lower() if real.endswith("/") else real.lower() + "/"
+    system, why = _system_drive()
+    if system is None and re.match(r"^/mnt/[a-z]/", probe):
+        raise ReaderError("refusing %s: it lies on a Windows drive, and without the local config the system drive "
+                          "cannot be told apart (%s)" % (path, why))
+    if system is not None and probe.startswith(system + "/"):
+        raise ReaderError("refusing %s: no repo tool reads session data from the system drive (data-drive copies "
+                          "only)" % path)
     if not sealed_eval and any(p in SEALED_PATH_PARTS for p in _path_parts(real)):
         raise SealedMapError("%s lies under a heldout/ or SEALED directory; it is read only on the sealed evaluation "
                              "path (sealed_eval=True)" % path)

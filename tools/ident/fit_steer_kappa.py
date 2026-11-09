@@ -12,8 +12,8 @@ Run it with the isolated interpreter (stdlib only; it reuses the probe kit's rea
 <play_dir> is one $profile:DC_Probes/<probe>/<launch_id>/play_NN directory of the probe kit (run_header.txt,
 <probe>_steps.csv, e01_phases.csv or e02a_cells.csv, run_footer.txt; PROBE_DESIGN.md 5.3). Without --out the card is
 printed; --out writes it (default place: tools/ident/cards/<pin_id>/<vehicle>.json, the path llc_v1 and the DD-5-min
-reader look up), --check compares it byte for byte with FILE (exit 1 when they differ). Writes only under /mnt/e/ or
-/dev/shm/.
+reader look up), --check compares it byte for byte with FILE (exit 1 when they differ). Writes only under /dev/shm/
+or on the data drive of the local config (DD-22; never the system drive or /tmp).
 
 WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c = steer_sign x engine steer)
   signs        steer_sign = sign of corr(cmd_steer, heading rate) on the E-01 steering excite steps at the level-
@@ -318,8 +318,49 @@ PLACEHOLDER_MPS_PER_KRPM = (1.54871, 2.772066, 4.169103)
 # llc_v1 sessions on 1.8.0.13 are stamped with)
 PLACEHOLDER_MEASURED_PIN = "1.8.0.13"
 
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# DD-22: outputs only where the write boundary allows (tools/local_config.py check_write): RAM (/dev/shm) or the
+# verified data drive of the local config, never a volume whose root holds Windows/System32, never /tmp/.
+# Without the config only RAM is writable; without the loader nothing is.
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "local_config.py")
+
+
+def _local_config_module():
+    """tools/local_config.py, loaded by path (shared as sys.modules["dd_local_config"]); None when it is missing."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            return None
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary (tools/local_config.py check_write) allows writing to path, narrowed to roots
+    when given, else the refusal message. Without the loader nothing is writable."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (path, _LOCAL_CONFIG_PY)
+    return mod.write_refusal(path, roots)
+
+
+def child_refusal(parent, name):
+    """None when <parent>/<name> may be written: name a plain file name (no separator, not absolute, not '..') and the
+    final path allowed by the write boundary under parent; else the refusal message."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (name, _LOCAL_CONFIG_PY)
+    try:
+        mod.check_child(parent, name, (parent,))
+    except mod.WriteRefused as exc:
+        return str(exc)
+    return None
+
+
 SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
 PIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -338,12 +379,18 @@ def sealed_reason(text):
     return None
 
 
+def open_no_follow(path):
+    """path opened for writing (created or truncated) without following a symlink there (O_NOFOLLOW)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                 0o644)
+    return os.fdopen(fd, "w", encoding="ascii", newline="")
+
+
 def check_out_path(path):
-    real = os.path.realpath(os.path.abspath(path))
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS) or not any(probe.startswith(r) for r in WRITE_ROOTS):
-        raise Refusal("refusing output %s: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
-    return real
+    why = write_refusal(path)
+    if why:
+        raise Refusal(why)
+    return os.path.realpath(os.path.abspath(path))
 
 
 def open_play(path, probe):
@@ -1520,7 +1567,7 @@ def main(argv=None):
         if args.out is not None:
             out = check_out_path(args.out or default_out(card))
             os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out, "w", encoding="ascii", newline="") as f:
+            with open_no_follow(out) as f:   # a symlink planted after the check is never followed
                 f.write(text)
     except Refusal as e:
         print("REFUSED: %s" % e)

@@ -8,8 +8,8 @@ raw screenshots once they have been checked).
 A dry run by default: per session (or probe play) it prints the raw files it would delete and keep and the bytes it
 would free, then the totals, and writes nothing. --apply deletes. --list prints every file with its action.
 
-Sessions (the default mode). Only captures/arland/<YYYY-MM-DD>/<trial_id>/<session_id>/ below /mnt/e/DriveDiT is
-looked at: never captures/_rejected/, compat19/, another map or a profile's DC_Sessions/. A session's raw
+Sessions (the default mode). Only captures/arland/<YYYY-MM-DD>/<trial_id>/<session_id>/ below <DATA_ROOT> (the local
+config's, DD-22) is looked at: never captures/_rejected/, compat19/, another map or a profile's DC_Sessions/. A session's raw
 screenshot frames/f_<slot:08d><suffix> (suffix: harvest.json screenshot_suffix, one of .png, .bmp.png, .bmp) may be
 deleted only when all of these hold; otherwise nothing of the session is deleted:
   * session.json is an Arland dc-2.0 session (harvest.is_arland) whose id is the directory name and whose date and
@@ -86,7 +86,7 @@ writer that changes a unit while its deletes run (a descriptor opened earlier, m
 caught, and that is what the constraint excludes. --apply enforces the precondition it can see: a read-only
 preflight refuses the whole run (exit 3, nothing written) when any file of a unit in scope was modified within the
 last 10 minutes.
-On E: (drvfs) Windows also refuses to rename a directory that retention holds open.
+On drvfs Windows also refuses to rename a directory that retention holds open.
 
 Re-runs and kills. A valid record is completed: it is made durable again, its remaining deletes are checked as
 above, then it is marked done. A kill at any point leaves every file the record lists in frames/ (checked again on
@@ -96,7 +96,8 @@ run: sessions are planned and applied one at a time under it, with the catalog r
 file at the start no session is retained in that run); probe plays are planned read-only first, then planned again
 and applied under the lock.
 
-Scope. Every path lies below /mnt/e/DriveDiT (harvest.data_root: not reached through a symlink, not on C:). --under
+Scope. Every path lies below <DATA_ROOT> (harvest.data_root: not reached through a symlink, through the write boundary).
+--under
 DIR narrows the scan; it must lie below the root without a symlink, inside captures/arland (sessions) or a
 DC_Probes folder (--probes). A $profile:DrivingData (dc-1.0) path or session is refused, and a symlinked directory
 on the way holds what lies below it. run_footer.txt and run_header.txt larger than 1 MiB hold the play.
@@ -106,7 +107,7 @@ play was held or refused (checksum mismatch, symlink, bad record, a play whose f
 Arland, dc-1.0) and nothing more of it deleted; 3 the run was refused (arguments, roots, --under outside the root,
 the lock, the --apply preflight); 4 an unexpected error.
 
---test-root DIR (tests only) replaces /mnt/e/DriveDiT by DIR, as in harvest.py; only then does
+--test-root DIR (tests only) replaces <DATA_ROOT> by DIR, as in harvest.py; only then does
 DD6_RETENTION_KILL_AT=<hook> (HOOKS) kill the run at that hook, for the kill-mid-run test.
 """
 
@@ -410,7 +411,7 @@ class Retention:
         """The --under directory (absolute, normalised), which must lie below the root without a symlink, inside
         captures/arland (sessions) or a DC_Probes folder (--probes), never in DrivingData or captures/_rejected."""
         if re.match(r"^[A-Za-z]:", under) or under.startswith("\\\\"):
-            raise Refused("--under %r uses Windows syntax; pass a /mnt/e/DriveDiT/... path" % under)
+            raise Refused("--under %r uses Windows syntax; pass a <DATA_ROOT>/... path in WSL form" % under)
         path = os.path.normpath(os.path.abspath(under))
         if not harvest.inside(path, self.root):
             raise Refused("--under %s is outside %s; retention never touches anything else" % (under, self.root))
@@ -1418,8 +1419,9 @@ def parse_args(argv):
                     help="--probes: skip plays with a file younger than this (default %(default)s)")
     ap.add_argument("--under", default=None, help="only sessions / plays below this directory (inside the root)")
     ap.add_argument("--list", action="store_true", help="print every kept and deleted file")
-    ap.add_argument("--test-root", default=None, help="TESTS ONLY: a /dev/shm/ or /mnt/e/ directory in place of %s"
-                    % harvest.DATA_ROOT)
+    ap.add_argument("--test-root", default=None,
+                    help="TESTS ONLY: a directory under /dev/shm/ or on the data drive in place of <DATA_ROOT> (the "
+                         "local config's)")
     args = ap.parse_args(argv)
     if args.every_n < 1:
         ap.error("--every-n must be at least 1")

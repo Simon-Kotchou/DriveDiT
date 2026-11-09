@@ -1,8 +1,8 @@
 {
   "enfusion-mcp": {
     "type": "stdio",
-    "command": "/mnt/e/drivedit_realign/mcp/enfusion-mcp-wsl.sh",
+    "command": "<REALIGN_ROOT>/mcp/enfusion-mcp-wsl.sh",
     "args": [],
-    "env": {}
+    "env": {"DRIVEDIT_LOCAL_CONFIG": "<DATA_ROOT>/config/drivedit.local.env"}
   }
 }

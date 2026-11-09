@@ -3,7 +3,7 @@
 // from WMI Win32_Process, through cscript.exe (Windows Script Host), so the endpoint handshake needs no PowerShell.
 // It only queries WMI and writes to stdout. Exit codes: 0 one process found; 1 none; 2 usage.
 var args = WScript.Arguments;
-// --env: print the TEMP and TMP this process sees (the handshake checks they are its E: dir before any query).
+// --env: print the TEMP and TMP this process sees (the handshake checks they are its data-drive dir before any query).
 if (args.length === 1 && args(0) === "--env") {
     var penv = WScript.CreateObject("WScript.Shell").Environment("PROCESS");
     WScript.StdOut.WriteLine("TEMP=" + penv("TEMP") + "\tTMP=" + penv("TMP"));

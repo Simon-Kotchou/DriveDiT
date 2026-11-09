@@ -8,7 +8,7 @@ Acceptance (TICKETS_UNIFIED DD-11-min): on a straight route p20 lies 20 m ahead 
 zero lateral; signs follow the right-positive convention on curves; ordered progress handles a loop crossing;
 d_stop = 200 with no stop; deterministic. Everything is synthetic geometry; no map data is read.
 
-The one test that writes a file (load_route on a real path) uses $TMPDIR only when it lies under /dev/shm or /mnt/e,
+The one test that writes a file (load_route on a real path) uses $TMPDIR only when it lies under /dev/shm,
 else /dev/shm, and is skipped otherwise; it never falls back to the system temp directory.
 """
 
@@ -16,6 +16,7 @@ import copy
 import importlib
 import json
 import math
+import importlib.util
 import os
 import shutil
 import sys
@@ -24,6 +25,11 @@ import unittest
 import warnings
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
@@ -38,12 +44,8 @@ TOL_P20 = 0.05  # acceptance tolerance on p20 (m)
 
 
 def tmp_base():
-    tmpdir = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if (tmpdir.startswith("/dev/shm/") or tmpdir.startswith("/mnt/e/")) and os.path.isdir(tmpdir):
-        return tmpdir
-    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
-        return "/dev/shm"
-    raise unittest.SkipTest("no TMPDIR on /dev/shm or /mnt/e and no writable /dev/shm; not using the system temp dir")
+    """Validated RAM (tests/fixtures/local_config/scratch.py); never the system temp dir."""
+    return scratch.ram_base()
 
 
 def route_dict(xz, map_id="arland", split="train", maneuvers=(), stops=None, closed=False, route_id="test_route",
@@ -470,7 +472,7 @@ class SealedMapTest(unittest.TestCase):
         self.assertEqual(route.map_id, "everon")
 
     def test_sealed_directories_refused_before_reading(self):
-        for path in ("/mnt/e/DriveDiT/heldout/everon/SEALED/harness/routes/r.json", "x/SEALED/r.json",
+        for path in ("/mnt/x/DataRoot/heldout/everon/SEALED/harness/routes/r.json", "x/SEALED/r.json",
                      "/nonexistent/heldout/r.json"):
             with self.assertRaises(SealedMapError):
                 load_route(path)

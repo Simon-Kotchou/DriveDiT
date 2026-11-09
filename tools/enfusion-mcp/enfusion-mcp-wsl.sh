@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# enfusion-mcp-wsl.sh - start steffenbk/enfusion-mcp-BK (built on E:) as a stdio MCP server from WSL.
+# enfusion-mcp-wsl.sh - start steffenbk/enfusion-mcp-BK (built on the data drive) as a stdio MCP server from WSL.
 #
 # DriveDiT setup, 2026-10-20 (DD-3). Versioned in the repo under tools/enfusion-mcp/ (runbook: README.md there).
-# Evidence: /mnt/e/drivedit_realign/enfusion/mcp-setup.md
+# Evidence: <REALIGN_ROOT>/enfusion/mcp-setup.md. <REALIGN_ROOT> and the defaults below come from the local config
+# (DD-22; tools/local_config.py); without it the wrapper refuses (exit 2). Write paths pass its write boundary.
 #
 #   enfusion-mcp-wsl.sh              exec the MCP server (Claude Code calls it like this)
 #   enfusion-mcp-wsl.sh --print-env  print the resolved environment to stderr and exit (creates nothing)
+#   enfusion-mcp-wsl.sh --print-root print the work root (EMCP_ROOT, else <REALIGN_ROOT>/mcp) and exit
 #   enfusion-mcp-wsl.sh --check      also open+close one TCP connection to the NET API port (opens a
 #                                    socket to Workbench; it sends no request)
 #
@@ -17,26 +19,65 @@
 # stdout belongs to JSON-RPC: every diagnostic in this script goes to stderr.
 # Paths, host and port can be overridden by exporting them beforehand (or via "env" in the MCP config).
 # The three guards cannot: they are always 1 here, and the wrapper refuses to start a build without them.
-# Exit codes: 0 ok; 1 missing node/dist, unguarded build or no Windows host IP; 2 refused path or bad setting.
+# Exit codes: 0 ok; 1 missing node/dist, unguarded build or no Windows host IP; 2 refused path, bad setting or no
+# local config.
 set -euo pipefail
 
+NAME=enfusion-mcp-wsl
 log() { printf '[enfusion-mcp-wsl] %s\n' "$*" >&2; }
 die() { local code="$1"; shift; log "$*"; exit "$code"; }
+HERE="$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")"
+# DD-22: this machine's paths come from the untracked local config (tools/local_config.py, drivedit.local.env).
+# An installed MCP root holds a copy of local_config.py next to this script; tell it the file with
+# DRIVEDIT_LOCAL_CONFIG (the MCP entry's "env"). In the repo the loader is ../local_config.py.
+LOCAL_CONFIG_PY=""
+for _c in "$HERE/local_config.py" "$HERE/../local_config.py"; do
+  if [[ -f "$_c" ]]; then LOCAL_CONFIG_PY="$_c"; break; fi
+done
+local_config() {   # local_config KEY [--win | --drive]: one value; the loader names the file and key on a refusal
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" get "$@"
+}
+local_config DATA_ROOT >/dev/null || die 2 "no local config (see the message above); nothing started"
 
-# True only for an absolute path that resolves (symlinks and '..' included) onto a Windows drive other
-# than C:, i.e. /mnt/<letter>/... with letter != c. Everything else is on C:: /mnt/c itself and the whole
-# WSL ext4.vhdx (~, /tmp, /var, /opt, ...). Relative paths are refused too: they would resolve against
-# the caller's cwd, and Claude Code starts this wrapper with its own cwd (the C: repo).
-off_c_drive() {
-  local r="" re='^/mnt/[abdefghijklmnopqrstuvwxyz](/|$)'
-  [[ "${1:-}" == /* ]] || return 1
-  r="$(realpath -m -- "$1" 2>/dev/null)" || return 1
-  [[ "$r" =~ $re ]]
+# Every path this wrapper (or the server behind it) writes under goes through the write boundary.
+write_ok() {   # write_ok PATH: print the resolved path when the write boundary allows writing there, else fail
+  # (tools/local_config.py check-write: RAM or the verified data drive, never a volume whose root holds
+  # Windows/System32, whatever the config says). A relative path is refused: it would resolve against the cwd.
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  [[ "${1:-}" == /* ]] || { echo "$NAME: '${1:-}' is not an absolute path" >&2; return 1; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" check-write "$1"
 }
 
-ROOT="${EMCP_ROOT:-/mnt/e/drivedit_realign/mcp}"   # work root of build-bk.sh (build, data, HOME/TMP redirects)
-off_c_drive "$ROOT" || die 2 "refusing EMCP_ROOT=$ROOT: use an absolute path on a drive other than C: (/mnt/c and the WSL disk are on C:)"
-ROOT="$(realpath -m -- "$ROOT")"
+ROOT="${EMCP_ROOT:-}"                              # work root of build-bk.sh (build, data, HOME/TMP redirects)
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(local_config REALIGN_ROOT)/mcp" || die 2 "no REALIGN_ROOT in the local config (see the message above)"
+fi
+# --print-root: print the work root as resolved here (before its check) and exit (tools/migrate_local_config.py).
+if [[ "${1:-}" == "--print-root" ]]; then printf '%s\n' "$ROOT"; exit 0; fi
+ROOT_OK="$(write_ok "$ROOT")" || die 2 "refusing EMCP_ROOT=$ROOT: the write boundary refuses it (see the message above)"
+ROOT="$ROOT_OK"
+derived_dir() {   # derived_dir DIR ROOT: DIR, to be created or reused below the checked ROOT, is safe to write
+  # into: it lies below ROOT, no component from DIR up to ROOT is a symlink, and every existing one is a directory on
+  # ROOT's device (stat -c %d), so a redirected or foreign-mounted home, temp, cache or build dir is refused before
+  # anything is written there. A DIR that does not exist yet passes when its parent does (DD-22).
+  local d="${1:-}" root="${2%/}" root_dev="" dev="" p=""
+  [[ -n "$root" && "$d" == "$root"/* && "$d/" != */../* && "$d/" != */./* ]] \
+    || { echo "$NAME: refusing $d: it is not below ${2:-} (or holds . or ..)" >&2; return 1; }
+  root_dev="$(stat -c %d -- "$root" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $root" >&2; return 1; }
+  p="$d"
+  while [[ "$p" != "$root" ]]; do
+    [[ "$p" != / && "$p" != . ]] || { echo "$NAME: refusing $d: it is not below $root" >&2; return 1; }
+    if [[ -L "$p" ]]; then echo "$NAME: refusing $d: $p is a symlink" >&2; return 1; fi
+    if [[ -e "$p" ]]; then
+      [[ -d "$p" ]] || { echo "$NAME: refusing $d: $p is not a directory" >&2; return 1; }
+      dev="$(stat -c %d -- "$p" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $p" >&2; return 1; }
+      [[ "$dev" == "$root_dev" ]] || { echo "$NAME: refusing $d: $p is on device $dev, not on $root's ($root_dev)" >&2; return 1; }
+    fi
+    p="$(dirname -- "$p")"
+  done
+}
+export EMCP_ROOT="$ROOT"                           # mcp_gate.py serves the index of the same root
 DIST="${EMCP_DIST:-$ROOT/build/enfusion-mcp-BK/dist/index.js}"
 
 # --- node binary (resolved before HOME is redirected; nvm lives under the real HOME) -------------
@@ -88,16 +129,16 @@ export ENFUSION_WORKBENCH_HOST ENFUSION_WORKBENCH_PORT
 
 # --- paths: WSL form for everything the server opens itself ----------------------------------------
 # Generators (project write, script_create, prefab create, mod create, game_duplicate, ...) write into the project
-# path, and so would any handler copy: it must stay off C: (never the OneDrive addons dir). mcp_gate.py sets it to
-# the pin's project root (E:\DriveDiT\addons for a stable pin); a value set here must be that root.
+# path, and so would any handler copy: it must stay off the system drive (never the OneDrive addons dir).
+# mcp_gate.py sets it to the pin's project root (<DATA_ROOT>/addons for a stable pin); a value set here must be that root.
 if [[ -n "${ENFUSION_PROJECT_PATH:-}" ]]; then
-  off_c_drive "$ENFUSION_PROJECT_PATH" || die 2 "refusing ENFUSION_PROJECT_PATH=$ENFUSION_PROJECT_PATH: the server writes there; use an absolute path off C:"
+  write_ok "$ENFUSION_PROJECT_PATH" >/dev/null || die 2 "refusing ENFUSION_PROJECT_PATH=$ENFUSION_PROJECT_PATH: the server writes there, and the write boundary refuses it (see the message above)"
 fi
 # ENFUSION_GAME_PATH and ENFUSION_WORKBENCH_PATH (read only; launch and mod build are guarded) are the pin's
 # installs, and ENFUSION_MCP_DATA_DIR is the pin's index: mcp_gate.py sets all three. BK's loader silently falls back
 # to an EMPTY index when api/*.json is missing (src/index/loader.ts loadJson(..., [])), so the gate checks every
 # api file against the index stamp first.
-GATE="${EMCP_GATE:-$(dirname "$(realpath -- "${BASH_SOURCE[0]}")")/mcp_gate.py}"
+GATE="${EMCP_GATE:-$HERE/mcp_gate.py}"
 PY=/usr/bin/python3
 # If anything ever injects handlers, it must target the addon that is actually open, not the
 # alphabetically-first addon that findFallbackGproj() would otherwise pick.
@@ -123,7 +164,7 @@ guarded_build() {
     && grep -q 'ENFUSION_MCP_NO_AUTO_LAUNCH' "$DIST_DIR/tools/mod.js"
 }
 
-# --- keep incidental writes off C: (the WSL ext4.vhdx lives on C:) ---------------------------------
+# --- keep incidental writes off the system drive (the WSL ext4.vhdx lives on it) -------------------
 export HOME="$ROOT/home"            # also: BK reads $HOME/.enfusion-mcp/config.json (absent)
 export TMPDIR="$ROOT/tmp"           # also the default dir of node's compile cache
 export XDG_CACHE_HOME="$ROOT/xdg/cache" XDG_CONFIG_HOME="$ROOT/xdg/config"
@@ -160,6 +201,10 @@ esac
 [[ -f "$DIST" ]] || die 1 "missing $DIST - run build-bk.sh (tools/enfusion-mcp/README.md) first"
 guarded_build || die 1 "refusing to start $DIST: the WSL guard code is not compiled in (rebuild with build-bk.sh)"
 [[ -f "$GATE" && -x "$PY" ]] || die 1 "missing $GATE or $PY: the server never runs without the pin gate (DD-14a)"
+mkdir -p -- "$ROOT"
+for d in "$HOME" "$TMPDIR" "$WORK_CWD" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"; do
+  derived_dir "$d" "$ROOT" || die 2 "refusing the work dir $d (see the message above); nothing started"
+done
 mkdir -p "$HOME" "$TMPDIR" "$WORK_CWD"
 cd "$WORK_CWD"
 exec "$PY" -I -B "$GATE" -- "$NODE_BIN" "$DIST" "$@"

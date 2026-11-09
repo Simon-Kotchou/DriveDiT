@@ -4,9 +4,10 @@
     TMPDIR=/dev/shm/<x> PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m pytest --noconftest -p no:cacheprovider -q \
         tests/test_harvest.py
 
-Every test builds a synthetic data root (the layout of /mnt/e/DriveDiT: wb_profile/, client_profiles/iNN/, logs/,
-pin/) in a temporary directory under $TMPDIR (on /dev/shm/ or /mnt/e/, else /dev/shm/) and passes it with
---test-root, so nothing is written under /mnt/e/DriveDiT. Sessions come from the DD-5-min generator
+Every test builds a synthetic data root (the layout of <DATA_ROOT>: wb_profile/, client_profiles/iNN/, logs/,
+pin/) in a temporary directory under $TMPDIR (on /dev/shm/, else /dev/shm/) and passes it with --test-root, so
+nothing is written under a real data root. The harvester reads the synthetic local config (DD-22; data root
+/mnt/x/DataRoot, system drive /mnt/z), set below for this process and the harvests it starts. Sessions come from the DD-5-min generator
 (tests/fixtures/capture_dc2/make_synthetic.py, kinds golden, golden_10hz and client_1408). The generator also writes
 the harvester's sidecars; the tests move them where the engine and the launchers put their originals instead: the
 launch record to <profile>/profile/dc_launch/ and pin/launches/, the console log to <profile>/logs/logs_<local
@@ -37,8 +38,9 @@ stable pin is held; an -exp session goes to compat19 only on the no-thresholds r
 harvester version or destination is rebuilt; a held session is left as it was found; a profile swapped for a
 symlink after admission, a symlinked frames/ and a symlinked _harvest/ are not read; a refusal line names no
 session directory.
-DC_TEST_E_SCRATCH (an existing directory under /mnt/e, outside /mnt/e/DriveDiT) also runs the Workbench harvest on
-E: (drvfs rename); without it that test skips.
+DC_TEST_E_SCRATCH with DD_TEST_LOCAL_CONFIG (a directory on that config's data drive, outside its DATA_ROOT) also
+runs the Workbench harvest on
+the data drive (drvfs rename); without it that test skips.
 """
 
 import calendar
@@ -61,6 +63,11 @@ from unittest import mock
 import numpy
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 HARVEST = os.path.join(REPO, "tools", "harvester", "harvest.py")
 GOLDEN_JSON = os.path.join(REPO, "tests", "fixtures", "capture_dc2", "golden.json")
 WB_ID = "arland_T0b_20261025T091512Z_wb_i00_5e00"
@@ -86,29 +93,38 @@ def load(name, rel):
     return module
 
 
+# DD-22: the synthetic local config (placeholder drives X:, Y:, Z:), for this process and the tools it starts.
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+
+# DD-22: documents of a real machine are compared only when DD_TEST_LOCAL_CONFIG names its local config (opt-in).
+_evidence_spec = importlib.util.spec_from_file_location(
+    "dd_test_evidence", os.path.join(REPO, "tests", "fixtures", "local_config", "evidence.py"))
+evidence = importlib.util.module_from_spec(_evidence_spec)
+_evidence_spec.loader.exec_module(evidence)
+
 harvest = load("dd6_harvest", "tools/harvester/harvest.py")
 synth = load("dc2_make_synthetic_h", "tests/fixtures/capture_dc2/make_synthetic.py")
 reader = harvest.reader
 
 
 def scratch_ok(path):
-    """True for an existing, writable directory under /dev/shm/ or /mnt/e/ (symlinks resolved) that is not on the
-    C: or WSL-image device and not inside /mnt/e/DriveDiT (the production root the tests never write)."""
+    """True for an existing, writable directory under /dev/shm/ (symlinks resolved) that the write boundary takes
+    for RAM (DD-22: no real drive is a scratch base)."""
     real = os.path.realpath(path or "/")
-    low = real.lower()
-    if not (low.startswith("/dev/shm/") or low.startswith("/mnt/e/")) or low == "/mnt/e/drivedit" \
-            or low.startswith("/mnt/e/drivedit/"):
+    if not real.startswith("/dev/shm/"):
         return False
-    return os.path.isdir(real) and os.access(real, os.W_OK) and harvest.forbidden_device_reason(real) is None
+    if not (os.path.isdir(real) and os.access(real, os.W_OK)):
+        return False
+    try:
+        harvest.check_write(real, ("/dev/shm",))
+    except harvest.Refused:
+        return False
+    return harvest.forbidden_device_reason(real) is None
 
 
 def temp_dir(prefix):
-    base = os.environ.get("TMPDIR")
-    if not scratch_ok(base):
-        base = "/dev/shm"
-        if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-            raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
-    return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(base))
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py); skipped where the write boundary refuses RAM."""
+    return scratch.mkdtemp(prefix, real_boundary=True)
 
 
 def run(root, *argv):
@@ -185,7 +201,7 @@ def log_file(path, start_utc, lines):
     """An engine log in the engine's format: the header with local and UTC start time, then lines."""
     local = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(start_utc + LOCAL_OFFSET_S))
     utc = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(start_utc))
-    head = ["-" * 45, "Log E:\\DriveDiT\\synthetic\\%s started at %s (%s UTC)" % (os.path.basename(path), local, utc),
+    head = ["-" * 45, "Log X:\\DataRoot\\synthetic\\%s started at %s (%s UTC)" % (os.path.basename(path), local, utc),
             ""]
     write(path, ("\r\n".join(head + lines) + "\r\n").encode("ascii"))
 
@@ -1114,12 +1130,13 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual(catalog(self.root), [])
 
     def test_roots(self):
-        self.assertEqual(harvest.DATA_ROOT, "/mnt/e/DriveDiT")
-        for bad in ("/mnt/c/Users/x", "C:\\DriveDiT", "/tmp/x", "/mnt/e/DriveDiT", "/mnt/e/DriveDiT/captures",
-                    "/mnt/e", "/dev/shm", "/mnt/e/__dd6_no_such_dir__", "/"):
+        self.assertEqual(harvest.DATA_ROOT, "/mnt/x/DataRoot")
+        self.assertEqual(harvest.TEST_ROOT_PREFIXES, ("/dev/shm/", "/mnt/x/"))
+        for bad in ("/mnt/z/Synthetic Steam (x86)/Users/x", "Z:\\DataRoot", "/tmp/x", "/mnt/x/DataRoot", "/mnt/x/DataRoot/captures",
+                    "/mnt/x", "/dev/shm", "/mnt/x/DataRoot/__dd6_no_such_dir__", "/"):
             with self.assertRaises(harvest.Refused, msg=bad):
                 harvest.data_root(bad)
-        self.assertFalse(os.path.exists("/mnt/e/__dd6_no_such_dir__"))
+        self.assertFalse(os.path.exists("/mnt/x/DataRoot/__dd6_no_such_dir__"))
         self.assertEqual(harvest.data_root(self.root), os.path.realpath(self.root))
         code, out = run(self.root, "--session", os.path.join(self.root, "elsewhere", WB_ID))
         self.assertEqual(code, 3, out)
@@ -1202,12 +1219,18 @@ class KillMidRunTest(unittest.TestCase):
 
 class EScratchTest(unittest.TestCase):
     def test_workbench_harvest_on_e(self):
-        """The Workbench harvest on E: (drvfs rename), only in a scratch directory the caller names."""
-        scratch = os.environ.get("DC_TEST_E_SCRATCH")
-        if not scratch or not scratch_ok(scratch) or not os.path.realpath(scratch).startswith("/mnt/e/"):
-            self.skipTest("set DC_TEST_E_SCRATCH to an existing directory under /mnt/e/ (outside /mnt/e/DriveDiT) "
-                          "to run this test")
-        root = tempfile.mkdtemp(prefix="dd6_e_", dir=os.path.realpath(scratch))
+        """The Workbench harvest on a real data drive (drvfs rename), only in a scratch directory the caller names,
+        with the machine's own local config (DD_TEST_LOCAL_CONFIG)."""
+        # Every check comes before anything is created (evidence.data_drive_scratch): the resolved directory, the write
+        # boundary of the machine's config (its verified data drive; never a system volume) and no overlap with the
+        # production DATA_ROOT.
+        scratch, why = evidence.data_drive_scratch()
+        if scratch is None:
+            self.skipTest(why)
+        patcher = mock.patch.dict(os.environ, {"DRIVEDIT_LOCAL_CONFIG": evidence.machine_config_path()})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        root = tempfile.mkdtemp(prefix="dd6_e_", dir=scratch)
         try:
             src = make_session(root, pin_sha=write_pin(root))
             raw = snapshot(src)

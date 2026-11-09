@@ -5,7 +5,8 @@
         tests/test_everon_ledger.py
 
   * the seed rows EL-001..EL-007 are CAPTURE_PROGRAM r2.2 Appendix A verbatim (the section sign written &sect;);
-    compared with /mnt/e/drivedit_realign/program/CAPTURE_PROGRAM.md when it exists, else that test skips;
+    compared with <REALIGN_ROOT>/program/CAPTURE_PROGRAM.md when DD_TEST_LOCAL_CONFIG names this machine's local
+    config (DD-22 opt-in) and the file exists, else that test skips;
   * the ledger is ASCII with LF line ends and passes the checker against itself and against git HEAD, and its
     committed history passes --history;
   * appending a row passes; editing, removing, reordering or inserting a row fails, and so do an id gap, a date
@@ -14,8 +15,8 @@
     and a table inside an HTML comment or a code fence fail (review F-6);
   * in a scratch git repository, an edit or a removal that was committed passes the HEAD comparison but fails
     --history (review F-4).
-Base versions and the scratch repository are written to a temporary directory under $TMPDIR (on /dev/shm/ or
-/mnt/e/, never /mnt/e/DriveDiT nor the C: or WSL-image device; else /dev/shm/).
+Base versions and the scratch repository are written to a temporary directory under $TMPDIR (on /dev/shm/, never
+on the WSL-image device; else /dev/shm/).
 """
 
 import contextlib
@@ -29,8 +30,18 @@ import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 LEDGER = os.path.join(REPO, "docs", "program", "everon_ledger.md")
-PROGRAM_MD = "/mnt/e/drivedit_realign/program/CAPTURE_PROGRAM.md"
+# DD-22: documents of a real machine are compared only when DD_TEST_LOCAL_CONFIG names its local config (opt-in).
+_evidence_spec = importlib.util.spec_from_file_location(
+    "dd_test_evidence", os.path.join(REPO, "tests", "fixtures", "local_config", "evidence.py"))
+evidence = importlib.util.module_from_spec(_evidence_spec)
+_evidence_spec.loader.exec_module(evidence)
+PROGRAM_MD = evidence.evidence_path("REALIGN_ROOT", "program", "CAPTURE_PROGRAM.md")
 NEW_ROW = ("| EL-008 | 2026-10-23 | Synthetic test entry: a declared build migration | build change; no "
            "Everon-driven change |")
 
@@ -46,24 +57,19 @@ checker = load("dd6_ledger_check", "tools/harvester/check_ledger_append_only.py"
 
 
 def scratch_ok(path):
-    """True for an existing, writable directory under /dev/shm/ or /mnt/e/ (symlinks resolved) that is not inside
-    /mnt/e/DriveDiT and not on the device of C: or of the WSL disk image (/), as test_harvest.scratch_ok."""
+    """True for an existing, writable directory under /dev/shm/ (symlinks resolved) that is not on the device of the
+    WSL disk image (/), as test_harvest.scratch_ok (DD-22: no real drive is a scratch base)."""
     real = os.path.realpath(path or "/")
-    low = real.lower()
-    if not (low.startswith("/dev/shm/") or low.startswith("/mnt/e/")) or low == "/mnt/e/drivedit" \
-            or low.startswith("/mnt/e/drivedit/"):
+    if not real.startswith("/dev/shm/"):
         return False
     if not (os.path.isdir(real) and os.access(real, os.W_OK)):
         return False
-    dev = os.stat(real).st_dev
-    return all(not os.path.isdir(other) or os.stat(other).st_dev != dev for other in ("/mnt/c", "/"))
+    return os.stat(real).st_dev != os.stat("/").st_dev
 
 
 def temp_dir(prefix):
-    base = os.environ.get("TMPDIR")
-    if not scratch_ok(base):
-        base = "/dev/shm"
-    return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(base))
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py)."""
+    return scratch.mkdtemp(prefix, real_boundary=False)
 
 
 def run_main(argv):
@@ -91,8 +97,9 @@ def seed_only(text):
 
 class LedgerSeedTest(unittest.TestCase):
     def test_seed_is_appendix_a_verbatim(self):
-        if not os.path.isfile(PROGRAM_MD):
-            self.skipTest("%s not on this machine" % PROGRAM_MD)
+        if not PROGRAM_MD or not os.path.isfile(PROGRAM_MD):
+            self.skipTest(evidence.skip_reason("CAPTURE_PROGRAM.md") if not PROGRAM_MD else
+                          "%s not on this machine" % PROGRAM_MD)
         with open(PROGRAM_MD, "rb") as f:
             lines = f.read().decode("utf-8").split("\n")
         start = next(i for i, line in enumerate(lines) if line.startswith("## Appendix A. Everon ledger seed"))

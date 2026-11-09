@@ -13,6 +13,11 @@ import unittest
 from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 SCAN_PATH = os.path.join(REPO, "tools", "ci", "secret_scan.py")
 
 _spec = importlib.util.spec_from_file_location("dd_secret_scan", SCAN_PATH)
@@ -27,13 +32,8 @@ def kinds(text, path="x.txt"):
 
 
 def temp_dir():
-    """A new directory under $TMPDIR when that is on /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp)."""
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
-        base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
-    return tempfile.mkdtemp(prefix="dd_secret_scan_", dir=base)
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py)."""
+    return scratch.mkdtemp("dd22_secret_scan_", real_boundary=False)
 
 
 def scan_files(*paths):
@@ -58,9 +58,19 @@ class SecretScanTest(unittest.TestCase):
         self.assertEqual(kinds("@pytest.mark.slow  y = a @ b.T"), [])
 
     def test_windows_profile(self):
-        for bad in ("C:\\Users\\" + "Jdoe\\x", "c:/Users/" + "jdoe", "/mnt/c/Users/" + "jdoe/y", "/mnt/d/Users/" + "jdoe"):
+        # placeholder drives, assembled (outside the synthetic config's folder X, Y and Z pass only in its forms)
+        x, y, mnt, sep = "X", "y", "/mnt/", ":\\"
+        home = "tests/fixtures/local_config/x.py"
+        for bad in (x + sep + "Users\\" + "Jdoe\\x", x.lower() + ":/Users/" + "jdoe", mnt + "x/Users/" + "jdoe/y",
+                    mnt + y + "/Users/" + "jdoe"):
+            self.assertEqual(kinds(bad, home), ["win-profile"], bad)
+        for ok in (mnt + "x/Users/x/out.json", x + sep + "Users\\<name>", mnt + "x/Users/$USER/a", x + sep + "Users\\Public"):
+            self.assertEqual(kinds(ok, home), [], ok)
+        # the environment forms with a literal name (DD-22 round 2)
+        for bad in ("%SystemDrive%\\Users\\" + "jdoe\\AppData", "$env:SystemDrive\\Users\\" + "jdoe",
+                    "${HOMEDRIVE}/Users/" + "jdoe/x"):
             self.assertEqual(kinds(bad), ["win-profile"], bad)
-        for ok in ("/mnt/c/Users/x/out.json", "C:\\Users\\<name>", "/mnt/c/Users/$USER/a", "C:\\Users\\Public"):
+        for ok in ("%SystemDrive%\\Users\\%USERNAME%\\x", "$env:SystemDrive\\Users\\$env:USERNAME"):
             self.assertEqual(kinds(ok), [], ok)
 
     def test_home_path(self):
@@ -98,7 +108,10 @@ class SecretScanTest(unittest.TestCase):
         line = '"1.9", "' + ".".join(("10", "0", "1", "2")) + '", "1.9.0.9-rc2"'
         self.assertEqual(kinds(line, "tools/pin/tests/test_pin.py"), [])
         self.assertEqual(kinds(line, "tools/pin/tests/other.py"), ["private-ip"])
-        self.assertEqual(len(scan.ALLOWLIST), 1)  # every allow entry is reviewed; add one only with its reason
+        # every allow entry is reviewed; add one only with its reason (the pin id above; the guard patch's pinned
+        # comment is one exact text, DD-22)
+        self.assertEqual(len(scan.ALLOWLIST), 1)
+        self.assertEqual(len(scan.ALLOWED_TEXT), 1)
 
     def test_windows_build(self):
         win = "Win" + "dows "
@@ -116,6 +129,95 @@ class SecretScanTest(unittest.TestCase):
             self.assertEqual(kinds(bad), ["wsl-version"], bad)
         for ok in ("WSL 2", "WSL2", "WSL in NAT mode", "under WSL; use it", "wslinfo --networking-mode"):
             self.assertEqual(kinds(ok), [], ok)
+
+    def test_machine_path(self):
+        # DD-22: drive paths of a machine; the letters are assembled so this file holds none
+        mnt, sep = "/mnt/", ":\\"
+        for bad in (mnt + "e" + "/Data", mnt + "c", "under " + mnt + "d" + ".", "E" + sep + "Data", "d" + ":/x",
+                    "`" + "C" + sep + "Program Files`", '"' + "E" + ":\\\\Data" + '"', "(" + mnt + "e" + "/x)",
+                    "cd " + mnt + "e" + " && ls"):
+            self.assertEqual(kinds(bad), ["machine-path"], bad)
+        for ok in (mnt + "x/DataRoot", "Z" + sep + "Synthetic Steam (x86)", "y" + ":/Game Library/a", mnt + "<drive>/x",
+                   "https://example.com/a",
+                   "%s" + sep + "%s", "%DDLC_R:/=\\%", r"\d\d" + ":\\d", mnt + "wsl/x", mnt + "eagle", "a" + mnt + "e/x",
+                   "$ROOT" + mnt + "e", "<X>" + sep + "Data", "re:/x", "Q" + ":"):
+            self.assertEqual(kinds(ok), [], ok)
+
+    def test_placeholder_drives_only_in_their_forms(self):
+        # DD-22 round 2: X, Y and Z pass everywhere only as the synthetic config's own forms; a real path on them is
+        # found outside tests/fixtures/local_config/ and *.example files.
+        mnt, sep = "/mnt/", ":\\"
+        self.assertEqual(scan.SYNTHETIC_ROOTS, ("CodeRoot", "DataRoot", "Experimental Library", "Game Library",
+                                                "PlanRoot", "Synthetic Steam (x86)"))
+        for ok in (mnt + "x", mnt + "x/DataRoot/pin", "X" + sep + "DataRoot\\pin", "X" + sep, "x" + ":/dataroot",
+                   mnt + "z/Synthetic Steam (x86)/T", mnt + "y/Game Library/a", "X" + sep + "...", mnt + "x/...",
+                   '"' + "X" + ':\\n"', "(" + mnt + "x)"):
+            self.assertEqual(kinds(ok, "tools/a.py"), [], ok)
+        for bad in (mnt + "x/a/b", mnt + "x/DataRoot2/a", "Z" + sep + "Program Files", mnt + "y/Library/x",
+                    mnt + "z/Users"):
+            self.assertEqual(kinds(bad, "tools/a.py"), ["machine-path"], bad)
+            for home in ("tests/fixtures/local_config/a.py", "drivedit.local.env.example", "x/y.example"):
+                self.assertEqual(kinds(bad, home), [], (bad, home))
+
+    def test_placeholder_forms_are_whole_components(self):
+        # Codex round 3 F11: a synthetic root must be a whole path component, and a string escape must end the drive
+        mnt, sep = "/mnt/", ":\\"
+        for bad in (mnt + "x/DataRoot+private/file", mnt + "x/DataRoot2/a", "X" + sep + "notes\\review-private",
+                    "X" + sep + "DataRoot-old\\x", mnt + "y/Game Library~1/x", mnt + "x/DataRoot.bak/x"):
+            self.assertEqual(kinds(bad, "tools/a.py"), ["machine-path"], bad)
+        for ok in (mnt + "x/DataRoot", mnt + "x/DataRoot/", "(" + mnt + "x/DataRoot)", mnt + "x/DataRoot.",
+                   '"' + mnt + 'x/DataRoot"', mnt + "x/DataRoot and more", '"' + "X" + ':\\n"',
+                   "X" + sep + "DataRoot\\pin"):
+            self.assertEqual(kinds(ok, "tools/a.py"), [], ok)
+
+    def test_quoted_paths_end_only_at_a_separator_or_the_quote(self):
+        # Codex round 4: inside quotes, a space or comma does not end a synthetic root component
+        mnt = "/mnt/"
+        for bad in ('"' + mnt + 'x/DataRoot personal"', "'" + mnt + "x/DataRoot,personal/a'",
+                    '`' + mnt + 'x/DataRoot more`', '"X' + ':\\DataRoot personal\\x"'):
+            self.assertEqual(kinds(bad, "tools/a.py"), ["machine-path"], bad)
+        for ok in ('"' + mnt + 'x/DataRoot"', '"' + mnt + 'x/DataRoot/pin"', "'" + mnt + "x/DataRoot'",
+                   '"X' + ':\\DataRoot\\pin"', "under " + mnt + "x/DataRoot, and", 'x = "a" + "' + mnt + 'x/DataRoot"'):
+            self.assertEqual(kinds(ok, "tools/a.py"), [], ok)
+
+    def test_allowed_text_is_exact(self):
+        entry = next(iter(scan.ALLOWED_TEXT))
+        path, _, text = entry
+        self.assertEqual(kinds(text, path), [])
+        self.assertEqual(kinds(text.replace("Data/", "Elsewhere/"), path), ["machine-path", "machine-path"])
+        self.assertEqual(kinds("/mnt/" + "x/notes", path), ["machine-path"])
+        self.assertEqual(kinds(text, "tools/other.patch"), ["machine-path", "machine-path"])
+
+    def test_javascript_regex_keys_are_not_paths(self):
+        for ok in ("const rules = { e" + ":/value/ };", "f({a: 1, e" + ":/x+/g})", "{e" + ":/v/i, d" + ":/w/}"):
+            self.assertEqual(kinds(ok), [], ok)
+        for bad in ("{ e" + ":/value/data/ }", "copy to e" + ":/value/", "x, e" + ":/Data"):
+            self.assertEqual(kinds(bad), ["machine-path"], bad)
+
+    def test_wsl_unc_paths(self):
+        name = "My" + "Distro-1"
+        for bad in ("\\\\wsl$\\" + name + "\\home", "\\\\wsl.localhost\\" + name + "\\x",
+                    '"\\\\\\\\wsl.localhost\\\\' + name + '\\\\x"', "//wsl$/" + name + "/x"):
+            self.assertEqual(kinds(bad), ["wsl-path"], bad)
+        for ok in ("\\\\wsl.localhost\\<distro>\\x", "\\\\wsl$\\%DD_WSL_DISTRO%\\x", "\\\\wsl.localhost\\Placeholder-Distro"):
+            self.assertEqual(kinds(ok), [], ok)
+
+    def test_wsl_distro_names(self):
+        name = "My" + "Distro-1"
+        for bad in ("wsl.exe -d " + name + " -e x", "wsl --distribution " + name, "WSL_DISTRO=" + name,
+                    "WSL_DISTRO_NAME: '" + name + "'", "Ubu" + "ntu-22.04", "Deb" + "ian 12", "open" + "SU" + "SE-Leap-15.6",
+                    'wsl.exe -d "' + name + '" -e x', "wsl.exe -d '" + name + "'", "wsl --distribution=" + name,
+                    "wsl.exe --cd ~ -u root -d " + name, 'cmd /c wsl -e ls -d ' + name, '{"distro": "' + name + '"}',
+                    '"wslDistro": "' + name + '"', "'distribution': '" + name + "'", '"WSL_DISTRO": "' + name + '"',
+                    'wsl.exe --cd "some path" -d ' + name, "wsl --cd 'a b' -u root --distribution " + name,
+                    "distro: " + name, "  wslDistro: " + name, "- distro_name: '" + name + "'"):
+            self.assertEqual(kinds(bad), ["wsl-distro"], bad)
+        for ok in ("wsl.exe -d %DD_WSL_DISTRO% -e x", "WSL_DISTRO=<distro name>", "WSL_DISTRO=Placeholder-Distro",
+                   "wsl -d $DISTRO", "runs-on: ubu" + "ntu-24.04", "WSL_DISTRO=No-Such-Distro-dd22",
+                   'wsl.exe -d "%DD_WSL_DISTRO%"', "wsl.exe -l -v", '{"distro": "<distro>"}', "wsl --distribution=$D",
+                   "distro: <distro name>", "distribution: uniform", 'wsl.exe --cd "some path" -e ls'):
+            self.assertEqual(kinds(ok), [], ok)
+        self.assertEqual(kinds("WSL_DISTRO=" + name, "tests/fixtures/local_config/p.local.env"), [])
 
     def test_allowlist_is_path_specific(self):
         line = "/home/" + "svc/app"

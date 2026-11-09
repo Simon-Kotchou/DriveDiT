@@ -2,14 +2,18 @@
 rem ==========================================================================================
 rem DriveDiT cold-run game-client launcher: Reforger 1.8.0.13 from the verified working copy,
 rem instance c18_i01. Ticket DD-14a (MIGRATION_1_9 7.1, decision 16; CRIT F-11). Install:
-rem E:\DriveDiT\tools\launch\client_C18_i01.bat. It never reads ACTIVE.
+rem <DATA_ROOT>\tools\launch\client_C18_i01.bat, next to dd_local_config.cmd. It never reads ACTIVE.
+rem
+rem Local paths (DD-22): as in wb_R1.bat, every machine path comes from drivedit.local.env through
+rem dd_local_config.cmd (DD_DATA_ROOT_WIN, DD_DATA_DRIVE_WIN, DD_DATA_ROOT and DD_WSL_DISTRO here);
+rem without it nothing is started. <DATA_ROOT> below is that file's DATA_ROOT.
 rem
 rem As client_R1_i01.bat, except:
-rem   - the preflight checks the EXPLICIT cold pin E:\DriveDiT\pin\pin_1.8.0.13-cold.json with
+rem   - the preflight checks the EXPLICIT cold pin <DATA_ROOT>\pin\pin_1.8.0.13-cold.json with
 rem     --launch-path cold-1.8.0.13 (the copy, checked against its pin and SHA256SUMS hashes);
-rem   - GAME_DIR is the working copy E:\DriveDiT\pin\1.8.0.13-run\game; profile, logs and the
-rem     addon copy (E:\DriveDiT\addons_c18) are its own;
-rem   - TEMP and TMP are E:\DriveDiT\tmp\c18_i01, and the launch record is copied into the profile's
+rem   - GAME_DIR is the working copy <DATA_ROOT>\pin\1.8.0.13-run\game; profile, logs and the
+rem     addon copy (<DATA_ROOT>\addons_c18) are its own;
+rem   - TEMP and TMP are <DATA_ROOT>\tmp\c18_i01, and the launch record is copied into the profile's
 rem     dc_launch\ folder and byte-checked before the start, as wb_R1.bat does;
 rem   - -noBackend is ALWAYS passed: after 1.9 is live a 1.8 client may be refused or degraded by
 rem     the production backend (7.1 [inference, UNVERIFIED]); the cold pin records it in
@@ -18,22 +22,29 @@ rem No pause on failure: a supervisor may run this unattended (exit code 1).
 rem USER STEPS: close Steam or put it in offline mode first (7.1). UNVERIFIED until the first
 rem start (decision 16): that the exe runs outside its Steam library at all.
 rem Launch path: GAME_DIR and DC_ADDONS_DIR must stay the cold-1.8.0.13 entries of
-rem pinlib.COLD_LAUNCH_PATHS and DEPLOY_ROOTS (tools/pin/tests compares them).
+rem pinlib.COLD_LAUNCH_PATHS and DEPLOY_ROOTS (tools/pin/tests compares them); both read DATA_ROOT
+rem of the same local config.
 rem The flags are those of client_R1_i01.bat (see its provenance notes), plus -noBackend.
 rem ==========================================================================================
-setlocal
+setlocal DisableDelayedExpansion
+if not exist "%~dp0dd_local_config.cmd" (
+  set "DD_ERR=Missing %~dp0dd_local_config.cmd: install it next to this launcher (tools\launch). Nothing was started."
+  goto :fail
+)
+call "%~dp0dd_local_config.cmd"
+if errorlevel 1 goto :fail
 set "DD_INSTANCE=c18_i01"
-set "GAME_DIR=E:\DriveDiT\pin\1.8.0.13-run\game"
+set "GAME_DIR=%DD_DATA_ROOT_WIN%\pin\1.8.0.13-run\game"
 set "GAME_EXE=%GAME_DIR%\ArmaReforgerSteam.exe"
-set "DC_PROFILE=E:\DriveDiT\client_profiles\%DD_INSTANCE%"
-set "DC_LOGS=E:\DriveDiT\logs\%DD_INSTANCE%"
-set "DC_CFG=E:\DriveDiT\tools\cfg\engine_R1.conf"
-set "DD_PIN=/mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json"
+set "DC_PROFILE=%DD_DATA_ROOT_WIN%\client_profiles\%DD_INSTANCE%"
+set "DC_LOGS=%DD_DATA_ROOT_WIN%\logs\%DD_INSTANCE%"
+set "DC_CFG=%DD_DATA_ROOT_WIN%\tools\cfg\engine_R1.conf"
+set "DD_PIN=%DD_DATA_ROOT%/pin/pin_1.8.0.13-cold.json"
 set "DD_LAUNCH_PATH=cold-1.8.0.13"
-set "DD_LAUNCHES=E:\DriveDiT\pin\launches"
-set "DD_TEMP=E:\DriveDiT\tmp\%DD_INSTANCE%"
+set "DD_LAUNCHES=%DD_DATA_ROOT_WIN%\pin\launches"
+set "DD_TEMP=%DD_DATA_ROOT_WIN%\tmp\%DD_INSTANCE%"
 rem ---- per-build settings (trial-ladder.md 8.2) ----
-set "DC_ADDONS_DIR=E:\DriveDiT\addons_c18"
+set "DC_ADDONS_DIR=%DD_DATA_ROOT_WIN%\addons_c18"
 set "DC_ADDON_GUID=88BEF4187E0D2DFC"
 set "DC_WORLD=UNSET"
 rem ---------------------------------------------------
@@ -56,15 +67,16 @@ if not exist "%DC_ADDONS_DIR%\" (
   goto :fail
 )
 
-rem TEMP and TMP on E: (R1: a cold run writes nothing to C:, and a normal Windows environment points both at
-rem the user's C: profile). The directory is created if missing; the launch stops unless it exists and is on E:.
+rem TEMP and TMP on the data drive (R1: a cold run writes nothing to the system drive, and a normal Windows
+rem environment points both at the user's profile there). The directory is created if missing; the launch stops
+rem unless it exists and is on the data drive (DD_DATA_DRIVE_WIN, the drive of DATA_ROOT).
 if not exist "%DD_TEMP%\" mkdir "%DD_TEMP%"
 if not exist "%DD_TEMP%\" (
   set "DD_ERR=Cannot create the temp dir %DD_TEMP%. Nothing was started."
   goto :fail
 )
-if /I not "%DD_TEMP:~0,3%"=="E:\" (
-  set "DD_ERR=The temp dir %DD_TEMP% is not on E:. Nothing was started."
+if /I not "%DD_TEMP:~0,3%"=="%DD_DATA_DRIVE_WIN%\" (
+  set "DD_ERR=The temp dir %DD_TEMP% is not on the data drive %DD_DATA_DRIVE_WIN%. Nothing was started."
   goto :fail
 )
 set "TEMP=%DD_TEMP%"
@@ -75,9 +87,9 @@ set "WSL_UTF8=1"
 set "LID="
 set "DD_ID_RE=^[0123456789][0123456789]*T[0123456789][0123456789]*Z-client-[0123456789abcdef][0123456789abcdef]*"
 set "DD_ID_BAD=[^-0123456789abcdefTZilnt]"
-for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin %DD_PIN% --launch-path %DD_LAUNCH_PATH% --exe client --instance %DD_INSTANCE% ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
+for /f %%i in ('wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B %DD_DATA_ROOT%/tools/pin/preflight.py --pin %DD_PIN% --launch-path %DD_LAUNCH_PATH% --exe client --instance %DD_INSTANCE% ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
 if not defined LID (
-  set "DD_ERR=PIN CHECK FAILED. The client was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin %DD_PIN% --launch-path %DD_LAUNCH_PATH% --check"
+  set "DD_ERR=PIN CHECK FAILED. The client was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B %DD_DATA_ROOT%/tools/pin/preflight.py --pin %DD_PIN% --launch-path %DD_LAUNCH_PATH% --check"
   goto :fail
 )
 if not exist "%DD_LAUNCHES%\launch_%LID%.json" (

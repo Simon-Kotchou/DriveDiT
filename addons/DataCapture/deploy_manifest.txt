@@ -1,5 +1,5 @@
 # DataCapture deploy manifest: the ONLY files tools/deploy_addon.py may copy into the deployed addon
-# (E:\DriveDiT\addons\DataCapture, i.e. /mnt/e/DriveDiT/addons/DataCapture). Review every change to this file.
+# (<DATA_ROOT>/addons/DataCapture, DATA_ROOT of the local config, DD-22). Review every change to this file.
 #
 # Format: one entry per line, "<kind> <repo-relative source path>". '#' starts a comment.
 #   addon   a Workbench resource under addons/DataCapture/ (.gproj .ent .layer .et .conf),

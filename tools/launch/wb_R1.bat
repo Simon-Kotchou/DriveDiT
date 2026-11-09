@@ -2,15 +2,22 @@
 rem ==========================================================================================
 rem DriveDiT pinned Workbench launcher, rig R1.
 rem Ticket DD-0 (capture program r2 TKT-0, Appendix B; decision D1).
-rem Install: E:\DriveDiT\tools\launch\wb_R1.bat. Never launch Workbench from the Steam library
-rem during the campaign.
+rem Install: <DATA_ROOT>\tools\launch\wb_R1.bat, next to dd_local_config.cmd. Never launch
+rem Workbench from the Steam library during the campaign.
+rem
+rem Local paths (DD-22): every machine path below comes from drivedit.local.env, the one untracked
+rem file that holds this machine's paths. dd_local_config.cmd (next to this file) finds it, by
+rem DRIVEDIT_LOCAL_CONFIG or else DATA_ROOT\config\drivedit.local.env two folders up, and sets
+rem DD_DATA_ROOT_WIN, DD_TOOLS_INSTALL_WIN, DD_GAME_INSTALL_WIN, DD_WSL_DISTRO and DD_DATA_ROOT (WSL
+rem form); it passes the file on to WSL, so the preflight checks the same installs. Without the file,
+rem or with a key missing, nothing is started. <DATA_ROOT> below is that file's DATA_ROOT.
 rem
 rem 1. Refuses if Workbench is already running (it never starts a second instance).
-rem 2. Runs the build-pin preflight in WSL with --pin-active: E:\DriveDiT\pin\ACTIVE names the
-rem    active pin id, and the pin is E:\DriveDiT\pin\pin_ID.json. The preflight refuses unless
+rem 2. Runs the build-pin preflight in WSL with --pin-active: <DATA_ROOT>\pin\ACTIVE names the
+rem    active pin id, and the pin is <DATA_ROOT>\pin\pin_ID.json. The preflight refuses unless
 rem    ACTIVE is valid and the Steam appmanifests and the installed files of BOTH Arma Reforger and
 rem    Arma Reforger Tools match that pin, and AutoUpdateBehavior is "1" ("Only update this game
-rem    when I launch it"). On success it writes E:\DriveDiT\pin\launches\launch_ID.json and
+rem    when I launch it"). On success it writes <DATA_ROOT>\pin\launches\launch_ID.json and
 rem    prints only the launch id. The launch logic names no game version.
 rem 3. Copies that record to WB_PROFILE\profile\dc_launch\launch_ID.json and checks the copy byte
 rem    for byte. In Workbench $profile is the -profile folder plus \profile, and DC_LaunchGuard
@@ -22,7 +29,7 @@ rem
 rem UNVERIFIED (capture program 4.2 item 2): that a direct exe launch never makes Steam update
 rem or relaunch the app. Steam must be running.
 rem UNVERIFIED (FIX_PLAN step 4, gate P-01): that Workbench honours -profile. After the first
-rem start, check console.log for "Adding relative directory 'E:\DriveDiT\wb_profile\profile'".
+rem start, check console.log for "Adding relative directory '<DATA_ROOT>\wb_profile\profile'".
 rem Args (Appendix B and FIX_PLAN step 4a): -profile, -gproj, -addonsDir, -forceUpdate, -maxFPS 60,
 rem -dcLaunchId (custom; the capture scripts read it with System.GetCLIParam, capture program 3.9).
 rem UNVERIFIED (probe E-11): that Workbench Play mode sees its own command line. The copied record
@@ -33,21 +40,29 @@ rem initialize game project settings" (measured 2026-10-21 18:50, first wb_R1.ba
 rem is the pinned game install (pinlib.LAUNCH_PATHS "game") plus \addons; it holds core\ and data\.
 rem Build: 1.8.0.13 is the INTERIM pin. The plan is to move to 1.9 and its new vehicle physics
 rem once 1.9 is stable and compatibility is checked. See program\1_9\MIGRATION_1_9.md in
-rem E:\drivedit_realign once written, and tools\pin\README.md. Switch pins only with
-rem E:\DriveDiT\tools\pin\pin_activate.py, which refuses a pin that does not match the installs.
+rem <REALIGN_ROOT> once written, and tools\pin\README.md. Switch pins only with
+rem <DATA_ROOT>\tools\pin\pin_activate.py, which refuses a pin that does not match the installs.
 rem Never edit ACTIVE by hand.
 rem Launch path: WB_DIR must stay the Tools install named in pinlib.LAUNCH_PATHS (plus \Workbench).
 rem The preflight check tools.launch_path refuses any pin not made from that install, so the exe
-rem started here is always the one the pin checked. Change both together, never one alone.
-rem WSL: the distro is named explicitly, because a second distro (Ubuntu-22.04-E) exists.
+rem started here is always the one the pin checked. Both read TOOLS_INSTALL of the same local
+rem config, so they cannot drift.
+rem WSL: the distro is named explicitly (WSL_DISTRO of the local config), because a machine may have
+rem more than one.
 rem ==========================================================================================
-setlocal
-set "WB_DIR=C:\Program Files (x86)\Steam\steamapps\common\Arma Reforger Tools\Workbench"
+setlocal DisableDelayedExpansion
+if not exist "%~dp0dd_local_config.cmd" (
+  set "DD_ERR=Missing %~dp0dd_local_config.cmd: install it next to this launcher (tools\launch). Nothing was started."
+  goto :fail
+)
+call "%~dp0dd_local_config.cmd"
+if errorlevel 1 goto :fail
+set "WB_DIR=%DD_TOOLS_INSTALL_WIN%\Workbench"
 set "WB_EXE=%WB_DIR%\ArmaReforgerWorkbenchSteamDiag.exe"
-set "WB_PROFILE=E:\DriveDiT\wb_profile"
-set "WB_GPROJ=E:\DriveDiT\addons\DataCapture\addon.gproj"
-set "GAME_ADDONS=D:\SteamLibrary\steamapps\common\Arma Reforger\addons"
-set "DD_LAUNCHES=E:\DriveDiT\pin\launches"
+set "WB_PROFILE=%DD_DATA_ROOT_WIN%\wb_profile"
+set "WB_GPROJ=%DD_DATA_ROOT_WIN%\addons\DataCapture\addon.gproj"
+set "GAME_ADDONS=%DD_GAME_INSTALL_WIN%\addons"
+set "DD_LAUNCHES=%DD_DATA_ROOT_WIN%\pin\launches"
 set "DD_ERR="
 
 rem /FO CSV: the default table format truncates image names to 25 characters.
@@ -81,9 +96,9 @@ rem filters: the id pattern anchored at the start, then /V on any character outs
 rem The interpreter is named (/usr/bin/python3) because -e starts no shell and its PATH holds Windows dirs.
 set "DD_ID_RE=^[0123456789][0123456789]*T[0123456789][0123456789]*Z-wb-[0123456789abcdef][0123456789abcdef]*"
 set "DD_ID_BAD=[^-0123456789abcdefTZw]"
-for /f %%i in ('wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --exe wb ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
+for /f %%i in ('wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B %DD_DATA_ROOT%/tools/pin/preflight.py --pin-active --exe wb ^| findstr /R /C:"%DD_ID_RE%" ^| findstr /R /V /C:"%DD_ID_BAD%"') do set "LID=%%i"
 if not defined LID (
-  set "DD_ERR=PIN CHECK FAILED. Workbench was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d Ubuntu-22.04 -e /usr/bin/python3 -I -B /mnt/e/DriveDiT/tools/pin/preflight.py --pin-active --check"
+  set "DD_ERR=PIN CHECK FAILED. Workbench was not started. The preflight messages above say why. If there are none, wsl.exe itself failed: run wsl.exe -d %DD_WSL_DISTRO% -e /usr/bin/python3 -I -B %DD_DATA_ROOT%/tools/pin/preflight.py --pin-active --check"
   goto :fail
 )
 rem The record must exist: a launch id alone is not proof that this preflight run passed.

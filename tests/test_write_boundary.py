@@ -153,6 +153,7 @@ def test_no_config_allows_ram_only(world):
 
 
 def test_cli_check_write():
+    scratch.boundary_base()   # skips, with the reason, where the real boundary refuses RAM (a hidden RAM mount)
     env = dict(os.environ)
     ok = subprocess.run([sys.executable, "-I", "-B", LC_PATH, "check-write", "/dev/shm/dd22-cli-probe/x.json"],
                         capture_output=True, text=True, env=env, timeout=60)
@@ -167,6 +168,7 @@ def test_cli_check_write():
 
 
 def test_real_mountinfo_ram_is_verified():
+    scratch.boundary_base()   # skips, with the reason, where the real boundary refuses RAM (a hidden RAM mount)
     # The real /dev/shm is a tmpfs: RAM stays writable with the synthetic config (whose drives are mounted nowhere).
     assert lc.write_refusal("/dev/shm/dd22-boundary-probe/x") is None
     assert "refusing" in lc.write_refusal("/tmp/dd22-boundary-probe/x")
@@ -196,3 +198,72 @@ def test_opt_in_scratch_is_validated_before_anything_is_created(world, monkeypat
                 assert got is None and fragment in why, (scratch, why)
     monkeypatch.delenv("DD_TEST_LOCAL_CONFIG")
     assert evidence.data_drive_scratch()[0] is None
+
+
+def test_a_negative_marker_result_is_not_cached(world, monkeypatch):
+    """Codex round 3 F9: after a check that found no marker, a planted Windows/System32 or a root that became
+    unlistable refuses from the next check on."""
+    with world.use(lc, "real_like"):
+        target = world.mnt + "/x/DataRoot/out.json"
+        assert lc.write_refusal(target) is None
+        real_scandir = os.scandir
+
+        def failing(path):
+            if path == world.mnt + "/x":
+                raise PermissionError(13, "Permission denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(lc.os, "scandir", failing)
+        assert "cannot be listed" in lc.write_refusal(target)
+        monkeypatch.setattr(lc.os, "scandir", real_scandir)
+        assert lc.write_refusal(target) is None
+        os.makedirs(world.mnt + "/x/WINDOWS/system32")
+        try:
+            assert "Windows system drive" in lc.write_refusal(target)
+        finally:
+            os.rmdir(world.mnt + "/x/WINDOWS/system32")
+            os.rmdir(world.mnt + "/x/WINDOWS")
+
+
+scratch = _load("dd22_scratch_t", os.path.join(FIXTURES, "scratch.py"))
+
+
+def test_scratch_overrides_and_fallbacks(monkeypatch, world):
+    """Codex round 3 F8: a scratch override must be validated RAM; nothing falls back to the system temp dir."""
+    import unittest
+
+    for bad in ("/tmp", "/", world.shm + "/leaf_link", world.base + "/missing"):
+        monkeypatch.setenv("DD_PIN_TEST_TMP", bad)
+        with pytest.raises(unittest.SkipTest, match="DD_PIN_TEST_TMP is not a usable RAM scratch"):
+            scratch.ram_base("DD_PIN_TEST_TMP")
+    monkeypatch.setenv("DD_PIN_TEST_TMP", world.shm)
+    assert scratch.ram_base("DD_PIN_TEST_TMP") == world.shm
+    monkeypatch.delenv("DD_PIN_TEST_TMP")
+    monkeypatch.setenv("TMPDIR", "/tmp")
+    assert scratch.ram_base() == "/dev/shm"   # a TMPDIR outside RAM is passed over, never used
+
+
+def test_a_hidden_ram_mount_skips_only_real_boundary_tests(world, monkeypatch, tmp_path):
+    """A sandbox can hide the RAM mount: mountinfo then names another device for /dev/shm than the directory has. The
+    boundary refuses (fail-closed); the real-boundary scratch skips with the reason, the RAM-only scratch still works."""
+    import unittest
+
+    with open("/proc/self/mountinfo") as fh:
+        text = fh.read()
+    lines = []
+    for line in text.splitlines():
+        f = line.split(" ")
+        if len(f) > 4 and f[4] == "/dev/shm":
+            f[2] = "0:4093"
+        lines.append(" ".join(f))
+    fake = os.path.join(world.base, "hidden.mountinfo")
+    with open(fake, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    monkeypatch.setattr(scratch._lc(), "MOUNTINFO", fake)
+    assert scratch.ram_base() in ("/dev/shm", os.path.realpath(os.environ.get("TMPDIR", "/dev/shm")))
+    with pytest.raises(unittest.SkipTest, match="refuses RAM scratch here, fail-closed"):
+        scratch.boundary_base()
+    with pytest.raises(lc.WriteRefused, match="device"):
+        with monkeypatch.context() as m:
+            m.setattr(lc, "MOUNTINFO", fake)
+            lc.check_write("/dev/shm/dd22-hidden-probe/x")

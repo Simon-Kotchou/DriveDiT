@@ -20,9 +20,22 @@ key (LocalConfigError). Importing this module reads nothing; a file is read on f
 The write boundary of every writer (check_write, "the write boundary" below) lives here too: RAM (/dev/shm) or the
 verified drive of DATA_ROOT only, never a volume whose root holds Windows/System32, whatever the config says.
 
+Threat model of the write boundary. It exists to stop ACCIDENTS: our own bugs, a wrong or missing config, a bad caller
+root, a test default, a stale file left over. It is NOT a defence against a hostile local process that plants
+symlinks or junctions, swaps directories in the middle of a call, or creates nested or bind mounts. Known non-goals:
+  * races on intermediate directories between the check and the write (time-of-check to time-of-use): the check is a
+    snapshot; only the last component of new files is protected (O_EXCL, O_NOFOLLOW);
+  * nested or bind mounts created under the data volume after a check (a mount there at check time is refused);
+  * Windows junctions (reparse points) under DATA_ROOT, which drvfs presents as directories;
+  * concurrent edits of the MCP build copy while tools/enfusion-mcp/build-bk.sh runs.
+The refusal is conservative: a volume whose root holds a Windows/System32 folder is taken for the Windows system
+drive, so a copied or planted Windows/System32 on the data volume makes the whole data volume unwritable (RAM stays
+writable) until it is removed. The marker is looked for again on every check, so that holds from the next check on.
+
 Format (the Windows launchers parse it with `for /f`, so it is deliberately plain):
   * one KEY=VALUE per line, no spaces around "=", no quotes, no variable expansion; a line starting with # is a
-    comment, blank lines are ignored; a key may appear once; unknown keys are refused (a typo never goes unseen);
+    comment, empty lines are ignored, a line of white space only is refused (the batch helper reads it as a line);
+    a key may appear once; unknown keys are refused (a typo never goes unseen);
   * a path is the WSL form, absolute and normalised (no trailing "/", no "//", ".", ".."). The Windows form is
     derived by the pure mapping /mnt/<x>/<rest> <-> <X>:\\<rest> (wsl_to_win), the same mapping the batch helper
     applies; `check` compares it with wslpath on the machine;
@@ -156,7 +169,11 @@ def parse(text: str, path: str = "<text>") -> "Config":
     values, problems = {}, []
     for n, raw in enumerate(text.split("\n"), 1):
         line = raw[:-1] if raw.endswith("\r") else raw
-        if not line.strip() or line.startswith("#"):
+        if not line or line.startswith("#"):
+            continue
+        if not line.strip():
+            problems.append("line %d: holds only white space; leave it empty (dd_local_config.cmd reads it as a line)"
+                            % n)
             continue
         if "=" not in line:
             problems.append("line %d: expected KEY=VALUE" % n)
@@ -408,10 +425,12 @@ def is_drive_mount(mount: dict, letter: str) -> bool:
 
 
 def system_marker(mount: dict):
-    """The Windows/System32 directory at the root of a mount (any letter case), or None. A root that cannot be
-    listed counts as a system volume (refused), and is looked at again next time."""
+    """The Windows/System32 directory at the root of a mount (any letter case), or None. Looked for on every call (a
+    negative result is never cached: a marker planted, or a root that became unlistable, counts from the next check
+    on); only a found marker is kept, so a system volume stays refused. A root that cannot be listed counts as a system
+    volume (refused)."""
     key = (mount["mount_point"], mount["dev"])
-    if key in _MARKER_CACHE:
+    if _MARKER_CACHE.get(key):
         return _MARKER_CACHE[key]
     found = None
     try:
@@ -425,7 +444,8 @@ def system_marker(mount: dict):
                 break
     except OSError as exc:
         return "%s (its root cannot be listed: %s)" % (mount["mount_point"], exc.strerror or exc)
-    _MARKER_CACHE[key] = found
+    if found:
+        _MARKER_CACHE[key] = found
     return found
 
 

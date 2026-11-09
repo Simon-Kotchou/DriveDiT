@@ -99,6 +99,13 @@ refused) and accepts only RAM (`/dev/shm`, verified as tmpfs) or the data drive:
 to the mount's. An unmounted mount point (an empty directory on the WSL disk), a redirected one, or another
 filesystem mounted below it is refused. Whatever the config or the caller says, a volume whose root holds
 `Windows/System32` is refused: the system drive is found by its content, and `SYSTEM_DRIVE` only words the refusal.
+The refusal is conservative: a `Windows/System32` folder copied or planted at the root of the data volume makes that
+whole volume unwritable (RAM stays writable) until it is removed; the marker is looked for on every check.
+
+The boundary stops accidents (our own bugs, a wrong or missing config, a bad caller root, a test default, a stale
+file left over), not a hostile local process. Races on intermediate directories between the check and the write,
+nested or bind mounts created under the data volume later, Windows junctions under `DATA_ROOT`, and concurrent edits of
+the MCP build copy are out of its scope (the module docstring of `tools/local_config.py` lists them).
 
 `make_pin.py` never creates directories and never overwrites a pin unless `--force` is given. `pin_activate.py`
 writes only `ACTIVE`, a temp file next to it, `ACTIVE.log` and `ACTIVE.lock`, in the pin directory. It opens the pin
@@ -581,14 +588,16 @@ python3 -I -B -m unittest discover -s tools/pin/tests -v
 
 `test_pin_dd14a.py` covers the DD-14a additions (channels, build_key, dd-pin/2, sidecars, use_class, the freeze check); `test_cold_pin.py` the cold-run pin, the cold launchers and the golden start lines of the stable launchers (`fixtures/golden_start_lines.txt`, recorded at DD-0 HEAD and kept by DD-22 as templates over the local config: rendered with a config they are the start lines the launchers produce with it). Both reuse the fake Steam layout of `test_pin.py`.
 
-Temp trees go to `$DD_PIN_TEST_TMP`, otherwise `/dev/shm`, and are deleted afterwards. Run the tests with
+Temp trees go to `$DD_PIN_TEST_TMP` (a directory under `/dev/shm`, checked before use), otherwise `$TMPDIR` or
+`/dev/shm` (`tests/fixtures/local_config/scratch.py`; never the system temp dir), and are deleted afterwards. Run the tests with
 `/usr/bin/python3` (3.10) as well, because the launchers run the preflight with it. Every test reads the synthetic
 local config `tests/fixtures/local_config/placeholder.local.env` (placeholder drives: data `/mnt/x`, game library
 `/mnt/y`, system `/mnt/z`, none of them mounted), never the machine's, so no test can reach a real drive. Tests point
 `pinlib.LAUNCH_PATHS` at their fake Steam layout; a script run in a subprocess sees the config's launch paths, so its
 fake pin fails `launch_path` there (the tests expect that). drvfs differs from tmpfs (sub-second mtimes, no FIFOs,
-renamed directories): run the suite once with `DD_PIN_TEST_TMP` on a drvfs scratch directory as well (the guards
-then refuse it, as it is not on the placeholder data drive, and the tests that need writes skip or use `/dev/shm`).
+renamed directories); its behaviour is covered by the opt-in tests that take `DC_TEST_E_SCRATCH` with
+`DD_TEST_LOCAL_CONFIG`, as `DD_PIN_TEST_TMP` must lie in RAM. Where the write boundary refuses RAM (a sandbox that
+hides the RAM mount), the tests that use the real boundary skip and say so.
 
 ## Differences from the Appendix B sketch
 

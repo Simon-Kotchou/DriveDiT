@@ -17,6 +17,11 @@ import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 LOADER = os.path.join(REPO, "tools", "local_config.py")
 FIXTURE = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
 EXAMPLE = os.path.join(REPO, "drivedit.local.env.example")
@@ -38,12 +43,8 @@ def read(path):
 
 
 def temp_dir():
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not (base.startswith("/dev/shm/") and os.path.isdir(base)):
-        base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-        raise unittest.SkipTest("no writable /dev/shm")
-    return tempfile.mkdtemp(prefix="dd22_local_config_", dir=base)
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py)."""
+    return scratch.mkdtemp("dd22_local_config_", real_boundary=False)
 
 
 class ParseTests(unittest.TestCase):
@@ -77,7 +78,7 @@ class ParseTests(unittest.TestCase):
     def test_malformed_lines_are_all_reported(self):
         text = ("# comment\n\nDATA_ROOT=/mnt/x/DataRoot/a b\nGAME_INSTALL=Y:\\Game Library\\steamapps\\common\\A\n"
                 "TOOLS_INSTALL=/mnt/z/Synthetic Steam (x86)/steamapps/common/B/\nWSL_DISTRO=a b\nBOGUS=1\n DATA_ROOT=/mnt/x/DataRoot\n"
-                "REALIGN_ROOT=/mnt/x/PlanRoot\nREALIGN_ROOT=/mnt/x/PlanRoot/b\nSYSTEM_DRIVE=/mnt/Z\nCODE_ROOT=/mnt/x/CodeRoot/<code>\n"
+                "REALIGN_ROOT=/mnt/x/PlanRoot\nREALIGN_ROOT=/mnt/x/PlanRoot/b\nSYSTEM_DRIVE=/mnt/Z" "\nCODE_ROOT=/mnt/x/CodeRoot/<code>\n"
                 "EXPERIMENTAL_GAME_INSTALL=/mnt/x/Experimental Library/no/layout\nno equals sign\nCODE_ROOT=relative/path\n")
         with self.assertRaises(lc.LocalConfigError) as caught:
             lc.parse(text, "bad.env")
@@ -256,6 +257,16 @@ class CheckTests(unittest.TestCase):
         status = {r[1]: r[0] for r in lc.check(cfg)}
         self.assertEqual(status["key.GAME_INSTALL"], "FAIL")
         self.assertEqual(status["data_root.off_system_drive"], "FAIL")
+
+
+class WhiteSpaceLineTests(unittest.TestCase):
+    def test_a_white_space_line_is_refused_and_an_empty_one_ignored(self):
+        # Codex round 3: the batch helper reads a line of blanks or tabs as a line, so Python refuses it as well
+        good = read(FIXTURE)
+        self.assertEqual(lc.parse(good + "\n\n").values, lc.parse(good).values)
+        for blank in ("\t", "  ", " \t ", "\t\r"):
+            with self.assertRaisesRegex(lc.LocalConfigError, "holds only white space", msg=repr(blank)):
+                lc.parse(good + blank + "\n")
 
 
 class GitignoreTests(unittest.TestCase):

@@ -337,6 +337,10 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 		if (!m_bCross || m_bCrossFallbackUsed || m_fCrossFallbackM >= m_fCrossNocallM || m_aCrossSpeeds.IsEmpty())
 			return false;
 
+		// the search time is used up (m_fSiteSearchMaxS): no fallback, the phases get the rest of the timeout
+		if (m_bSearchTimeCapped)
+			return false;
+
 		if (GetSite(SITE_CROSS))
 			return false;
 

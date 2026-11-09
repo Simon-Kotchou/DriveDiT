@@ -23,7 +23,9 @@
 //     e22's circles may exit in any direction: the full stopping distance sideways and backwards). The motion is held
 //     to those assumptions: a driving segment ends with overspeed above GetMaxSpeedKmh() + 3 km/h and, outside
 //     circle probes, with aborted_heading beyond GetEnvelopeAngleDeg() off the strip direction; it ends with
-//     aborted_area outside the area. The searches share one native-call budget per frame (DC_SteerBudget). Each found
+//     aborted_area outside the area. The searches share one native-call budget per render frame (DC_SteerBudget; a
+//     search takes frames / fps of world time) and m_fSiteSearchMaxS of world time together (then status
+//     time_cap); a probe stopped while it searches writes every search's state (AppendSearchSnapshot). Each found
 //     site is written with site.<kind>.reuse, the attribute values that make the 1.8 cold baseline drive the same
 //     strip. Phases on a site that was not found are skipped (result skipped, note no_site);
 //   - the wheel-angle axle choice (DC_SteerChannels.ArmAxleSelection) is armed only in a settle segment, from half
@@ -228,6 +230,9 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	[Attribute("3", UIWidgets.Slider, "Every surface sample of a site above this y [m] (sea level 0: no shore, no water)", "-100 500 0.5", category: "Search")]
 	protected float m_fSiteMinSurfaceY;
 
+	[Attribute("90", UIWidgets.Slider, "World seconds all site searches of the probe may take together (the budgets are per render frame, so a search takes frames / fps; e21's 420 s keeps its phases after 90 s of searching); the searches still running then end with status time_cap", "5 600 5", category: "Search")]
+	protected float m_fSiteSearchMaxS;
+
 	// === DRIVE ===
 	[Attribute("0.3", UIWidgets.Slider, "Teleport height above GetSurfaceY [m]", "0 5 0.05", category: "Drive")]
 	protected float m_fSpawnLiftM;
@@ -326,6 +331,8 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 	protected int m_iSpinSteps;
 	protected int m_iLastCovered = 1;		//!< engine steps the last dispatched step covered (CoveredSteps)
 	protected ref DC_SteerBudget m_Budget = new DC_SteerBudget();
+	protected float m_fSearchStartMs = -1;	//!< world time of the first search frame
+	protected bool m_bSearchTimeCapped;		//!< m_fSiteSearchMaxS ran out (e21: then no fallback search)
 	protected float m_fSteerSignSum;		//!< sum of cmd_steer x heading rate on the steering segments
 	protected int m_iSteerSignSamples;
 	protected int m_iMeasuredSteerSign;
@@ -563,6 +570,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		outKeyValues.Insert("m_iSiteMaxStrips=" + m_iSiteMaxStrips.ToString());
 		outKeyValues.Insert("m_iSiteMaxObstacleChecks=" + m_iSiteMaxObstacleChecks.ToString());
 		outKeyValues.Insert("m_fSiteMinSurfaceY=" + m_fSiteMinSurfaceY.ToString(-1, 2));
+		outKeyValues.Insert("m_fSiteSearchMaxS=" + m_fSiteSearchMaxS.ToString(-1, 1));
 		outKeyValues.Insert("m_fSpawnLiftM=" + m_fSpawnLiftM.ToString(-1, 3));
 		outKeyValues.Insert("m_fSettleS=" + m_fSettleS.ToString(-1, 3));
 		outKeyValues.Insert("m_fSpeedKp=" + m_fSpeedKp.ToString(-1, 4));
@@ -643,6 +651,9 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		// the smallest atomic units of the search: a grid gradient takes 4 samples, a sweep call 1 trace
 		if (m_iSiteSamplesPerFrame < 4 || m_iSiteTracesPerFrame < 1)
 			return RefuseStart(string.Format("m_iSiteSamplesPerFrame %1 / m_iSiteTracesPerFrame %2 below the atomic costs 4 / 1 - probe not started", m_iSiteSamplesPerFrame, m_iSiteTracesPerFrame));
+
+		if (!InRange(m_fSiteSearchMaxS, 5, 600))
+			return RefuseStart("m_fSiteSearchMaxS " + m_fSiteSearchMaxS.ToString(-1, 1) + " outside 5..600 s - probe not started");
 
 		// The obstacle traces ignore the car and everything attached to it
 		m_aExcludes = {};
@@ -917,6 +928,24 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (!world)
 			return;
 
+		// the searches' world time together: past m_fSiteSearchMaxS every unfinished one ends with status time_cap
+		float now = GetWorldMs();
+		if (m_fSearchStartMs < 0)
+			m_fSearchStartMs = now;
+
+		if (!m_bSearchTimeCapped && now - m_fSearchStartMs > m_fSiteSearchMaxS * 1000)
+		{
+			m_bSearchTimeCapped = true;
+			foreach (int cappedIndex, DC_SteerSiteSearch capped : m_aSearches)
+			{
+				if (capped.IsDone())
+					continue;
+
+				capped.StopSearch("time_cap");
+				LogWarning(string.Format("the %1 site search used up m_fSiteSearchMaxS (%2 s) - it ends with status time_cap", m_aSearchKinds[cappedIndex], m_fSiteSearchMaxS.ToString(-1, 0)));
+			}
+		}
+
 		// one budget for this frame, shared: each unfinished search takes what the ones before it left
 		m_Budget.Reset(m_iSiteSamplesPerFrame, m_iSiteTracesPerFrame);
 		bool allDone = true;
@@ -1044,6 +1073,10 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 			return;
 
 		RestoreAssistMode();
+		// searches cut short keep their diagnosis (every reason: it only appends to the run header)
+		if (m_eSegment == DC_ESteerSegment.SEARCH && !m_bProbeDone)
+			AppendSearchSnapshot(reason);
+
 		if (reason != DC_ProbeRunner.REASON_DELETE)
 		{
 			DC_ProbeSteerPhase phase = GetPhase();
@@ -1137,6 +1170,31 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		m_iAssistSets = 0;
 		m_iAssistRestores = 0;
 		m_iAssistOverride = -1;
+		m_fSearchStartMs = -1;
+		m_bSearchTimeCapped = false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The probe stopped while its searches ran (timeout, play end, a stop of the plan, world teardown): every
+	//! search's lines as they stand (counts, refusals, near miss, grid progress, the stage and the strip it was
+	//! sampling) with status = the stop reason, so a search cut short still says what it saw
+	protected void AppendSearchSnapshot(string reason)
+	{
+		if (!m_Ctx || !m_aSearches)
+			return;
+
+		array<string> lines = {};
+		lines.Insert("site.search_stopped=" + reason);
+		foreach (int i, DC_SteerSiteSearch search : m_aSearches)
+		{
+			search.NoteProbeStop(reason);
+			string kind = m_aSearchKinds[i];
+			search.AppendHeaderLines(lines, "site." + kind);
+			LogWarning("stopped while searching: " + search.DescribeSearch());
+		}
+
+		if (!m_Ctx.AppendHeaderLines(lines))
+			LogWarning("the interrupted search lines could not be appended to the run header");
 	}
 
 	//------------------------------------------------------------------------------------------------

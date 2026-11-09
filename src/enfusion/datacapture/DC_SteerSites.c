@@ -38,10 +38,16 @@
 //      entity's class or prefab is listed as benign (the probe's m_sBenignColliders, empty by default): then that one
 //      entity is excluded and the same sweep is traced again, so every remaining check still runs. The first clean
 //      strip is the site.
-// The work is spread over render frames with one budget per frame shared by every search of the probe
-// (DC_SteerBudget): each GetSurfaceY takes one sample and each TracePosition / TraceMove, benign retries included,
-// one trace, taken before the call; a strip's terrain and a candidate's sweeps continue in the next frame where they
-// stopped (DC_SteerSweepPlan keeps the pending call).
+// The work is spread over RENDER frames (the probe's OnProbeFrame, EOnFrame) with one budget per frame shared by every
+// search of the probe (DC_SteerBudget): each GetSurfaceY takes one sample and each TracePosition / TraceMove, benign
+// retries included, one trace, taken before the call; a strip's terrain and a candidate's sweeps continue in the
+// next frame where they stopped (DC_SteerSweepPlan keeps the pending call). A search therefore takes frames / fps of
+// world time (the first 1.9.0.37 Play: 497 frames in 9.0 s, 55 fps at 6000 samples per frame), and the probe caps the
+// world time of all its searches (DC_ProbeSteerBase m_fSiteSearchMaxS): a search it stops ends with status time_cap.
+// The header (site.<kind>.search.*) says how a search ended: status done, time_cap or the probe's stop reason when
+// the probe stopped while it searched (timeout, play_end, ...: its counts, refusals, near miss and the strip it was
+// sampling are written then), the stage it was in, and grid_complete 1 only when every grid point was visited and
+// the strip cap suppressed no heading (strips_capped).
 // The chosen site, its measured slopes, its centre tyre-pair height profile (track_profile, for the same-ground check
 // of a baseline), its definition as an explicit candidate (explicit = x z heading) and the search counts go into the
 // run header (site.<kind>.*).
@@ -583,6 +589,8 @@ class DC_SteerSiteSearch
 	protected string m_sFirstReject;		//!< first terrain refusal reason of any candidate (explicit or grid)
 	protected string m_sFirstExplicitReject;	//!< first terrain refusal reason of an explicit candidate
 	protected string m_sFirstObstacle;		//!< first blocking obstacle
+	protected int m_iStripsCapped;			//!< headings the strip cap suppressed (grid_complete needs none)
+	protected string m_sStopReason;			//!< why the search ended early (time_cap, the probe's stop reason); empty: it ran out
 	protected ref array<string> m_aRejectReasons = {};	//!< every refusal reason seen, with its count
 	protected ref array<int> m_aRejectCounts = {};
 	protected ref DC_SteerSite m_NearMiss;	//!< the fully sampled refused candidate with the largest zone share
@@ -793,7 +801,10 @@ class DC_SteerSiteSearch
 	protected void AddCentredStrip(float x, float z, float headingDeg)
 	{
 		if (m_iStrips >= m_iMaxStrips)
+		{
+			m_iStripsCapped++;
 			return;
+		}
 
 		float rad = headingDeg * Math.DEG2RAD;
 		float half = m_Criteria.m_fLengthM * 0.5;
@@ -1184,6 +1195,65 @@ class DC_SteerSiteSearch
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Ends an unfinished search now with reason (time_cap: the probe's search time is used up). No candidate is
+	//! selected that has not passed its obstacle sweeps; the counts so far stay for the header
+	void StopSearch(string reason)
+	{
+		if (m_iStage == STAGE_DONE)
+			return;
+
+		m_sStopReason = reason;
+		m_iStage = STAGE_DONE;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The probe stopped while this search was unfinished (its stop reason): the header lines then say so
+	void NoteProbeStop(string reason)
+	{
+		if (m_iStage == STAGE_DONE)
+			return;
+
+		m_sStopReason = reason;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! done (the search ran out), or why it ended or was interrupted
+	string GetStatus()
+	{
+		if (!m_sStopReason.IsEmpty())
+			return m_sStopReason;
+
+		if (m_iStage == STAGE_DONE)
+			return "done";
+
+		return "running";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	static string StageName(int stage)
+	{
+		if (stage == STAGE_EXPLICIT)
+			return "explicit";
+
+		if (stage == STAGE_GRID)
+			return "grid";
+
+		if (stage == STAGE_OBSTACLES)
+			return "obstacles";
+
+		return "done";
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every grid point visited, every strip generated (no heading suppressed by the cap), nothing pending, and the
+	//! search not stopped early
+	bool IsGridComplete()
+	{
+		int total = m_iGridNx * m_iGridNz;
+		return m_bGrid && m_bGridDone && m_iGridCursor >= total && m_iStripsCapped == 0 && m_sStopReason.IsEmpty();
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! <prefix>.found and the site lines, the criteria and the search counts
 	void AppendHeaderLines(notnull array<string> lines, string prefix)
 	{
@@ -1215,14 +1285,27 @@ class DC_SteerSiteSearch
 		lines.Insert(s + "rejects=" + DC_ProbeCsv.CleanField(DescribeRejects()));
 		int gridTotal = m_iGridNx * m_iGridNz;
 		lines.Insert(s + "grid_total=" + gridTotal.ToString());
-		lines.Insert(s + "grid_complete=" + DC_LaunchGuard.BoolText(m_iGridCursor >= gridTotal));
+		lines.Insert(s + "strips_capped=" + m_iStripsCapped.ToString());
+		lines.Insert(s + "grid_complete=" + DC_LaunchGuard.BoolText(IsGridComplete()));
+		lines.Insert(s + "status=" + DC_ProbeCsv.CleanField(GetStatus()));
+		lines.Insert(s + "stage=" + StageName(m_iStage));
+		string pending;
+		if (m_Sampling)
+		{
+			int sampled = m_iSampleIndex;
+			int total = m_aAlong.Count() * m_aLateral.Count();
+			float pendingHeading = m_Sampling.m_fHeadingDeg;
+			pending = string.Format("%1 start %2 heading %3, pre-check %4, %5 of %6 samples", m_Sampling.m_sSource, DC_ProbeArea.FormatVector(m_Sampling.m_vStart, 1), pendingHeading.ToString(-1, 2), DC_LaunchGuard.BoolText(m_bPreCheck), sampled, total);
+		}
+
+		lines.Insert(s + "pending=" + DC_ProbeCsv.CleanField(pending));
 		string nearMiss;
 		if (m_NearMiss)
 			nearMiss = m_NearMiss.DescribeRefusal();
 
 		lines.Insert(s + "near_miss=" + DC_ProbeCsv.CleanField(nearMiss));
 		lines.Insert(s + "first_obstacle=" + DC_ProbeCsv.CleanField(m_sFirstObstacle));
-		lines.Insert(s + "rule=rejects counts every refused candidate by its first failed criterion (cross_zone_pre: a grid strip whose centre tyre pair left the zone's cross window at a zone station, before the full sampling); first_terrain_reject is the first refusal of any candidate, first_explicit_reject of an explicit one; near_miss the fully sampled refused candidate with the largest zone share; grid_complete 0 when the strip cap ended the grid early");
+		lines.Insert(s + "rule=rejects counts every refused candidate by its first failed criterion (cross_zone_pre: a grid strip whose centre tyre pair left the zone's cross window at a zone station, before the full sampling); first_terrain_reject is the first refusal of any candidate, first_explicit_reject of an explicit one; near_miss the fully sampled refused candidate with the largest zone share; grid_complete 1 only when every grid point was visited, the strip cap suppressed no heading (strips_capped 0) and the search was not stopped; status done, time_cap (the probe's search time ran out) or the probe's stop reason (the probe stopped while it searched: stage and pending say where)");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1234,6 +1317,12 @@ class DC_SteerSiteSearch
 
 		int explicitCount = m_aExplicit.Count();
 		string text = string.Format("%1 search: %2 explicit, %3 grid points (%4 with a usable gradient), %5 strips, %6 terrain ok, %7 obstacle-checked (%8 rejected): %9", m_Criteria.m_sKind, explicitCount, m_iGridPoints, m_iGradientOk, m_iStrips, m_iTerrainOk, m_iObstacleChecked, m_iObstacleRejected, found);
+		if (!m_sStopReason.IsEmpty())
+			text += string.Format("; stopped (%1) in stage %2", m_sStopReason, StageName(m_iStage));
+
+		if (m_iStripsCapped > 0)
+			text += string.Format("; %1 headings over the strip cap", m_iStripsCapped);
+
 		if (!m_aRejectReasons.IsEmpty())
 			text += "; terrain refusals " + DescribeRejects();
 

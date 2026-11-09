@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Switch the active build pin, the one every launcher checks (ticket DD-0 / program TKT-0).
 
-    python3 -I -B pin_activate.py PIN_ID [--pin-dir /mnt/e/DriveDiT/pin]
+    python3 -I -B pin_activate.py PIN_ID [--pin-dir DIR]          # default DIR: <DATA_ROOT>/pin (local config)
 
 <pin dir>/ACTIVE holds one line, the active pin id, and `preflight.py --pin-active` checks <pin dir>/pin_<id>.json.
 1.8.0.13 is the interim pin. The plan is to move to 1.9 and its new vehicle physics once 1.9 is stable and
@@ -26,8 +26,8 @@ Then it writes ACTIVE atomically (temp file and rename in the same directory) an
 <old> is "none" when there was no ACTIVE and "invalid" when ACTIVE held no valid id. If PIN_ID is already active,
 it re-checks and writes nothing, unless the last log line does not record a switch to PIN_ID (a previous run
 switched but could not write its line): then it appends "<UTC ISO time> unlogged -> <new> <user>@<host>".
-Writes are allowed only on the E: drive (C: is always refused), as for make_pin.py and preflight.py, and all of
-them go through one opened fd of the pin dir.
+Writes are allowed only on the data drive (the system drive is always refused), as for make_pin.py and
+preflight.py, and all of them go through one opened fd of the pin dir.
 
 Exit codes: 0 activated, already active, or the missing log line repaired; 1 refused (a check failed); 2 usage,
 config, path or lock error; 3 a write failed (the message says whether ACTIVE changed).
@@ -107,16 +107,18 @@ def log_line(old: str, new: str) -> str:
     return "%s %s -> %s %s" % (pinlib.utc_iso(pinlib.utc_now()), old, new, who())
 
 
-def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
+def main(argv=None, write_roots=None) -> int:
+    """write_roots: None for pinlib.DEFAULT_WRITE_ROOTS (the data drive of the local config)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("pin_id", help="the pin to activate, e.g. 1.9.0.12; <pin dir>/pin_<id>.json must exist")
-    ap.add_argument("--pin-dir", default=pinlib.DEFAULT_PIN_DIR,
-                    help="directory holding the pin files, ACTIVE, ACTIVE.log and ACTIVE.lock (default %(default)s)")
+    ap.add_argument("--pin-dir", default=None,
+                    help="directory holding the pin files, ACTIVE, ACTIVE.log and ACTIVE.lock (default <DATA_ROOT>/pin "
+                         "of the local config)")
     args = ap.parse_args(argv)
 
-    pin_dir = os.path.abspath(pinlib.win_to_wsl(args.pin_dir))
-    lock = os.path.join(pin_dir, pinlib.ACTIVE_LOCK_NAME)
     try:
+        pin_dir = os.path.abspath(pinlib.win_to_wsl(args.pin_dir or pinlib.DEFAULT_PIN_DIR))
+        lock = os.path.join(pin_dir, pinlib.ACTIVE_LOCK_NAME)
         new = pinlib.validate_pin_id(args.pin_id)
         # Write guard before anything is read: ACTIVE, its temp file, the lock and the log all live in pin_dir, and
         # every one of them is written through this one directory fd.

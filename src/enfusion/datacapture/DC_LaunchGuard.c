@@ -7,7 +7,8 @@
 //
 // THE RULE (PROBE_DESIGN.md 4.6, checks G1-G15 in this order; the first failure refuses with its reason)
 //   CLI mode: -dcLaunchId <id> is on the command line (System.GetCLIParam). The id must be a launch id, -profile must
-//     be visible and lie inside the required profile root (E:/DriveDiT); in Workbench the resolved $profile must lie
+//     be visible and lie inside the required profile root (the data root, which tools/deploy_addon.py writes in from
+//     the local config, PROFILE_ROOT_TOKEN, DD-22); in Workbench the resolved $profile must lie
 //     there too, and a $profile Workbench cannot resolve refuses (as in the escape). $profile:dc_launch/
 //     launch_<id>.json must exist and be a valid launch record (status ok, same id, exe wb in Workbench and client
 //     outside). tools/launch/wb_R1.bat copies the preflight record there and passes the id (DD-0 follow-up).
@@ -28,7 +29,7 @@
 //   holds the host name).
 //
 // Evaluate() never writes and never prints; the caller logs. The E-11 line the runner prints shows $profile, which
-// is a C: path with the Windows user name when Workbench was started from Steam: that line is never pasted into a
+// is a system-drive path with the Windows user name when Workbench was started from Steam: that line is never pasted into a
 // PR, a commit or a report.
 // ============================================================================
 
@@ -157,7 +158,7 @@ class DC_LaunchGuard
 
 		// G8: a visible command line without -dcLaunchId means Workbench was not started by the patched launcher
 		if (info.m_bCliProfile)
-			return Refuse(info, "started without -dcLaunchId: start Workbench with E:\\DriveDiT\\tools\\launch\\wb_R1.bat");
+			return Refuse(info, "started without -dcLaunchId: start Workbench with @DD_PROFILE_ROOT@/tools/launch/wb_R1.bat");
 
 		// G9
 		if (!allowWorkbenchWithoutLaunchId)
@@ -368,7 +369,7 @@ class DC_LaunchGuard
 
 	//------------------------------------------------------------------------------------------------
 	//! Same rule as SCR_MLDataCollector.NormalizePathForCompare (DD-1, SCR_MLDataCollector.c:201): trim, drop '"',
-	//! '\' -> '/', lower case, no trailing '/'. "E:\DriveDiT\" -> "e:/drivedit"
+	//! '\' -> '/', lower case, no trailing '/'. "X:\DataRoot\" -> "x:/dataroot"
 	static string NormalizePathForCompare(string path)
 	{
 		string normalized = path.Trim();

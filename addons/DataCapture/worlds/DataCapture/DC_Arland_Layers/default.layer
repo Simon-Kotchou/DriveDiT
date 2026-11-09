@@ -40,7 +40,7 @@ SCR_BaseGameMode GameMode_DataCapture : "{1B76F75A3175E85C}Prefabs/MP/Modes/Plai
    m_fMapSizeTolM 256
    m_fLatitudeDeg 47.411
    m_fLatitudeTolDeg 0.05
-   m_sRequiredProfileRoot "E:/DriveDiT"
+   m_sRequiredProfileRoot "@DD_PROFILE_ROOT@"
    m_bAllowWorkbenchWithoutLaunchId 0
    m_bEscapeBindToProcessStart 1
    m_fImageHz 5

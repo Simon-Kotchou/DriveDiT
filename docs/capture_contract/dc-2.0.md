@@ -106,9 +106,9 @@ field. They are never interchanged: `cain` and `eden` are not map ids.
 
 | map_id | terrain | Root world | Capture world | Splits | Role | Storage root |
 |---|---|---|---|---|---|---|
-| `arland` | `Arland` | `{A9806AF617972E97}worlds/Arland/Arland.ent` | worlds/DataCapture/DC_Arland.ent | `train`, `val_c`, `val_l`, `a0`, `a_stress` | TRAIN + VAL-C + VAL-L layout diagnostic + A0/A-stress references | `E:\DriveDiT\captures\arland\` |
-| `kolguyev` | `Cain` | `{1EA95DAE3230BEB0}worlds/Cain/Cain.ent` | worlds/DataCapture/DC_Kolguyev.ent (DD-2) | `k_val`, `k_rep` | OOD-VAL: K-VAL selection within its budget, K-REP report only (pending D4); never training | `E:\DriveDiT\captures\kolguyev\` |
-| `everon` | `Eden` | `{853E92315D1D9EFE}worlds/Eden/Eden.ent` | worlds/DataCapture/DC_Everon.ent (DD-2-everon, just before T4-E) | `everon_harness`, `everon_test` | SEALED TEST (zero-shot); every Eden-rooted world counts as Everon | `E:\DriveDiT\heldout\everon\SEALED\` |
+| `arland` | `Arland` | `{A9806AF617972E97}worlds/Arland/Arland.ent` | worlds/DataCapture/DC_Arland.ent | `train`, `val_c`, `val_l`, `a0`, `a_stress` | TRAIN + VAL-C + VAL-L layout diagnostic + A0/A-stress references | `<DATA_ROOT_WIN>\captures\arland\` |
+| `kolguyev` | `Cain` | `{1EA95DAE3230BEB0}worlds/Cain/Cain.ent` | worlds/DataCapture/DC_Kolguyev.ent (DD-2) | `k_val`, `k_rep` | OOD-VAL: K-VAL selection within its budget, K-REP report only (pending D4); never training | `<DATA_ROOT_WIN>\captures\kolguyev\` |
+| `everon` | `Eden` | `{853E92315D1D9EFE}worlds/Eden/Eden.ent` | worlds/DataCapture/DC_Everon.ent (DD-2-everon, just before T4-E) | `everon_harness`, `everon_test` | SEALED TEST (zero-shot); every Eden-rooted world counts as Everon | `<DATA_ROOT_WIN>\heldout\everon\SEALED\` |
 
 - `map_id` is declared by the capture world (DC_Arland gives `arland`) and verified at session start by the L8
   fingerprint: world size and latitude must match the map card (`program/maps/map_cards_v1.json`). A mismatch logs an
@@ -135,7 +135,7 @@ field. They are never interchanged: `cain` and `eden` are not map ids.
     normalisation or model-selection set, curriculum statistic or FD reference (L1, L2);
   - before the sealed run only non-learned drivers run on Everon (L5), and behavioural harness metrics go to the sealed
     report store unseen (L12);
-  - storage only under `E:\DriveDiT\heldout\everon\SEALED\` (L7);
+  - storage only under `<DATA_ROOT_WIN>\heldout\everon\SEALED\` (L7);
   - **loaders refuse Everon outside the sealed evaluation path.** Every reader, dataset builder, manifest builder and
     route loader (DD-5-min, DD-6, DD-11, `drivedit_nav.load_route`) raises unless it is called on the sealed
     evaluation path (`sealed_eval=True` in Python, `--sealed-eval` on a command line) when it meets `map_id`
@@ -201,15 +201,15 @@ commit line for it.
 - `$profile:DC_Sessions/` holds dc-2.0 sessions only. DD-1's dc-1.0 `$profile:DrivingData/session_<n>/` folders and
   DD-4-probe's `$profile:DC_Probes/` lie beside it and are never read by the dc-2.0 harvester, reader or validator,
   so a Play that runs a dc-1.0 producer and a dc-2.0 session never mixes their files.
-- `$profile` must lie under `E:\DriveDiT\` (the launch guard, section 5, and DD-1's profile guard). The C: drive is
+- `$profile` must lie under `<DATA_ROOT_WIN>\` (the launch guard, section 5, and DD-1's profile guard). The system drive is
   never a capture, scratch or harvest target.
-- The harvester moves a sealed session, by rename on E:, to:
-  - `E:\DriveDiT\captures\arland\<YYYY-MM-DD>\<trial_id>\<session_id>\` or
-    `E:\DriveDiT\captures\kolguyev\<YYYY-MM-DD>\<trial_id>\<session_id>\` on PASS;
-  - `E:\DriveDiT\captures\_rejected\<session_id>\` on FAIL (Arland and Kolguyev only);
-  - `E:\DriveDiT\heldout\everon\SEALED\{harness,harness_reports_sealed,openloop_test,closedloop_test}\...` for every
+- The harvester moves a sealed session, by rename on the data drive, to:
+  - `<DATA_ROOT_WIN>\captures\arland\<YYYY-MM-DD>\<trial_id>\<session_id>\` or
+    `<DATA_ROOT_WIN>\captures\kolguyev\<YYYY-MM-DD>\<trial_id>\<session_id>\` on PASS;
+  - `<DATA_ROOT_WIN>\captures\_rejected\<session_id>\` on FAIL (Arland and Kolguyev only);
+  - `<DATA_ROOT_WIN>\heldout\everon\SEALED\{harness,harness_reports_sealed,openloop_test,closedloop_test}\...` for every
     Everon session, PASS or FAIL; Everon never lands in `captures\`;
-  - `E:\DriveDiT\compat19\<pin_id>\` for any session from an experimental (`-exp`) pin; never `captures\`.
+  - `<DATA_ROOT_WIN>\compat19\<pin_id>\` for any session from an experimental (`-exp`) pin; never `captures\`.
 - C03 checks the map-to-root mapping; C24 checks that no `heldout\` path appears outside the sealed test manifest.
 - `$profile:DC_STOP` is the stop file of r2 3.9 (supervisor, DD-9): when it exists at a heartbeat, the session ends the
   episode, writes `session_end.json` (`end_reason` `dc_stop`) and requests close.
@@ -223,7 +223,7 @@ Nothing is written, not even a directory, unless the guard passes in one of two 
 
 Mode `cli` (every client session; Workbench when TBD-6 is positive):
 1. `System.GetCLIParam("dcLaunchId", id)` succeeds and `id` is a launch id (20-64 characters of `[0-9A-Za-z-]`);
-2. `-profile` is visible and lies inside `E:\DriveDiT`, and in Workbench the `$profile` resolved by
+2. `-profile` is visible and lies inside `<DATA_ROOT_WIN>`, and in Workbench the `$profile` resolved by
    `Workbench.GetAbsolutePath` lies there too; a `$profile` Workbench cannot resolve refuses;
 3. `FileIO.FileExists("$profile:dc_launch/launch_" + id + ".json")` is true. The launchers are meant to copy the
    preflight record there, so a Workbench or client started any other way never writes. As of DD-0 `6f045b1`
@@ -237,7 +237,7 @@ Mode `cli` (every client session; Workbench when TBD-6 is positive):
 Mode `wb_escape` (Workbench only, for a Play that cannot see the command line at all, TBD-6 negative):
 1. no command-line parameter is visible (a visible command line without `-dcLaunchId` always refuses: Workbench was
    then started by hand), and the escape is enabled on the capture component;
-2. the resolved `$profile` lies inside `E:\DriveDiT` (refused when it cannot be resolved);
+2. the resolved `$profile` lies inside `<DATA_ROOT_WIN>` (refused when it cannot be resolved);
 3. the newest `-wb-` record in `$profile:dc_launch` is valid (as in cli item 4), younger than the deploy
    (`DC_BuildInfo.DEPLOY_UTC`), and was written by the launch that started this Workbench process: at most 300 s
    before the process start, estimated as `System.GetUnixTime() - System.GetTickCount() / 1000`, and not after it
@@ -1075,7 +1075,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `pin.pin_sha256` | str | - | yes | sha256 of the pin file, from the launch record. |
 | `pin.build_key` | str | - | yes, null ok | Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a) from a dd-launch/2 record; null while launch records are dd-launch/1. session.json is never edited after it is written: the harvester then writes build_key (from the pin) into its sidecar harvest.json, and C02 reads it from there and refuses a session that has neither. |
 | `pin.channel` | enum | - | yes | stable or experimental (dd-launch/1 records: stable). Values: stable, experimental. |
-| `pin.launch_id` | str | - | yes | -dcLaunchId (launch_mode cli) or the id of the matched record (wb_escape); joins the launch record in E:\DriveDiT\pin\launches. |
+| `pin.launch_id` | str | - | yes | -dcLaunchId (launch_mode cli) or the id of the matched record (wb_escape); joins the launch record in <DATA_ROOT_WIN>\pin\launches. |
 | `pin.launch_schema` | str | - | yes | Schema of the launch record read (dd-launch/1, later /2). |
 | `pin.game_buildid` | int | - | yes | Game Steam buildid from the launch record. |
 | `pin.tools_buildid` | int | - | yes | Tools Steam buildid from the launch record. |
@@ -1146,7 +1146,7 @@ means the key is always present; "yes, null ok" allows the value null; Req = no 
 | `launch_guard.record_path` | str | - | yes | The matched record, $profile:dc_launch/launch_<id>.json. |
 | `launch_guard.record_launch_id` | str | - | yes | launch_id inside the matched record (equals pin.launch_id). |
 | `launch_guard.cli_seen` | bool | - | yes | 1 when System.GetCLIParam saw -dcLaunchId or -profile (E-11). |
-| `launch_guard.profile_root_ok` | bool | - | yes | 1: -profile (when visible) and the resolved $profile lie inside E:\DriveDiT. |
+| `launch_guard.profile_root_ok` | bool | - | yes | 1: -profile (when visible) and the resolved $profile lie inside <DATA_ROOT_WIN>. |
 | `launch_guard.escape_binding` | str | - | yes, null ok | wb_escape only: process_start (the record was written by the launch that started this Workbench; the default) or newest_after_deploy (binding switched off for one Play); null in cli mode. |
 
 ### 10.2 `session_end.json`

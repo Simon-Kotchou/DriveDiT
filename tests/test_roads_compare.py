@@ -7,7 +7,7 @@
 Each case writes a small decoder TSV and an e08a play directory (run header and footer, arland_roads.csv,
 arland_road_points.csv, arland_tiles.csv, arland_roads_footer.txt; probe_common.write_synthetic_play) into a fresh
 probe_common.make_temp_dir() directory
-(RAM or E:, never /tmp) and removes it afterwards:
+(RAM or the data drive, never /tmp) and removes it afterwards:
 
   - 3 engine roads on the 3 drivable decoder polylines (offset, resampled, one reversed) -> PASS;
   - the same with one decoder road split into two engine roads -> still PASS (contained), same km;
@@ -78,8 +78,8 @@ def engine_roads(split=False):
 
 def write_text(path, lines):
     real = os.path.realpath(path)
-    if not (real.startswith("/dev/shm/") or real.startswith("/mnt/e/")):
-        raise AssertionError("refusing to write a fixture outside /dev/shm/ and /mnt/e/: %s" % real)
+    if not (real.startswith("/dev/shm/") or probe_common.write_refusal(real) is None):
+        raise AssertionError("refusing to write a fixture outside /dev/shm/ and the data drive: %s" % real)
     with open(path, "w", encoding="ascii", newline="\n") as f:
         f.writelines(line + "\n" for line in lines)
 

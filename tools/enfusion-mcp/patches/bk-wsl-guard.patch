@@ -6,7 +6,7 @@
  
 +/**
 + * DriveDiT local WSL patch: Workbench is a Windows process, so absolute paths the server computed
-+ * in WSL form ("/mnt/c/Users/...") must reach it as drive paths ("C:/Users/..."), e.g. the
++ * in WSL form ("/mnt/x/Data/...") must reach it as drive paths ("X:/Data/..."), e.g. the
 + * absDestPath that game_duplicate / wb_entity_duplicate pass to ResourceManager.RegisterResourceFile
 + * (documented as `string absFilePath`). Only whole-string values that start with /mnt/<letter>/ are
 + * rewritten; resource paths ("Prefabs/...", "{GUID}...") are untouched.
@@ -49,12 +49,12 @@
        throw new WorkbenchError("No config provided — cannot recover handlers.", "LAUNCH_FAILED");
      }
 +    if (process.env.ENFUSION_MCP_NO_AUTO_INSTALL === "1") {
-+      // DriveDiT local guard: never copy handler scripts implicitly (ENFUSION_PROJECT_PATH is on C:,
++      // DriveDiT local guard: never copy handler scripts implicitly (ENFUSION_PROJECT_PATH may be the system drive,
 +      // and findFallbackGproj() picks the alphabetically-first addon when ENFUSION_DEFAULT_MOD is unset).
 +      throw new WorkbenchError(
 +        `Workbench is running but the EnfusionMCP handler scripts are not loaded, and automatic ` +
 +          `handler installation is disabled (ENFUSION_MCP_NO_AUTO_INSTALL=1). Load the DriveDiT_EMCP ` +
-+          `handler addon (see /mnt/e/drivedit_realign/enfusion/mcp-setup.md) and restart Workbench.`,
++          `handler addon (see tools/enfusion-mcp/README.md of the DriveDiT repo) and restart Workbench.`,
 +        "LAUNCH_FAILED"
 +      );
 +    }

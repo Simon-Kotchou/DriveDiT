@@ -4,7 +4,9 @@ is a stub child that echoes. The fixture dumps are synthetic (tests/fixtures/dum
 
     python3 -I -B -m unittest discover -s tools/enfusion-mcp/tests -v
 
-Temp trees go under $DD_PIN_TEST_TMP, else /dev/shm, and are deleted afterwards.
+Temp trees go under $DD_PIN_TEST_TMP, else /dev/shm, and are deleted afterwards. Every test reads the synthetic local
+config of tools/pin/tests (DD-22; data drive /mnt/x, system drive /mnt/z), never this machine's. The BK source check
+runs only when $DD_TEST_BK_SRC names a pinned BK checkout's src/tools.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ EMCP = os.path.dirname(HERE)
 REPO = os.path.dirname(os.path.dirname(EMCP))
 FIX = os.path.join(HERE, "fixtures")
 PIN_TESTS = os.path.join(REPO, "tools", "pin", "tests")
-BK_SRC = "/mnt/e/drivedit_realign/mcp/build/enfusion-mcp-BK/src/tools"
+BK_SRC = os.environ.get("DD_TEST_BK_SRC", "")   # opt-in: <MCP root>/build/enfusion-mcp-BK/src/tools
 
 
 def _load(name, path):
@@ -131,9 +133,7 @@ class PinCase(base.TmpCase):
         for name, value in (("DEPLOY_ROOTS", {"stable": self.project, "cold-1.8.0.13": self.cold_project}),
                             ("WB_LAUNCH", {"stable": {"profile": self.profile, "gproj": self.gproj,
                                                       "launcher": "wb_R1.bat"}})):
-            saved = getattr(pinlib, name)
-            setattr(pinlib, name, value)
-            self.addCleanup(setattr, pinlib, name, saved)
+            base.override(self, pinlib, name, value)
 
     def pin_file(self, pin_id):
         return os.path.join(self.fs.out_dir, "pin_%s.json" % pin_id)
@@ -308,7 +308,7 @@ class IndexDiffTests(PinCase):
         self.addCleanup(shutil.rmtree, outside, True)
         link = os.path.join(self.tmp, "link")
         os.symlink(outside, link)
-        for tsv in ("/mnt/c/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
+        for tsv in ("/mnt/z/Synthetic Steam (x86)/__dd14a_never_written__/d.tsv", os.path.join(link, "d.tsv")):
             self.assertEqual(self.diff(expect, "--tsv", tsv)[0], 2, tsv)
         cwd = os.getcwd()
         os.chdir(outside)
@@ -571,10 +571,10 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "no Workbench exe hash", dict(self.ident, exe_sha256=None))
 
     def test_another_profile_or_project(self):
-        cmd = '"%s" -profile "D:\\OneDrive\\ArmaReforgerWorkbench" -gproj "%s" -dcLaunchId %s' % (
+        cmd = '"%s" -profile "Y:\\Game Library\\OneDrive\\ArmaReforgerWorkbench" -gproj "%s" -dcLaunchId %s' % (
             self.exe, self.gproj, self.LID)
         self.refused(self.probes(cmd=cmd), "-profile is")
-        cmd = '"%s" -profile "%s" -gproj "D:\\DataTest\\addon.gproj" -dcLaunchId %s' % (self.exe, self.profile, self.LID)
+        cmd = '"%s" -profile "%s" -gproj "Y:\\Game Library\\DataTest\\addon.gproj" -dcLaunchId %s' % (self.exe, self.profile, self.LID)
         self.refused(self.probes(cmd=cmd), "-gproj is")
 
     def test_started_by_hand(self):
@@ -611,7 +611,7 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "0 console.log(s)")
         self.write_log(gproj=os.path.join(self.tmp, "other.gproj"))
         self.refused(self.probes(), "names another -gproj")
-        self.write_log(cwd="C:\\Elsewhere\\Workbench\\")
+        self.write_log(cwd="Z:\\Synthetic Steam (x86)\\Elsewhere\\Workbench\\")
         self.refused(self.probes(), "has working directory")
         self.write_log()
         self.write_log(name="logs_2026-11-05_22-25-00", start=REC_UNIX + 30)
@@ -633,15 +633,20 @@ class HandshakeTests(PinCase):
         self.refused(self.probes(), "is not the newest log")
 
     def test_windows_probe_environment(self):
-        p = eh.WindowsProbes(win_temp="/mnt/e/DriveDiT/tmp/mcp")
+        p = eh.WindowsProbes(win_temp="/mnt/x/DataRoot/tmp/mcp")
         env = p.win_env()
-        self.assertEqual(env["WSLENV"], eh.win_env("/mnt/e/DriveDiT/tmp/mcp")["WSLENV"])
-        self.assertEqual((env["TEMP"], env["TMP"]), ("/mnt/e/DriveDiT/tmp/mcp", "/mnt/e/DriveDiT/tmp/mcp"))
+        self.assertEqual(env["WSLENV"], eh.win_env("/mnt/x/DataRoot/tmp/mcp")["WSLENV"])
+        self.assertEqual((env["TEMP"], env["TMP"]), ("/mnt/x/DataRoot/tmp/mcp", "/mnt/x/DataRoot/tmp/mcp"))
         self.assertEqual(env["WSLENV"].split(":")[-2:], ["TEMP/p", "TMP/p"])
-        self.assertEqual(eh.parse_env_line("TEMP=E:\\DriveDiT\\tmp\\mcp\tTMP=E:\\DriveDiT\\tmp\\mcp\r\n"),
-                         {"TEMP": "E:\\DriveDiT\\tmp\\mcp", "TMP": "E:\\DriveDiT\\tmp\\mcp"})
-        with self.assertRaises(OSError):   # a temp dir off E: is refused before cscript runs
+        self.assertEqual(eh.parse_env_line("TEMP=X:\\DataRoot\\tmp\\mcp\tTMP=X:\\DataRoot\\tmp\\mcp\r\n"),
+                         {"TEMP": "X:\\DataRoot\\tmp\\mcp", "TMP": "X:\\DataRoot\\tmp\\mcp"})
+        with self.assertRaises(OSError):   # a temp dir off the data drive is refused before cscript runs
             eh.WindowsProbes(win_temp=self.tmp).check_env()
+        # DD-22: the Windows tools and the temp dir come from the local config
+        self.assertEqual((p.netstat, p.cscript), (base.SYSTEM_DRIVE + "/Windows/System32/NETSTAT.EXE",
+                                                  base.SYSTEM_DRIVE + "/Windows/System32/cscript.exe"))
+        self.assertEqual(eh.MCP_WIN_TEMP, "/mnt/x/DataRoot/tmp/mcp")
+        self.assertEqual(eh.IPCONFIG, base.SYSTEM_DRIVE + "/Windows/System32/ipconfig.exe")
 
     def test_cli_main_reads_only(self):
         before = sorted(os.listdir(self.pin_dir))
@@ -655,9 +660,9 @@ class HandshakeTests(PinCase):
         self.assertEqual(sorted(os.listdir(self.pin_dir)), before)
 
     def test_parsing(self):
-        argv = eh.split_cmdline('"C:\\Program Files (x86)\\x.exe" -profile "E:\\a b" -forceUpdate -maxFPS 60 -dcLaunchId X')
-        self.assertEqual(argv[0], "C:\\Program Files (x86)\\x.exe")
-        self.assertEqual(eh.cli_args(argv[1:]), {"profile": "E:\\a b", "forceupdate": "", "maxfps": "60",
+        argv = eh.split_cmdline('"Z:\\Synthetic Steam (x86)\\x.exe" -profile "X:\\DataRoot\\a b" -forceUpdate -maxFPS 60 -dcLaunchId X')
+        self.assertEqual(argv[0], "Z:\\Synthetic Steam (x86)\\x.exe")
+        self.assertEqual(eh.cli_args(argv[1:]), {"profile": "X:\\DataRoot\\a b", "forceupdate": "", "maxfps": "60",
                                                  "dclaunchid": "X"})
         self.assertEqual(eh.listening_pids("  TCP    0.0.0.0:57750   0.0.0.0:0   LISTENING   9\n"
                                            "  TCP    [::]:5775       [::]:0      LISTENING   7\n", 5775), {7})
@@ -710,7 +715,7 @@ WRITE_CALLS = [
     ("wb_localization", {"action": a}) for a in ("insert", "delete", "modify")] + [
     ("wb_clipboard", {"action": a}) for a in ("copy", "cut", "paste", "pasteAtCursor", "duplicate", "hasCopied")] + [
     ("wb_component", {"action": a, "entityName": "x"}) for a in ("add", "remove")] + [
-    ("wb_projects", {"action": "open", "name": "E:\\DriveDiT\\addons\\DataCapture\\worlds\\x.ent"}),
+    ("wb_projects", {"action": "open", "name": "X:\\DataRoot\\addons\\DataCapture\\worlds\\x.ent"}),
     ("wb_entity_select", {"action": "select", "name": "x"}), ("wb_entity_select", {"action": "deselect"}),
     ("wb_entity_select", {"action": "clear"})]
 PATH_CALLS = [("project", {"action": "browse"}), ("project", {"action": "read", "path": "Scripts/Game/X.c"}),
@@ -833,9 +838,9 @@ class GatePolicyTests(unittest.TestCase):
         self.assertEqual(bk.identifier_tokens("worlds/EdenTerrain_v2"), ["worlds", "eden", "terrain", "v", "2"])
 
     def test_table_matches_the_bk_source(self):
-        # Opt-in: the pinned BK source on E: (absent in CI). Every BK tool is classified (allowed or denied).
-        if not os.path.isdir(BK_SRC):
-            self.skipTest("BK source not present")
+        # Opt-in: the pinned BK source ($DD_TEST_BK_SRC; absent in CI). Every BK tool is classified (allowed or denied).
+        if not BK_SRC or not os.path.isdir(BK_SRC):
+            self.skipTest("set DD_TEST_BK_SRC to a pinned BK checkout's src/tools to run this test")
         names = set()
         for fn in os.listdir(BK_SRC):
             if fn.endswith(".ts"):
@@ -912,10 +917,8 @@ class WrapperTests(PinCase):
         self.assertEqual(subprocess.run(["bash", "-n", self.WRAPPER]).returncode, 0)
 
     def test_print_env_runs_the_gate(self):
-        # The wrapper accepts a work root only on a Windows drive other than C:, so this runs only with
-        # DD_PIN_TEST_TMP on such a drive.
-        if not re.match(r"^/mnt/[abd-z]/", os.path.realpath(self.tmp)):
-            self.skipTest("temp dir is not on a /mnt/<d..z> drive")
+        # The wrapper accepts a work root the write boundary allows: RAM here (the synthetic config's drives are
+        # mounted nowhere).
         dist = os.path.join(self.root, "build", "enfusion-mcp-BK", "dist")
         os.makedirs(os.path.join(dist, "workbench"))
         os.makedirs(os.path.join(dist, "tools"))
@@ -925,12 +928,164 @@ class WrapperTests(PinCase):
         os.chmod(node, 0o755)
         env = {"PATH": "/usr/bin:/bin", "EMCP_ROOT": self.root, "NODE_BIN": node, "ENFUSION_WORKBENCH_HOST": "127.0.0.1",
                "EMCP_PIN_DIR": self.pin_dir, "EMCP_PIN": "1.8.0.13", "HOME": self.tmp,
-               "DD_PIN_TOOLS": os.path.join(REPO, "tools", "pin")}
+               "DD_PIN_TOOLS": os.path.join(REPO, "tools", "pin"), "DRIVEDIT_LOCAL_CONFIG": base.LOCAL_CONFIG_FIXTURE}
         r = subprocess.run(["bash", self.WRAPPER, "--print-env"], env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("REFUSED", r.stderr)
         self.assertIn("has no API index", r.stderr)
         self.assertEqual(r.stdout, "")
+
+
+class LazyPinToolsTests(unittest.TestCase):
+    """Codex round 2 row 15: importing endpoint_handshake (and mcp_gate) in an installed MCP layout reads no config;
+    tools/pin is found on first use."""
+
+    def test_import_reads_no_config(self):
+        tmp = tempfile.mkdtemp(prefix="dd22-lazy-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        installed = os.path.join(tmp, "mcp")   # no tools/pin next to it, no local_config.py
+        os.makedirs(installed)
+        shutil.copyfile(os.path.join(EMCP, "endpoint_handshake.py"), os.path.join(installed, "endpoint_handshake.py"))
+        code = ("import importlib.util, sys\n"
+                "spec = importlib.util.spec_from_file_location('eh_lazy', sys.argv[1])\n"
+                "eh = importlib.util.module_from_spec(spec); spec.loader.exec_module(eh)\n"
+                "print('imported')\n"
+                "try:\n    eh.pinlib.PinError\nexcept SystemExit as exc:\n    print('first use:', exc)\n")
+        env = {k: v for k, v in os.environ.items() if k != "DD_PIN_TOOLS"}
+        env["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(tmp, "no-such.local.env")
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code, os.path.join(installed, "endpoint_handshake.py")],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[0], "imported")
+        self.assertIn("first use: endpoint_handshake: cannot find tools/pin", r.stdout)
+
+    def test_the_lazy_modules_are_the_pin_tools(self):
+        self.assertIs(eh.pinlib.PinError, pinlib.PinError)
+        self.assertIs(gate_mod.pinlib.check_write_path, pinlib.check_write_path)
+
+
+class ShellGuardTests(unittest.TestCase):
+    """The MCP shell scripts write only where the write boundary allows (tools/local_config.py check-write), and
+    launch-workbench.sh has no way around the pin preflight (Codex round 2 rows 2, 14)."""
+
+    def run_script(self, name, *args, **env):
+        e = {"PATH": "/usr/bin:/bin", "HOME": "/dev/shm", "DRIVEDIT_LOCAL_CONFIG": base.LOCAL_CONFIG_FIXTURE}
+        e.update(env)
+        return subprocess.run(["bash", os.path.join(EMCP, name)] + list(args), env=e, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_work_roots_off_the_boundary_are_refused(self):
+        never = "/tmp/__dd22_emcp_never_written__"
+        for name in ("enfusion-mcp-wsl.sh", "build-bk.sh"):
+            for root in (never, "relative/root", base.SYSTEM_DRIVE + "/mcp", base.DATA_DRIVE + "mcp"):
+                r = self.run_script(name, "--print-env" if name.startswith("enfusion") else "--smoke",
+                                    EMCP_ROOT=root)
+                self.assertEqual(r.returncode, 2, (name, root, r.stderr))
+                self.assertIn("refusing EMCP_ROOT=%s" % root, r.stderr)
+        self.assertFalse(os.path.exists(never))
+
+    def test_launch_workbench_has_no_preflight_bypass(self):
+        with open(os.path.join(EMCP, "launch-workbench.sh")) as fh:
+            code = [ln for ln in fh.read().splitlines() if not ln.lstrip().startswith("#")]
+        self.assertFalse([ln for ln in code if "SKIP" in ln])
+        # a gproj off the boundary (the repo's own, on a drive the synthetic config does not verify) is refused
+        # before tasklist, the preflight or Workbench is touched
+        gproj = os.path.join(REPO, "addons", "DataCapture", "addon.gproj")
+        r = self.run_script("launch-workbench.sh", gproj, WB_SKIP_PREFLIGHT="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("refusing gproj", r.stderr)
+
+
+
+class DerivedDirTests(unittest.TestCase):
+    """Codex round 3 F5: one derived_dir function, the same text in the four shell scripts, refuses a derived home,
+    temp, cache or build dir that is a symlink, lies below one, or lies outside the checked root."""
+
+    SCRIPTS = (os.path.join(EMCP, "build-bk.sh"), os.path.join(EMCP, "enfusion-mcp-wsl.sh"),
+               os.path.join(EMCP, "launch-workbench.sh"), os.path.join(REPO, "tools", "pin", "cold_copy.sh"))
+
+    @staticmethod
+    def function(path):
+        with open(path) as fh:
+            text = fh.read()
+        m = re.search(r"(?ms)^derived_dir\(\) \{.*?^\}$", text)
+        return m.group(0) if m else None
+
+    def test_one_function_everywhere(self):
+        bodies = {path: self.function(path) for path in self.SCRIPTS}
+        self.assertTrue(all(bodies.values()), bodies)
+        self.assertEqual(len(set(bodies.values())), 1)
+
+    def test_it_refuses_redirected_dirs(self):
+        tmp = tempfile.mkdtemp(prefix="dd22-derived-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "root")
+        os.makedirs(os.path.join(root, "build"))
+        os.symlink("/tmp", os.path.join(root, "home"))
+        os.makedirs(os.path.join(tmp, "elsewhere"))
+        os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(root, "xdg"))
+        with open(os.path.join(root, "file"), "w") as fh:
+            fh.write("x")
+        fn = self.function(self.SCRIPTS[0])
+        cases = {"build": 0, "build/new/deeper": 0, "new": 0, "home": 1, "home/.cache": 1, "xdg/cache": 1,
+                 "file": 1, "file/sub": 1, "../outside": 1}
+        for rel, want in cases.items():
+            d = os.path.join(root, rel) if not rel.startswith("..") else os.path.join(root, rel)
+            r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % fn, "_", d, root],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, want, (rel, r.stderr))
+        r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % fn, "_", "/tmp/x", root],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not below", r.stderr)
+        r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % fn, "_", root + "/build", root + "/"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+    def test_build_bk_checks_every_dir_it_writes_into(self):
+        # Codex round 4: data/api, the patch record and the build outputs are checked, not only their parents
+        with open(self.SCRIPTS[0]) as fh:
+            text = fh.read()
+        m = re.search(r'(?ms)^for d in (.*?); do\n  derived_dir "\$d" "\$ROOT"', text)
+        self.assertIsNotNone(m)
+        checked = re.findall(r'"([^"]+)"', m.group(1))
+        for want in ("$HOME", "$TMPDIR", "$NODE_COMPILE_CACHE", "$npm_config_cache", "$npm_config_logs_dir",
+                     "$PLAYWRIGHT_BROWSERS_PATH", "$XDG_CACHE_HOME", "$XDG_CONFIG_HOME", "$XDG_STATE_HOME",
+                     "$XDG_DATA_HOME", "$ROOT/build", "$BUILD", "$BUILD/node_modules", "$BUILD/dist", "$BUILD/.git",
+                     "$APPLIED_DIR", "$DATA", "$DATA/api", "$DATA/patterns", "$DATA/recipes", "$DATA/wiki"):
+            self.assertIn(want, checked)
+        self.assertLess(text.index('derived_dir "$d" "$ROOT"'), text.index('git clone'))
+        # no file is written by a fixed name: only through put_file or a fresh mktemp file
+        self.assertNotIn(".part", text)
+        self.assertNotIn(': >"', text)
+
+    def test_put_file_replaces_a_stale_symlink(self):
+        tmp = tempfile.mkdtemp(prefix="dd22-putfile-", dir=base._tmp_base())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        d = os.path.join(tmp, "api")
+        os.makedirs(d)
+        outside = os.path.join(tmp, "outside.json")
+        with open(outside, "w") as fh:
+            fh.write("untouched\n")
+        os.symlink(outside, os.path.join(d, "groups.json"))
+        with open(self.SCRIPTS[0]) as fh:
+            fn = re.search(r"(?ms)^put_file\(\) \{.*?^\}$", fh.read()).group(0)
+        r = subprocess.run(["bash", "-c", '%s\nprintf "new\\n" | put_file "$1" groups.json' % fn, "_", d],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.islink(os.path.join(d, "groups.json")))
+        with open(os.path.join(d, "groups.json")) as fh:
+            self.assertEqual(fh.read(), "new\n")
+        with open(outside) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+        self.assertEqual(os.listdir(d), ["groups.json"])
+        # the derived_dir check refuses a data/api that is a stale symlink to an old location
+        os.symlink("/tmp", os.path.join(tmp, "api_old"))
+        r = subprocess.run(["bash", "-c", 'NAME=t\n%s\nderived_dir "$1" "$2"' % self.function(self.SCRIPTS[0]), "_",
+                            os.path.join(tmp, "api_old"), tmp], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is a symlink", r.stderr)
 
 
 if __name__ == "__main__":

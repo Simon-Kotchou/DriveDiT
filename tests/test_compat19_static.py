@@ -96,7 +96,7 @@ class CC02Tests(unittest.TestCase):
             self.assertEqual(rc, 0, out)
 
 
-REAL_DUMP = os.environ.get("DD14A_SCRIPT_DUMP", "/mnt/e/drivedit_realign/program/1_9/work/dl/sd_stable")
+REAL_DUMP = os.environ.get("DD14A_SCRIPT_DUMP", "")   # opt-in: <REALIGN_ROOT>/program/1_9/work/dl/sd_stable
 
 
 class RealDumpSpotChecks(unittest.TestCase):
@@ -117,7 +117,7 @@ class RealDumpSpotChecks(unittest.TestCase):
     )
 
     def setUp(self):
-        if not os.path.isdir(os.path.join(REAL_DUMP, ".git")):
+        if not REAL_DUMP or not os.path.isdir(os.path.join(REAL_DUMP, ".git")):
             self.skipTest("the official script dump is not present (%s)" % REAL_DUMP)
         import subprocess
         self.subprocess = subprocess
@@ -199,21 +199,19 @@ class TsvGuardTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, "cc02.tsv")))
 
     def test_c_drive_stand_in_refused(self):
-        pinlib = base.pinlib
-        fake_c = os.path.join(self.tmp, "fake_c_drive")
-        os.makedirs(fake_c)
-        saved = pinlib.FORBIDDEN_WRITE_PREFIXES
-        pinlib.FORBIDDEN_WRITE_PREFIXES = saved + (os.path.realpath(fake_c).lower() + "/",)
-        self.addCleanup(setattr, pinlib, "FORBIDDEN_WRITE_PREFIXES", saved)
-        rc, out = self.run_api(os.path.join(fake_c, "cc02.tsv"))
-        self.assertEqual(rc, 2, out)
-        self.assertIn("refusing to write on C:", out)
-        self.assertEqual(os.listdir(fake_c), [])
+        # a fake drvfs mount in the temp dir whose root holds Windows/System32: the write boundary refuses it by
+        # itself, although the temp dir is an allowed root (boundary_vectors.patched_system_volume)
+        with base.bv.patched_system_volume(base.lc, self.tmp) as fake_c:
+            rc, out = self.run_api(os.path.join(fake_c, "cc02.tsv"))
+            self.assertEqual(rc, 2, out)
+            self.assertIn("Windows system drive", out)
+            self.assertEqual(os.listdir(fake_c), ["Windows"])
 
     def test_real_c_path_refused_before_anything_runs(self):
-        rc, out = self.run_api("/mnt/c/__dd14a_never_written__/cc02.tsv")
+        # the synthetic config's system drive is mounted nowhere: a path on it lies on the Linux root filesystem
+        rc, out = self.run_api(base.SYSTEM_DRIVE + "/Synthetic Steam (x86)/__dd14a_never_written__/cc02.tsv")
         self.assertEqual(rc, 2, out)
-        self.assertIn("refusing to write on C:", out)
+        self.assertIn("refusing to write", out)
 
     def test_symlinked_parent_refused(self):
         link = os.path.join(self.tmp, "link")
@@ -223,7 +221,7 @@ class TsvGuardTests(unittest.TestCase):
         self.assertEqual(os.listdir(self.outside), [])
 
     def test_relative_path_off_the_roots_refused(self):
-        # a relative --tsv resolves against the cwd; on the WSL disk (C:-backed) that is outside E:
+        # a relative --tsv resolves against the cwd; on the WSL disk that is off the data drive
         rc, out = self.run_api("cc02.tsv", cwd=self.outside)
         self.assertEqual(rc, 2, out)
         self.assertIn("outside", out)

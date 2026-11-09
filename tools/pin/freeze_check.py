@@ -23,10 +23,11 @@ cannot be read from WSL: --steam online|offline records what the user says, and 
 offline run ends PASS_UNQUALIFIED, which CC-01 does not accept.
 
     python3 -I -B freeze_check.py before --pin-active --steam online [--dry-run]
-    python3 -I -B freeze_check.py after --before /mnt/e/DriveDiT/pin/freeze/freeze_<id>_<UTC>.before.json [--dry-run]
+    python3 -I -B freeze_check.py after --before <DATA_ROOT>/pin/freeze/freeze_<id>_<UTC>.before.json [--dry-run]
 
 Exit codes: 0 written (before), PASS (after) or dry run; 1 refused (the pin does not pass before), FAIL or
-PASS_UNQUALIFIED (after); 2 usage, config or path error. Writes only under /mnt/e, and only the freeze/ records.
+PASS_UNQUALIFIED (after); 2 usage, config or path error. Writes only on the data drive (pinlib.check_write_path),
+and only the freeze/ records. <DATA_ROOT> is the local config's (tools/local_config.py).
 """
 from __future__ import annotations
 
@@ -276,7 +277,8 @@ def find_pass(pin_dir: str, pin_sha256: str, build_key) -> list:
     return out
 
 
-def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
+def main(argv=None, write_roots=None) -> int:
+    """write_roots: None for pinlib.DEFAULT_WRITE_ROOTS (the data drive of the local config)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="step", required=True)
     b = sub.add_parser("before")

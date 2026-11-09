@@ -5,7 +5,7 @@
         tests/test_t0eng_actuation.py
 
 Every case writes a synthetic play directory (run_header.txt, the probe CSVs, run_footer.txt) with
-probe_common.write_synthetic_play into a fresh probe_common.make_temp_dir() directory (RAM or E:, never /tmp) and
+probe_common.write_synthetic_play into a fresh probe_common.make_temp_dir() directory (RAM or the data drive, never /tmp) and
 removes it afterwards. The fixtures are generated here from a small vehicle model; nothing binary is committed.
 
   - E-01: a 4-step steering dead time with a first-order yaw lag, steer_sign -1, a 6-step longitudinal dead time and

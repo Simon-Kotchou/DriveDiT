@@ -79,7 +79,7 @@ session ends with ego_destroyed, status ok. Nothing is written after L.
 telemetry.dv_max_mps is the reference detector's delta-v (contract 9.5.1: 100 ms of world time, interpolated, gap
 rule) of the row's callback, empty while it was not evaluated.
 
-Writes only under /mnt/e/ or /dev/shm/ (never /mnt/c or /tmp). Stdlib, numpy and drivedit_nav; PNGs are written by
+Writes only under /dev/shm/ or on the data drive of the local config (never the system drive or /tmp). Stdlib, numpy and drivedit_nav; PNGs are written by
 a small zlib PNG writer, so no cv2 is needed here.
 """
 
@@ -105,8 +105,47 @@ import drivedit_nav  # noqa: E402
 
 STREAMS_JSON = os.path.join(REPO, "docs", "capture_contract", "dc-2.0.streams.json")
 CARD_FILE = os.path.join(HERE, "cards", "S105_synthetic.json")
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# DD-22: outputs only where the write boundary allows (tools/local_config.py check_write): RAM (/dev/shm) or the
+# verified data drive of the local config, never a volume whose root holds Windows/System32, never /tmp/.
+# Without the config only RAM is writable; without the loader nothing is.
+_LOCAL_CONFIG_PY = os.path.join(REPO, "tools", "local_config.py")
+
+
+def _local_config_module():
+    """tools/local_config.py, loaded by path (shared as sys.modules["dd_local_config"]); None when it is missing."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            return None
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary (tools/local_config.py check_write) allows writing to path, narrowed to roots
+    when given, else the refusal message. Without the loader nothing is writable."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (path, _LOCAL_CONFIG_PY)
+    return mod.write_refusal(path, roots)
+
+
+def child_refusal(parent, name):
+    """None when <parent>/<name> may be written: name a plain file name (no separator, not absolute, not '..') and the
+    final path allowed by the write boundary under parent; else the refusal message."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (name, _LOCAL_CONFIG_PY)
+    try:
+        mod.check_child(parent, name, (parent,))
+    except mod.WriteRefused as exc:
+        return str(exc)
+    return None
 VARIANTS = ("gap", "missing_commit", "reused_slot", "crash", "crash_unexplained", "destroyed_unexplained")
 CRASH_VARIANTS = ("crash", "crash_unexplained", "destroyed_unexplained")
 # session.json events.* (contract 10.1, TBD-10 defaults)
@@ -168,11 +207,34 @@ def _hex(text, n=64):
 
 
 def check_out(path):
-    real = os.path.realpath(path)
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(r) for r in FORBIDDEN_ROOTS) or not any(probe.startswith(r) for r in WRITE_ROOTS):
-        raise ValueError("refusing output %r: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
-    return real
+    why = write_refusal(path)
+    if why:
+        raise ValueError(why)
+    return os.path.realpath(path)
+
+
+def write_new(root, rel, data):
+    """Create <root>/<rel> (rel: plain names joined by /) as a new file: each name checked (check_child), then
+    created through the write boundary with O_EXCL | O_NOFOLLOW (tools/local_config.py write_new), narrowed to root."""
+    parent = root
+    parts = rel.split("/")
+    for part in parts[:-1]:
+        parent = check_child(parent, part)
+    path = check_child(parent, parts[-1])
+    mod = _local_config_module()
+    try:
+        return mod.write_new(path, data, (root,))
+    except mod.WriteRefused as exc:
+        raise ValueError(str(exc))
+
+
+def check_child(parent, name):
+    """<parent>/<name> for a plain file name whose final path the write boundary allows under parent (an absolute,
+    '..' or nested name never moves a write out of parent); ValueError otherwise."""
+    why = child_refusal(parent, name)
+    if why:
+        raise ValueError(why)
+    return os.path.join(parent, name)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1039,8 +1101,8 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
         schema = json.loads(f.read().decode("ascii"))
     route_obj = route_obj or ROUTES[spec["route"]]()
     route = drivedit_nav.route_from_dict(route_obj)
-    session_dir = os.path.join(out_dir, spec["session_id"])
-    if os.path.exists(session_dir):
+    session_dir = check_child(out_dir, spec["session_id"])
+    if os.path.lexists(session_dir):
         raise ValueError("refusing to overwrite %s" % session_dir)
     os.makedirs(session_dir)
     sim = simulate(spec, route)
@@ -1126,7 +1188,7 @@ def generate(out_dir, kind="golden", variant=None, golden_json=None, routes_dir=
     if routes_dir is not None:
         routes_dir = check_out(routes_dir)
         os.makedirs(routes_dir, exist_ok=True)
-        with open(os.path.join(routes_dir, route.route_id + ".json"), "wb") as f:
+        with open(check_child(routes_dir, route.route_id + ".json"), "wb") as f:
             f.write((json.dumps(route_obj, indent=1) + "\n").encode("ascii"))
     golden = None
     if golden_json is not None:
@@ -1335,10 +1397,15 @@ def legacy_header():
 def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, frames_present=(0, 10, 20)):
     """A small dc-1.0 session as the DD-1 writer leaves it: telemetry.csv (CRLF, one row per vehicle per tick, tick
     intervals of 200 and 400 ms as in sessions 2702 and 4811), summary.txt and frames/frame_<id:06d>.bmp.png for
-    frames_present only. Returns the session directory."""
+    frames_present only. Returns the session directory. A session directory that exists already is refused, and every
+    file is created new (O_EXCL | O_NOFOLLOW through the write boundary), so nothing left there is written through."""
     out_dir = check_out(out_dir)
-    sdir = os.path.join(out_dir, name)
-    os.makedirs(os.path.join(sdir, "frames"))
+    sdir = check_child(out_dir, name)
+    if os.path.lexists(sdir):
+        raise ValueError("refusing to overwrite %s" % sdir)
+    os.makedirs(out_dir, exist_ok=True)
+    os.mkdir(sdir)
+    os.mkdir(os.path.join(sdir, "frames"))
     cols = legacy_header()
     lines = [",".join(cols)]
     t = 2902.6
@@ -1350,20 +1417,17 @@ def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, 
                       "speed_kmh": "%.3f" % (20.0 + v), "gear": "2", "engine_rpm": "1500.0", "engine_on": "1"}
             lines.append(",".join(values.get(c, "0.0000") for c in cols))
         t += 200.0 if f % 2 == 0 else 400.0
-    with open(os.path.join(sdir, "telemetry.csv"), "wb") as fh:
-        fh.write(("\r\n".join(lines) + "\r\n").encode("ascii"))
-    with open(os.path.join(sdir, "summary.txt"), "wb") as fh:
-        fh.write(("total_frames=%d\r\nvehicles_tracked=%d\r\n" % (n_frames, vehicles)).encode("ascii"))
+    write_new(sdir, "telemetry.csv", ("\r\n".join(lines) + "\r\n").encode("ascii"))
+    write_new(sdir, "summary.txt", ("total_frames=%d\r\nvehicles_tracked=%d\r\n" % (n_frames, vehicles)).encode("ascii"))
     img = numpy.full((40, 64, 3), 128, dtype=numpy.uint8)
     for f in frames_present:
-        with open(os.path.join(sdir, "frames", "frame_%06d.bmp.png" % f), "wb") as fh:
-            fh.write(png_bytes(img))
+        write_new(sdir, "frames/frame_%06d.bmp.png" % f, png_bytes(img))
     return sdir
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", required=True, help="parent directory of the new session (under /mnt/e or /dev/shm)")
+    ap.add_argument("--out", required=True, help="parent directory of the new session (under /dev/shm or the data drive)")
     ap.add_argument("--kind", choices=KINDS, default="golden")
     ap.add_argument("--variant", choices=VARIANTS, default=None)
     ap.add_argument("--golden-json", default=None, help="also write the expected reader output here")

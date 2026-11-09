@@ -27,15 +27,15 @@ been registered changes the path that every launcher refers to.
 
 ```bash
 python3 -I -B tools/deploy_addon.py --dry-run     # show the plan
-python3 -I -B tools/deploy_addon.py               # deploy to /mnt/e/DriveDiT/addons/DataCapture
+python3 -I -B tools/deploy_addon.py               # deploy to <DATA_ROOT>/addons/DataCapture
 python3 -I -B tools/deploy_addon.py --emcp-handlers <BK build>/mod/Scripts/WorkbenchGame/EnfusionMCP
 python3 -I -B tools/test_deploy_addon.py -v       # self-test (temp targets only)
 ```
 
 The tool also writes `Scripts/Game/DataCapture/DC_BuildInfo.c` (git sha, branch, dirty flag, deploy time, manifest
 and content hashes) and tracks what it deployed in `<target>/.deploy_state.json`. It deploys only into a folder inside
-`/mnt/e/DriveDiT/addons/` (`--allow-root DIR` adds a scratch root under `/mnt/e/` or `/dev/shm/`, for static checks and
-the self-test) and never onto C: or the WSL disk image. It refuses files outside the manifest (case variants
+`<DATA_ROOT>/addons/` (`--allow-root DIR` adds a scratch root on the data drive or under `/dev/shm/`, for static checks
+and the self-test) and never onto the system drive or the WSL disk image. It refuses files outside the manifest (case variants
 included), writing through a symlink or junction inside the target, and overwriting or deleting anything that
 changed in the target since it was deployed (for example a layer saved by Workbench) unless `--force` is given,
 which backs the old file up first.
@@ -161,8 +161,8 @@ It has no `SCR_MLDataCollector`, no `SCR_MLScreenshotCapture`, no director and n
 world writes no `DrivingData` session.
 
 Before the first probe Play:
-- `E:\DriveDiT\tools\launch\wb_R1.bat` must be the patched launcher (DD-0 follow-up). It copies the launch record
-  to `E:\DriveDiT\wb_profile\profile\dc_launch\` and passes `-dcLaunchId`. Without it every probe Play refuses and
+- `<DATA_ROOT_WIN>\tools\launch\wb_R1.bat` must be the patched launcher (DD-0 follow-up). It copies the launch record
+  to `<DATA_ROOT_WIN>\wb_profile\profile\dc_launch\` and passes `-dcLaunchId`. Without it every probe Play refuses and
   writes nothing.
 - New script classes and a new world need a Workbench restart from `wb_R1.bat` after the deploy.
 
@@ -170,11 +170,11 @@ Before the first probe Play:
 
 `DC_LaunchGuard` decides at the start of every Play whether anything may be written. It writes nothing, not even
 a folder, unless one of these holds:
-- `-dcLaunchId <id>` is on the command line, `-profile` lies inside `E:/DriveDiT`, in Workbench the resolved
+- `-dcLaunchId <id>` is on the command line, `-profile` lies inside `<DATA_ROOT_WIN>`, in Workbench the resolved
   `$profile` lies there too (a `$profile` Workbench cannot resolve refuses), and `$profile:dc_launch/launch_<id>.json`
   is a valid launch record of this exe (`wb` in Workbench);
 - the Workbench escape (`m_bAllowWorkbenchWithoutLaunchId 1` in this layer): the game cannot see the command line
-  at all, `$profile` lies inside `E:/DriveDiT`, and the newest `-wb-` record in `$profile:dc_launch` is valid, newer
+  at all, `$profile` lies inside `<DATA_ROOT_WIN>`, and the newest `-wb-` record in `$profile:dc_launch` is valid, newer
   than the deploy and this Workbench start's own record: written at most 300 s before the process start, which the
   guard estimates as `GetUnixTime - GetTickCount / 1000` (`m_bEscapeBindToProcessStart 1`). Only the newest record
   is considered: when it belongs to another Workbench start the Play is refused, never joined to an older record.
@@ -195,8 +195,8 @@ A visible command line without `-dcLaunchId` always refuses: Workbench was then 
    Steam: never paste it into a PR, a commit or a report.
 2. Then either `[DC_Probe] launch guard: mode=cli id=<launch id> pin=<pin id>` (a WARNING with `mode=wb_escape`), or
    `[DC_Probe] ERROR: launch guard refused: <reason> - no probe runs, nothing written`. The usual reasons:
-   - `started without -dcLaunchId: start Workbench with E:\DriveDiT\tools\launch\wb_R1.bat`;
-   - `-profile '...' is not inside E:/DriveDiT` or `$profile '...' is not inside E:/DriveDiT` (Workbench started
+   - `started without -dcLaunchId: start Workbench with <DATA_ROOT_WIN>\tools\launch\wb_R1.bat`;
+   - `-profile '...' is not inside <DATA_ROOT_WIN>` or `$profile '...' is not inside <DATA_ROOT_WIN>` (Workbench started
      from Steam);
    - `$profile could not be resolved ...`;
    - CLI mode: `no launch record $profile:dc_launch/launch_<id>.json ...` (the unpatched launcher, or the record was
@@ -207,7 +207,7 @@ A visible command line without `-dcLaunchId` always refuses: Workbench was then 
      (another Workbench started later?)`;
    - `newest launch record <id> predates the deploy <utc>: restart Workbench with wb_R1.bat`.
    - Guard test (optional, no restart): rename this start's record
-     `E:\DriveDiT\wb_profile\profile\dc_launch\launch_<id>.json`, press Play, then Stop. In CLI mode the expected
+     `<DATA_ROOT_WIN>\wb_profile\profile\dc_launch\launch_<id>.json`, press Play, then Stop. In CLI mode the expected
      refusal is `no launch record $profile:dc_launch/launch_<id>.json ...`; in escape mode it is `no launch record
      under $profile:dc_launch ...` when no other `-wb-` record exists, else `no launch record of this Workbench
      start: ...` or `... predates the deploy ...`. No `DC_Probes` folder may appear. Rename the record back.
@@ -241,8 +241,8 @@ A visible command line without `-dcLaunchId` always refuses: Workbench was then 
 
 Every probe writes to `$profile:DC_Probes/<probe>/<launch id>/play_NN/`. NN = 01..99 is the first free number:
 every Play of one Workbench start shares the launch id.
-- With `wb_R1.bat` this is **`E:\DriveDiT\wb_profile\profile\DC_Probes\`**, which is
-  `/mnt/e/DriveDiT/wb_profile/profile/DC_Probes/` in WSL.
+- With `wb_R1.bat` this is **`<DATA_ROOT_WIN>\wb_profile\profile\DC_Probes\`**, which is
+  `<DATA_ROOT>/wb_profile/profile/DC_Probes/` in WSL.
 - Each play folder holds:
   - `run_header.txt`: build stamp (git sha, dirty flag), launch id and pin, build version, fixed time slice,
     world, clocks (including the run's fixed and merged step counts at the probe start), and every probe parameter
@@ -262,7 +262,7 @@ The probe parameters are attributes of the probe components, set in this layer, 
 
 `e19kill` is never in the default plan. Run it on its own, last in a session: it waits for a
 `taskkill /F /IM ArmaReforgerWorkbenchSteamDiag.exe`, after which Workbench must be restarted. For E-19's read-only
-case, run `attrib +R E:\DriveDiT\wb_profile\profile\DC_Probes\e19\ro_target.txt` (cmd) between two Plays with e19.
+case, run `attrib +R <DATA_ROOT_WIN>\wb_profile\profile\DC_Probes\e19\ro_target.txt` (cmd) between two Plays with e19.
 E-19 stays INCOMPLETE until both exist: an e19 Play whose c09 refused the write to the read-only target, and an
 analysed e19kill Play (`e19_write.py <e19 play_dir> --kill <e19kill play_dir>`). e19 also measures whether WRITE
 truncates a longer file (c10, the dc-2.0 heartbeat) and the open-APPEND-write-close cycle per line (c11); e19kill

@@ -528,7 +528,8 @@ class DC_ProbeRunner : SCR_BaseGameModeComponent
 	[Attribute("Arland", UIWidgets.EditBox, "Terrain name written to every run header", category: "Probes")]
 	protected string m_sTerrain;
 
-	[Attribute("E:/DriveDiT", UIWidgets.EditBox, "Launch guard: -profile and $profile must lie inside this folder (case-insensitive, either slash). The probe guard has no off switch: empty refuses", category: "Probes")]
+	// The default below is a deploy token: tools/deploy_addon.py (PROFILE_ROOT_TOKEN) writes in the data root of the local config (DD-22)
+	[Attribute("@DD_PROFILE_ROOT@", UIWidgets.EditBox, "Launch guard: -profile and $profile must lie inside this folder (case-insensitive, either slash). The probe guard has no off switch: empty refuses", category: "Probes")]
 	protected string m_sRequiredProfileRoot;
 
 	[Attribute("0", UIWidgets.CheckBox, "Launch guard: Workbench-only escape for a Play that cannot see the command line (E-11). It still needs the newest -wb- launch record in $profile:dc_launch, copied after the deploy by wb_R1.bat, and a $profile inside the root; escape runs are marked launch.mode=wb_escape", category: "Probes")]

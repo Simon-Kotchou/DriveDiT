@@ -5,10 +5,11 @@ Reads, READ-ONLY, both Steam appmanifests and both install directories, and reco
   - game: appid, buildid, TargetBuildID, StateFlags, AutoUpdateBehavior, depots + manifest ids
   - tools: the same for the Tools app
   - every *.pak in each install (relative path, size, mtime), the launched exes, steam_appid.txt
-The JSON goes to --out, which must be under /mnt/e (C: is always refused). The output directory must
-already exist; nothing else is written.
+The JSON goes to --out, which must be on the data drive (the system drive is always refused; tools/pin/pinlib.py
+check_write_path). The output directory must already exist; nothing else is written. The default appmanifests are
+those of the local config's installs (tools/local_config.py; <DATA_ROOT> below is its DATA_ROOT).
 
-    python3 -I -B make_pin.py --pin-id 1.8.0.13 --out /mnt/e/DriveDiT/pin/pin_1.8.0.13.json \
+    python3 -I -B make_pin.py --pin-id 1.8.0.13 --out <DATA_ROOT>/pin/pin_1.8.0.13.json \
         --expect-game-buildid 24903726 --expect-tools-buildid 24870687
 
 Writing a pin does not make the launchers use it: switch with `pin_activate.py <pin id>` (see README).
@@ -17,7 +18,7 @@ Rollback (README "Rollback"): restored installs never get the sub-second mtimes 
 are re-pinned under a new id, never by overwriting the original pin:
 
     python3 -I -B make_pin.py --pin-id 1.8.0.13-r1 --restore-of 1.8.0.13 \
-        --out /mnt/e/DriveDiT/pin/pin_1.8.0.13-r1.json --expect-game-buildid 24903726 --expect-tools-buildid 24870687
+        --out <DATA_ROOT>/pin/pin_1.8.0.13-r1.json --expect-game-buildid 24903726 --expect-tools-buildid 24870687
 
 --restore-of REF reads <out dir>/pin_<REF>.json and refuses (exit 1) unless the new snapshot equals it in
 everything that identifies the build: appid, buildid, depot manifests, appmanifest and install paths,
@@ -29,12 +30,12 @@ channel, its launch-path id, the sha256 of every launched exe (exe_sha256), buil
 buildids and the client and Workbench exe hashes) and physics_hz_expected. Without --channel the DD-0 dd-pin/1 pin
 is written, unchanged (its build_key then comes from a sidecar, pin_sidecar.py build-key).
 
-    python3 -I -B make_pin.py --channel stable --pin-id 1.9.0.40 --out /mnt/e/DriveDiT/pin/pin_1.9.0.40.json \
+    python3 -I -B make_pin.py --channel stable --pin-id 1.9.0.40 --out <DATA_ROOT>/pin/pin_1.9.0.40.json \
         --expect-game-buildid <id> --expect-tools-buildid <id>
     python3 -I -B make_pin.py --channel experimental --pin-id 1.9.0.10-exp \
-        --out /mnt/e/DriveDiT/pin/pin_1.9.0.10-exp.json             # the E: library's Experimental apps
+        --out <DATA_ROOT>/pin/pin_1.9.0.10-exp.json        # the local config's EXPERIMENTAL_*_INSTALL apps
     python3 -I -B make_pin.py --channel cold --pin-id 1.8.0.13-cold --cold-of 1.8.0.13 \
-        --from-copy /mnt/e/DriveDiT/pin/1.8.0.13-run --out /mnt/e/DriveDiT/pin/pin_1.8.0.13-cold.json
+        --from-copy <DATA_ROOT>/pin/1.8.0.13-run --out <DATA_ROOT>/pin/pin_1.8.0.13-cold.json
 
 --channel cold runs a stable build from a working copy (MIGRATION_1_9 7.1): it reads the copy's saved appmanifests
 (meta/), hashes every pak and exe and compares them with the reference copy's SHA256SUMS, requires the reference
@@ -294,14 +295,15 @@ def build_pin(pin_id: str, out_path: str, game: dict, tools: dict) -> dict:
     }
 
 
-def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
+def main(argv=None, write_roots=None) -> int:
+    """write_roots: None for pinlib.DEFAULT_WRITE_ROOTS (the data drive of the local config)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", required=True, help="pin JSON to write; must be under /mnt/e; parent must exist")
+    ap.add_argument("--out", required=True, help="pin JSON to write; must be on the data drive; parent must exist")
     ap.add_argument("--pin-id", required=True,
                     help="id of the pinned version, e.g. 1.8.0.13, 1.9.0.12 or 1.9.0.9-exp (pinlib.PIN_ID_RE); "
                          "name the output pin_<id>.json so pin_activate.py and preflight --pin-active find it")
-    ap.add_argument("--game-acf", default=None, help="default: the channel's appmanifest (stable: %s)"
-                    % pinlib.DEFAULT_ACF["game"])
+    ap.add_argument("--game-acf", default=None,
+                    help="default: the channel's appmanifest, from the local config's installs (stable: GAME_INSTALL)")
     ap.add_argument("--tools-acf", default=None)
     ap.add_argument("--expect-game-buildid", type=int, default=None)
     ap.add_argument("--expect-tools-buildid", type=int, default=None)
@@ -314,7 +316,7 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
                          "it, DD-0's dd-pin/1 pin is written")
     ap.add_argument("--from-copy", default=None, metavar="DIR",
                     help="--channel cold: the working copy to run from (a pinlib.COLD_RUN_ROOTS entry, e.g. "
-                         "/mnt/e/DriveDiT/pin/1.8.0.13-run), with game/, tools/ and meta/")
+                         "<DATA_ROOT>/pin/1.8.0.13-run), with game/, tools/ and meta/")
     ap.add_argument("--cold-of", default=None, metavar="PIN_ID",
                     help="--channel cold: the stable pin the copy was made from (<out dir>/pin_PIN_ID.json); the cold "
                          "pin must get its build_key")
@@ -340,12 +342,14 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
     elif args.from_copy or args.cold_of or args.sums:
         print("make_pin: --from-copy, --cold-of and --sums are only for --channel cold", file=sys.stderr)
         return 2
-    acf_defaults = pinlib.DEFAULT_ACF_BY_CHANNEL.get(args.channel or "stable", pinlib.DEFAULT_ACF)
-    args.game_acf = args.game_acf or acf_defaults["game"]
-    args.tools_acf = args.tools_acf or acf_defaults["tools"]
-
-    # Path guard first: nothing is read or written before the output path is known to be on E:.
+    # Path guard first: nothing is read or written before the output path is known to be on the data drive.
     try:
+        if args.channel != "cold" and not (args.game_acf and args.tools_acf):
+            # Only now the local config: an explicit --game-acf/--tools-acf pair needs no install key.
+            acf_defaults = (pinlib.DEFAULT_ACF if args.channel in (None, "stable")
+                            else pinlib.DEFAULT_ACF_BY_CHANNEL[args.channel])
+            args.game_acf = args.game_acf or acf_defaults["game"]
+            args.tools_acf = args.tools_acf or acf_defaults["tools"]
         pinlib.validate_pin_id(args.pin_id)
         out = pinlib.check_write_path(args.out, write_roots)
     except pinlib.PinError as exc:

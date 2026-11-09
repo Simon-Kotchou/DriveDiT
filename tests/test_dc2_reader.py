@@ -15,9 +15,9 @@ join ctl and telemetry; segments at gaps, episode boundaries and masks (the obs 
 between the obs and the window, react_visible at the label step); the seal (a failed status, its fields, a lost
 tail) and salvage; duplicated keys, empty chunks, img paths and files outside the session; the vehicle card hash
 and gear mapping; dc-1.0 sessions raise; Everon (incl. an Eden root world), heldout/ and SEALED paths need
-sealed_eval; C: paths are refused; the crash events of contract 9.5.1 (payload parsing, the first terminal ego event,
+sealed_eval; system-drive paths are refused; the crash events of contract 9.5.1 (payload parsing, the first terminal ego event,
 policy_valid 0 from the crash on, ego_destroyed as a normal seal). Temporary sessions live under $TMPDIR when that is
-on /dev/shm/ or /mnt/e/, else /dev/shm/, and are removed.
+on /dev/shm/, else /dev/shm/, and are removed.
 """
 
 import importlib.util
@@ -34,6 +34,11 @@ import zlib
 import numpy
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# DD-22: test scratch only in validated RAM (tests/fixtures/local_config/scratch.py), never the system temp dir.
+_scratch_spec = importlib.util.spec_from_file_location(
+    "dd22_scratch", os.path.join(REPO, "tests", "fixtures", "local_config", "scratch.py"))
+scratch = importlib.util.module_from_spec(_scratch_spec)
+_scratch_spec.loader.exec_module(scratch)
 FIXTURES = os.path.join(REPO, "tests", "fixtures", "capture_dc2")
 GOLDEN_ID = "arland_T0b_20261025T091512Z_wb_i00_5e00"
 GOLDEN_DIR = os.path.join(FIXTURES, "golden", GOLDEN_ID)
@@ -54,15 +59,13 @@ reader = load("dc2_reader", "data/dc2/reader.py")
 synth = load("dc2_make_synthetic", "tests/fixtures/capture_dc2/make_synthetic.py")
 
 
+# DD-22: the synthetic local config (also set by tests/conftest.py under pytest), so the repo's fixtures on any
+# drive are readable and no real drive is the system drive here.
+os.environ["DRIVEDIT_LOCAL_CONFIG"] = os.path.join(REPO, "tests", "fixtures", "local_config", "placeholder.local.env")
+
 def temp_dir(prefix):
-    """A new directory under $TMPDIR when that is on /dev/shm/ or /mnt/e/, else under /dev/shm/ (never /tmp, which
-    is on the C: drive here). The caller removes it."""
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not ((base.startswith("/dev/shm/") or base.startswith("/mnt/e/")) and os.path.isdir(base)):
-        base = "/dev/shm"
-    if not (os.path.isdir(base) and os.access(base, os.W_OK)) or base.startswith("/mnt/c"):
-        raise unittest.SkipTest("no usable temporary base under /dev/shm/ or /mnt/e/")
-    return tempfile.mkdtemp(prefix=prefix, dir=base)
+    """A new directory in validated RAM (tests/fixtures/local_config/scratch.py); skipped where the write boundary refuses RAM."""
+    return scratch.mkdtemp(prefix, real_boundary=True)
 
 
 def png_content(data):
@@ -110,7 +113,7 @@ _RAM = []
 
 
 def golden_source():
-    """A copy of the golden session in a temporary directory (made once; copies from /mnt/e are slow)."""
+    """A copy of the golden session in a temporary directory (made once; copies from drvfs are slow)."""
     if not _RAM:
         tmp = temp_dir("dc2_golden_src_")
         _RAM.append(tmp)
@@ -803,6 +806,27 @@ class DefectTest(unittest.TestCase):
         self.assertIsNone(s.vehicle_card)                       # a dict cannot be checked against the sha
         self.assertEqual(len(s.problems_for("C02")), 1)
 
+    def test_legacy_session_writer_never_writes_through_leftovers(self):
+        # Codex round 3 F3: an existing session directory is refused, and every file is created new (O_EXCL,
+        # O_NOFOLLOW), so a planted telemetry.csv symlink cannot redirect the write.
+        outside = os.path.join(self.tmp, "outside.csv")
+        with open(outside, "w") as fh:
+            fh.write("untouched\n")
+        sdir = os.path.join(self.tmp, "session_9001")
+        os.makedirs(sdir)
+        os.symlink(outside, os.path.join(sdir, "telemetry.csv"))
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+            synth.write_legacy_session(self.tmp)
+        with open(outside) as fh:
+            self.assertEqual(fh.read(), "untouched\n")
+        self.assertEqual(os.listdir(sdir), ["telemetry.csv"])
+        for name in ("../escape", "/tmp/dd22_legacy_never", "a/b"):
+            with self.assertRaises(ValueError, msg=name):
+                synth.write_legacy_session(self.tmp, name=name)
+        self.assertFalse(os.path.exists("/tmp/dd22_legacy_never"))
+        fresh = synth.write_legacy_session(self.tmp, name="session_9002")
+        self.assertEqual(sorted(os.listdir(fresh)), ["frames", "summary.txt", "telemetry.csv"])
+
     def test_legacy_sessions_raise(self):
         legacy = synth.write_legacy_session(self.tmp)
         with self.assertRaisesRegex(reader.LegacySessionError, "dc-1.0"):
@@ -851,8 +875,8 @@ class DefectTest(unittest.TestCase):
             reader.open_session(session, sealed_eval=True, decode_images=False)
 
     def test_c_drive_paths_are_refused(self):
-        with self.assertRaisesRegex(reader.ReaderError, "C: drive"):
-            reader.open_session("/mnt/c/__dd5_no_such_dir__/" + GOLDEN_ID)
+        with self.assertRaisesRegex(reader.ReaderError, "system drive"):
+            reader.open_session("/mnt/z/Synthetic Steam (x86)/__dd5_no_such_dir__/" + GOLDEN_ID)
 
 
 crash_dv = load("dc2_crash_dv", "data/dc2/crash_dv.py")

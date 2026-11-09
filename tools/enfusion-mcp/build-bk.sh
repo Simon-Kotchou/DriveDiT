@@ -1,35 +1,72 @@
 #!/usr/bin/env bash
-# build-bk.sh - build steffenbk/enfusion-mcp-BK on E: with every npm/node/git side effect on E:.
+# build-bk.sh - build steffenbk/enfusion-mcp-BK on the data drive with every npm/node/git side effect there.
 # Versioned in the DriveDiT repo under tools/enfusion-mcp/ (DD-3); the live copy sits in $EMCP_ROOT.
-# Runbook: tools/enfusion-mcp/README.md. Evidence: /mnt/e/drivedit_realign/enfusion/mcp-setup.md
+# Runbook: tools/enfusion-mcp/README.md. Evidence: <REALIGN_ROOT>/enfusion/mcp-setup.md (REALIGN_ROOT comes from the
+# local config, DD-22; tools/local_config.py).
 #
 #   bash build-bk.sh            # build at the pinned commit + guard patches + prune
-#   bash build-bk.sh --data18   # additionally compose an E: data dir that swaps in fma-rc's Reforger 1.8 API index
+#   bash build-bk.sh --data18   # additionally compose a data dir that swaps in fma-rc's Reforger 1.8 API index
 #   bash build-bk.sh --smoke    # MCP initialize + tools/list over stdio (no Workbench I/O: unreachable host, guards on);
 #                               # exits 1 unless serverInfo and the expected tool count come back
 #
-# Env overrides: EMCP_ROOT (work root: clones, build, caches; default /mnt/e/drivedit_realign/mcp; must be an
-#                absolute path on a drive other than C:), EMCP_PATCH_DIR (guard patches; default: patches/ next
-#                to this script).
-# Re-running is safe: the clone, checkout, patches (already-applied check), npm ci, tsc, prune and the data
-# copy all converge on the same tree.
+# Env overrides: EMCP_ROOT (work root: clones, build, caches; default <REALIGN_ROOT>/mcp; must pass the write
+#                boundary of tools/local_config.py: the verified data drive, never the system drive), EMCP_PATCH_DIR
+#                (guard patches; default: patches/ next to this script), EMCP_PREVIOUS_PATCHES (the patch files an
+#                older build copy holds, ':'-separated; only when no record of them exists, see step 1).
+# Re-running is safe: the clone, the patches (applied once; a build copy is reset only when its changes are proven to
+# be a previous patch set), npm ci, tsc, prune and the data copy all converge on the same tree.
 set -euo pipefail
 
+NAME=build-bk
 die() { echo "build-bk: $*" >&2; exit "${EXIT_CODE:-1}"; }
-# True only for an absolute path that resolves (symlinks and '..' included) onto a Windows drive other than C:.
-# /mnt/c and the whole WSL ext4.vhdx (~, /tmp, /var, ...) are on C:, which is nearly full; relative paths
-# would resolve against the caller's cwd.
-off_c_drive() {
-  local r="" re='^/mnt/[abdefghijklmnopqrstuvwxyz](/|$)'
-  [[ "${1:-}" == /* ]] || return 1
-  r="$(realpath -m -- "$1" 2>/dev/null)" || return 1
-  [[ "$r" =~ $re ]]
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# DD-22: this machine's paths come from the untracked local config (tools/local_config.py, drivedit.local.env).
+# An installed MCP root holds a copy of local_config.py next to this script; tell it the file with
+# DRIVEDIT_LOCAL_CONFIG (the MCP entry's "env"). In the repo the loader is ../local_config.py.
+LOCAL_CONFIG_PY=""
+for _c in "$HERE/local_config.py" "$HERE/../local_config.py"; do
+  if [[ -f "$_c" ]]; then LOCAL_CONFIG_PY="$_c"; break; fi
+done
+local_config() {   # local_config KEY [--win | --drive]: one value; the loader names the file and key on a refusal
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" get "$@"
+}
+local_config DATA_ROOT >/dev/null || EXIT_CODE=2 die "no local config (see the message above)"
+# The work root (and so every cache, log and temp file below) goes through the write boundary.
+write_ok() {   # write_ok PATH: print the resolved path when the write boundary allows writing there, else fail
+  # (tools/local_config.py check-write: RAM or the verified data drive, never a volume whose root holds
+  # Windows/System32, whatever the config says). A relative path is refused: it would resolve against the cwd.
+  [[ -n "$LOCAL_CONFIG_PY" ]] || { echo "$NAME: local_config.py is missing next to this script and in ../" >&2; return 2; }
+  [[ "${1:-}" == /* ]] || { echo "$NAME: '${1:-}' is not an absolute path" >&2; return 1; }
+  /usr/bin/python3 -I -B "$LOCAL_CONFIG_PY" check-write "$1"
 }
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="${EMCP_ROOT:-/mnt/e/drivedit_realign/mcp}"
-off_c_drive "$ROOT" || EXIT_CODE=2 die "refusing EMCP_ROOT=$ROOT: use an absolute path on a drive other than C: (/mnt/c and the WSL disk are on C:)"
-ROOT="$(realpath -m -- "$ROOT")"
+ROOT="${EMCP_ROOT:-}"
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(local_config REALIGN_ROOT)/mcp" || EXIT_CODE=2 die "no REALIGN_ROOT in the local config (see the message above)"
+fi
+ROOT_OK="$(write_ok "$ROOT")" || EXIT_CODE=2 die "refusing EMCP_ROOT=$ROOT: the write boundary refuses it (see the message above)"
+ROOT="$ROOT_OK"
+derived_dir() {   # derived_dir DIR ROOT: DIR, to be created or reused below the checked ROOT, is safe to write
+  # into: it lies below ROOT, no component from DIR up to ROOT is a symlink, and every existing one is a directory on
+  # ROOT's device (stat -c %d), so a redirected or foreign-mounted home, temp, cache or build dir is refused before
+  # anything is written there. A DIR that does not exist yet passes when its parent does (DD-22).
+  local d="${1:-}" root="${2%/}" root_dev="" dev="" p=""
+  [[ -n "$root" && "$d" == "$root"/* && "$d/" != */../* && "$d/" != */./* ]] \
+    || { echo "$NAME: refusing $d: it is not below ${2:-} (or holds . or ..)" >&2; return 1; }
+  root_dev="$(stat -c %d -- "$root" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $root" >&2; return 1; }
+  p="$d"
+  while [[ "$p" != "$root" ]]; do
+    [[ "$p" != / && "$p" != . ]] || { echo "$NAME: refusing $d: it is not below $root" >&2; return 1; }
+    if [[ -L "$p" ]]; then echo "$NAME: refusing $d: $p is a symlink" >&2; return 1; fi
+    if [[ -e "$p" ]]; then
+      [[ -d "$p" ]] || { echo "$NAME: refusing $d: $p is not a directory" >&2; return 1; }
+      dev="$(stat -c %d -- "$p" 2>/dev/null)" || { echo "$NAME: refusing $d: cannot stat $p" >&2; return 1; }
+      [[ "$dev" == "$root_dev" ]] || { echo "$NAME: refusing $d: $p is on device $dev, not on $root's ($root_dev)" >&2; return 1; }
+    fi
+    p="$(dirname -- "$p")"
+  done
+}
 export EMCP_ROOT="$ROOT"                           # the wrapper reads the same root
 SRC="$ROOT/src/enfusion-mcp-BK"                    # pristine clone (untrusted content, never built in place)
 BUILD="$ROOT/build/enfusion-mcp-BK"                # build copy
@@ -49,36 +86,62 @@ NODE_DIR="$(dirname "$NODE_BIN")"
 [[ -x "$NODE_DIR/npm" ]] || die "npm not found next to $NODE_BIN"
 export PATH="$NODE_DIR:$PATH"
 
-# ---- every cache/log/temp/config write goes to E: --------------------------------------------------
+# ---- every cache/log/temp/config write goes under ROOT, on the data drive ---------------------------
 export HOME="$ROOT/home"                           # ~/.npmrc, ~/.cache, ~/.config, ~/.gitconfig lookups
 export XDG_CACHE_HOME="$ROOT/xdg/cache" XDG_CONFIG_HOME="$ROOT/xdg/config"
 export XDG_STATE_HOME="$ROOT/xdg/state" XDG_DATA_HOME="$ROOT/xdg/data"
 export TMPDIR="$ROOT/tmp"
 export NODE_COMPILE_CACHE="$ROOT/tmp/node-compile-cache"  # npm 11 / tsc 5.9 call module.enableCompileCache()
 unset NODE_OPTIONS NODE_V8_COVERAGE                # inherited node flags could write reports/coverage elsewhere
-export npm_config_cache="$ROOT/npm-cache"          # default would be ~/.npm (C:)
+export npm_config_cache="$ROOT/npm-cache"          # default would be ~/.npm (the WSL disk)
 export npm_config_logs_dir="$ROOT/npm-logs"        # default would be <cache>/_logs
 export npm_config_userconfig="$ROOT/home/.npmrc"
 export npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1          # playwright is a devDependency (scraper only)
 export PLAYWRIGHT_BROWSERS_PATH="$ROOT/pw-browsers"
 export GIT_CONFIG_NOSYSTEM=1
+APPLIED_DIR="$ROOT/build/applied-patches"          # copies of the patches the last build applied (step 1)
+APPLIED_LIST="$ROOT/build/applied-patches.list"     # their names
+DATA="$ROOT/data"                                  # the --data18 data dir (step 6)
+# Every directory this script (or git, npm, tsc, node run from it) writes into is checked (derived_dir) before
+# anything is written: ROOT itself passed write_ok. They are the redirected HOME, TMPDIR (also the scratch index)
+# and node compile cache, the npm cache and logs, the playwright dir, the four XDG dirs, build/, the build copy and
+# its node_modules/, dist/ and .git/, build/applied-patches/, and data/ with data/api/, data/patterns/,
+# data/recipes/ and data/wiki/. Files are written into them only as new temporary files (mktemp, exclusive) that
+# are then renamed over their names, so a stale symlink at a file name is replaced, never written through.
+mkdir -p -- "$ROOT"
+for d in "$HOME" "$TMPDIR" "$NODE_COMPILE_CACHE" "$npm_config_cache" "$npm_config_logs_dir" "$PLAYWRIGHT_BROWSERS_PATH" \
+         "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$ROOT/build" "$BUILD" \
+         "$BUILD/node_modules" "$BUILD/dist" "$BUILD/.git" "$APPLIED_DIR" "$DATA" "$DATA/api" "$DATA/patterns" \
+         "$DATA/recipes" "$DATA/wiki"; do
+  derived_dir "$d" "$ROOT" || EXIT_CODE=2 die "refusing the work dir $d (see the message above); nothing was written"
+done
+put_file() {   # put_file DIR NAME [SRC]: SRC (or stdin) to DIR/NAME through a new exclusive temp file in DIR, renamed
+  local tmp
+  tmp="$(mktemp -- "$1/.$2.XXXXXX")" || return 1
+  if [[ $# -ge 3 ]]; then cp -- "$3" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  else cat >"$tmp" || { rm -f -- "$tmp"; return 1; }; fi
+  mv -f -- "$tmp" "$1/$2"
+}
 mkdir -p "$HOME" "$TMPDIR" "$npm_config_cache" "$npm_config_logs_dir" "$ROOT/build" \
          "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"
-cd "$ROOT"                                         # never run anything from the caller's (possibly C:) cwd
+cd "$ROOT"                                         # never run anything from the caller's cwd
 
 smoke() {
   # initialize + tools/list over stdio; the server never contacts Workbench for these. Belt and braces:
   # the wrapper forces all three guards on, and the NET API host/port point at a closed WSL loopback
   # port, not at Workbench.
-  local rc=0
+  local rc=0 out err
+  out="$(mktemp -- "$ROOT/.smoke.stdout.XXXXXX")" && err="$(mktemp -- "$ROOT/.smoke.stderr.XXXXXX")" \
+    || die "cannot create the smoke output files in $ROOT"
   { printf '%s\n' \
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
       '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
       '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
     sleep 8; } \
   | ENFUSION_WORKBENCH_HOST=127.0.0.1 ENFUSION_WORKBENCH_PORT=1 \
-    timeout 60 "$WRAPPER" 2>"$ROOT/smoke.stderr" > "$ROOT/smoke.stdout" || true
+    timeout 60 "$WRAPPER" 2>"$err" > "$out" || true
+  mv -f -- "$out" "$ROOT/smoke.stdout" && mv -f -- "$err" "$ROOT/smoke.stderr"
   python3 -I -B -c '
 import json, sys
 info, names = None, None
@@ -110,19 +173,72 @@ if [[ "${1:-}" == "--smoke" ]]; then smoke; exit $?; fi
 [[ -d "$SRC/.git" ]] || die "missing pristine clone $SRC (README: Build, prerequisite)"
 if [[ ! -d "$BUILD/.git" ]]; then
   git clone --quiet --no-hardlinks "$SRC" "$BUILD"
+  git -C "$BUILD" -c advice.detachedHead=false checkout --quiet "$PIN"
 fi
-git -C "$BUILD" -c advice.detachedHead=false checkout --quiet "$PIN"
-
-# ---- 2. local guard patches (env-gated; no behaviour change unless the env vars are 1) -------------
-for PATCH in "${PATCHES[@]}"; do
-  [[ -f "$PATCH" ]] || die "missing guard patch $PATCH"
-  if git -C "$BUILD" apply --reverse --check "$PATCH" 2>/dev/null; then
-    echo "already applied: $PATCH"
-  else
+# The build copy is reset only when its changes are provably ours. Its tracked files (on disk) must be exactly the
+# pinned tree, the pinned tree plus the current guard patches, or the pinned tree plus the PREVIOUS patch set: the
+# patches the last build applied, as recorded in $APPLIED_LIST (or, for a build copy made before that record
+# existed, the patch files EMCP_PREVIOUS_PATCHES names, ':'-separated). Only in that last case is the copy reset to
+# the pin (checkout -f; untracked node_modules/ and dist/ are kept), after `git apply -R --check` of the previous
+# patches and a tree comparison prove the difference is exactly theirs. Anything else (another commit, staged
+# edits, any other change) refuses and touches nothing. Trees are compared through a scratch index under $TMPDIR.
+SCRATCH_INDEX="$TMPDIR/build-bk-scratch-index"
+for PATCH in "${PATCHES[@]}"; do [[ -f "$PATCH" ]] || die "missing guard patch $PATCH"; done
+tree_of() {   # tree_of [PATCH...]: the tree of PIN with the patches applied, in the scratch index
+  GIT_INDEX_FILE="$SCRATCH_INDEX" git -C "$BUILD" read-tree "$PIN" \
+    && { [[ $# -eq 0 ]] || GIT_INDEX_FILE="$SCRATCH_INDEX" git -C "$BUILD" apply --cached "$@"; } \
+    && GIT_INDEX_FILE="$SCRATCH_INDEX" git -C "$BUILD" write-tree
+}
+work_tree() {   # the tree of the build copy's tracked files as they are on disk, in the scratch index
+  GIT_INDEX_FILE="$SCRATCH_INDEX" git -C "$BUILD" read-tree HEAD \
+    && GIT_INDEX_FILE="$SCRATCH_INDEX" git -C "$BUILD" add -u \
+    && GIT_INDEX_FILE="$SCRATCH_INDEX" git -C "$BUILD" write-tree
+}
+HEAD_NOW="$(git -C "$BUILD" rev-parse HEAD)"
+[[ "$HEAD_NOW" == "$PIN" ]] || die "build copy $BUILD is at $HEAD_NOW, not the pinned $PIN; it holds work that is not this script's. Inspect it, or move it away to rebuild from $SRC"
+git -C "$BUILD" diff --cached --quiet || die "build copy $BUILD has staged changes; this script never stages. Inspect them; nothing was reset"
+T_WORK="$(work_tree)" || die "cannot read the tracked files of $BUILD"
+T_PIN="$(tree_of)" || die "cannot read the pinned tree $PIN"
+T_NEW="$(tree_of "${PATCHES[@]}")" || die "the guard patches do not apply to the pinned tree $PIN"
+if [[ "$T_WORK" == "$T_NEW" ]]; then
+  echo "already applied: ${PATCHES[*]}"
+else
+  if [[ "$T_WORK" != "$T_PIN" ]]; then
+    PREV=()
+    if [[ -f "$APPLIED_LIST" ]]; then
+      while IFS= read -r name; do [[ -n "$name" ]] && PREV+=("$APPLIED_DIR/$name"); done <"$APPLIED_LIST"
+    elif [[ -n "${EMCP_PREVIOUS_PATCHES:-}" ]]; then
+      IFS=: read -r -a PREV <<<"$EMCP_PREVIOUS_PATCHES"
+    fi
+    [[ ${#PREV[@]} -gt 0 ]] || die "build copy $BUILD has changes that are not the guard patches, and no previous patch set is recorded ($APPLIED_LIST) or named (EMCP_PREVIOUS_PATCHES); refusing to reset it. Inspect: git -C '$BUILD' status"
+    PREV_REV=()
+    for ((i = ${#PREV[@]} - 1; i >= 0; i--)); do
+      [[ -f "${PREV[$i]}" ]] || die "missing previous patch ${PREV[$i]}"
+      PREV_REV+=("${PREV[$i]}")
+    done
+    git -C "$BUILD" apply --reverse --check "${PREV_REV[@]}" \
+      || die "build copy $BUILD has changes that are not exactly the previous patch set (${PREV[*]}); refusing to reset it"
+    T_PREV="$(tree_of "${PREV[@]}")" || die "the previous patch set does not apply to the pinned tree $PIN"
+    [[ "$T_WORK" == "$T_PREV" ]] \
+      || die "build copy $BUILD has changes beyond the previous patch set (${PREV[*]}); refusing to reset it"
+    echo "resetting $BUILD: its tracked changes are exactly the previous patch set"
+    git -C "$BUILD" -c advice.detachedHead=false checkout --quiet -f "$PIN"
+  fi
+  # ---- 2. local guard patches (env-gated; no behaviour change unless the env vars are 1) -----------
+  for PATCH in "${PATCHES[@]}"; do
     git -C "$BUILD" apply --check "$PATCH"
     git -C "$BUILD" apply "$PATCH"
-  fi
+  done
+fi
+# Record the patch set the build copy now holds, for the next run's proof (copies, then the list naming them).
+mkdir -p "$APPLIED_DIR"
+NAMES=()
+for i in "${!PATCHES[@]}"; do
+  name="$(printf '%02d' "$i")-$(basename -- "${PATCHES[$i]}")"
+  put_file "$APPLIED_DIR" "$name" "${PATCHES[$i]}" || die "cannot record $name in $APPLIED_DIR"
+  NAMES+=("$name")
 done
+printf '%s\n' "${NAMES[@]}" | put_file "$ROOT/build" "$(basename -- "$APPLIED_LIST")" || die "cannot write $APPLIED_LIST"
 
 # ---- 3. install exactly the lockfile, no lifecycle scripts (skips 'prepare', esbuild postinstall) ---
 cd "$BUILD"
@@ -138,18 +254,22 @@ npm prune --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=warn
 du -sh "$BUILD/node_modules" "$BUILD/dist" || true
 cd "$ROOT"
 
-# ---- 6 (optional). E: data dir with the Reforger 1.8 API index from fma-rc ---------------------------
+# ---- 6 (optional). data dir with the Reforger 1.8 API index from fma-rc ------------------------------
 # Read from the pinned commit's objects (not the working tree), so a moved checkout cannot change the index.
 if [[ "${1:-}" == "--data18" ]]; then
-  DATA="$ROOT/data"
   git -C "$FMARC" cat-file -e "$FMARC_PIN^{commit}" 2>/dev/null || die "fma-rc commit $FMARC_PIN not in $FMARC (README: Build, prerequisite)"
   mkdir -p "$DATA/api"
+  # cp -r merges into existing copies, so nothing below them may be a symlink (derived_dir checked the dirs above)
+  for d in "$DATA/patterns" "$DATA/recipes" "$DATA/wiki" "$DATA/api"; do
+    if [[ -d "$d" && -n "$(find "$d" -type l -print -quit)" ]]; then
+      die "$d holds a symlink ($(find "$d" -type l -print -quit)); refusing to copy into it"
+    fi
+  done
   cp -r "$BUILD/data/patterns" "$BUILD/data/recipes" "$BUILD/data/wiki" "$DATA/"
   for f in arma-classes.json enfusion-classes.json groups.json hierarchy.json; do
-    git -C "$FMARC" show "$FMARC_PIN:data/api/$f" > "$DATA/api/$f.part"
-    mv -f "$DATA/api/$f.part" "$DATA/api/$f"
+    git -C "$FMARC" show "$FMARC_PIN:data/api/$f" | put_file "$DATA/api" "$f" || die "cannot write $DATA/api/$f"
   done
-  echo "$FMARC_PIN" > "$DATA/api/SOURCE_fma-rc_commit.txt"
+  echo "$FMARC_PIN" | put_file "$DATA/api" SOURCE_fma-rc_commit.txt || die "cannot write $DATA/api/SOURCE_fma-rc_commit.txt"
   echo "composed $DATA (wrapper exports ENFUSION_MCP_DATA_DIR automatically when api/ is populated)"
 fi
 

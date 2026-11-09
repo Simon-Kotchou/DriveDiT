@@ -43,9 +43,48 @@ RUN_HEADER = "run_header.txt"
 RUN_FOOTER = "run_footer.txt"
 PLAY_DIR_RE = re.compile(r"^play_\d\d$")
 
-# Roots where this tool family may write (outputs, synthetic plays, temporary directories)
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# Where this tool family may write (outputs, synthetic plays, temporary directories): write_refusal below.
+# DD-22: outputs only where the write boundary allows (tools/local_config.py check_write): RAM (/dev/shm) or the
+# verified data drive of the local config, never a volume whose root holds Windows/System32, never /tmp/.
+# Without the config only RAM is writable; without the loader nothing is.
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), "local_config.py")
+
+
+def _local_config_module():
+    """tools/local_config.py, loaded by path (shared as sys.modules["dd_local_config"]); None when it is missing."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            return None
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def write_refusal(path, roots=None):
+    """None when the write boundary (tools/local_config.py check_write) allows writing to path, narrowed to roots
+    when given, else the refusal message. Without the loader nothing is writable."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (path, _LOCAL_CONFIG_PY)
+    return mod.write_refusal(path, roots)
+
+
+def child_refusal(parent, name):
+    """None when <parent>/<name> may be written: name a plain file name (no separator, not absolute, not '..') and the
+    final path allowed by the write boundary under parent; else the refusal message."""
+    mod = _local_config_module()
+    if mod is None:
+        return "refusing output %r: the write boundary %s is missing" % (name, _LOCAL_CONFIG_PY)
+    try:
+        mod.check_child(parent, name, (parent,))
+    except mod.WriteRefused as exc:
+        return str(exc)
+    return None
 
 
 class InputError(Exception):
@@ -258,17 +297,15 @@ def run_cli(main, argv=None):
 # Output and test helpers
 # ------------------------------------------------------------------------------------------------
 def _inside_write_roots(path):
-    real = os.path.realpath(path)
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS):
-        return False
-    return any(probe.startswith(root) for root in WRITE_ROOTS)
+    return write_refusal(path) is None
 
 
 def check_out_path(path):
-    """Optional outputs only under the configured data roots (WRITE_ROOTS), never /tmp. Returns the path."""
-    if not path or not _inside_write_roots(path):
-        raise InputError("refusing output path %r: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
+    """Optional outputs only under /dev/shm/ or on the data drive of the local config, never /tmp. Returns the
+    path."""
+    why = write_refusal(path)
+    if why:
+        raise InputError(why)
     return path
 
 
@@ -287,39 +324,66 @@ def _kv_text(mapping):
     return "".join("%s=%s\n" % (k, "" if v is None else v) for k, v in mapping.items())
 
 
+def _checked_child(play_dir, rel):
+    """<play_dir>/<rel> for a relative rel of plain names (each component checked: no separator inside, not '..',
+    not absolute), its final path allowed by the write boundary under play_dir; ValueError otherwise."""
+    parts = rel.split("/") if isinstance(rel, str) else [rel]
+    parent = play_dir
+    for part in parts[:-1]:
+        why = child_refusal(parent, part)
+        if why:
+            raise ValueError("refusing file outside the play: %r (%s)" % (rel, why))
+        parent = os.path.join(parent, part)
+    why = child_refusal(parent, parts[-1])
+    if why:
+        raise ValueError("refusing file outside the play: %r (%s)" % (rel, why))
+    return os.path.join(parent, parts[-1])
+
+
+def _write_no_follow(path, data):
+    """Create or replace path for writing without following a symlink there (O_NOFOLLOW)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0), 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
 def write_synthetic_play(play_dir, header, csvs, footer=None, files=None):
     """Test helper: writes a play directory the way the engine side does.
     header / footer: dicts -> key=value files (footer None: no run_footer.txt); csvs: {name: (columns, rows)} with rows
-    as lists (or dicts by column), None -> empty field; files: {relpath: bytes}. Refuses any play_dir outside
-    /dev/shm/ or /mnt/e/ and anything under /mnt/c or /tmp. Returns the play dir."""
+    as lists (or dicts by column), None -> empty field; files: {relpath: bytes}. Refuses any play_dir the write
+    boundary refuses (RAM or the verified data drive only), and any derived name that is absolute, holds '..' or a
+    separator, or lands on a symlink: every final destination is checked, and opened without following a link.
+    Returns the play dir."""
     if not _inside_write_roots(play_dir):
-        raise ValueError("refusing synthetic play outside /dev/shm/ or /mnt/e/: %r" % play_dir)
+        raise ValueError("refusing synthetic play: %s" % write_refusal(play_dir))
     os.makedirs(play_dir, exist_ok=True)
-    with open(os.path.join(play_dir, RUN_HEADER), "w", encoding="ascii", newline="") as f:
-        f.write(_kv_text(header))
+    _write_no_follow(_checked_child(play_dir, RUN_HEADER), _kv_text(header).encode("ascii"))
     for name, (columns, rows) in (csvs or {}).items():
-        with open(os.path.join(play_dir, name + ".csv"), "w", encoding="ascii", newline="") as f:
-            f.write(_csv_text(columns, rows))
+        _write_no_follow(_checked_child(play_dir, name + ".csv"), _csv_text(columns, rows).encode("ascii"))
     for rel, data in (files or {}).items():
-        path = os.path.join(play_dir, rel)
-        if not _inside_write_roots(path):
-            raise ValueError("refusing file outside the play: %r" % rel)
+        path = _checked_child(play_dir, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(data)
+        _write_no_follow(_checked_child(play_dir, rel), data)
     if footer is not None:
-        with open(os.path.join(play_dir, RUN_FOOTER), "w", encoding="ascii", newline="") as f:
-            f.write(_kv_text(footer))
+        _write_no_follow(_checked_child(play_dir, RUN_FOOTER), _kv_text(footer).encode("ascii"))
     return play_dir
 
 
 def make_temp_dir(prefix):
-    """Test helper (tools/test_deploy_addon.py tmp_base rule): a new directory under $TMPDIR when that lies in
-    /dev/shm/ or /mnt/e/, else under /dev/shm/. unittest.SkipTest when neither is usable. Never /tmp. The caller
-    removes it (shutil.rmtree in a finally or addCleanup)."""
-    base = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if not (_inside_write_roots(base) and os.path.isdir(base) and os.access(base, os.W_OK)):
-        base = "/dev/shm"
-        if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-            raise unittest.SkipTest("no writable $TMPDIR under /dev/shm/ or /mnt/e/ and no /dev/shm; not using /tmp")
-    return tempfile.mkdtemp(prefix=prefix, dir=base)
+    """Test helper: a new directory under $TMPDIR when the write boundary allows it, else under /dev/shm/ when it does,
+    checked before anything is created (no symlink, an existing writable directory). unittest.SkipTest when neither
+    is usable, with the reason (a sandbox can hide the RAM mount, and the boundary refuses then, fail-closed). Never
+    /tmp or the system temp dir. The caller removes it (shutil.rmtree in a finally or addCleanup)."""
+    reasons = []
+    for cand in (os.environ.get("TMPDIR") or "", "/dev/shm"):
+        if not cand:
+            continue
+        if os.path.islink(cand) or not os.path.isdir(cand) or not os.access(cand, os.W_OK):
+            reasons.append("%s is not an existing writable directory (or is a symlink)" % cand)
+            continue
+        why = write_refusal(os.path.join(os.path.realpath(cand), "__dd22_scratch_probe__"))
+        if why is None:
+            return tempfile.mkdtemp(prefix=prefix, dir=os.path.realpath(cand))
+        reasons.append(why)
+    raise unittest.SkipTest("no scratch directory the write boundary allows (%s); not using /tmp" % "; ".join(reasons))

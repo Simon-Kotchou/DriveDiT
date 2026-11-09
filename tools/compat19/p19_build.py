@@ -9,10 +9,11 @@ Pass criterion (6.1 CC-01), all four, evaluated read-only:
   4. the direct-launch freeze check of 5.5 was done for this app pair: a PASS after-record of
      tools/pin/freeze_check.py for this pin file or its build_key, under <pin dir>/freeze/.
 
-    python3 -I -B tools/compat19/p19_build.py [--pin-dir /mnt/e/DriveDiT/pin] [--write]
+    python3 -I -B tools/compat19/p19_build.py [--pin-dir <DATA_ROOT>/pin] [--write]
 
---write also stores the result as /mnt/e/DriveDiT/compat19/<pin id>/cc01_<UTC>.json (the directory must exist or is
-created under /mnt/e/DriveDiT/compat19). Exit codes: 0 PASS, 1 FAIL, 2 config error.
+--write also stores the result as <DATA_ROOT>/compat19/<pin id>/cc01_<UTC>.json (the directory must exist or is
+created under <DATA_ROOT>/compat19; DATA_ROOT of the local config, DD-22). Exit codes: 0 PASS, 1 FAIL, 2 config
+error.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PIN_TOOLS = os.path.join(os.path.dirname(HERE), "pin")
-COMPAT_ROOT = "/mnt/e/DriveDiT/compat19"
+COMPAT_REL = "compat19"   # under DATA_ROOT of the local config (DD-22)
 
 
 def _load(name):
@@ -80,10 +81,12 @@ def evaluate(pin_dir=None) -> dict:
             "verdict": "PASS" if all(i["ok"] for i in items) else "FAIL"}
 
 
-def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS, compat_root=COMPAT_ROOT) -> int:
+def main(argv=None, write_roots=None, compat_root=None) -> int:
+    """write_roots None: pinlib.DEFAULT_WRITE_ROOTS; compat_root None: <DATA_ROOT>/compat19 of the local config."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--pin-dir", default=None)
-    ap.add_argument("--write", action="store_true", help="also write the result under %s/<pin id>/" % COMPAT_ROOT)
+    ap.add_argument("--write", action="store_true", help="also write the result under <DATA_ROOT>/%s/<pin id>/"
+                    % COMPAT_REL)
     args = ap.parse_args(argv)
     try:
         res = evaluate(args.pin_dir)
@@ -95,7 +98,8 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS, compat_root=COMPAT_R
     print("CC-01 %s (pin %s, build_key %s)" % (res["verdict"], res["pin_id"], res["build_key"]))
     if args.write:
         try:
-            d = pinlib.check_write_path(os.path.join(compat_root, res["pin_id"]), write_roots)
+            root = compat_root or os.path.join(pinlib.local_path("DATA_ROOT"), COMPAT_REL)
+            d = pinlib.check_write_path(os.path.join(root, res["pin_id"]), write_roots)
             os.makedirs(d, exist_ok=True)
             path = pinlib.write_json_once(os.path.join(d, "cc01_%s.json" % res["utc"].replace("-", "").replace(":", "")),
                                          res, write_roots)

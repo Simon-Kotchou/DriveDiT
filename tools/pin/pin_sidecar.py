@@ -21,8 +21,9 @@ bytes (pin_sha256), written once (O_EXCL) and never replaced:
     python3 -I -B pin_sidecar.py build-key 1.8.0.13 --from-sums --dry-run
     python3 -I -B pin_sidecar.py engine 1.9.0.37 --run-header <DC_Probes/e01/<launch id>/play_01/run_header.txt> --dry-run
 
-Exactly one of --dry-run (print the sidecar, write nothing) and --apply (write it) is required. Writes only under
-/mnt/e (pinlib.check_write_path). Reads the installs, the copy and the run header read-only.
+Exactly one of --dry-run (print the sidecar, write nothing) and --apply (write it) is required. Writes only on the
+data drive (pinlib.check_write_path). Reads the installs, the copy and the run header read-only. --pin-dir defaults
+to <DATA_ROOT>/pin of the local config (tools/local_config.py).
 
 Exit codes: 0 written (or dry run); 1 refused (the pin does not match its installs or copy, the evidence does not
 name the pin); 2 usage, config or path error, or the sidecar already exists.
@@ -174,13 +175,14 @@ def make_engine_sidecar(src: dict, header_path: str) -> dict:
     }
 
 
-def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
+def main(argv=None, write_roots=None) -> int:
+    """write_roots: None for pinlib.DEFAULT_WRITE_ROOTS (the data drive of the local config)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="kind", required=True)
     for name in ("build-key", "engine"):
         p = sub.add_parser(name)
         p.add_argument("pin_id")
-        p.add_argument("--pin-dir", default=pinlib.DEFAULT_PIN_DIR)
+        p.add_argument("--pin-dir", default=None, help="default <DATA_ROOT>/pin of the local config")
         mode = p.add_mutually_exclusive_group(required=True)
         mode.add_argument("--dry-run", action="store_true", help="print the sidecar; write nothing")
         mode.add_argument("--apply", action="store_true", help="write the sidecar (once; never replaced)")
@@ -195,8 +197,8 @@ def main(argv=None, write_roots=pinlib.DEFAULT_WRITE_ROOTS) -> int:
             p.add_argument("--run-header", required=True, help="a probe run_header.txt of a launch on this pin")
     args = ap.parse_args(argv)
 
-    pin_dir = os.path.abspath(pinlib.win_to_wsl(args.pin_dir))
     try:
+        pin_dir = os.path.abspath(pinlib.win_to_wsl(args.pin_dir or pinlib.DEFAULT_PIN_DIR))
         pinlib.validate_pin_id(args.pin_id)
         out = pinlib.sidecar_path(pin_dir, args.pin_id, "build_key" if args.kind == "build-key" else "engine")
         if args.apply:

@@ -200,7 +200,7 @@
       "root_world": "{A9806AF617972E97}worlds/Arland/Arland.ent",
       "capture_world": "worlds/DataCapture/DC_Arland.ent",
       "splits": ["train", "val_c", "val_l", "a0", "a_stress"],
-      "storage": "E:\\DriveDiT\\captures\\arland\\",
+      "storage": "<DATA_ROOT_WIN>\\captures\\arland\\",
       "role": "TRAIN + VAL-C + VAL-L layout diagnostic + A0/A-stress references"
     },
     {
@@ -209,7 +209,7 @@
       "root_world": "{1EA95DAE3230BEB0}worlds/Cain/Cain.ent",
       "capture_world": "worlds/DataCapture/DC_Kolguyev.ent (DD-2)",
       "splits": ["k_val", "k_rep"],
-      "storage": "E:\\DriveDiT\\captures\\kolguyev\\",
+      "storage": "<DATA_ROOT_WIN>\\captures\\kolguyev\\",
       "role": "OOD-VAL: K-VAL selection within its budget, K-REP report only (pending D4); never training"
     },
     {
@@ -218,7 +218,7 @@
       "root_world": "{853E92315D1D9EFE}worlds/Eden/Eden.ent",
       "capture_world": "worlds/DataCapture/DC_Everon.ent (DD-2-everon, just before T4-E)",
       "splits": ["everon_harness", "everon_test"],
-      "storage": "E:\\DriveDiT\\heldout\\everon\\SEALED\\",
+      "storage": "<DATA_ROOT_WIN>\\heldout\\everon\\SEALED\\",
       "role": "SEALED TEST (zero-shot); every Eden-rooted world counts as Everon"
     }
   ],
@@ -879,7 +879,7 @@
         {"name": "pin.pin_sha256", "type": "str", "unit": "-", "required": true, "desc": "sha256 of the pin file, from the launch record."},
         {"name": "pin.build_key", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "Build identity (game and Tools appid+buildid, exe sha256s; computed by pinlib, DD-14a) from a dd-launch/2 record; null while launch records are dd-launch/1. session.json is never edited after it is written: the harvester then writes build_key (from the pin) into its sidecar harvest.json, and C02 reads it from there and refuses a session that has neither."},
         {"name": "pin.channel", "type": "enum", "unit": "-", "required": true, "enum": ["stable", "experimental"], "desc": "stable or experimental (dd-launch/1 records: stable)."},
-        {"name": "pin.launch_id", "type": "str", "unit": "-", "required": true, "desc": "-dcLaunchId (launch_mode cli) or the id of the matched record (wb_escape); joins the launch record in E:\\DriveDiT\\pin\\launches."},
+        {"name": "pin.launch_id", "type": "str", "unit": "-", "required": true, "desc": "-dcLaunchId (launch_mode cli) or the id of the matched record (wb_escape); joins the launch record in <DATA_ROOT_WIN>\\pin\\launches."},
         {"name": "pin.launch_schema", "type": "str", "unit": "-", "required": true, "desc": "Schema of the launch record read (dd-launch/1, later /2)."},
         {"name": "pin.game_buildid", "type": "int", "unit": "-", "required": true, "desc": "Game Steam buildid from the launch record."},
         {"name": "pin.tools_buildid", "type": "int", "unit": "-", "required": true, "desc": "Tools Steam buildid from the launch record."},
@@ -950,7 +950,7 @@
         {"name": "launch_guard.record_path", "type": "str", "unit": "-", "required": true, "desc": "The matched record, $profile:dc_launch/launch_<id>.json."},
         {"name": "launch_guard.record_launch_id", "type": "str", "unit": "-", "required": true, "desc": "launch_id inside the matched record (equals pin.launch_id)."},
         {"name": "launch_guard.cli_seen", "type": "bool", "unit": "-", "required": true, "desc": "1 when System.GetCLIParam saw -dcLaunchId or -profile (E-11)."},
-        {"name": "launch_guard.profile_root_ok", "type": "bool", "unit": "-", "required": true, "desc": "1: -profile (when visible) and the resolved $profile lie inside E:\\DriveDiT."},
+        {"name": "launch_guard.profile_root_ok", "type": "bool", "unit": "-", "required": true, "desc": "1: -profile (when visible) and the resolved $profile lie inside <DATA_ROOT_WIN>."},
         {"name": "launch_guard.escape_binding", "type": "str", "unit": "-", "required": true, "nullable": true, "desc": "wb_escape only: process_start (the record was written by the launch that started this Workbench; the default) or newest_after_deploy (binding switched off for one Play); null in cli mode."}
       ]
     },

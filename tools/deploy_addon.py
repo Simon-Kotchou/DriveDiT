@@ -28,9 +28,10 @@ Safety rules:
     FILE argument is not in the manifest.
   * Target allowlist: the resolved target must lie strictly inside <DATA_ROOT>/addons/ (the default target is
     <DATA_ROOT>/addons/DataCapture). --allow-root DIR adds another root for scratch deploys and the self-test;
-    DIR must be an existing directory on the data drive (the drive of DATA_ROOT) or under /dev/shm/. Targets on the
-    system drive (SYSTEM_DRIVE, its Windows form, the same device) or on the WSL disk image (the device of /, which
-    lives on the system drive) are always refused.
+    DIR must be an existing directory on the data drive (the drive of DATA_ROOT) or under /dev/shm/. Every target,
+    --allow-root, destination, backup and the state file also pass the write boundary (tools/local_config.py
+    check_write: RAM or the data drive verified in /proc/self/mountinfo), which refuses the Windows system drive by
+    its Windows/System32 whatever the config says; the WSL disk image (the device of /) is always refused.
   * Never writes through a symlink or junction inside the target: every destination, the state file and every
     backup path are checked component by component before anything is written.
   * Never writes, overwrites or deletes Workbench-generated files (*.meta, resourceDatabase.rdb, UserMaps.desc).
@@ -53,12 +54,14 @@ refused. Without --target-pin a deploy to the production root is as before: the 
 every check are unchanged.
 
 Local paths (DD-22): the repo names no machine path. <DATA_ROOT> and the system drive come from the untracked local
-config (tools/local_config.py, drivedit.local.env: DATA_ROOT, SYSTEM_DRIVE), read when a deploy runs and never at
-import; without it, or without one of those keys, the deploy is refused before anything is read or written. The
-launch guard's profile root is the only machine value the engine needs: the repo writes it as PROFILE_ROOT_TOKEN in
-DC_Session.c, DC_ProbeRunner.c, DC_LaunchGuard.c and the two world layers, and the payload gets DATA_ROOT in the
-Windows form with forward slashes (X:/...) in its place, so a deployed file holds exactly what it held before
-DD-22 on a machine whose config holds the same root. Any other @DD_...@ token, or a token in a config file, refuses.
+config (tools/local_config.py, drivedit.local.env: DATA_ROOT; SYSTEM_DRIVE only words a refusal), read when a deploy
+runs and never at import; without it, or without DATA_ROOT, the deploy is refused before anything is read or written.
+The launch guard's profile root is the only machine value the engine needs: the repo writes it as PROFILE_ROOT_TOKEN
+in exactly five sources (PROFILE_ROOT_SOURCES: DC_Session.c, DC_ProbeRunner.c, DC_LaunchGuard.c and the two world
+layers), and the payload gets DATA_ROOT in the Windows form with forward slashes (X:/...) in its place. The two
+layers deploy exactly what they held before DD-22 on a machine whose config holds the same root; the three scripts
+differ from then in comments and in two diagnostic strings only (their code lines are unchanged). The token in any
+other file, or any other @DD_...@ in any payload (the MCP handlers included), refuses.
 
 Exit codes: 0 success (or dry run), 2 refused, 1 unexpected I/O error.
 """
@@ -80,16 +83,25 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 #   DEFAULT_TARGET           <DATA_ROOT>/addons/DataCapture
 #   ALLOWED_TARGET_ROOTS     (<DATA_ROOT>/addons,): deploy targets resolve strictly inside one of them (DD-1)
 #   ALLOW_ROOT_PREFIXES      (<data drive>/, /dev/shm/): an extra --allow-root resolves strictly under one of them
-#   FORBIDDEN_DEVICE_PATHS   the system drive (SYSTEM_DRIVE) and / (the WSL disk image, which lives on the system
-#                            drive): a path on the device of either never receives a deploy
+#   FORBIDDEN_DEVICE_PATHS   / (the WSL disk image): a path on its device never receives a deploy (the Windows
+#                            system drive is refused by the write boundary itself, boundary_reason)
 #   DEFAULT_DEPLOY_ROOTS     the protected per-pin roots (DD-14a), <DATA_ROOT>/<DEFAULT_DEPLOY_ROOT_RELS>, the same as
 #                            tools/pin/pinlib.py DEPLOY_ROOTS (the self-test compares them); used only when this file
 #                            runs without tools/pin next to it, so the protection holds there too
 DEFAULT_DEPLOY_ROOT_RELS = {"stable": "addons", "cold-1.8.0.13": "addons_c18"}
 DEFAULT_MANIFEST = os.path.join(REPO_ROOT, "addons", "DataCapture", "deploy_manifest.txt")
-# The launch guard's profile root in the repo's addon and script files (DD-22): replaced by the data root (X:/...).
+# The launch guard's profile root (DD-22): replaced by the data root (X:/...) in exactly these five sources, and
+# nowhere else. Any other @DD_...@ (any characters but '@' and white space between) left in any payload, the MCP
+# handlers included, refuses the deploy.
 PROFILE_ROOT_TOKEN = b"@DD_PROFILE_ROOT@"
-TOKEN_RE = re.compile(rb"@DD_[A-Z0-9_]*@")
+PROFILE_ROOT_SOURCES = frozenset((
+    "src/enfusion/datacapture/DC_Session.c",
+    "src/enfusion/datacapture/DC_ProbeRunner.c",
+    "src/enfusion/datacapture/DC_LaunchGuard.c",
+    "addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
+    "addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.layer",
+))
+TOKEN_RE = re.compile(rb"@DD_[^@\s]*@")
 PROFILE_ROOT_RE = re.compile(r"[A-Z]:/[A-Za-z0-9_./-]+")
 
 
@@ -98,9 +110,8 @@ class Refusal(Exception):
     pass
 
 
-def local_config():
-    """The parsed local config (tools/local_config.py next to this file, loaded by path). Refusal when it or the
-    loader is missing or malformed."""
+def _lc():
+    """tools/local_config.py next to this file, loaded by path (shared as sys.modules["dd_local_config"])."""
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "local_config.py")
     mod = sys.modules.get("dd_local_config")
@@ -111,6 +122,19 @@ def local_config():
         mod = importlib.util.module_from_spec(spec)
         sys.modules["dd_local_config"] = mod
         spec.loader.exec_module(mod)
+    return mod
+
+
+def boundary_reason(path, roots=None):
+    """Why the write boundary (tools/local_config.py check_write: RAM or the verified data drive, never a Windows
+    system volume) refuses path, or None. Every target, --allow-root, destination, backup and the state file pass it."""
+    return _lc().write_refusal(path, roots)
+
+
+def local_config():
+    """The parsed local config (tools/local_config.py next to this file, loaded by path). Refusal when it or the
+    loader is missing or malformed."""
+    mod = _lc()
     try:
         return mod.load()
     except mod.LocalConfigError as e:
@@ -129,8 +153,7 @@ _COMPUTED = {
     "DEFAULT_TARGET": lambda: _local("get", "DATA_ROOT") + "/addons/DataCapture",
     "ALLOWED_TARGET_ROOTS": lambda: (_local("get", "DATA_ROOT") + "/addons",),
     "ALLOW_ROOT_PREFIXES": lambda: (_local("drive", "DATA_ROOT") + "/", "/dev/shm/"),
-    "FORBIDDEN_DEVICE_PATHS": lambda: ((_local("get", "SYSTEM_DRIVE"), "the system drive"),
-                                       ("/", "the WSL disk image, which lives on the system drive")),
+    "FORBIDDEN_DEVICE_PATHS": lambda: (("/", "the WSL disk image, which lives on the system drive"),),
     "DEFAULT_DEPLOY_ROOTS": lambda: {lp: _local("get", "DATA_ROOT") + "/" + rel
                                      for lp, rel in DEFAULT_DEPLOY_ROOT_RELS.items()},
 }
@@ -156,15 +179,15 @@ def profile_root_value():
 
 
 def render_payload(group, src_rel, data, root_value):
-    """The deployed bytes of one source: addon and script files with PROFILE_ROOT_TOKEN replaced (DD-22), everything
-    else unchanged. Refusal for a token anywhere else, or for any other @DD_...@ token."""
-    if group in (GROUP_ADDON, GROUP_SCRIPT):
+    """The deployed bytes of one source (every group): PROFILE_ROOT_TOKEN replaced in the five PROFILE_ROOT_SOURCES
+    (DD-22), everything else unchanged. Refusal for the token in any other file, or for any other @DD_...@ token."""
+    if src_rel in PROFILE_ROOT_SOURCES and group in (GROUP_ADDON, GROUP_SCRIPT):
         data = data.replace(PROFILE_ROOT_TOKEN, root_value.encode("ascii"))
     left = TOKEN_RE.search(data)
     if left:
         raise Refusal("%s holds the token %s, which the deploy does not fill in%s" % (
-            src_rel, left.group(0).decode("ascii"), " here (config files are copied byte for byte)"
-            if left.group(0) == PROFILE_ROOT_TOKEN else ""))
+            src_rel, left.group(0).decode("ascii", "replace"), " here (only %s get the profile root)"
+            % ", ".join(sorted(PROFILE_ROOT_SOURCES)) if left.group(0) == PROFILE_ROOT_TOKEN else ""))
     return data
 
 
@@ -403,7 +426,7 @@ def existing_ancestor(path):
 
 
 def forbidden_device_reason(real, what):
-    """Why `real` (or its nearest existing ancestor) is on a forbidden device (the system drive, the WSL disk
+    """Why `real` (or its nearest existing ancestor) is on a forbidden device (FORBIDDEN_DEVICE_PATHS: the WSL disk
     image), or None."""
     try:
         dev = os.stat(existing_ancestor(real)).st_dev
@@ -428,25 +451,31 @@ def allow_root_reason(raw):
         return "--allow-root %s resolves to %s, which is not inside %s" % (raw, real, " or ".join(prefixes))
     if not os.path.isdir(real):
         return "--allow-root %s is not an existing directory" % raw
-    return forbidden_device_reason(real, "--allow-root")
+    return forbidden_device_reason(real, "--allow-root") or boundary_reason(raw)
+
+
+def _lc_value(key):
+    """A config value for a message only (advisory), or None."""
+    try:
+        return _local("get", key)
+    except Refusal:
+        return None
 
 
 def target_reason(raw, allow_roots=()):
     """Return why `raw` is not an acceptable target, or None.
 
-    Refused: Windows syntax, the system drive or the WSL disk image (by path or by device), filesystem or drive
-    roots, anything overlapping the repo, and everything that does not resolve strictly inside ALLOWED_TARGET_ROOTS
-    or an accepted --allow-root."""
-    system = _local("get", "SYSTEM_DRIVE")
+    Refused: Windows syntax, the WSL disk image (by device), whatever the write boundary refuses (the Windows system
+    drive, found by its Windows/System32 whatever SYSTEM_DRIVE says; unmounted or unverified drives), filesystem or
+    drive roots, anything overlapping the repo, and everything that does not resolve strictly inside
+    ALLOWED_TARGET_ROOTS or an accepted --allow-root. SYSTEM_DRIVE only words a refusal."""
     if re.match(r"^[A-Za-z]:", raw) or raw.startswith("\\\\"):
-        if raw[:1].lower() == system[-1]:
+        system = _lc_value("SYSTEM_DRIVE")
+        if system and raw[:1].lower() == system[-1]:
             return "target %r is on the system drive; deploys go to the data drive (%s/...)" % (
                 raw, _local("drive", "DATA_ROOT"))
         return "target %r uses Windows syntax; pass the WSL form, e.g. %s" % (raw, _get("DEFAULT_TARGET"))
     real = os.path.realpath(os.path.abspath(raw))
-    low = real.lower()
-    if low == system or low.startswith(system + "/"):
-        return "target %s resolves to the system drive (%s); deploys go to the data drive" % (raw, real)
     reason = forbidden_device_reason(real, "target")
     if reason:
         return reason
@@ -454,6 +483,9 @@ def target_reason(raw, allow_roots=()):
         return "target %s is a filesystem or drive root" % raw
     if inside(real, REPO_ROOT) or inside(REPO_ROOT, real):
         return "target %s overlaps the repo %s" % (raw, REPO_ROOT)
+    reason = boundary_reason(raw)
+    if reason:
+        return reason
     roots = [os.path.realpath(r) for r in tuple(_get("ALLOWED_TARGET_ROOTS")) + tuple(allow_roots)]
     if not any(real != root and inside(real, root) for root in roots):
         return ("target %s resolves to %s, which is not inside an allowed deploy root (%s); the capture addon "
@@ -581,7 +613,7 @@ def escape_reason(target, rel):
     probe = existing_ancestor(cur)
     if inside(probe, target) and not inside(os.path.realpath(probe), target):
         return "%s: %s resolves outside the target (%s)" % (rel, probe, os.path.realpath(probe))
-    return None
+    return boundary_reason(os.path.join(target, *rel.split("/")))
 
 
 def git(args):
@@ -854,9 +886,6 @@ def main(argv=None):
     for it in items:
         with open(it["src_abs"], "rb") as f:
             data = f.read()
-        if it["group"] == GROUP_EMCP:
-            payload[it["dst"]] = data
-            continue
         try:
             payload[it["dst"]] = render_payload(it["group"], it["src_rel"], data, root_value)
         except Refusal as e:

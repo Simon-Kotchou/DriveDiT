@@ -16,7 +16,9 @@ too; nothing here depends on, or names, a real machine. The data-root rules (all
 are checked in-process with the device check of the never-mounted /mnt/x lifted.
 """
 
+import contextlib
 import hashlib
+import importlib.util
 import os
 import re
 import shutil
@@ -103,6 +105,11 @@ def expected_dst(kind, src):
     return SCRIPT_DST + "/" + src.rsplit("/", 1)[1]
 
 
+def source_bytes(src):
+    with open(os.path.join(REPO, *src.split("/")), "rb") as f:
+        return f.read()
+
+
 def deployed_bytes(kind, src):
     """What the deploy writes for a manifest entry: the source, with the profile-root token filled in (DD-22)."""
     with open(os.path.join(REPO, *src.split("/")), "rb") as f:
@@ -112,10 +119,22 @@ def deployed_bytes(kind, src):
     return data
 
 
+@contextlib.contextmanager
 def no_device_check():
-    """The data-root rules in-process: /mnt/x is never mounted, so its paths would lie on the device of / and be
-    refused by the device check first. This lifts that check for one block."""
-    return mock.patch.object(deploy_addon, "FORBIDDEN_DEVICE_PATHS", ())
+    """The data-root rules in-process: the fixture's data drive is never mounted, so its paths would lie on the device
+    of / and be refused by the device check and the write boundary first. This lifts both for one block (the boundary
+    has its own tests: test_refuses_a_system_volume_whatever_the_config_says and tests/test_write_boundary.py)."""
+    with mock.patch.object(deploy_addon, "FORBIDDEN_DEVICE_PATHS", ()), \
+            mock.patch.object(deploy_addon, "boundary_reason", lambda path, roots=None: None):
+        yield
+
+
+# An independent spelling of the token rule (not deploy_addon.TOKEN_RE): @DD_ then anything but '@' and white space.
+ANY_TOKEN = re.compile(rb"@DD_[^@\s]*@")
+_bv_spec = importlib.util.spec_from_file_location(
+    "dd22_boundary_vectors", os.path.join(REPO, "tests", "fixtures", "local_config", "boundary_vectors.py"))
+bv = importlib.util.module_from_spec(_bv_spec)
+_bv_spec.loader.exec_module(bv)
 
 
 def listing(root):
@@ -201,8 +220,7 @@ class DeployAddonTest(unittest.TestCase):
     def test_profile_root_token_is_filled_in(self):
         # DD-22: the repo names no profile root; the deploy writes DATA_ROOT (X:/...) for the token, and only there.
         token = deploy_addon.PROFILE_ROOT_TOKEN
-        holders = sorted(src for kind, src in manifest_entries()
-                         if token in open(os.path.join(REPO, *src.split("/")), "rb").read())
+        holders = sorted(src for kind, src in manifest_entries() if token in source_bytes(src))
         self.assertEqual(holders, ["addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer",
                                    "addons/DataCapture/worlds/DataCapture/DC_Probes_Arland_Layers/default.layer",
                                    "src/enfusion/datacapture/DC_LaunchGuard.c", "src/enfusion/datacapture/DC_ProbeRunner.c",
@@ -211,7 +229,7 @@ class DeployAddonTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         for rel in listing(self.target):
             with open(os.path.join(self.target, rel), "rb") as f:
-                self.assertIsNone(deploy_addon.TOKEN_RE.search(f.read()), rel)
+                self.assertIsNone(ANY_TOKEN.search(f.read()), rel)
         with open(os.path.join(self.target, SCRIPT_DST, "DC_Session.c"), encoding="utf-8") as f:
             self.assertIn('[Attribute("%s", UIWidgets.EditBox, "Launch guard:' % PROFILE_ROOT, f.read())
         with open(os.path.join(self.target, *WORLD_LAYER.split("/")), encoding="utf-8") as f:
@@ -219,12 +237,39 @@ class DeployAddonTest(unittest.TestCase):
 
     def test_tokens_are_refused_where_they_are_not_filled_in(self):
         value = PROFILE_ROOT
-        with self.assertRaisesRegex(deploy_addon.Refusal, "config files are copied byte for byte"):
-            deploy_addon.render_payload("config", "x.json", b'{"root": "@DD_PROFILE_ROOT@"}', value)
-        with self.assertRaisesRegex(deploy_addon.Refusal, "@DD_OTHER@"):
-            deploy_addon.render_payload("script", "src/enfusion/datacapture/X.c", b'"@DD_OTHER@"', value)
-        self.assertEqual(deploy_addon.render_payload("addon", "a.layer", b'r "@DD_PROFILE_ROOT@"', value),
-                         b'r "X:/DataRoot"')
+        layer = "addons/DataCapture/worlds/DataCapture/DC_Arland_Layers/default.layer"
+        self.assertEqual(deploy_addon.render_payload("addon", layer, b'r "@DD_PROFILE_ROOT@"', value),
+                         b'r "%s"' % PROFILE_ROOT.encode("ascii"))
+        # the token outside the five named sources, in any group, the MCP handlers included
+        for group, src in (("config", "addons/DataCapture/Configs/x.json"), ("addon", "addons/DataCapture/a.layer"),
+                           ("script", "src/enfusion/datacapture/DC_Other.c"),
+                           ("emcp", "tools/enfusion-mcp/handlers/EMCP_X.c"), ("config", layer)):
+            with self.assertRaisesRegex(deploy_addon.Refusal, "only .* get the profile root", msg=(group, src)):
+                deploy_addon.render_payload(group, src, b'{"root": "@DD_PROFILE_ROOT@"}', value)
+        # any other @DD_...@, whatever its characters, in any payload
+        for token in (b"@DD_OTHER@", b"@DD_typo@", b"@DD_FOO-BAR@", b"@DD_@", b"@DD_x.y/z@"):
+            self.assertIsNotNone(ANY_TOKEN.search(token))
+            for group in ("script", "addon", "config", "emcp"):
+                with self.assertRaisesRegex(deploy_addon.Refusal, re.escape(token.decode()), msg=(group, token)):
+                    deploy_addon.render_payload(group, "src/enfusion/datacapture/DC_Session.c", b'"%s"' % token,
+                                                value)
+
+    def test_exactly_five_sources_hold_the_token(self):
+        holders = set()
+        for root, _, files in os.walk(REPO):
+            if "/.git" in root or "/.venv" in root:
+                continue
+            for name in files:
+                rel = os.path.relpath(os.path.join(root, name), REPO).replace(os.sep, "/")
+                if rel.startswith(("tools/deploy_addon.py", "tools/test_deploy_addon.py")):
+                    continue
+                try:
+                    with open(os.path.join(root, name), "rb") as f:
+                        if deploy_addon.PROFILE_ROOT_TOKEN in f.read():
+                            holders.add(rel)
+                except OSError:
+                    pass
+        self.assertEqual(holders, set(deploy_addon.PROFILE_ROOT_SOURCES))
 
     def test_no_local_config_refuses_before_anything(self):
         env = dict(os.environ, DRIVEDIT_LOCAL_CONFIG=os.path.join(self.tmp, "missing.env"))
@@ -326,8 +371,8 @@ class DeployAddonTest(unittest.TestCase):
         # Checked in-process on the pure target_reason(): no system-drive or WSL-disk path is ever passed to the
         # tool's argv. The fixture's system drive is /mnt/z (Z:).
         probes = [SYSTEM_DRIVE + "/__dd_deploy_selftest_missing__/DataCapture",
-                  "Z:\\__dd_deploy_selftest_missing__\\DataCapture",
-                  "z:/__dd_deploy_selftest_missing__/DataCapture"]
+                  "Z:\\Synthetic Steam (x86)\\__dd_deploy_selftest_missing__\\DataCapture",
+                  "z:/Synthetic Steam (x86)/__dd_deploy_selftest_missing__/DataCapture"]
         for target in probes:
             reason = deploy_addon.target_reason(target, [self.tmp])
             self.assertIsNotNone(reason, target)
@@ -336,20 +381,34 @@ class DeployAddonTest(unittest.TestCase):
         # The WSL disk image (/tmp, ~) lives on the system drive; the game library (/mnt/y here) is read-only.
         for target in ("/tmp/__dd_deploy_selftest_missing__/DataCapture",
                        os.path.join(os.path.expanduser("~"), "__dd_deploy_selftest_missing__", "DataCapture"),
-                       "/mnt/y/__dd_deploy_selftest_missing__/DataCapture"):
+                       "/mnt/y/Game Library/__dd_deploy_selftest_missing__/DataCapture"):
             self.assertIsNotNone(deploy_addon.target_reason(target, [self.tmp]), target)
 
     def test_refuses_the_system_drive_by_device(self):
-        # A path whose device is the system drive's (here: a stand-in directory on the device of the temp dir) is
+        # A path whose device is the WSL disk image's (here: a stand-in directory on the device of the temp dir) is
         # refused by device, also through a symlink whose name says nothing.
-        stand_in = os.path.join(self.tmp, "system_drive")
+        stand_in = os.path.join(self.tmp, "wsl_disk")
         os.makedirs(stand_in)
         link = os.path.join(self.tmp, "innocent")
         os.symlink(stand_in, link)
-        with mock.patch.object(deploy_addon, "FORBIDDEN_DEVICE_PATHS", ((stand_in, "the system drive"),)):
+        with mock.patch.object(deploy_addon, "FORBIDDEN_DEVICE_PATHS", ((stand_in, "the WSL disk image"),)):
             for target in (os.path.join(link, "DataCapture"), self.target):
                 reason = deploy_addon.target_reason(target, [self.tmp])
-                self.assertIn("same device as %s (the system drive)" % stand_in, reason)
+                self.assertIn("same device as %s (the WSL disk image)" % stand_in, reason)
+
+    def test_refuses_a_system_volume_whatever_the_config_says(self):
+        # The write boundary's backstop: a volume whose root holds Windows/System32 (here a fake drvfs mount in the
+        # temp dir) is refused as a target, an allow-root and a destination, also through an innocent symlink.
+        with bv.patched_system_volume(deploy_addon._lc(), self.tmp) as system:
+            os.makedirs(os.path.join(system, "addons"))
+            link = os.path.join(self.tmp, "innocent")
+            os.symlink(os.path.join(system, "addons"), link)
+            for target in (os.path.join(system, "addons", "DataCapture"), os.path.join(link, "DataCapture")):
+                self.assertIn("Windows system drive", deploy_addon.target_reason(target, [self.tmp, system]), target)
+            self.assertIn("Windows system drive", deploy_addon.allow_root_reason(os.path.join(system, "addons")))
+            self.assertIn("Windows system drive", deploy_addon.escape_reason(system, "addons/x.c"))
+            self.assertEqual(sorted(os.listdir(system)), ["Windows", "addons"])
+            self.assertEqual(os.listdir(os.path.join(system, "addons")), [])
 
     def test_refuses_targets_outside_the_allowed_roots(self):
         # Runs everywhere: a sibling of the allowed root is not inside it, and an allowed root itself is not a target.
@@ -758,6 +817,97 @@ class TargetPinTest(unittest.TestCase):
         with no_device_check():
             self.assertIn("not inside an allowed deploy root", deploy_addon.target_reason(target))
             self.assertIsNone(deploy_addon.target_reason(target, (DATA_ROOT + "/addons_c18",)))
+
+
+
+LEGACY_REV = "f145aff"   # the last pre-DD-22 main commit
+CHANGED_SCRIPTS = ("src/enfusion/datacapture/DC_LaunchGuard.c", "src/enfusion/datacapture/DC_ProbeEngine.c",
+                   "src/enfusion/datacapture/DC_ProbeRunner.c", "src/enfusion/datacapture/DC_Session.c")
+
+
+def git_show(rev, rel):
+    r = subprocess.run(["git", "--no-optional-locks", "-C", REPO, "show", "%s:%s" % (rev, rel)],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return r.stdout if r.returncode == 0 else None
+
+
+def code_lines(data):
+    """The non-empty lines of Enforce Script source with // and /* */ comments removed and every string literal
+    emptied: what the engine runs, apart from the text of its messages and defaults."""
+    text, out, i, n, block = data.decode("utf-8"), [], 0, 0, False
+    n = len(text)
+    while i < n:
+        if block:
+            if text.startswith("*/", i):
+                block, i = False, i + 2
+            else:
+                out.append("\n" if text[i] == "\n" else "")
+                i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            block, i = True, i + 2
+        elif text[i] == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append('""')
+            i = j + 1
+        else:
+            out.append(text[i])
+            i += 1
+    return [ln.strip() for ln in "".join(out).split("\n") if ln.strip()]
+
+
+class LegacyPayloadTest(unittest.TestCase):
+    """Codex round 2 row 10: the payload the deploy writes with the config derived from the last pre-DD-22 revision,
+    against that revision's files (git show at run time; no copy is committed). Every payload is byte-identical to
+    then, the two world layers included, except the four scripts of CHANGED_SCRIPTS, which differ in comments and
+    string literals only (their code lines are the same). Runs only where that revision is in the history; a failure
+    names files, never their content (it is this machine's)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if git_show(LEGACY_REV, "tools/pin/pinlib.py") is None:
+            raise unittest.SkipTest("%s is not in this clone's history (a shallow CI checkout)" % LEGACY_REV)
+        spec = importlib.util.spec_from_file_location("dd_test_deploy_migrate", os.path.join(HERE, "migrate_local_config.py"))
+        mig = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mig)
+        values = mig.derive(mig.Legacy(repo=REPO, rev=LEGACY_REV))
+        cfg = deploy_addon._lc().parse(mig.config_text(values, LEGACY_REV), "<derived from %s>" % LEGACY_REV)
+        cls.root_value = cfg.win("DATA_ROOT").replace("\\", "/")
+
+    def payloads(self):
+        for kind, src in manifest_entries():
+            old = git_show(LEGACY_REV, src)
+            if old is None:
+                continue
+            group = {"emcp": deploy_addon.GROUP_EMCP}.get(kind, kind)
+            yield src, old, deploy_addon.render_payload(group, src, source_bytes(src), self.root_value)
+
+    def test_payloads_are_the_old_bytes_but_four_scripts(self):
+        differ, compared = [], 0
+        for src, old, new in self.payloads():
+            compared += 1
+            if old != new:
+                differ.append(src)
+        self.assertGreater(compared, 20)
+        self.assertEqual(sorted(differ), sorted(CHANGED_SCRIPTS))
+        for layer in sorted(deploy_addon.PROFILE_ROOT_SOURCES - set(CHANGED_SCRIPTS)):
+            self.assertTrue(layer.endswith(".layer"), layer)
+
+    def test_the_four_scripts_differ_in_comments_and_strings_only(self):
+        seen = set()
+        for src, old, new in self.payloads():
+            if src in CHANGED_SCRIPTS:
+                seen.add(src)
+                self.assertTrue(code_lines(old) == code_lines(new), "%s: a code line changed" % src)
+        self.assertEqual(seen, set(CHANGED_SCRIPTS))
+
+    def test_code_lines_see_a_code_change(self):
+        self.assertEqual(code_lines(b'a = "x"; // c\n/* b\n */ f("y\\"z");\n'), ['a = "";', 'f("");'])
+        self.assertNotEqual(code_lines(b'if (a) b();'), code_lines(b'if (!a) b();'))
 
 
 if __name__ == "__main__":

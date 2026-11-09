@@ -1,9 +1,17 @@
 """Tests for tools/migrate_local_config.py (DD-22). Stdlib only.
 
-The old revision is synthetic: a directory (--from-dir) holding the files of a pre-DD-22 revision as they looked then,
-with this file's literal paths on the placeholder drives X:, Y: and Z: in place of a machine's. The migration must
-derive exactly the synthetic config tests/fixtures/local_config/placeholder.local.env from them, and find the current
-code reproduce every old value. Temporary trees go under /dev/shm and are removed.
+Three kinds of test:
+* The preservation proof (HistoryTest): the last pre-DD-22 revision, read with git show at run time (no copy of it is
+  committed), against the current code: every old launcher line, path table, write root and runtime getter must come
+  out the same. It runs only where that revision is in the history and its data drive is this machine's verified data
+  drive (the machine whose paths it holds); everywhere else, CI included, it skips, and a failure names only a count.
+* The mechanics (MigrateTest), on a synthetic old revision in RAM: the placeholder machine of
+  tests/fixtures/local_config/placeholder.local.env written out as pre-DD-22 literals. Its launchers are today's with
+  the helper's values written in, so these tests prove derivation and refusals, not preservation. The boundary rows
+  run in the fake world of tests/fixtures/local_config/boundary_vectors.py, the runtime getters in a child interpreter.
+* The runtime getters are the code's own (GetterTest): a copy of the repo in RAM whose dataset default is changed
+  makes the builder row differ, which a restated formula would not.
+Temporary trees go under /dev/shm and are removed.
 """
 
 import contextlib
@@ -12,6 +20,8 @@ import io
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -28,7 +38,12 @@ def load(name, rel):
 
 mig = load("dd_test_migrate_local_config", "tools/migrate_local_config.py")
 lc = mig.lc
+bv = load("dd22_boundary_vectors", "tests/fixtures/local_config/boundary_vectors.py")
 CFG = lc.load(FIXTURE)
+with open(FIXTURE, encoding="ascii") as _fh:
+    FIXTURE_TEXT = _fh.read()
+SYS = CFG.get("SYSTEM_DRIVE")
+REV = "f145aff"   # the last pre-DD-22 main commit
 
 DATA, DATA_WIN = "/mnt/x/DataRoot", "X:\\DataRoot"
 GAME = "/mnt/y/Game Library/steamapps/common/Arma Reforger"
@@ -76,10 +91,10 @@ DEFAULT_DEPLOY_ROOTS = {"stable": "/mnt/x/DataRoot/addons", "cold-1.8.0.13": "/m
 LEGACY_TEXT = {
     "tools/enfusion-mcp/enfusion-mcp-wsl.sh": 'ROOT="${EMCP_ROOT:-/mnt/x/PlanRoot/mcp}"   # work root\n',
     "tools/enfusion-mcp/mcp_gate.py": '    root = os.path.realpath(env.get("EMCP_ROOT") or "/mnt/x/PlanRoot/mcp")\n',
-    "tools/enfusion-mcp/endpoint_handshake.py": ('NETSTAT = "/mnt/z/Windows/System32/NETSTAT.EXE"\n'
-                                                 'CSCRIPT = "/mnt/z/Windows/System32/cscript.exe"\n'
+    "tools/enfusion-mcp/endpoint_handshake.py": ('NETSTAT = "%s/Windows/System32/NETSTAT.EXE"\n'
+                                                 'CSCRIPT = "%s/Windows/System32/cscript.exe"\n'
                                                  'MCP_WIN_TEMP = "/mnt/x/DataRoot/tmp/mcp"   # helper temp\n'
-                                                 'IPCONFIG = "/mnt/z/Windows/System32/ipconfig.exe"\n'),
+                                                 'IPCONFIG = "%s/Windows/System32/ipconfig.exe"\n' % (SYS, SYS, SYS)),
     "tools/harvester/harvest.py": ('DATA_ROOT = "/mnt/x/DataRoot"\nTEST_ROOT_PREFIXES = ("/dev/shm/", "/mnt/x/")\n'
                                    'FORBIDDEN_DEVICE_PATHS = (("/mnt/z", "the system drive"), ("/", "the WSL disk"))\n'),
     "tools/validator/dc_validate.py": 'DEFAULT_REPORT_DIR = "/mnt/x/DataRoot/reports"\nREPORT_ROOT = "/mnt/x/"\n',
@@ -137,12 +152,59 @@ def run(*argv):
     return rc, out.getvalue(), err.getvalue()
 
 
+def history_available():
+    r = subprocess.run(["git", "--no-optional-locks", "-C", REPO, "cat-file", "-e", REV + "^{commit}"],
+                       capture_output=True)
+    return r.returncode == 0
+
+
+class HistoryTest(unittest.TestCase):
+    def test_the_last_pre_dd22_revision_is_reproduced(self):
+        if not history_available():
+            self.skipTest("%s is not in this clone's history (a shallow CI checkout)" % REV)
+        legacy = mig.Legacy(repo=REPO, rev=REV)
+        values = mig.derive(legacy)
+        text = mig.config_text(values, legacy.where())
+        cfg = lc.parse(text, "<derived from %s>" % REV)
+        with lc.override(cfg):
+            vol, _ = lc.data_volume(lc.read_mountinfo())
+        if vol is None:
+            self.skipTest("the data drive of %s is not a verified data drive here: not the machine whose paths it "
+                          "holds" % REV)
+        rows = mig.compare(legacy, cfg, text, python=sys.executable)
+        diffs = [r for r in rows if not r[3]]
+        # only a count: the values are this machine's (run the tool with --dry-run to see them)
+        self.assertEqual(len(diffs), 0, "%d of %d comparisons differ" % (len(diffs), len(rows)))
+        labels = [r[0] for r in rows]
+        self.assertGreaterEqual(len(rows), 120)
+        for name in mig.LAUNCHERS:   # the old side of every launcher row is the revision's own file (git show)
+            self.assertIn("%s start line" % name, labels)
+            self.assertIn("%s wsl.exe lines" % name, labels)
+        self.assertEqual(legacy.text("tools/launch/wb_R1.bat"), subprocess.run(
+            ["git", "--no-optional-locks", "-C", REPO, "show", REV + ":tools/launch/wb_R1.bat"], capture_output=True,
+            check=True).stdout.decode("ascii").replace("\r\n", "\n"))
+        for want in ("build.DATASET_ROOTS", "dinov3.DEFAULT_DINOV3_DIR", "mcp_gate EMCP_ROOT default",
+                     "pinlib.WRITE_ROOT_DRIVES -> the boundary's data drive"):
+            self.assertIn(want, labels)
+        self.assertTrue(any(l.startswith("boundary refuses ") for l in labels))
+
+
 class MigrateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = temp_dir()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.legacy = os.path.join(self.tmp, "legacy")
         write_legacy(self.legacy)
+
+    def in_world(self):
+        """The fake world: the placeholder data drive X: verified, Z: a system volume (boundary_vectors)."""
+        w = bv.world(prefix="dd22_migrate_world_")
+        world = w.__enter__()
+        self.addCleanup(w.__exit__, None, None, None)
+        use = world.use(lc, "real_like")
+        use.__enter__()
+        self.addCleanup(use.__exit__, None, None, None)
+        return world
 
     def test_derives_the_config(self):
         values = mig.derive(mig.Legacy(directory=self.legacy))
@@ -152,31 +214,43 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse([line for line in text.splitlines() if "=" in line and "<" in line and not line.startswith("#")])
 
     def test_every_old_value_is_reproduced(self):
-        rows = mig.compare(mig.Legacy(directory=self.legacy), CFG)
+        self.in_world()
+        rows = mig.compare(mig.Legacy(directory=self.legacy), CFG, FIXTURE_TEXT, python=sys.executable)
         self.assertEqual([(r[0], r[1], r[2]) for r in rows if not r[3]], [])
         labels = [r[0] for r in rows]
         for want in ("wb_R1.bat start line", "client_C18_i01.bat set DD_PIN", "wb_C18.bat wsl.exe lines",
                      "golden_start_lines.txt", "pinlib.LAUNCH_PATHS", "pinlib.WB_LAUNCH", "deploy_addon.DEFAULT_TARGET",
                      "DC_Session.c m_sRequiredProfileRoot default", "endpoint_handshake.MCP_WIN_TEMP",
-                     "harvest.DATA_ROOT", "dinov3.DEFAULT_DINOV3_DIR"):
+                     "harvest.DATA_ROOT", "dinov3.DEFAULT_DINOV3_DIR", "boundary refuses /mnt/z/ "
+                     "(pinlib.FORBIDDEN_WRITE_PREFIXES)", "boundary writes under /mnt/x/ (pinlib.DEFAULT_WRITE_ROOTS)"):
             self.assertIn(want, labels)
         self.assertGreater(len(rows), 100)
 
+    def test_the_boundary_rows_see_a_refused_old_root(self):
+        # outside the fake world the placeholder data drive is mounted nowhere: the old write root is refused now
+        rows = mig.boundary_rows(mig.Legacy(directory=self.legacy), CFG)
+        row = next(r for r in rows if r[0] == "boundary writes under /mnt/x/ (pinlib.DEFAULT_WRITE_ROOTS)")
+        self.assertIn("is not mounted", row[2])
+        self.assertNotEqual(row[1], row[2])
+
     def test_dry_run(self):
-        rc, out, err = run("--from-dir", self.legacy, "--dry-run")
+        self.in_world()
+        rc, out, err = run("--from-dir", self.legacy, "--dry-run", "--python", sys.executable)
         self.assertEqual(rc, 0, err)
         self.assertIn("DATA_ROOT=/mnt/x/DataRoot\n", out)
         self.assertIn("0 different", out)
         self.assertIn("DRY RUN: nothing written", out)
 
     def test_a_difference_refuses(self):
+        self.in_world()
         name = "tools/launch/wb_R1.bat"
         changed = legacy_launcher("wb_R1.bat").replace('\\addons"\r\n', '\\addons_elsewhere"\r\n', 1)
         self.assertNotEqual(changed, legacy_launcher("wb_R1.bat"))
         write_legacy(self.legacy, {name: changed})
-        rc, out, err = run("--from-dir", self.legacy, "--write")
+        rc, out, err = run("--from-dir", self.legacy, "--write", "--python", sys.executable)
         self.assertEqual(rc, 1, out + err)
         self.assertIn("DIFF wb_R1.bat set GAME_ADDONS", out)
+        self.assertIn("2 different", out)   # the set line and the start line that uses it
         self.assertIn("nothing written", err)
 
     def test_a_post_dd22_revision_is_refused(self):
@@ -186,19 +260,49 @@ class MigrateTest(unittest.TestCase):
         self.assertIn("not a pre-DD-22 revision", err)
 
     def test_launchers_must_agree_on_the_distro(self):
-        other = legacy_launcher("client_R1_i01.bat").replace("wsl.exe -d Placeholder-Distro", "wsl.exe -d Other")
+        other = legacy_launcher("client_R1_i01.bat").replace("wsl.exe -d Placeholder-Distro",
+                                                             "wsl.exe -d Placeholder-Other")
         write_legacy(self.legacy, {"tools/launch/client_R1_i01.bat": other})
         rc, _, err = run("--from-dir", self.legacy, "--dry-run")
         self.assertEqual(rc, 2)
         self.assertIn("different WSL distros", err)
 
     def test_write_goes_through_the_guard(self):
-        # The placeholder data drive is never mounted, so the pin tools' guard refuses the write: nothing is written
-        # anywhere, and the refusal says why.
-        rc, out, err = run("--from-dir", self.legacy, "--write")
+        # Every row is the same in the fake world, but the write itself goes to the config's real DATA_ROOT, whose
+        # placeholder drive is mounted nowhere: the write boundary refuses it, nothing is written anywhere.
+        self.in_world()
+        rc, out, err = run("--from-dir", self.legacy, "--write", "--python", sys.executable)
         self.assertEqual(rc, 2, out + err)
+        self.assertIn("0 different", out)
         self.assertIn("refusing to write", err)
-        self.assertFalse(os.path.exists("/mnt/x"))
+        self.assertFalse(os.path.exists(CFG.drive("DATA_ROOT")))
+
+
+class GetterTest(unittest.TestCase):
+    """Codex round 2 row 9: the runtime rows read the code's own getters, so a changed default shows."""
+
+    def test_a_changed_builder_default_differs(self):
+        tmp = temp_dir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        legacy = os.path.join(tmp, "legacy")
+        write_legacy(legacy)
+        copy = os.path.join(tmp, "repo")
+        for rel in ("src", "tools", "data", "docs"):
+            shutil.copytree(os.path.join(REPO, rel), os.path.join(copy, rel),
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        rows = dict((r[0], r) for r in mig.runtime_rows(mig.Legacy(directory=legacy), CFG, FIXTURE_TEXT, copy,
+                                                        sys.executable))
+        self.assertEqual(rows["build.DATASET_ROOTS"][1], rows["build.DATASET_ROOTS"][2])
+        build = os.path.join(copy, "src", "drivedit", "data", "build.py")
+        with open(build, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count('DATASET_ROOT_REL = "datasets"'), 1)
+        with open(build, "w", encoding="utf-8") as fh:
+            fh.write(text.replace('DATASET_ROOT_REL = "datasets"', 'DATASET_ROOT_REL = "datasets_moved"'))
+        rows = dict((r[0], r) for r in mig.runtime_rows(mig.Legacy(directory=legacy), CFG, FIXTURE_TEXT, copy,
+                                                        sys.executable))
+        self.assertEqual(rows["build.DATASET_ROOTS"][2], [CFG.get("DATA_ROOT") + "/datasets_moved"])
+        self.assertNotEqual(rows["build.DATASET_ROOTS"][1], rows["build.DATASET_ROOTS"][2])
 
 
 if __name__ == "__main__":

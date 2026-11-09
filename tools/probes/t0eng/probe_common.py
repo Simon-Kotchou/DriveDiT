@@ -43,9 +43,28 @@ RUN_HEADER = "run_header.txt"
 RUN_FOOTER = "run_footer.txt"
 PLAY_DIR_RE = re.compile(r"^play_\d\d$")
 
-# Roots where this tool family may write (outputs, synthetic plays, temporary directories)
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# Where this tool family may write (outputs, synthetic plays, temporary directories): write_refusal below.
+# DD-22: outputs only under /dev/shm/ or on the data drive of the local config (tools/local_config.py: the drive of
+# DATA_ROOT; never SYSTEM_DRIVE or /tmp/). Without the config only /dev/shm/ is writable.
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), "local_config.py")
+
+
+def write_refusal(path):
+    """None when an output may go to path, else the refusal message (tools/local_config.py simple_write_refusal)."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            real = os.path.realpath(os.path.abspath(path)) if path else ""
+            return None if path and real.startswith("/dev/shm/") else (
+                "refusing output %r: only /dev/shm/... here (%s, which knows the data drive, is missing)"
+                % (path, _LOCAL_CONFIG_PY))
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod.simple_write_refusal(path)
 
 
 class InputError(Exception):
@@ -258,17 +277,15 @@ def run_cli(main, argv=None):
 # Output and test helpers
 # ------------------------------------------------------------------------------------------------
 def _inside_write_roots(path):
-    real = os.path.realpath(path)
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS):
-        return False
-    return any(probe.startswith(root) for root in WRITE_ROOTS)
+    return write_refusal(path) is None
 
 
 def check_out_path(path):
-    """Optional outputs only under the configured data roots (WRITE_ROOTS), never /tmp. Returns the path."""
-    if not path or not _inside_write_roots(path):
-        raise InputError("refusing output path %r: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
+    """Optional outputs only under /dev/shm/ or on the data drive of the local config, never /tmp. Returns the
+    path."""
+    why = write_refusal(path)
+    if why:
+        raise InputError(why)
     return path
 
 
@@ -291,9 +308,10 @@ def write_synthetic_play(play_dir, header, csvs, footer=None, files=None):
     """Test helper: writes a play directory the way the engine side does.
     header / footer: dicts -> key=value files (footer None: no run_footer.txt); csvs: {name: (columns, rows)} with rows
     as lists (or dicts by column), None -> empty field; files: {relpath: bytes}. Refuses any play_dir outside
-    /dev/shm/ or /mnt/e/ and anything under /mnt/c or /tmp. Returns the play dir."""
+    /dev/shm/ or the data drive of the local config, and anything on the system drive or under /tmp. Returns the play
+    dir."""
     if not _inside_write_roots(play_dir):
-        raise ValueError("refusing synthetic play outside /dev/shm/ or /mnt/e/: %r" % play_dir)
+        raise ValueError("refusing synthetic play: %s" % write_refusal(play_dir))
     os.makedirs(play_dir, exist_ok=True)
     with open(os.path.join(play_dir, RUN_HEADER), "w", encoding="ascii", newline="") as f:
         f.write(_kv_text(header))
@@ -314,12 +332,13 @@ def write_synthetic_play(play_dir, header, csvs, footer=None, files=None):
 
 
 def make_temp_dir(prefix):
-    """Test helper (tools/test_deploy_addon.py tmp_base rule): a new directory under $TMPDIR when that lies in
-    /dev/shm/ or /mnt/e/, else under /dev/shm/. unittest.SkipTest when neither is usable. Never /tmp. The caller
-    removes it (shutil.rmtree in a finally or addCleanup)."""
+    """Test helper: a new directory under $TMPDIR when that lies in /dev/shm/ or on the data drive of the local
+    config, else under /dev/shm/. unittest.SkipTest when neither is usable. Never /tmp. The caller removes it
+    (shutil.rmtree in a finally or addCleanup)."""
     base = os.path.realpath(os.environ.get("TMPDIR") or "/")
     if not (_inside_write_roots(base) and os.path.isdir(base) and os.access(base, os.W_OK)):
         base = "/dev/shm"
         if not (os.path.isdir(base) and os.access(base, os.W_OK)):
-            raise unittest.SkipTest("no writable $TMPDIR under /dev/shm/ or /mnt/e/ and no /dev/shm; not using /tmp")
+            raise unittest.SkipTest("no writable $TMPDIR under /dev/shm/ or the data drive and no /dev/shm; "
+                                    "not using /tmp")
     return tempfile.mkdtemp(prefix=prefix, dir=base)

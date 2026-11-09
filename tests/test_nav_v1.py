@@ -8,7 +8,7 @@ Acceptance (TICKETS_UNIFIED DD-11-min): on a straight route p20 lies 20 m ahead 
 zero lateral; signs follow the right-positive convention on curves; ordered progress handles a loop crossing;
 d_stop = 200 with no stop; deterministic. Everything is synthetic geometry; no map data is read.
 
-The one test that writes a file (load_route on a real path) uses $TMPDIR only when it lies under /dev/shm or /mnt/e,
+The one test that writes a file (load_route on a real path) uses $TMPDIR only when it lies under /dev/shm,
 else /dev/shm, and is skipped otherwise; it never falls back to the system temp directory.
 """
 
@@ -39,11 +39,11 @@ TOL_P20 = 0.05  # acceptance tolerance on p20 (m)
 
 def tmp_base():
     tmpdir = os.path.realpath(os.environ.get("TMPDIR") or "/")
-    if (tmpdir.startswith("/dev/shm/") or tmpdir.startswith("/mnt/e/")) and os.path.isdir(tmpdir):
+    if tmpdir.startswith("/dev/shm/") and os.path.isdir(tmpdir):
         return tmpdir
     if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
         return "/dev/shm"
-    raise unittest.SkipTest("no TMPDIR on /dev/shm or /mnt/e and no writable /dev/shm; not using the system temp dir")
+    raise unittest.SkipTest("no TMPDIR on /dev/shm and no writable /dev/shm; not using the system temp dir")
 
 
 def route_dict(xz, map_id="arland", split="train", maneuvers=(), stops=None, closed=False, route_id="test_route",
@@ -470,7 +470,7 @@ class SealedMapTest(unittest.TestCase):
         self.assertEqual(route.map_id, "everon")
 
     def test_sealed_directories_refused_before_reading(self):
-        for path in ("/mnt/e/DriveDiT/heldout/everon/SEALED/harness/routes/r.json", "x/SEALED/r.json",
+        for path in ("/mnt/x/DataRoot/heldout/everon/SEALED/harness/routes/r.json", "x/SEALED/r.json",
                      "/nonexistent/heldout/r.json"):
             with self.assertRaises(SealedMapError):
                 load_route(path)

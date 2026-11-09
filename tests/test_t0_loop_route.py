@@ -44,7 +44,7 @@ the clockwise loop, the same form and rules, rebuilt byte for byte).
     crossed the old loop, is far away); the trail check tells a crossing from a trail ending on the road, also for a
     trail through a route point and by the trail length at the actual intersection; the generator refuses Everon
     paths, an incomplete or altered dump, a source.txt without the sha256 of every file, a dump whose roads have other
-    keys, and outputs outside E: or RAM.
+    keys, and outputs off the data drive and RAM.
 """
 
 import contextlib
@@ -75,7 +75,12 @@ LAUNCH_ID = "20261023T021038Z-wb-776e"
 # DD_PROBE_PROFILE names the Workbench profile folder that holds DC_Probes
 PROBE_PROFILE = os.environ.get("DD_PROBE_PROFILE", "")
 PLAY = os.path.join(PROBE_PROFILE, "DC_Probes", "e08a", LAUNCH_ID, "play_01") if PROBE_PROFILE else ""
-PROGRAM = "/mnt/e/drivedit_realign/program"
+# DD-22: documents of a real machine are compared only when DD_TEST_LOCAL_CONFIG names its local config (opt-in).
+_evidence_spec = importlib.util.spec_from_file_location(
+    "dd_test_evidence", os.path.join(REPO, "tests", "fixtures", "local_config", "evidence.py"))
+evidence = importlib.util.module_from_spec(_evidence_spec)
+_evidence_spec.loader.exec_module(evidence)
+PROGRAM = evidence.evidence_path("REALIGN_ROOT", "program") or "/nonexistent-dd22-evidence"
 POLYLINES = os.path.join(PROGRAM, "evidence", "maps", "Arland_road_polylines.tsv")
 SPLITS = os.path.join(PROGRAM, "maps", "splits_v2_PROPOSED.json")
 VAL_L_BOX = (1536.0, 2560.0, 512.0, 1536.0)     # dc-2.0.md 4: x in [1536, 2560), z in [512, 1536)
@@ -554,13 +559,13 @@ class LoopRouteTest(unittest.TestCase):
 
     def test_generator_refuses_everon_and_outputs_outside_e(self):
         generator = load_generator()
-        self.assertIsNotNone(generator.sealed_reason("/mnt/e/x/Eden_road_dump"))
-        self.assertIsNotNone(generator.sealed_reason("/mnt/e/x/everon/e08a"))
+        self.assertIsNotNone(generator.sealed_reason("/mnt/x/a/Eden_road_dump"))
+        self.assertIsNotNone(generator.sealed_reason("/mnt/x/a/everon/e08a"))
         self.assertIsNone(generator.sealed_reason(DUMP))
         with self.assertRaises(generator.Refusal):
             generator.check_out_path("/tmp/arland_t0_loop.json")
         with self.assertRaises(generator.Refusal):
-            generator.check_out_path("/mnt/c/arland_t0_loop.json")
+            generator.check_out_path("/mnt/z/arland_t0_loop.json")
         tmp = tempfile.mkdtemp(prefix="t0_loop_", dir=self.tmp_base())
         try:
             sealed = os.path.join(tmp, "Eden_e08a")
@@ -576,7 +581,7 @@ class LoopRouteTest(unittest.TestCase):
     @staticmethod
     def tmp_base():
         base = os.path.realpath(os.environ.get("TMPDIR") or "/dev/shm")
-        if not (base.startswith("/mnt/e/") or base.startswith("/dev/shm")):
+        if not base.startswith("/dev/shm"):
             base = "/dev/shm"
         return base
 

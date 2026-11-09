@@ -108,7 +108,8 @@ the sha256 of the file without its final LF is drivedit_nav's Route.sha256; DC_E
 that way.
 
 Sealed map: any input path naming eden or everon is refused with exit 2 before anything is read (Everon is the
-zero-shot test map). Outputs only under /mnt/e/ or /dev/shm/ (never /mnt/c or /tmp).
+zero-shot test map). Outputs only under /dev/shm/ or on the data drive of the local config (never the system drive
+or /tmp).
 Exit codes: 0 built (and written or equal), 1 --check found a difference, 2 refused (input, check or path problem).
 """
 
@@ -210,8 +211,29 @@ TRAIL_END_M = 8.0               # a trail ending within this of the route ends o
 CUT_EPS_M = 1e-6                # segments this close meet; meeting points this close along a trail are one
 GRID_M = 32.0
 
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# DD-22: outputs only under /dev/shm/ or on the data drive of the local config (tools/local_config.py: the drive of
+# DATA_ROOT; never SYSTEM_DRIVE or /tmp/). Without the config only /dev/shm/ is writable.
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "local_config.py")
+
+
+def write_refusal(path):
+    """None when an output may go to path, else the refusal message (tools/local_config.py simple_write_refusal)."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            real = os.path.realpath(os.path.abspath(path)) if path else ""
+            return None if path and real.startswith("/dev/shm/") else (
+                "refusing output %r: only /dev/shm/... here (%s, which knows the data drive, is missing)"
+                % (path, _LOCAL_CONFIG_PY))
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod.simple_write_refusal(path)
+
+
 SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
 VEHICLE_RE = re.compile(r'^Vehicle\s+(\w+)\s*:')
 COORDS_RE = re.compile(r'^\s*coords\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*$')
@@ -233,11 +255,10 @@ def sealed_reason(path):
 
 
 def check_out_path(path):
-    real = os.path.realpath(os.path.abspath(path))
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS) or not any(probe.startswith(r) for r in WRITE_ROOTS):
-        raise Refusal("refusing output %s: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
-    return real
+    why = write_refusal(path)
+    if why:
+        raise Refusal(why)
+    return os.path.realpath(os.path.abspath(path))
 
 
 def sha256_file(path):

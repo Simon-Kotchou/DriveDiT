@@ -5,7 +5,8 @@
         tests/test_t0eng_common.py
 
 Synthetic plays are written by probe_common.write_synthetic_play into a make_temp_dir directory (under $TMPDIR when
-that lies in /dev/shm/ or /mnt/e/, else /dev/shm/; never /tmp, which is on the C: drive) and removed afterwards.
+that lies in /dev/shm/ or on the data drive of the local config, else /dev/shm/; never /tmp, which is on the system
+drive) and removed afterwards.
 """
 
 import contextlib
@@ -31,7 +32,7 @@ class ProbeCommonTest(unittest.TestCase):
 
     def test_temp_dir_is_not_on_c(self):
         real = os.path.realpath(self.tmp)
-        self.assertTrue(real.startswith("/dev/shm/") or real.startswith("/mnt/e/"), real)
+        self.assertTrue(real.startswith("/dev/shm/") or pc.write_refusal(real) is None, real)
 
     def test_read_kv_later_keys_win(self):
         path = os.path.join(self.tmp, "kv.txt")
@@ -119,7 +120,7 @@ class ProbeCommonTest(unittest.TestCase):
         self.assertIn("input error: missing file x", out.getvalue())
 
     def test_synthetic_play_refuses_c_and_tmp(self):
-        for bad in ("/mnt/c/dd4_should_not_exist/play_01", "/tmp/dd4_should_not_exist/play_01", "/home/x/play_01"):
+        for bad in ("/mnt/z/dd4_should_not_exist/play_01", "/tmp/dd4_should_not_exist/play_01", "/home/x/play_01"):
             with self.assertRaises(ValueError):
                 pc.write_synthetic_play(bad, {"probe": "e10"}, {})
             self.assertFalse(os.path.exists(os.path.dirname(bad)), bad)
@@ -128,7 +129,7 @@ class ProbeCommonTest(unittest.TestCase):
 
     def test_check_out_path(self):
         self.assertEqual(pc.check_out_path(self.tmp), self.tmp)
-        for bad in ("/mnt/c/Users/x/out.json", "/tmp/out.json", "", "/home/x/out.json"):
+        for bad in ("/mnt/z/Users/x/out.json", "/tmp/out.json", "", "/home/x/out.json"):
             with self.assertRaises(pc.InputError):
                 pc.check_out_path(bad)
 

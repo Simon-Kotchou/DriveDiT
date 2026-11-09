@@ -79,7 +79,7 @@ session ends with ego_destroyed, status ok. Nothing is written after L.
 telemetry.dv_max_mps is the reference detector's delta-v (contract 9.5.1: 100 ms of world time, interpolated, gap
 rule) of the row's callback, empty while it was not evaluated.
 
-Writes only under /mnt/e/ or /dev/shm/ (never /mnt/c or /tmp). Stdlib, numpy and drivedit_nav; PNGs are written by
+Writes only under /dev/shm/ or on the data drive of the local config (never the system drive or /tmp). Stdlib, numpy and drivedit_nav; PNGs are written by
 a small zlib PNG writer, so no cv2 is needed here.
 """
 
@@ -105,8 +105,27 @@ import drivedit_nav  # noqa: E402
 
 STREAMS_JSON = os.path.join(REPO, "docs", "capture_contract", "dc-2.0.streams.json")
 CARD_FILE = os.path.join(HERE, "cards", "S105_synthetic.json")
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# DD-22: outputs only under /dev/shm/ or on the data drive of the local config (tools/local_config.py: the drive of
+# DATA_ROOT; never SYSTEM_DRIVE or /tmp/). Without the config only /dev/shm/ is writable.
+_LOCAL_CONFIG_PY = os.path.join(REPO, "tools", "local_config.py")
+
+
+def write_refusal(path):
+    """None when an output may go to path, else the refusal message (tools/local_config.py simple_write_refusal)."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            real = os.path.realpath(os.path.abspath(path)) if path else ""
+            return None if path and real.startswith("/dev/shm/") else (
+                "refusing output %r: only /dev/shm/... here (%s, which knows the data drive, is missing)"
+                % (path, _LOCAL_CONFIG_PY))
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod.simple_write_refusal(path)
 VARIANTS = ("gap", "missing_commit", "reused_slot", "crash", "crash_unexplained", "destroyed_unexplained")
 CRASH_VARIANTS = ("crash", "crash_unexplained", "destroyed_unexplained")
 # session.json events.* (contract 10.1, TBD-10 defaults)
@@ -168,11 +187,10 @@ def _hex(text, n=64):
 
 
 def check_out(path):
-    real = os.path.realpath(path)
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(r) for r in FORBIDDEN_ROOTS) or not any(probe.startswith(r) for r in WRITE_ROOTS):
-        raise ValueError("refusing output %r: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
-    return real
+    why = write_refusal(path)
+    if why:
+        raise ValueError(why)
+    return os.path.realpath(path)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1363,7 +1381,7 @@ def write_legacy_session(out_dir, name="session_9001", n_frames=40, vehicles=5, 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", required=True, help="parent directory of the new session (under /mnt/e or /dev/shm)")
+    ap.add_argument("--out", required=True, help="parent directory of the new session (under /dev/shm or the data drive)")
     ap.add_argument("--kind", choices=KINDS, default="golden")
     ap.add_argument("--variant", choices=VARIANTS, default=None)
     ap.add_argument("--golden-json", default=None, help="also write the expected reader output here")

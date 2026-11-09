@@ -9,7 +9,7 @@ that the run-header and footer keys the analyses read are written by the Enforce
         tests/test_t0eng_images.py
 
 Every play is written with probe_common.write_synthetic_play into a probe_common.make_temp_dir directory (under
-$TMPDIR when it lies in /dev/shm/ or /mnt/e/, else /dev/shm/; never /tmp) and removed afterwards. The column lists
+$TMPDIR when it lies in /dev/shm/ or on the data drive, else /dev/shm/; never /tmp) and removed afterwards. The column lists
 mirror DC_ImageSlotScheduler.AddRequestColumns and DC_ProbeImages.AddFrameColumns.
 """
 

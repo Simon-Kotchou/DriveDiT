@@ -12,8 +12,8 @@ Run it with the isolated interpreter (stdlib only; it reuses the probe kit's rea
 <play_dir> is one $profile:DC_Probes/<probe>/<launch_id>/play_NN directory of the probe kit (run_header.txt,
 <probe>_steps.csv, e01_phases.csv or e02a_cells.csv, run_footer.txt; PROBE_DESIGN.md 5.3). Without --out the card is
 printed; --out writes it (default place: tools/ident/cards/<pin_id>/<vehicle>.json, the path llc_v1 and the DD-5-min
-reader look up), --check compares it byte for byte with FILE (exit 1 when they differ). Writes only under /mnt/e/ or
-/dev/shm/.
+reader look up), --check compares it byte for byte with FILE (exit 1 when they differ). Writes only under /dev/shm/
+or on the data drive of the local config (DD-22; never the system drive or /tmp).
 
 WHAT IS FITTED (contract signs: steer, curvature and yaw rate right-positive; c = steer_sign x engine steer)
   signs        steer_sign = sign of corr(cmd_steer, heading rate) on the E-01 steering excite steps at the level-
@@ -318,8 +318,29 @@ PLACEHOLDER_MPS_PER_KRPM = (1.54871, 2.772066, 4.169103)
 # llc_v1 sessions on 1.8.0.13 are stamped with)
 PLACEHOLDER_MEASURED_PIN = "1.8.0.13"
 
-WRITE_ROOTS = ("/mnt/e/", "/dev/shm/")
-FORBIDDEN_ROOTS = ("/mnt/c/", "/tmp/")
+# DD-22: outputs only under /dev/shm/ or on the data drive of the local config (tools/local_config.py: the drive of
+# DATA_ROOT; never SYSTEM_DRIVE or /tmp/). Without the config only /dev/shm/ is writable.
+_LOCAL_CONFIG_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "local_config.py")
+
+
+def write_refusal(path):
+    """None when an output may go to path, else the refusal message (tools/local_config.py simple_write_refusal)."""
+    import importlib.util
+    import sys
+    mod = sys.modules.get("dd_local_config")
+    if mod is None or getattr(mod, "__file__", None) != _LOCAL_CONFIG_PY:
+        if not os.path.isfile(_LOCAL_CONFIG_PY):
+            real = os.path.realpath(os.path.abspath(path)) if path else ""
+            return None if path and real.startswith("/dev/shm/") else (
+                "refusing output %r: only /dev/shm/... here (%s, which knows the data drive, is missing)"
+                % (path, _LOCAL_CONFIG_PY))
+        spec = importlib.util.spec_from_file_location("dd_local_config", _LOCAL_CONFIG_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dd_local_config"] = mod
+        spec.loader.exec_module(mod)
+    return mod.simple_write_refusal(path)
+
+
 SEALED_RE = re.compile(r"eden|everon", re.IGNORECASE)
 PIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -339,11 +360,10 @@ def sealed_reason(text):
 
 
 def check_out_path(path):
-    real = os.path.realpath(os.path.abspath(path))
-    probe = real if real.endswith("/") else real + "/"
-    if any(probe.startswith(root) for root in FORBIDDEN_ROOTS) or not any(probe.startswith(r) for r in WRITE_ROOTS):
-        raise Refusal("refusing output %s: only /mnt/e/... or /dev/shm/... (never /mnt/c or /tmp)" % path)
-    return real
+    why = write_refusal(path)
+    if why:
+        raise Refusal(why)
+    return os.path.realpath(os.path.abspath(path))
 
 
 def open_play(path, probe):

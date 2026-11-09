@@ -7,7 +7,7 @@
 No E-01 / E-02a play exists yet (the user's probe Plays are pending), so the plays are generated here from a vehicle
 with a known steer -> curvature map, dead time, first-order lag and signs, in the probe kit's format: the step-CSV
 header comes from the Enforce producer (tests/test_t0eng_actuation.py enforce_step_columns), the play files from
-probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or E:, never /tmp), removed afterwards.
+probe_common.write_synthetic_play into a fresh make_temp_dir() directory (RAM or the data drive, never /tmp), removed afterwards.
 
   - the fit recovers the map per speed, the offset, steer_sign and yaw_axis_sign, the dead time and lag (the
     delay + first-order structure wins on the held-out PRBS half), the echoing input, the throttle and brake gains,

@@ -683,10 +683,15 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
     found = play.header.get("site.cross.found")
     if found != "1":
         return verdict.check("c_cross", None, "no cross-slope site was found (site.cross.found=%s; first terrain "
-                                              "reject %s, first obstacle %s): no_site" % (
+                                              "reject %s, first obstacle %s; search status %s, refusals %s, grid "
+                                              "complete %s, near miss %s): no_site" % (
                                                   found, play.header.get("site.cross.search.first_terrain_reject",
                                                                          "-"),
-                                                  play.header.get("site.cross.search.first_obstacle", "-")))
+                                                  play.header.get("site.cross.search.first_obstacle", "-"),
+                                                  play.header.get("site.cross.search.status", "-"),
+                                                  play.header.get("site.cross.search.rejects", "-"),
+                                                  play.header.get("site.cross.search.grid_complete", "-"),
+                                                  play.header.get("site.cross.search.near_miss", "-")))
     cross_min = probe_common.to_float(play.header.get("site.cross.cross_min_signed"))
     detail_site = "site %s heading %s, cross %s..%s (mean %s), grade %s, fallback %s" % (
         play.header.get("site.cross.start", "-"), play.header.get("site.cross.heading_deg", "-"),

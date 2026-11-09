@@ -81,10 +81,12 @@ PATTERNS = {
     # --distribution option of wsl(.exe), also after other options, with a space or =, quoted or not; WSL_DISTRO or
     # WSL_DISTRO_NAME set or used as a key; a JSON/YAML key such as "distro", "wslDistro" or "distribution"
     "wsl-distro": re.compile(
-        r"(?:\b[Ww][Ss][Ll](?:\.[Ee][Xx][Ee])?(?:\s+-{1,2}[A-Za-z][\w-]*(?:[= ][^\s-]\S*)?)*?\s+(?:-d|--distribution)"
-        r"(?:\s+|=)[\"']?"
+        r"(?:\b[Ww][Ss][Ll](?:\.[Ee][Xx][Ee])?"
+        r"(?:\s+-{1,2}[A-Za-z][\w-]*(?:[= ](?:\"[^\"]*\"|'[^']*'|[^\s\"'-]\S*))?)*?"   # earlier options, quoted args too
+        r"\s+(?:-d|--distribution)(?:\s+|=)[\"']?"
         r"|\bWSL_DISTRO(?:_NAME)?(?:\s*[=:]\s*[\"']?|[\"']\s*:\s*[\"'])"
-        r"|[\"'](?i:distro|wsl_?distro|distribution|distro_?name|wsl_?distro_?name)[\"']\s*:\s*[\"'])"
+        r"|[\"'](?i:distro|wsl_?distro|distribution|distro_?name|wsl_?distro_?name)[\"']\s*:\s*[\"']"
+        r"|^\s*(?:-\s+)?(?i:distro|wsl_?distro|distro_?name|wsl_?distro_?name)\s*:\s*[\"']?)"   # an unquoted YAML key
         r"(?P<name>[A-Za-z0-9%$<{][A-Za-z0-9._%${}<>-]*)"
         r"|\b(?:Ubuntu|Debian|Kali|kali-linux|openSUSE|SUSE|OracleLinux|AlmaLinux|FedoraLinux|archlinux)"
         r"[-_ ](?:\d+(?:\.\d+)*(?:-LTS)?|Leap-\d+(?:\.\d+)*|Tumbleweed)\b"
@@ -249,6 +251,27 @@ def in_placeholder_home(path: str) -> bool:
     return rel.startswith(PLACEHOLDER_HOMES) or "/" + PLACEHOLDER_HOMES[0] in rel or rel.endswith(PLACEHOLDER_SUFFIXES)
 
 
+def open_quote(line: str, pos: int):
+    """The quote (\" ' `) of the string the text at pos lies in, or None: the last quote before pos that is not closed
+    before it (backslash escapes skipped). A triple quote opens prose (a docstring), so it counts as no quote."""
+    quote, i = None, 0
+    while i < pos:
+        c = line[i]
+        if c == "\\" and quote:
+            i += 2
+            continue
+        if line.startswith(('"""', "'''"), i) and quote in (None, line[i:i + 3]):
+            quote = None if quote else line[i:i + 3]
+            i += 3
+            continue
+        if quote is None and c in "\"'`":
+            quote = c
+        elif c == quote:
+            quote = None
+        i += 1
+    return None if quote in ('"""', "'''") else quote
+
+
 def placeholder_drive_ok(path: str, line: str, m) -> bool:
     """A placeholder drive (X, Y, Z) passes in the synthetic config's folder and in *.example files; elsewhere only as
     the bare drive or under one of SYNTHETIC_ROOTS (a real path on such a drive is still found)."""
@@ -263,7 +286,17 @@ def placeholder_drive_ok(path: str, line: str, m) -> bool:
     if rest.startswith("..."):   # an ellipsis: X:\..., /mnt/x/...
         return True
     low = rest.lower()   # drvfs is case-insensitive: x:/dataroot is X:\DataRoot
-    return any(low.startswith(root.lower()) and _COMPONENT_END.match(rest[len(root):]) for root in SYNTHETIC_ROOTS)
+    quote = open_quote(line, m.start())
+    for root in SYNTHETIC_ROOTS:
+        if not low.startswith(root.lower()):
+            continue
+        tail = rest[len(root):]
+        if quote:   # inside a quoted string the component ends only at a separator, a quote or the line's end
+            if tail == "" or tail[0] in "\\/\"'`":
+                return True
+        elif _COMPONENT_END.match(tail):
+            return True
+    return False
 
 
 def allowed_text(path: str, kind: str, line: str, m) -> bool:

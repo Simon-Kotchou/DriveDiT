@@ -170,6 +170,16 @@ class SecretScanTest(unittest.TestCase):
                    "X" + sep + "DataRoot\\pin"):
             self.assertEqual(kinds(ok, "tools/a.py"), [], ok)
 
+    def test_quoted_paths_end_only_at_a_separator_or_the_quote(self):
+        # Codex round 4: inside quotes, a space or comma does not end a synthetic root component
+        mnt = "/mnt/"
+        for bad in ('"' + mnt + 'x/DataRoot personal"', "'" + mnt + "x/DataRoot,personal/a'",
+                    '`' + mnt + 'x/DataRoot more`', '"X' + ':\\DataRoot personal\\x"'):
+            self.assertEqual(kinds(bad, "tools/a.py"), ["machine-path"], bad)
+        for ok in ('"' + mnt + 'x/DataRoot"', '"' + mnt + 'x/DataRoot/pin"', "'" + mnt + "x/DataRoot'",
+                   '"X' + ':\\DataRoot\\pin"', "under " + mnt + "x/DataRoot, and", 'x = "a" + "' + mnt + 'x/DataRoot"'):
+            self.assertEqual(kinds(ok, "tools/a.py"), [], ok)
+
     def test_allowed_text_is_exact(self):
         entry = next(iter(scan.ALLOWED_TEXT))
         path, _, text = entry
@@ -198,11 +208,14 @@ class SecretScanTest(unittest.TestCase):
                     "WSL_DISTRO_NAME: '" + name + "'", "Ubu" + "ntu-22.04", "Deb" + "ian 12", "open" + "SU" + "SE-Leap-15.6",
                     'wsl.exe -d "' + name + '" -e x', "wsl.exe -d '" + name + "'", "wsl --distribution=" + name,
                     "wsl.exe --cd ~ -u root -d " + name, 'cmd /c wsl -e ls -d ' + name, '{"distro": "' + name + '"}',
-                    '"wslDistro": "' + name + '"', "'distribution': '" + name + "'", '"WSL_DISTRO": "' + name + '"'):
+                    '"wslDistro": "' + name + '"', "'distribution': '" + name + "'", '"WSL_DISTRO": "' + name + '"',
+                    'wsl.exe --cd "some path" -d ' + name, "wsl --cd 'a b' -u root --distribution " + name,
+                    "distro: " + name, "  wslDistro: " + name, "- distro_name: '" + name + "'"):
             self.assertEqual(kinds(bad), ["wsl-distro"], bad)
         for ok in ("wsl.exe -d %DD_WSL_DISTRO% -e x", "WSL_DISTRO=<distro name>", "WSL_DISTRO=Placeholder-Distro",
                    "wsl -d $DISTRO", "runs-on: ubu" + "ntu-24.04", "WSL_DISTRO=No-Such-Distro-dd22",
-                   'wsl.exe -d "%DD_WSL_DISTRO%"', "wsl.exe -l -v", '{"distro": "<distro>"}', "wsl --distribution=$D"):
+                   'wsl.exe -d "%DD_WSL_DISTRO%"', "wsl.exe -l -v", '{"distro": "<distro>"}', "wsl --distribution=$D",
+                   "distro: <distro name>", "distribution: uniform", 'wsl.exe --cd "some path" -e ls'):
             self.assertEqual(kinds(ok), [], ok)
         self.assertEqual(kinds("WSL_DISTRO=" + name, "tests/fixtures/local_config/p.local.env"), [])
 

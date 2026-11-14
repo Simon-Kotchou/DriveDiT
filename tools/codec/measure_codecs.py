@@ -18,8 +18,10 @@ Per codec it reports:
 Every codec also gets a few side-by-side PNGs (original | reconstruction) in ``<out>/<codec_id>/``. The results go to
 ``<out>/measurements.json`` and ``<out>/measurements.md``.
 
-Run it in an environment with CUDA torch and the ``codec`` extra (``uv sync --extra model --extra cuda --extra codec``),
-with HF_HOME on the data drive. The CADRE codecs need the verified DINOv3 checkout of ``drivedit.codec.dinov3``
+Run it in an environment with CUDA torch and the ``codec`` extra (``uv sync --extra model --extra cuda --extra codec``).
+The process's caches (the Hugging Face weights, torch, CUDA) and temporary files are routed into the write boundary
+first (``drivedit.process_paths.prepare_process``: by default ``<DATA_ROOT>/cache`` and RAM; a variable already set is
+kept if the boundary allows it, else the run stops; DD-23). The CADRE codecs need the verified DINOv3 checkout of ``drivedit.codec.dinov3``
 (``DRIVEDIT_DINOV3_DIR`` or its default directory); it is checked first and never fetched::
 
     python -I -B tools/codec/measure_codecs.py --deriv <session>/_harvest/deriv --out <reports>/codec \\
@@ -49,6 +51,7 @@ from drivedit.codec import CODECS, codec_ids, get_codec
 from drivedit.local_paths import WriteRefusedError, check_write
 from drivedit.codec.base import fetch_weights
 from drivedit.codec.dinov3 import dinov3_dir, verify_checkout
+from drivedit.process_paths import command_line, prepare_process
 
 # The DiT patch size planned for each arm, so that every arm feeds the probe model about 144 tokens per frame
 # (66 for CADRE-1x48x48): delta-2026-11 §2, candidate table and recommendation.
@@ -245,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     _OUT_ROOT.clear()
     args.out = checked(args.out)  # first: the report directory must pass the write boundary
     _OUT_ROOT.append(args.out)
+    with command_line("measure_codecs"):
+        prepare_process()  # then the caches and temporary files, before torch, CUDA or huggingface_hub write
     if not torch.cuda.is_available():
         raise SystemExit("needs a CUDA device")
     if args.frames < CLIP:

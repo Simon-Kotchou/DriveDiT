@@ -41,17 +41,18 @@ def test_out_off_the_boundary_is_refused_first(measure: ModuleType, out: str) ->
 
 
 def test_files_are_narrowed_to_the_checked_out(measure: ModuleType) -> None:
-    out = Path("/dev/shm") / f"dd22_codec_out_{os.getpid()}"
-    measure._OUT_ROOT[:] = [out]
-    try:
-        assert measure.checked(out / "recon.png") == out / "recon.png"
-        with pytest.raises(SystemExit, match="outside"):
-            measure.checked(Path("/dev/shm") / "dd22_codec_elsewhere.png")
-        with pytest.raises(SystemExit, match=re.escape("'..'")):
-            measure.checked(out / ".." / "escape.png")
-    finally:
-        measure._OUT_ROOT.clear()
-    assert not out.exists()
+    with world() as w:  # RAM of a fake world: no skip where a sandbox hides /dev/shm's device (DD-23)
+        out = Path(w.shm, "codec_out")
+        measure._OUT_ROOT[:] = [out]
+        try:
+            assert measure.checked(out / "recon.png") == out / "recon.png"
+            with pytest.raises(SystemExit, match="outside"):
+                measure.checked(Path(w.shm, "codec_elsewhere.png"))
+            with pytest.raises(SystemExit, match=re.escape("'..'")):
+                measure.checked(out / ".." / "escape.png")
+        finally:
+            measure._OUT_ROOT.clear()
+        assert not out.exists()
 
 
 def test_caches_outside_the_boundary_stop_it_before_cuda(measure: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,7 +66,7 @@ def test_caches_outside_the_boundary_stop_it_before_cuda(measure: ModuleType, mo
         set_process_env(monkeypatch, Path(w.shm, "process"))
         monkeypatch.setenv("HF_HOME", NEVER + "/hf")
         out = Path(w.shm, "report")
-        with pytest.raises(SystemExit, match=r"^measure_codecs: HF_HOME=/tmp/"):
+        with pytest.raises(SystemExit, match=f"^measure_codecs: HF_HOME={re.escape(NEVER)}/"):
             measure.main(["--deriv", str(Path(w.shm, "no_such_deriv")), "--out", str(out)])
         assert not out.exists()
         monkeypatch.delenv("HF_HOME")

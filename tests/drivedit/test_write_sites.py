@@ -1,9 +1,11 @@
 """A static scan of the model-side code (``src/drivedit``, ``tools/codec``) for writers that could leave the write
 boundary unnoticed (DD-23). Torch-free: it parses, never imports.
 
-- No ``/tmp`` fallback: every ``tempfile`` call that creates something names its ``dir=``, nothing asks for the system
-  temp dir (``gettempdir``; only ``process_paths.prepare_process`` reads it back, to verify ``TMPDIR``), and no string
-  is a system temp path (``/tmp``, ``/var/tmp``) or a path under the home directory (``expanduser``, ``Path.home``).
+- No ``/tmp`` fallback: every ``tempfile`` call that creates something names its ``dir=`` (not ``None``), nothing asks
+  for the system temp dir (``gettempdir``), and no string is a system temp path (``/tmp``, ``/var/tmp``) or a path
+  under the home directory (``expanduser``, ``Path.home``).
+- It is a lint, not a proof of containment: a path assembled at run time (``os.path.join(os.sep, "tmp")``) or a call
+  that never runs (``if False: prepare_process()``) passes it. The behaviour tests check the writers themselves.
 - No environment changes in library code: ``os.environ`` is never assigned, deleted or updated, ``os.putenv`` and
   ``tempfile.tempdir`` never set, except in ``drivedit/process_paths.py``, whose ``prepare_process`` entry points call.
 - Every command line (a module with ``main`` and a ``__main__`` guard, or a ``[project.scripts]`` target) calls
@@ -90,8 +92,9 @@ def _is_os_environ(node: ast.AST) -> bool:
 def _call_findings(node: ast.Call, imported: dict[str, str], allowed_env: bool) -> list[str]:
     found = []
     name = _tempfile_call(node, imported)
-    if name in TEMPFILE_MAKERS and not any(k.arg == "dir" for k in node.keywords):
-        found.append(f"tempfile.{name}() without dir= falls back to the system temp dir")
+    dirs = [k.value for k in node.keywords if k.arg == "dir"]
+    if name in TEMPFILE_MAKERS and (not dirs or any(isinstance(d, ast.Constant) and d.value is None for d in dirs)):
+        found.append(f"tempfile.{name}() without dir= (or dir=None) falls back to the system temp dir")
     if name in TEMPFILE_SYSTEM and not allowed_env:
         found.append(f"tempfile.{name}() is the system temp dir; use process_paths.scratch_dir()")
     func = node.func
@@ -196,12 +199,13 @@ def test_the_scan_finds_what_it_looks_for(tmp_path: Path) -> None:
         "open('/tmp/x', 'w')\n"
         "os.path.expanduser('~/x')\n"
         "import tempfile as tf\n"
-        "from os import environ\n",
+        "from os import environ\n"
+        "tempfile.mkstemp(dir=None)\n",
         encoding="utf-8",
     )
     found = _findings(sample, "sample.py")
     lines = sorted(int(f.split(":")[1]) for f in found)
-    assert lines == [4, 5, 7, 8, 9, 10, 11, 12, 13, 13, 14, 15], found  # line 6 names its dir=; 13 holds two
+    assert lines == [4, 5, 7, 8, 9, 10, 11, 12, 13, 13, 14, 15, 16], found  # line 6 names its dir=; 13 holds two
 
 
 def _commands() -> Iterator[Path]:

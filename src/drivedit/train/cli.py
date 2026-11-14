@@ -4,6 +4,13 @@
     torchrun --nproc-per-node 2 -m drivedit.train.cli --config run.json --run-dir runs/<run_id> --resume
 
 ``--print-config PRESET`` writes a default RunConfig for a model preset to stdout, as a starting point.
+
+Before anything else a training run routes the process's caches and temporary files into the write boundary
+(``drivedit.process_paths.prepare_process``: torch.compile, Triton and CUDA caches under ``<DATA_ROOT>/cache``,
+temporary files in RAM) and checks ``--run-dir`` (``drivedit.train.trainer.check_run_dir``: RAM or the verified data
+drive of the local config, DD-23); a refusal exits with one line naming the reason. torchrun itself runs before this
+module: start it with ``TMPDIR`` (or ``--log-dir``) in RAM or on the data drive, or its per-run log directory goes to
+the system temp dir and every rank refuses the ``TORCHELASTIC_ERROR_FILE`` it was given there.
 """
 
 from __future__ import annotations
@@ -14,9 +21,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from drivedit.model.config import PRESETS
+from drivedit.process_paths import command_line, prepare_process
 from drivedit.train.config import RunConfig
 from drivedit.train.data import open_training_windows
-from drivedit.train.trainer import Trainer
+from drivedit.train.trainer import Trainer, check_run_dir
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,11 +43,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.config is None or args.run_dir is None:
         _parser().error("--config and --run-dir are required")
-    cfg = RunConfig.from_json(args.config.read_text())
-    trainer = Trainer(cfg, open_training_windows(cfg), args.run_dir)
-    if args.resume and trainer.resume():
-        print(f"resumed at step {trainer.step}", file=sys.stderr)
-    trainer.fit()
+    with command_line("dd-train"):
+        prepare_process()
+        check_run_dir(args.run_dir)  # before the data is opened
+        cfg = RunConfig.from_json(args.config.read_text())
+        trainer = Trainer(cfg, open_training_windows(cfg), args.run_dir)
+        if args.resume and trainer.resume():
+            print(f"resumed at step {trainer.step}", file=sys.stderr)
+        trainer.fit()
     return 0
 
 

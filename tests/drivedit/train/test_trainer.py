@@ -1,10 +1,14 @@
 """The trainer: config round trips, warm-up, checkpoint save / load / resume determinism, the non-finite stop, weight
-decay groups, latent statistics and the CLI. DDP is in test_ddp.py."""
+decay groups, latent statistics, the CLI, and the write boundary of its run directory (DD-23). DDP is in test_ddp.py.
+
+The trainer writes through the real write boundary, so ``tmp_path`` here is RAM scratch that boundary allows (the tests
+skip where a sandbox hides /dev/shm's device). The boundary tests run in a DD-22 fake world and never skip."""
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -14,14 +18,23 @@ import pytest
 import torch
 from torch import Tensor
 
+from drivedit.local_paths import WriteRefusedError
 from drivedit.model import AUX_HEADS, WorldModel, WorldModelConfig
+from drivedit.process_paths import PROCESS_PATHS
 from drivedit.train import DataConfig, ForcingSchedule, OptimConfig, RunConfig, Trainer, load_world_model
 from drivedit.train.cli import main
 from drivedit.train.config import from_dict
 from drivedit.train.data import channel_stats
+from tests.drivedit.boundary import NEVER, assert_never_written, require_real_boundary, set_process_env, world
 from tests.drivedit.model.toy import ShiftDynamics, tiny_config
 
 CPU = torch.device("cpu")
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """RAM scratch the real write boundary allows (the trainer writes through it), or the test skips."""
+    return require_real_boundary(tmp_path)
 
 
 def _cfg(**overrides: object) -> RunConfig:
@@ -185,8 +198,93 @@ def test_cli_prints_a_preset_config(capsys: pytest.CaptureFixture[str]) -> None:
     assert (cfg.model.dim, cfg.model.depth) == (768, 16)
 
 
+@pytest.mark.usefixtures("process_env")
 def test_cli_needs_data_and_the_data_layer(tmp_path: Path) -> None:
     config = tmp_path / "run.json"
     config.write_text(_cfg().to_json())
     with pytest.raises(ValueError, match=r"RunConfig\.data"):
         main(["--config", str(config), "--run-dir", str(tmp_path / "run")])
+
+
+# --- the write boundary (DD-23) ---------------------------------------------------------------------------------
+
+
+def _data() -> ShiftDynamics:
+    return ShiftDynamics(tiny_config(aux_heads=AUX_HEADS), 16, seed=0)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "{M}/z/run",  # the Windows system drive
+        "{M}/y/run",  # a drive that is not mounted (a directory of the Linux root filesystem)
+        "{B}/elsewhere/run",  # another tmpfs
+        "{B}/shm/dir_to_system/run",  # RAM by name, a link to the system drive
+        NEVER + "/run",  # the system temp dir
+    ],
+)
+def test_a_run_dir_outside_the_boundary_is_refused_before_anything(where: str) -> None:
+    with world() as w:
+        run_dir = Path(w.path(where))
+        with pytest.raises(WriteRefusedError, match="refusing"):
+            Trainer(_cfg(), _data(), run_dir, device=CPU)
+        assert not run_dir.exists()
+        assert not any(Path(w.mnt, "z").rglob("run*"))
+    assert_never_written()
+
+
+def test_a_run_dir_on_the_data_drive_trains_and_checkpoints() -> None:
+    with world() as w:
+        run_dir = Path(w.mnt, "x", "DataRoot", "runs", "r1")
+        trainer = Trainer(_cfg(steps=3), _data(), run_dir, device=CPU)
+        trainer.fit()
+        assert sorted(p.name for p in run_dir.iterdir()) == ["checkpoints", "log.jsonl", "run_config.json"]
+        assert [p.name for p in (run_dir / "checkpoints").iterdir()] == ["step_00000003.pt"]
+
+
+def test_a_checkpoints_link_out_of_the_boundary_is_refused_at_the_start() -> None:
+    with world() as w:
+        run_dir = Path(w.shm, "run")
+        run_dir.mkdir()
+        (run_dir / "checkpoints").symlink_to(Path(w.mnt, "z"))
+        with pytest.raises(WriteRefusedError, match="Windows system drive"):
+            Trainer(_cfg(), _data(), run_dir, device=CPU)
+        assert not (run_dir / "run_config.json").exists()
+
+
+def test_each_file_is_checked_again_when_it_is_written() -> None:
+    with world() as w:
+        system = Path(w.mnt, "z")
+        run_dir = Path(w.shm, "run")
+        trainer = Trainer(_cfg(), _data(), run_dir, device=CPU)
+        (run_dir / "checkpoints").symlink_to(system)  # after the start
+        with pytest.raises(WriteRefusedError, match="Windows system drive"):
+            trainer.save_checkpoint()
+        (run_dir / "log.jsonl").symlink_to(system / "log.jsonl")
+        with pytest.raises(WriteRefusedError, match="symlink"):
+            trainer._log({}, seconds=0.0)
+        assert sorted(p.name for p in system.iterdir()) == ["DataRoot", "Windows"]
+
+
+def test_cli_checks_the_run_dir_before_it_reads_anything(monkeypatch: pytest.MonkeyPatch) -> None:
+    with world() as w:
+        set_process_env(monkeypatch, Path(w.shm, "process"))
+        missing = Path(w.shm, "no_such_run.json")  # never read: the refusal comes first
+        with pytest.raises(SystemExit, match=r"^dd-train: refusing to write /tmp/"):
+            main(["--config", str(missing), "--run-dir", NEVER + "/run"])
+    assert_never_written()
+
+
+def test_cli_refuses_unset_caches_without_a_verified_data_drive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The synthetic config's data drive is mounted nowhere, so the cache defaults have no home: refused, and the
+    environment is left as it was."""
+    for entry in PROCESS_PATHS:
+        for name in (entry.name, entry.legacy):
+            if name is not None:
+                monkeypatch.delenv(name, raising=False)
+    with world("placeholder") as w:
+        run_dir = Path(w.shm, "run")
+        with pytest.raises(SystemExit, match=r"^dd-train: XDG_CACHE_HOME=.*\(its default\).*is not mounted"):
+            main(["--config", str(Path(w.shm, "no_such_run.json")), "--run-dir", str(run_dir)])
+        assert not run_dir.exists()
+    assert all(entry.name not in os.environ for entry in PROCESS_PATHS)

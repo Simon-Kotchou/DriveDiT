@@ -24,10 +24,17 @@ from torch import multiprocessing as mp
 
 from drivedit.model import AUX_HEADS
 from drivedit.train import ForcingSchedule, OptimConfig, RunConfig, Trainer
+from tests.drivedit.boundary import require_real_boundary
 from tests.drivedit.model.toy import ShiftDynamics, tiny_config
 
 CPU = torch.device("cpu")
 DEADLINE_S = 180.0
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """RAM scratch the real write boundary allows (every rank's trainer writes through it, DD-23), or the test skips."""
+    return require_real_boundary(tmp_path)
 
 
 def _cfg(**overrides: Any) -> RunConfig:

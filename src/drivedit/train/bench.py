@@ -5,6 +5,10 @@
 Prints one JSON record: parameter count, shapes, precision, the median and p90 milliseconds per optimiser step after
 warm-up, and the peak CUDA memory allocated and reserved. The batch is drawn once and reused, so data loading is
 excluded. This is the reproducible measurement behind any step-time number quoted for the world model.
+
+The trainer's run directory lives only for the measurement, in a temporary directory under
+``drivedit.process_paths.scratch_dir()`` (``TMPDIR``, by default in RAM; never the system temp dir), after
+``prepare_process`` has routed the caches of torch.compile, Triton and CUDA into the write boundary (DD-23).
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from drivedit.model.config import PRESETS, WorldModelConfig
+from drivedit.process_paths import command_line, prepare_process, scratch_dir
 from drivedit.train.config import RunConfig
 from drivedit.train.trainer import Trainer
 
@@ -67,7 +72,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--compile", action="store_true")
     p.add_argument("--device", default="cuda")
     args = p.parse_args(argv)
+    with command_line("bench"):
+        prepare_process()
+        return _bench(args)
 
+
+def _bench(args: argparse.Namespace) -> int:
     model = replace(PRESETS[args.preset]().with_latent(*args.latent), window=args.window)
     cfg = RunConfig(
         run_id=f"bench-{args.preset}",
@@ -80,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     device = torch.device(args.device)
     data = RandomWindows(model, size=args.batch, seed=0)
     batch = {k: torch.stack([data[i][k] for i in range(args.batch)]) for k in data[0]}
-    with tempfile.TemporaryDirectory() as run_dir:
+    with tempfile.TemporaryDirectory(prefix="dd_bench_", dir=scratch_dir()) as run_dir:
         trainer = Trainer(cfg, data, Path(run_dir), device=device)
         times = []
         for i in range(args.warmup + args.steps):

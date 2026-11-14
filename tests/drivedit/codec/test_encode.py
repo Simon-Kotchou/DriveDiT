@@ -2,6 +2,9 @@
 
 ``DRIVEDIT_TEST_SHARD`` may name a real DD-11 shard (``<root>/<session_id>/features_v1``); the test that reads it
 only reads, and skips without it.
+
+The pre-encoder writes through the real write boundary (DD-23), so ``tmp_path`` here is RAM scratch that boundary
+allows (the tests skip where a sandbox hides /dev/shm's device). The boundary tests run in a DD-22 fake world.
 """
 
 from __future__ import annotations
@@ -23,14 +26,23 @@ from drivedit.codec.encode import (
     IMAGE_PATTERN,
     LATENTS_SCHEMA,
     LatentsLockedError,
+    check_destination,
     encode_session,
     main,
     read_shard,
 )
+from drivedit.local_paths import WriteRefusedError
+from tests.drivedit.boundary import NEVER, assert_never_written, require_real_boundary, set_process_env, world
 from tests.drivedit.codec.helpers import DD11_META_KEYS, POOL_INFO, PoolCodec, write_shard
 
 SLOTS = [-1, 0, 1, 2, -1, 3, 4, 5, 6, -1]
 REAL_SHARD = os.environ.get("DRIVEDIT_TEST_SHARD")
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """RAM scratch the real write boundary allows (the pre-encoder writes through it), or the test skips."""
+    return require_real_boundary(tmp_path)
 
 
 def _sha256(path: Path) -> str:
@@ -302,6 +314,7 @@ def test_a_failed_overwrite_keeps_the_old_output(tmp_path: Path, pool_codec: Poo
 # --- CLI and a real shard --------------------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("process_env")
 def test_cli(
     tmp_path: Path, pool_codec: PoolCodec, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -329,3 +342,67 @@ def test_a_real_dd11_shard_reads() -> None:
     assert shard.slot_id.shape == (shard.meta["n_steps"],)
     first = int(shard.slot_id[shard.slot_id >= 0][0])
     assert (shard.deriv_dir / IMAGE_PATTERN.format(slot=first)).is_file()
+
+
+# --- the write boundary (DD-23) ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "{M}/z/DataRoot",  # the Windows system drive
+        "{M}/y/DataRoot",  # a drive that is not mounted
+        "{B}/elsewhere",  # another tmpfs
+    ],
+)
+def test_latents_beside_a_shard_outside_the_boundary_are_refused(pool_codec: PoolCodec, where: str) -> None:
+    with world() as w:
+        shard = write_shard(Path(w.path(where)), SLOTS)  # the shard itself is only read
+        root = shard.shard_dir.parent / "latents"
+        with pytest.raises(WriteRefusedError, match="refusing"):
+            encode_session(shard.shard_dir, pool_codec, batch=4)
+        assert not root.exists()
+
+
+def test_latents_on_the_data_drive_are_written(pool_codec: PoolCodec) -> None:
+    with world() as w:
+        shard = write_shard(Path(w.mnt, "x", "DataRoot", "datasets"), SLOTS)
+        out = encode_session(shard.shard_dir, pool_codec, batch=4)
+        assert out == shard.shard_dir.parent / "latents" / "test-pool"
+        _assert_consistent(out)
+
+
+def test_a_latents_link_out_of_the_boundary_is_refused(pool_codec: PoolCodec) -> None:
+    with world() as w:
+        shard = write_shard(Path(w.shm), SLOTS)
+        (shard.shard_dir.parent / "latents").symlink_to(Path(w.mnt, "z"))
+        with pytest.raises(WriteRefusedError, match="Windows system drive"):
+            encode_session(shard.shard_dir, pool_codec, batch=4)
+        assert sorted(p.name for p in Path(w.mnt, "z").iterdir()) == ["DataRoot", "Windows"]
+
+
+def test_check_destination_names_the_latents_root() -> None:
+    with world() as w:
+        shard_dir = Path(w.shm, "s", "features_v1")
+        assert check_destination(shard_dir, "test-pool") == Path(w.shm, "s", "latents")
+        Path(w.shm, "s", "latents").mkdir(parents=True)
+        (Path(w.shm, "s", "latents") / "test-pool").symlink_to(Path(w.shm, "real"))  # a renamed output would follow it
+        with pytest.raises(WriteRefusedError, match="symlink"):
+            check_destination(shard_dir, "test-pool")
+
+
+def test_cli_refuses_before_the_codec_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_codec(*_: object, **__: object) -> None:
+        raise AssertionError("the codec must not load for a refused destination")
+
+    monkeypatch.setattr(encode_module, "get_codec", no_codec)
+    with world() as w:
+        set_process_env(monkeypatch, Path(w.shm, "process"))
+        shard = write_shard(Path(w.mnt, "z", "DataRoot"), SLOTS)
+        with pytest.raises(SystemExit, match=r"^dd-encode: refusing to write .*Windows system drive"):
+            main([str(shard.shard_dir), "--codec", "wan21-vae", "--device", "cpu"])
+        assert not (shard.shard_dir.parent / "latents").exists()
+        monkeypatch.setenv("HF_HOME", NEVER + "/hf")  # a cache outside the boundary stops it first
+        with pytest.raises(SystemExit, match=r"^dd-encode: HF_HOME=/tmp/"):
+            main([str(shard.shard_dir), "--codec", "wan21-vae", "--device", "cpu"])
+    assert_never_written()

@@ -1,5 +1,6 @@
 """tools/codec/measure_codecs.py writes only where the write boundary allows (DD-22 round 2): --out is checked first,
-before CUDA, weights or frames are touched, and every file is narrowed to it."""
+before CUDA, weights or frames are touched, and every file is narrowed to it. Then the process's caches and temporary
+files are routed into the boundary (DD-23), still before CUDA."""
 
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+
+from tests.drivedit.boundary import NEVER, assert_never_written, set_process_env, world
 
 REPO = Path(__file__).resolve().parents[3]
 FIXTURE = REPO / "tests" / "fixtures" / "local_config" / "placeholder.local.env"
@@ -49,3 +52,25 @@ def test_files_are_narrowed_to_the_checked_out(measure: ModuleType) -> None:
     finally:
         measure._OUT_ROOT.clear()
     assert not out.exists()
+
+
+def test_caches_outside_the_boundary_stop_it_before_cuda(measure: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """DD-23: after --out, the process's caches and temporary files (prepare_process), before CUDA or any weights."""
+
+    def no_cuda() -> bool:
+        raise AssertionError("CUDA must not be touched before the caches are routed")
+
+    monkeypatch.setattr(measure.torch.cuda, "is_available", no_cuda)
+    with world() as w:
+        set_process_env(monkeypatch, Path(w.shm, "process"))
+        monkeypatch.setenv("HF_HOME", NEVER + "/hf")
+        out = Path(w.shm, "report")
+        with pytest.raises(SystemExit, match=r"^measure_codecs: HF_HOME=/tmp/"):
+            measure.main(["--deriv", str(Path(w.shm, "no_such_deriv")), "--out", str(out)])
+        assert not out.exists()
+        monkeypatch.delenv("HF_HOME")
+        monkeypatch.delenv("XDG_CACHE_HOME")
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(Path(w.mnt, "z", "inductor")))
+        with pytest.raises(SystemExit, match=r"^measure_codecs: TORCHINDUCTOR_CACHE_DIR=.*Windows system drive"):
+            measure.main(["--deriv", str(Path(w.shm, "no_such_deriv")), "--out", str(out)])
+    assert_never_written()

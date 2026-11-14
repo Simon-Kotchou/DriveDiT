@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -25,7 +26,14 @@ from drivedit.train import DataConfig, ForcingSchedule, OptimConfig, RunConfig, 
 from drivedit.train.cli import main
 from drivedit.train.config import from_dict
 from drivedit.train.data import channel_stats
-from tests.drivedit.boundary import NEVER, assert_never_written, require_real_boundary, set_process_env, world
+from tests.drivedit.boundary import (
+    NEVER,
+    assert_never_written,
+    clear_process_env,
+    require_real_boundary,
+    set_process_env,
+    world,
+)
 from tests.drivedit.model.toy import ShiftDynamics, tiny_config
 
 CPU = torch.device("cpu")
@@ -257,7 +265,16 @@ def test_each_file_is_checked_again_when_it_is_written() -> None:
         system = Path(w.mnt, "z")
         run_dir = Path(w.shm, "run")
         trainer = Trainer(_cfg(), _data(), run_dir, device=CPU)
-        (run_dir / "checkpoints").symlink_to(system)  # after the start
+        (run_dir / "checkpoints").mkdir()
+        (run_dir / "checkpoints" / "step_00000000.tmp").symlink_to(system / "never.tmp")  # after the start
+        with pytest.raises(WriteRefusedError, match=r"step_00000000\.tmp: it is a symlink"):
+            trainer.save_checkpoint()
+        (run_dir / "checkpoints" / "step_00000000.tmp").unlink()
+        (run_dir / "checkpoints" / "step_00000000.pt").symlink_to(system / "never.pt")
+        with pytest.raises(WriteRefusedError, match=r"step_00000000\.pt: it is a symlink"):
+            trainer.save_checkpoint()
+        shutil.rmtree(run_dir / "checkpoints")
+        (run_dir / "checkpoints").symlink_to(system)
         with pytest.raises(WriteRefusedError, match="Windows system drive"):
             trainer.save_checkpoint()
         (run_dir / "log.jsonl").symlink_to(system / "log.jsonl")
@@ -266,11 +283,22 @@ def test_each_file_is_checked_again_when_it_is_written() -> None:
         assert sorted(p.name for p in system.iterdir()) == ["DataRoot", "Windows"]
 
 
+def test_a_stale_link_in_the_run_dir_is_refused_at_the_start() -> None:
+    """A leftover ``step_*.tmp`` link would be written through by the next checkpoint (check_tree)."""
+    with world() as w:
+        run_dir = Path(w.shm, "run")
+        (run_dir / "checkpoints").mkdir(parents=True)
+        (run_dir / "checkpoints" / "step_00000006.tmp").symlink_to(Path(w.mnt, "z", "never.tmp"))
+        with pytest.raises(WriteRefusedError, match=r"step_00000006\.tmp leads to .*Windows system drive"):
+            Trainer(_cfg(), _data(), run_dir, device=CPU)
+        assert not (run_dir / "run_config.json").exists()
+
+
 def test_cli_checks_the_run_dir_before_it_reads_anything(monkeypatch: pytest.MonkeyPatch) -> None:
     with world() as w:
         set_process_env(monkeypatch, Path(w.shm, "process"))
         missing = Path(w.shm, "no_such_run.json")  # never read: the refusal comes first
-        with pytest.raises(SystemExit, match=r"^dd-train: refusing to write /tmp/"):
+        with pytest.raises(SystemExit, match=f"^dd-train: refusing to write {re.escape(NEVER)}/"):
             main(["--config", str(missing), "--run-dir", NEVER + "/run"])
     assert_never_written()
 
@@ -278,11 +306,8 @@ def test_cli_checks_the_run_dir_before_it_reads_anything(monkeypatch: pytest.Mon
 def test_cli_refuses_unset_caches_without_a_verified_data_drive(monkeypatch: pytest.MonkeyPatch) -> None:
     """The synthetic config's data drive is mounted nowhere, so the cache defaults have no home: refused, and the
     environment is left as it was."""
-    for entry in PROCESS_PATHS:
-        for name in (entry.name, entry.legacy):
-            if name is not None:
-                monkeypatch.delenv(name, raising=False)
     with world("placeholder") as w:
+        clear_process_env(monkeypatch)
         run_dir = Path(w.shm, "run")
         with pytest.raises(SystemExit, match=r"^dd-train: XDG_CACHE_HOME=.*\(its default\).*is not mounted"):
             main(["--config", str(Path(w.shm, "no_such_run.json")), "--run-dir", str(run_dir)])

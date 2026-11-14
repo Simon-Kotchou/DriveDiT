@@ -4,6 +4,8 @@ and routes the process's caches into the write boundary first (DD-23). Runs in a
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -53,7 +55,9 @@ def test_the_run_dir_is_temporary_scratch_under_tmpdir(
 ) -> None:
     with world() as w:
         env = set_process_env(monkeypatch, Path(w.shm, "process"))
+        monkeypatch.setenv("HF_XET_CACHE", "")  # prepare_process ran: it fills an empty one in
         assert bench.main(ARGV) == 0
+        assert os.environ["HF_XET_CACHE"] == env["HF_HOME"] + "/xet"
         (run_dir,) = tiny_preset
         assert run_dir.parent == Path(env["TMPDIR"])
         assert run_dir.name.startswith("dd_bench_")
@@ -64,12 +68,16 @@ def test_the_run_dir_is_temporary_scratch_under_tmpdir(
 
 def test_a_tmpdir_outside_the_boundary_stops_it_first(tiny_preset: list[Path], monkeypatch: pytest.MonkeyPatch) -> None:
     with world() as w:
-        set_process_env(monkeypatch, Path(w.shm, "process"))
+        env = set_process_env(monkeypatch, Path(w.shm, "process"))
         monkeypatch.setenv("TMPDIR", NEVER)
-        with pytest.raises(SystemExit, match=r"^bench: TMPDIR=/tmp/"):
+        with pytest.raises(SystemExit, match=f"^bench: TMPDIR={re.escape(NEVER)}"):
             bench.main(ARGV)
         monkeypatch.setenv("TMPDIR", str(Path(w.mnt, "z")))
         with pytest.raises(SystemExit, match=r"^bench: TMPDIR=.*Windows system drive"):
+            bench.main(ARGV)
+        monkeypatch.setenv("TMPDIR", env["TMPDIR"])
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", NEVER + "/inductor")  # a cache, not the scratch
+        with pytest.raises(SystemExit, match=f"^bench: TORCHINDUCTOR_CACHE_DIR={re.escape(NEVER)}/"):
             bench.main(ARGV)
     assert tiny_preset == []
     assert_never_written()

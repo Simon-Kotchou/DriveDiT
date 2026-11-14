@@ -7,10 +7,11 @@ own slice of every global batch (efficiency 3.4 item 1: DDP, not FSDP, at <= 400
 
 Writes: ``run_config.json``, ``log.jsonl`` and ``checkpoints/`` under ``run_dir``, and nothing else. ``run_dir`` must
 pass the write boundary (``drivedit.local_paths``: RAM or the verified data drive of the local config, never a Windows
-system volume; DD-23): ``check_run_dir`` runs on every rank before the process group, the model or any file, and rank 0
-checks each file again just before writing it (a ``checkpoints`` folder or ``log.jsonl`` that is a symlink leading out
-of the boundary is refused). Caches and temporary files (torch.compile, Triton, CUDA) are the entry point's business:
-``drivedit.process_paths.prepare_process``.
+system volume; DD-23): ``check_run_dir`` runs on every rank before the process group, the model or any file (it also
+refuses a link already inside ``run_dir`` that leads out of the boundary), and rank 0 checks each checkpoint and log
+file again just before writing it. Rank 0's verdict is all-reduced first, so every rank raises together and none waits
+in a collective for a rank that stopped. Caches and temporary files (torch.compile, Triton, CUDA) are the entry
+point's business: ``drivedit.process_paths.prepare_process``.
 """
 
 from __future__ import annotations
@@ -134,10 +135,12 @@ CHECKPOINTS = "checkpoints"
 
 def check_run_dir(run_dir: Path) -> None:
     """``WriteRefusedError`` unless the write boundary allows every place the trainer writes under ``run_dir``: its
-    files (``RUN_FILES``) and ``checkpoints/`` (``drivedit.local_paths``). Writes nothing."""
+    files (``RUN_FILES``), ``checkpoints/``, and where every link already in the tree leads (``drivedit.local_paths``
+    ``check_tree``: a stale ``step_*.tmp`` link would be written through). Writes nothing."""
     for name in RUN_FILES:
         local_paths.check_write(run_dir / name)
     local_paths.check_dir(run_dir / CHECKPOINTS)
+    local_paths.check_tree(run_dir)
 
 
 class Trainer:
@@ -263,10 +266,9 @@ class Trainer:
     def save_checkpoint(self) -> Path | None:
         """Write ``checkpoints/step_<step>.pt`` atomically (rank 0) and keep the newest ``keep_checkpoints``."""
         path = self.checkpoint_dir / f"step_{self.step:08d}.pt"
+        tmp = path.with_suffix(".tmp")
+        self._check_on_main(tmp, path)
         if self.is_main:
-            tmp = path.with_suffix(".tmp")
-            for target in (tmp, path):
-                local_paths.check_write(target)
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
             state = {
                 "format": CHECKPOINT_FORMAT,
@@ -303,9 +305,26 @@ class Trainer:
 
     # ------------------------------------------------------------------------------------------------------ helpers
 
-    def _write_run_config(self) -> None:
+    def _check_on_main(self, *paths: Path) -> None:
+        """Rank 0 checks ``paths`` against the write boundary; under DDP its verdict is all-reduced, so every rank
+        raises ``WriteRefusedError`` together instead of leaving the others in the next collective."""
+        refusal: local_paths.WriteRefusedError | None = None
+        if self.is_main:
+            try:
+                for path in paths:
+                    local_paths.check_write(path)
+            except local_paths.WriteRefusedError as exc:
+                refusal = exc
+        if dist.is_initialized():
+            flag = torch.tensor([0.0 if refusal is None else 1.0], device=self.device)
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            if flag.item() > 0 and refusal is None:
+                raise local_paths.WriteRefusedError(f"rank 0 refused to write {paths[0]}; every rank stops")
+        if refusal is not None:
+            raise refusal
+
+    def _write_run_config(self) -> None:  # run_dir was checked in __init__ (check_run_dir), just before this
         path = self.run_dir / "run_config.json"
-        local_paths.check_write(path)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         text = self.cfg.to_json()
         if path.exists() and RunConfig.from_json(path.read_text()) != self.cfg:
@@ -313,12 +332,12 @@ class Trainer:
         path.write_text(text + "\n")
 
     def _log(self, logs: Mapping[str, Tensor], *, seconds: float) -> None:
+        path = self.run_dir / "log.jsonl"
+        self._check_on_main(path)  # every rank: it may all-reduce
         if not self.is_main:
             return
         record = {"step": self.step, "step_s": round(seconds, 4), **{k: float(v) for k, v in logs.items()}}
         line = json.dumps(record)
-        path = self.run_dir / "log.jsonl"
-        local_paths.check_write(path)
         with path.open("a") as f:
             f.write(line + "\n")
         print(line, flush=True)

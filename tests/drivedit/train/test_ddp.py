@@ -22,6 +22,7 @@ from torch import Tensor
 from torch import distributed as dist
 from torch import multiprocessing as mp
 
+from drivedit import local_paths
 from drivedit.model import AUX_HEADS
 from drivedit.train import ForcingSchedule, OptimConfig, RunConfig, Trainer
 from tests.drivedit.boundary import require_real_boundary
@@ -112,6 +113,28 @@ def _non_finite_on_rank_1(rank: int, port: int, run_dir: str) -> None:
     dist.destroy_process_group()
 
 
+def _checkpoint_refused_on_rank_0(rank: int, port: int, run_dir: str) -> None:
+    """Rank 0's write boundary refuses the checkpoint (as for a link planted after the start); rank 1's would not."""
+    _join_group(rank, port)
+    trainer = Trainer(_cfg(), ShiftDynamics(_cfg().model, 32, seed=3), Path(run_dir), device=CPU)
+    if rank == 0:
+        allowed = local_paths.check_write
+
+        def refuse_checkpoints(path: str | Path, roots: object = None) -> str:
+            if "checkpoints" in str(path):
+                raise local_paths.WriteRefusedError(f"refusing to write {path}: test refusal")
+            return allowed(path)
+
+        local_paths.check_write = refuse_checkpoints  # type: ignore[assignment]
+    try:
+        trainer.fit()
+        outcome = f"finished {trainer.step}"
+    except local_paths.WriteRefusedError as err:
+        outcome = f"refused {trainer.step}: {err}"
+    (Path(run_dir) / f"outcome_rank{rank}.txt").write_text(outcome)
+    dist.destroy_process_group()
+
+
 def _run_two_ranks(worker: Callable[[int, int, str], None], run_dir: Path) -> None:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -148,3 +171,13 @@ def test_a_non_finite_loss_on_one_rank_stops_every_rank(tmp_path: Path) -> None:
     own_loss = [float(o.split("this rank: ")[1].split(")")[0]) for o in outcomes]
     assert math.isfinite(own_loss[0])  # rank 0 stopped because rank 1's loss was not finite
     assert not math.isfinite(own_loss[1])
+
+
+def test_a_refused_checkpoint_on_rank_0_stops_every_rank(tmp_path: Path) -> None:
+    """DD-23: rank 0's verdict is all-reduced, so rank 1 raises too instead of waiting at the checkpoint barrier."""
+    _run_two_ranks(_checkpoint_refused_on_rank_0, tmp_path)
+    outcomes = [(tmp_path / f"outcome_rank{r}.txt").read_text() for r in (0, 1)]
+    assert outcomes[0].startswith("refused 3: refusing to write"), outcomes
+    assert "test refusal" in outcomes[0], outcomes
+    assert outcomes[1].startswith("refused 3: rank 0 refused to write"), outcomes
+    assert not (tmp_path / "checkpoints").exists()

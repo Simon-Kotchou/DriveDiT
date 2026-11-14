@@ -1,6 +1,6 @@
 """Step time and peak memory of training steps of a model preset, on random latents: a speed measurement only.
 
-    python -m drivedit.train.bench --preset probe_50m --latent 32 9 16 --window 10 --batch 8 --steps 30
+    python -m drivedit.commands bench --preset probe_50m --latent 32 9 16 --window 10 --batch 8 --steps 30
 
 Prints one JSON record: parameter count, shapes, precision, the median and p90 milliseconds per optimiser step after
 warm-up, and the peak CUDA memory allocated and reserved. The batch is drawn once and reused, so data loading is
@@ -8,7 +8,8 @@ excluded. This is the reproducible measurement behind any step-time number quote
 
 The trainer's run directory lives only for the measurement, in a temporary directory under
 ``drivedit.process_paths.scratch_dir()`` (``TMPDIR``, by default in RAM; never the system temp dir), after
-``prepare_process`` has routed the caches of torch.compile, Triton and CUDA into the write boundary (DD-23).
+``prepare_process`` has routed the caches of torch.compile, Triton and CUDA into the write boundary (DD-23;
+``python -m drivedit.commands bench`` does that before torch is imported, ``python -m drivedit.train.bench`` after).
 """
 
 from __future__ import annotations

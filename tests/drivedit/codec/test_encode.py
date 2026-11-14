@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -381,6 +382,18 @@ def test_a_latents_link_out_of_the_boundary_is_refused(pool_codec: PoolCodec) ->
         assert sorted(p.name for p in Path(w.mnt, "z").iterdir()) == ["DataRoot", "Windows"]
 
 
+def test_a_lock_link_out_of_the_boundary_is_refused(pool_codec: PoolCodec) -> None:
+    """Checked before the lock is taken: a refusal, not a LatentsLockedError naming a stale lock."""
+    with world() as w:
+        shard = write_shard(Path(w.shm), SLOTS)
+        root = shard.shard_dir.parent / "latents"
+        root.mkdir()
+        (root / ".test-pool.lock").symlink_to(Path(w.mnt, "z", "never.lock"))
+        with pytest.raises(WriteRefusedError, match=r"\.test-pool\.lock: it is a symlink"):
+            encode_session(shard.shard_dir, pool_codec, batch=4)
+        assert sorted(p.name for p in root.iterdir()) == [".test-pool.lock"]
+
+
 def test_check_destination_names_the_latents_root() -> None:
     with world() as w:
         shard_dir = Path(w.shm, "s", "features_v1")
@@ -403,6 +416,6 @@ def test_cli_refuses_before_the_codec_loads(monkeypatch: pytest.MonkeyPatch) -> 
             main([str(shard.shard_dir), "--codec", "wan21-vae", "--device", "cpu"])
         assert not (shard.shard_dir.parent / "latents").exists()
         monkeypatch.setenv("HF_HOME", NEVER + "/hf")  # a cache outside the boundary stops it first
-        with pytest.raises(SystemExit, match=r"^dd-encode: HF_HOME=/tmp/"):
+        with pytest.raises(SystemExit, match=f"^dd-encode: HF_HOME={re.escape(NEVER)}/"):
             main([str(shard.shard_dir), "--codec", "wan21-vae", "--device", "cpu"])
     assert_never_written()

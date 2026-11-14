@@ -45,10 +45,11 @@ def test_library_defaults_match_the_table(tmp_path: Path) -> None:
         cache = f"{w.mnt}/x/DataRoot/cache"
         assert ours["XDG_CACHE_HOME"] == cache
     # Only the parents the libraries read: the roots and TRITON_HOME (Triton's default follows HOME, not XDG).
-    env = {k: v for k, v in os.environ.items() if k not in {e.name for e in PROCESS_PATHS}}
+    names = {n for e in PROCESS_PATHS for n in (e.name, e.legacy) if n is not None}
+    env = {k: v for k, v in os.environ.items() if k not in names}
     env |= {"XDG_CACHE_HOME": ours["XDG_CACHE_HOME"], "TMPDIR": str(tmp_path), "TRITON_HOME": ours["TRITON_HOME"]}
     result = subprocess.run(
-        [sys.executable, "-I", "-c", PROBE], cwd=tmp_path, env=env, capture_output=True, text=True, check=False
+        [sys.executable, "-I", "-B", "-c", PROBE], cwd=tmp_path, env=env, capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
     theirs: dict[str, str] = json.loads(result.stdout)

@@ -22,13 +22,14 @@ and licence without loading anything, so tools can report provenance and check t
 storage), which huggingface_hub fixes when it is first imported. It is imported on first use (``fetch_weights``), not
 with this module, so an entry point can route the cache first (``drivedit.process_paths.prepare_process``: by default
 ``<DATA_ROOT>/cache/huggingface``). Before a download ``fetch_weights`` checks both directories against the write
-boundary (``drivedit.local_paths.check_dir``) and refuses (``WriteRefusedError``) a cache outside it, such as the
-library default under ``~/.cache``; ``local_only=True`` only reads and is not checked.
+boundary, with every link already in them (``check_hub_cache``), and refuses (``WriteRefusedError``) a cache outside
+it, such as the library default under ``~/.cache``; ``local_only=True`` only reads and is not checked.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -285,16 +286,18 @@ HUB_WRITE_DIRS: Final = ("HF_HUB_CACHE", "HF_XET_CACHE")
 
 
 def check_hub_cache() -> None:
-    """``WriteRefusedError`` unless every directory a Hugging Face download writes into (``HUB_WRITE_DIRS``, as the
-    imported huggingface_hub resolved them) passes the write boundary. Imports huggingface_hub."""
+    """``WriteRefusedError`` unless a Hugging Face download stays inside the write boundary: each cache directory it
+    writes into (``HUB_WRITE_DIRS``, as the imported huggingface_hub resolved them), every link already inside those
+    trees (``drivedit.local_paths.check_tree``: a stale ``.locks`` or ``blobs`` link would be written through), and
+    Xet's log destination ``HF_XET_LOG_DEST`` when it is set. Imports huggingface_hub; writes nothing."""
     from huggingface_hub import constants  # noqa: PLC0415 -- fixes the cache paths: imported on first use only
 
-    for name in HUB_WRITE_DIRS:
-        path = getattr(constants, name, None)
+    checks = [(name, getattr(constants, name, None)) for name in HUB_WRITE_DIRS]
+    for name, path in checks:
         if path is None:
             continue
         try:
-            local_paths.check_dir(path)
+            local_paths.check_tree(path)
         except local_paths.WriteRefusedError as exc:
             raise local_paths.WriteRefusedError(
                 f"the Hugging Face cache {name}={path} is outside the write boundary, so no weights are downloaded "
@@ -302,6 +305,12 @@ def check_hub_cache() -> None:
                 "huggingface_hub is imported; the entry points do it (drivedit.process_paths.prepare_process). "
                 f"{exc}"
             ) from exc
+    log_dest = os.environ.get("HF_XET_LOG_DEST", "")
+    if log_dest.strip():
+        try:
+            local_paths.check_write(log_dest)
+        except local_paths.WriteRefusedError as exc:
+            raise local_paths.WriteRefusedError(f"HF_XET_LOG_DEST={log_dest}: {exc}") from exc
 
 
 def fetch_weights(source: WeightSource, *, local_only: bool = False) -> Path:

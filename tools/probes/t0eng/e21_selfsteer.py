@@ -23,9 +23,16 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  |kappa| >= 0.004 1/m): per channel (rot, bone, ent, sig) the median |tan(delta_eff) / L - kappa| /
                  |kappa| <= --max-step0-error over >= 30 rows, and EVERY qualifying command change (the e22 stair
                  levels, the e23 onsets and releases with --e23) lags t50(delta_eff) - t50(input_post_steer) <=
-                 --max-lag-steps engine steps. A change is unmeasurable when a value is missing, no t50 is found or a
-                 row it depends on covers merged steps (the resolution is then coarser than one step); unmeasurable
-                 changes are counted, and more than --max-unmeasurable of them (or < 3 measurable) is INCOMPLETE.
+                 --max-lag-steps engine steps. A change qualifies only when both its command levels are held for
+                 settle + 1 rows or more (steer_common.settle_rows: 6 rows for the one-step lag, one more for every
+                 further step --max-lag-steps admits): the old level is read at the row before the change and the new
+                 one as the median from settle rows on, never past the new level's end. A shorter level (the e23
+                 trains at 60 km/h hold a +-1 step for one row by design) has no settled level on one side, so its
+                 t50s compare values the delayed channel never sat on; it is excluded and reported as short_hold with
+                 a steepest-step lag diagnostic, neither measured nor unmeasurable. A qualifying change is
+                 unmeasurable when a value is missing, no t50 is found or a row it depends on covers merged steps (the
+                 resolution is then coarser than one step); unmeasurable changes are counted, and more than
+                 --max-unmeasurable of them (or < 3 measurable, so also no qualifying change) is INCOMPLETE.
                  The first channel that passes is the wheel_angle (the steering0 signal at --signal-scale-deg per
                  unit; that scale is carried to every reader); none passes and one is INCOMPLETE -> INCOMPLETE
   a_readback     every expected called row (all rows outside e21's no-call segment) of e21, e22 and e23 must be
@@ -86,7 +93,7 @@ STEP0_MIN_EVENTS = 3
 LOW_SLIP_KMH = (10.0, 20.0)
 LOW_SLIP_ALAT = 1.0
 CHANGE_MIN = 0.04
-SETTLE_FROM = 6
+SETTLE_FROM = sc.SETTLE_FROM
 SETTLE_TO = 15
 # mandated conditions (MIGRATION_1_9.md 6.1 CC-07)
 FLAT_SPEEDS = (20.0, 40.0)
@@ -141,6 +148,37 @@ def transitions(steps, segment_names):
     return out
 
 
+settle_rows = sc.settle_rows
+
+
+def min_hold_rows(max_lag_steps):
+    """The rows both command levels of a change must be held for its lag to be measured: the change row and the
+    settle_rows after it (lag_of reads the settled new level from settle_rows on, and the old level at the row
+    before the change, which must lie as far into its own level)"""
+    return settle_rows(max_lag_steps) + 1
+
+
+def level_holds(steps, k, limit):
+    """(rows the old command level was held up to row k - 1, rows the new level is held from row k), each counted
+    up to limit within the row's phase and run, whatever the segment label (a trim or a hold row with the same
+    command continues the level)"""
+    key = (steps[k].phase, steps[k].i.get("run_idx"))
+
+    def run(start, step, value):
+        count = 0
+        j = start
+        while 0 <= j < len(steps) and count < limit:
+            row = steps[j]
+            cmd = row.f.get("cmd_steer")
+            if (row.phase, row.i.get("run_idx")) != key or cmd is None or abs(cmd - value) > 1e-6:
+                break
+            count += 1
+            j += step
+        return count
+
+    return run(k - 1, -1, steps[k - 1].f.get("cmd_steer")), run(k, 1, steps[k].f.get("cmd_steer"))
+
+
 def t50_row(values, start, end, pre, final):
     span = final - pre
     if abs(span) < 1e-9:
@@ -151,14 +189,19 @@ def t50_row(values, start, end, pre, final):
     return None
 
 
-def lag_of(steps, inputs, angles, k, settle_to, dt):
-    """(lag in engine steps, None) of the command change at row k, or (None, reason) when it is not measurable"""
-    end = min(len(inputs), k + settle_to)
-    if k < 1 or end - k <= SETTLE_FROM:
+def lag_of(steps, inputs, angles, k, settle_to, dt, settle=SETTLE_FROM, new_hold=None):
+    """(lag in engine steps, None) of the command change at row k, or (None, reason) when it is not measurable. The
+    old level is read at row k - 1, the new one as the median from k + settle to the end of the window: settle_to
+    rows (shifted by any extra settle) and never past the new level's last row (new_hold rows from k; the rows of the
+    next level are no part of this change)"""
+    end = min(len(inputs), k + settle_to + (settle - SETTLE_FROM))
+    if new_hold is not None:
+        end = min(end, k + new_hold)
+    if k < 1 or end - k <= settle:
         return None, "short"
     pre_i, pre_a = inputs[k - 1], angles[k - 1]
-    tail_i = [v for v in inputs[k + SETTLE_FROM:end] if v is not None]
-    tail_a = [v for v in angles[k + SETTLE_FROM:end] if v is not None]
+    tail_i = [v for v in inputs[k + settle:end] if v is not None]
+    tail_a = [v for v in angles[k + settle:end] if v is not None]
     if pre_i is None or pre_a is None or not tail_i or not tail_a:
         return None, "missing"
     ti = t50_row(inputs, k, end, pre_i, sc.median(tail_i))
@@ -170,6 +213,29 @@ def lag_of(steps, inputs, angles, k, settle_to, dt):
         return None, "merged"
     lag = sum(sc.covered_steps(steps[i], dt) for i in range(lo + 1, hi + 1))
     return (lag if ta >= ti else -lag), None
+
+
+def steepest_lag(steps, inputs, angles, k, dt, reach):
+    """Diagnostic for a change too short for lag_of: the rows from the steepest step of the input (in the change's
+    direction, rows k..k + reach) to the steepest step of the angle, in engine steps; None without the values or
+    across a merged dispatch. It needs no settled level, so it reads a one-row pulse too"""
+    direction = (steps[k].f.get("cmd_steer") or 0.0) - (steps[k - 1].f.get("cmd_steer") or 0.0)
+    best = []
+    for series in (inputs, angles):
+        top, row = None, None
+        for i in range(k, min(len(series), k + reach + 1)):
+            if series[i] is None or series[i - 1] is None:
+                return None
+            change = (series[i] - series[i - 1]) * (1.0 if direction > 0 else -1.0)
+            if top is None or change > top:
+                top, row = change, i
+        if row is None or top <= 0:
+            return None
+        best.append(row)
+    lo, hi = min(best), max(best)
+    if any(sc.covered_steps(steps[i], dt) > 1 for i in range(k - 1, hi + 1)):
+        return None
+    return hi - lo if best[1] >= best[0] else lo - hi
 
 
 def step0_selection(load_play, args, extra_play=None):
@@ -196,10 +262,23 @@ def step0_selection(load_play, args, extra_play=None):
             low.append(s)
     aborted = {name: result for name, result in sc.aborted_phases(load_play, "e22").items()
                if name.startswith("stair_")}
-    changes = [(0, k, SETTLE_TO, dt) for k in transitions(steps, ("stair",))]
+    settle = settle_rows(args.max_lag_steps)
+    hold_min = min_hold_rows(args.max_lag_steps)
+    found = [(0, k, SETTLE_TO, dt) for k in transitions(steps, ("stair",))]
     if extra_steps and extra_dt:
-        changes += [(1, k, 12, extra_dt) for k in transitions(extra_steps, ("train",))]
+        found += [(1, k, SETTLE_TO, extra_dt) for k in transitions(extra_steps, ("train",))]
     rows_of = (steps, extra_steps)
+    # a change is measured only when both its levels are held long enough for the channels to settle (the old level
+    # at the row before the change, the new one from settle rows on); a shorter level (the e23 trains at 60 km/h hold
+    # a +-1 step for 1 row by design) is excluded and counted on its own, never as unmeasurable: its t50 compares a
+    # pre value and a tail that the delayed channel never sat on
+    changes, short = [], []
+    for which, k, settle_to, step in found:
+        old, new = level_holds(rows_of[which], k, hold_min)
+        if old >= hold_min and new >= hold_min:
+            changes.append((which, k, settle_to, step, new))
+        else:
+            short.append((which, k, step))
     inputs = ([s.f.get("input_post_steer") for s in steps], [s.f.get("input_post_steer") for s in extra_steps])
     parts = []
     states = []
@@ -216,16 +295,22 @@ def step0_selection(load_play, args, extra_play=None):
             if key == "sig" and s.f.get("sig_steer"):
                 sig_scales.append(math.atan(s.kappa * wheelbase) / s.f.get("sig_steer"))
         lags, reasons = [], {}
-        for which, k, settle_to, step in changes:
-            lag, reason = lag_of(rows_of[which], inputs[which], angles[which], k, settle_to, step)
+        for which, k, settle_to, step, new in changes:
+            lag, reason = lag_of(rows_of[which], inputs[which], angles[which], k, settle_to, step, settle, new)
             if lag is None:
                 reasons[reason] = reasons.get(reason, 0) + 1
             else:
                 lags.append(lag)
+        steepest = {}
+        for which, k, step in short:
+            value = steepest_lag(rows_of[which], inputs[which], angles[which], k, step,
+                                 int(math.ceil(args.max_lag_steps)) + 2)
+            steepest[value] = steepest.get(value, 0) + 1
         err = sc.median(errors)
         err_state = None if len(errors) < STEP0_MIN_ROWS else err <= args.max_step0_error
         violations = sum(1 for x in lags if x > args.max_lag_steps)
         unmeasurable = sum(reasons.values())
+        # no qualifying change at all is no evidence (an all-short-hold play never passes)
         share = unmeasurable / float(len(changes)) if changes else 1.0
         if violations:
             lag_state = False
@@ -236,15 +321,16 @@ def step0_selection(load_play, args, extra_play=None):
         state = sc.combine([err_state, lag_state])
         states.append(state)
         entry = {"error": err, "rows": len(errors), "lags": lags, "violations": violations, "state": state,
-                 "unmeasurable": reasons}
+                 "unmeasurable": reasons, "short_hold": len(short), "steepest": steepest}
         if key == "sig":
             entry["fit_scale_deg"] = math.degrees(sc.median(sig_scales)) if sig_scales else None
         result["per"][key] = entry
         text = "%s: median error %s over %d rows; lag <= %g steps on %d of %d measurable changes (max %s), %d of " \
-               "%d unmeasurable (%s) -> %s" % (
+               "%d unmeasurable (%s), short_hold excluded %d (%s) -> %s" % (
                    key, sc.fmt(err * 100 if err is not None else None, 3, "%"), len(errors), args.max_lag_steps,
                    len(lags) - violations, len(lags), sc.fmt(max(lags) if lags else None, 3), unmeasurable,
-                   len(changes), ", ".join("%s %d" % r for r in sorted(reasons.items())) or "-", STATE_TEXT[state])
+                   len(changes), ", ".join("%s %d" % r for r in sorted(reasons.items())) or "-", len(short),
+                   steepest_text(steepest), STATE_TEXT[state])
         if key == "sig":
             text += " (scale %g deg/unit; best fit %s deg)" % (args.signal_scale_deg,
                                                                sc.fmt(entry["fit_scale_deg"], 4))
@@ -260,10 +346,22 @@ def step0_selection(load_play, args, extra_play=None):
         result["state"] = None
     else:
         result["state"] = False
-    result["detail"] = "L %s m, %d low-slip rows, %d command changes; %s; selected %s%s" % (
-        sc.fmt(wheelbase, 4), len(low), len(changes), "; ".join(parts), result["selected"] or "none",
-        "; stair phases not ok: " + ", ".join("%s %s" % kv for kv in sorted(aborted.items())) if aborted else "")
+    result["short_hold"] = len(short)
+    result["detail"] = "L %s m, %d low-slip rows, %d command changes (%d with both levels held >= %d rows, settled " \
+                       "from row %d; %d shorter); %s; selected %s%s" % (
+                           sc.fmt(wheelbase, 4), len(low), len(found), len(changes), hold_min, settle, len(short),
+                           "; ".join(parts), result["selected"] or "none",
+                           "; stair phases not ok: " + ", ".join("%s %s" % kv for kv in sorted(aborted.items()))
+                           if aborted else "")
     return result
+
+
+def steepest_text(steepest):
+    """The steepest-step lags of the short-hold changes (diagnostic, not gated): 'steepest-step lag 1: 98, -: 2'"""
+    if not steepest:
+        return "-"
+    items = sorted(steepest.items(), key=lambda kv: (kv[0] is None, kv[0] if kv[0] is not None else 0))
+    return "steepest-step lag " + ", ".join("%s: %d" % ("-" if lag is None else lag, n) for lag, n in items)
 
 
 # ---------------------------------------------------------------------------------------------------------------

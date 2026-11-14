@@ -44,6 +44,10 @@ import probe_common  # noqa: E402
 
 HARMONIC_MIN_TAN = 0.02
 MIN_SPEED_MS = 1.0
+# Rows after a command change from which the steering input and a wheel-angle channel count as settled at the new level,
+# for the one-step lag CC-07 step 0 allows (settle_rows): the e21 lag test reads its settled levels from there, the e23
+# plateaus only after it
+SETTLE_FROM = 6
 IDENTITY_KEYS = ("engine.build_version", "launch.pin_id", "ego.prefab", "world.map_id", "addon.git_sha")
 # The wheel-angle candidates in the order step 0 tries them (DC_SteerChannels columns)
 CHANNELS = (
@@ -675,6 +679,13 @@ def fmt(value, digits=4, unit=""):
 
 def deg(rad):
     return None if rad is None else math.degrees(rad)
+
+
+def settle_rows(max_lag_steps=1.0):
+    """Rows after a command change from which the input and the wheel-angle channel count as settled at the new level:
+    SETTLE_FROM for the one-step lag the spec allows, one more for every further step of lag --max-lag-steps admits
+    (a channel that may start later must be given as long to settle)"""
+    return SETTLE_FROM + max(0, int(math.ceil(max_lag_steps)) - 1)
 
 
 def t50_time(rows, values, start, pre, final):

@@ -32,6 +32,10 @@ tracking. This analysis covers the raw engine path; what it cannot cover is INCO
   steer_sign     the kappa plateaus have the command's sign (+1 on 1.8.0.13 and 1.9.0.37)
   INFO           cmd -> kappa per bin (labelled PARTIAL: the command to the realised curvature, not the llc path),
                  the rate limit vs speed, the centering on release, the L/R angle ratio, the script-setter limit
+Plateaus (steer_sign, centering, the L/R ratio) are the last 3 rows before a release, used only when they lie
+steer_common.settle_rows(--max-lag-steps) rows or more after the onset (CC-07 step 0's settle rule): the shorter
+holds of the 30 / 40 / 60 km/h trains have no settled plateau (their last rows hold the onset transient, and a channel
+one row late still shows the level before the step), so they add no plateau.
 Structures (discrete in engine steps of dt; a row that covers n merged steps is n steps of the model with the row's
 command, its output compared at the last of them; target = g x u[step - d]):
   M1 delay           y = target
@@ -805,20 +809,25 @@ def prbs_windows(steps, path, channel, scale_rad, dt, status, planned=None):
     return out
 
 
-def plateau(window):
-    """Mean output over the last 3 rows before the release, minus the output before the onset (None without a
-    release index)."""
+PLATEAU_ROWS = 3
+
+
+def plateau(window, settle=sc.SETTLE_FROM):
+    """Mean output over the last PLATEAU_ROWS rows before the release, minus the output before the onset; None
+    without a release index or when those rows do not all lie settle rows or more after the onset (a step held
+    shorter, as the 30 / 40 / 60 km/h trains are, has no settled plateau: its last rows hold the onset transient
+    and, for a channel one row late, the level before the step; CC-07 step 0 applies the same settle rule)"""
     rel = window.get("release_index")
-    if rel is None or rel < 3:
+    if rel is None or rel - PLATEAU_ROWS < settle:
         return None
-    tail = [v for v in window["y"][rel - 3:rel] if v is not None]
+    tail = [v for v in window["y"][rel - PLATEAU_ROWS:rel] if v is not None]
     return sum(tail) / len(tail) - window["y0"] if tail else None
 
 
-def centering(window):
+def centering(window, settle=sc.SETTLE_FROM):
     """Seconds from the release until the output is back within 10% of the plateau of its pre-onset value, and the
-    remaining share of the plateau at the window end."""
-    p = plateau(window)
+    remaining share of the plateau at the window end (None without a settled plateau)."""
+    p = plateau(window, settle)
     rel = window.get("release_index")
     if p is None or rel is None or abs(p) < 1e-9:
         return None, None
@@ -1015,7 +1024,7 @@ def analyse(play, args, verdict):
             verdict.info("cmd_kappa_%gkmh_%g" % (speed, amplitude), "PARTIAL (cmd -> kappa_realised, not the llc "
                                                                    "path; not gated): %s, %s" % (
                                                                        STATE_TEXT[res["state"]], res["detail"]))
-    report_extras(channel, results, verdict)
+    report_extras(channel, results, verdict, sc.settle_rows(args.max_lag_steps))
     # a run aborted by the motion guards (or a skipped phase) leaves its speed's evidence incomplete even when the
     # footer is complete
     for name, (speed, result) in sorted(aborted.items()):
@@ -1097,14 +1106,15 @@ def input_model(play, args):
         structure, model["d"], sc.fmt(model["g"], 4), sc.fmt(model["tau"], 3), sc.fmt(model["rate"], 4), len(fitted))
 
 
-def report_extras(channel, results, verdict):
-    """steer_sign, rate limit vs speed, centering, L/R ratio and the script-setter limit."""
+def report_extras(channel, results, verdict, settle=sc.SETTLE_FROM):
+    """steer_sign, rate limit vs speed, centering, L/R ratio and the script-setter limit; every plateau among them
+    only on steps held settle rows and more (plateau)."""
     signs = []
     for (path, key), res in results.items():
         if path != "kappa" or key == "prbs":
             continue
         for w in res["windows"]:
-            p = plateau(w)
+            p = plateau(w, settle)
             if p is not None and w["amplitude"] != 0:
                 signs.append(1 if p / w["amplitude"] > 0 else -1)
     if len(signs) >= 6:
@@ -1136,8 +1146,8 @@ def report_extras(channel, results, verdict):
         for key, res in bins_of(path):
             if not res["windows"]:
                 continue
-            t10 = [centering(w)[0] for w in res["windows"]]
-            residual = [centering(w)[1] for w in res["windows"]]
+            t10 = [centering(w, settle)[0] for w in res["windows"]]
+            residual = [centering(w, settle)[1] for w in res["windows"]]
             lines.append("%s %g km/h x %g: t10 %s s, residual %s" % (
                 path, key[0], key[1], sc.fmt(sc.median([v for v in t10 if v is not None]), 3),
                 sc.fmt(sc.median([v for v in residual if v is not None]), 3)))
@@ -1148,10 +1158,10 @@ def report_extras(channel, results, verdict):
             per = []
             for w in res["windows"]:
                 rel = w.get("release_index")
-                if rel is None or rel < 3:
+                if rel is None or rel - PLATEAU_ROWS < settle:
                     continue
-                left = [sc.channel_pair(s, channel)[0] for s in w["rows"][rel - 3:rel]]
-                right = [sc.channel_pair(s, channel)[1] for s in w["rows"][rel - 3:rel]]
+                left = [sc.channel_pair(s, channel)[0] for s in w["rows"][rel - PLATEAU_ROWS:rel]]
+                right = [sc.channel_pair(s, channel)[1] for s in w["rows"][rel - PLATEAU_ROWS:rel]]
                 left = [v for v in left if v is not None]
                 right = [v for v in right if v is not None]
                 if not left or not right:

@@ -651,8 +651,8 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol, skip=None):
     BIAS_WINDOW_S must stay within bias_tol on every block (a persistent offset the one-step prediction would absorb).
     Returns the maxima and the counts: unexplained, outside (the scope), no_state (no predecessor or no settled
     start before a deviation), bias_windows (windows over bias_tol). skip(row): a row of an excluded zero-command
-    context, never scored, never a settled start, no part of the bias windows; the free-running prediction runs on
-    through it"""
+    context, never scored and no part of the bias windows; a settled one may start the free-running prediction, which
+    runs on through them"""
     u_e, ends = [], []
     for s in steps:
         u_e.extend([s.f.get("cmd_steer") or 0.0] * sc.covered_steps(s, dt))
@@ -681,8 +681,11 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol, skip=None):
                 out["missing"] += 1
                 continue
             if skip is not None and skip(row):
+                # never scored; a settled one (within tol) may start the free-running prediction like any row
                 if free_y is not None:
                     free_y = model_step(model, free_y, u_e, ends[idx - 1], ends[idx] - ends[idx - 1], dt)
+                elif abs(post - cmd) <= tol:
+                    free_y = post
                 continue
             deviates = abs(post - cmd) > tol
             if deviates and not in_scope(row, scope):
@@ -738,6 +741,7 @@ def check_readback(sets, verdict, args, e23_play):
         states.append(complete)
         parts.append(text)
     total = 0
+    called_rows = 0          # every called row with a command and a readback: the evidence gate counts them all
     devs = []
     per_segment = {}
     late_zero = 0
@@ -751,6 +755,7 @@ def check_readback(sets, verdict, args, e23_play):
             if not called(s) or s.i.get("steer_call") != 1 or cmd is None or post is None:
                 zero_run = 0
                 continue
+            called_rows += 1
             context = excluded_context(s, launches[name])
             if context is not None:
                 # reported apart, never scored (the completeness check above still counts every row)
@@ -779,11 +784,14 @@ def check_readback(sets, verdict, args, e23_play):
     excluded_text = excluded_summary(excluded, args.readback_tol)
     verdict.info("a_excluded", excluded_text)
     parts.append("not scored: " + excluded_text)
-    if total < 100:
+    # the evidence gate counts every called row (an excluded context is not scored, it is still evidence); a deviation
+    # is judged whatever the gate says, so an observed FAIL stays visible
+    if called_rows < 100:
         states.append(None)
         parts.append("< 100 called rows")
-    elif not devs:
-        states.append(True)
+    if not devs:
+        if called_rows >= 100:
+            states.append(True)
     elif e23_play is None:
         states.append(None)
         parts.append("the deterministic-dynamics exception needs the CC-08 input model (a complete --e23)")

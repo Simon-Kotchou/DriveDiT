@@ -453,6 +453,51 @@ class ExcludedContextTests(unittest.TestCase):
         self.assertNotEqual(ts.item(text, "a_readback"), "PASS", text)
         self.assertRegex(ts.detail(text, "a_readback").split("not scored:")[0], r"e22/settle [1-9]")
 
+    def test_the_evidence_gate_counts_the_excluded_rows_too(self):
+        # Codex DD-14f, MEDIUM: 100 settle rows and 20 hold rows were 20 scored rows (< 100: INCOMPLETE), and the
+        # unexplained hold deviations were never judged
+        steps = []
+        for k in range(120):
+            segment = "settle" if k < 100 else "hold"
+            raw = {c: "" for c in sc.STEP_COLUMNS}
+            raw.update({"physics_step": str(1000 + k), "timeslice_s": "%.6f" % DT, "phase": "flat_20",
+                        "segment": segment, "run_idx": "1", "steer_call": "1", "cmd_steer": "0.0000",
+                        "input_post_steer": "0.01200" if segment == "hold" else "0.00000",
+                        "speed_kmh": "0.000" if segment == "settle" else "20.000"})
+            steps.append(sc.Step(raw, k))
+
+        class OnePhase:
+            def has(self, name):
+                return True
+
+            def csv(self, name, required=()):
+                return [{"phase": "flat_20", "start_step": "1000", "end_step": "1119", "result": "ok"}]
+
+        model = {"structure": "M2", "d": 0, "g": 1.0, "tau": 0.013, "rate": None,
+                 "scope": {"cells": [(17.0, 23.0, 1.0)], "text": "17..23 km/h"}}
+        args = types.SimpleNamespace(readback_tol=1e-3, bias_tol=2e-4)
+        verdict = sc.StrictVerdict("test", "-")
+        original = e23.input_model
+        e23.input_model = lambda play, args: (True, model, "stub")
+        try:
+            state = e21.check_readback([("e21", OnePhase(), "e21", steps, DT)], verdict, args, object())
+        finally:
+            e23.input_model = original
+        self.assertIs(state, False, verdict.items)
+        text = [d for t, n, d in verdict.items if n == "a_readback"][0]
+        self.assertIn("20 scored called rows in e21: 20 off by > 0.001", text)
+        self.assertNotIn("< 100 called rows", text)
+        # fewer than 100 called rows in all: INCOMPLETE, the observed FAIL kept
+        verdict = sc.StrictVerdict("test", "-")
+        e23.input_model = lambda play, args: (True, model, "stub")
+        try:
+            state = e21.check_readback([("e21", OnePhase(), "e21", steps[30:], DT)], verdict, args, object())
+        finally:
+            e23.input_model = original
+        self.assertIsNone(state)
+        self.assertIn("[observed FAIL in 1 part(s); withheld: incomplete]",
+                      [d for t, n, d in verdict.items if n == "a_readback"][0])
+
     def test_an_excluded_context_never_hides_missing_rows(self):
         def drop_stop(row):
             return None if row["segment"] == "stop" and row["phase"] == "flat_40" else row

@@ -403,5 +403,209 @@ class ExcludedContextTests(unittest.TestCase):
         self.assertRegex(ts.detail(text, "a_readback"), r"e21: flat_40: \d+ of \d+ rows")
 
 
+# ------------------------------------------------------------------------------------------------------------------
+# the site survey (DC_SteerSites.c, e21_selfsteer.py)
+
+SITE_SOURCE = ts.SITE_SOURCE
+SELF_SOURCE = ts.SELF_SOURCE
+BASE_SOURCE = ts.BASE_SOURCE
+
+
+def survey_class():
+    return enforce_subset.translate(read(SITE_SOURCE), ["DC_SteerSurvey"])["DC_SteerSurvey"]
+
+
+def longest_run(flags):
+    best = run = 0
+    for ok in flags:
+        run = run + 1 if ok else 0
+        best = max(best, run)
+    return best
+
+
+class SiteSurveyTests(unittest.TestCase):
+    def test_the_pre_check_survey_keeps_the_exact_longest_run(self):
+        Survey = survey_class()
+        survey = Survey()
+        rng = random.Random(11)
+        expected_hist = {}
+        sampled = 0
+        for strip in range(400):
+            n = rng.choice((21, 41))
+            flags = [rng.random() < rng.choice((0.3, 0.7, 0.95)) for _ in range(n)]
+            # ContinuePreCheck's control flow: the refusal at the first station outside, the sampling on while the
+            # run can still grow
+            survey.StartStrip()
+            rejected = False
+            for station in range(n):
+                if rejected and not survey.CanImprove(n - station):
+                    break
+                survey.AddStation(flags[station])
+                sampled += 1
+                if not flags[station]:
+                    rejected = True
+            self.assertEqual(rejected, not all(flags))
+            if rejected:
+                self.assertEqual(survey.m_iBestRun, longest_run(flags))
+                start = survey.m_iBestRunFrom
+                if survey.m_iBestRun:
+                    self.assertTrue(all(flags[start:start + survey.m_iBestRun]))
+                survey.CountRefused()
+                expected_hist[longest_run(flags)] = expected_hist.get(longest_run(flags), 0) + 1
+        self.assertEqual(survey.m_iPreRejected, sum(expected_hist.values()))
+        self.assertEqual(survey.HistogramText(), ";".join("%d:%d" % kv for kv in sorted(expected_hist.items())))
+        self.assertEqual(survey.m_iLongestRun, max(expected_hist))
+        keys = enforce_subset.EArray([enforce_subset.f32(v) for v in (0.9, 0.7, 0.7)], "float")
+        self.assertEqual(survey.RankPosition(keys, enforce_subset.f32(0.7), 10), 3)     # ties after the earlier
+        self.assertEqual(survey.RankPosition(keys, enforce_subset.f32(0.8), 10), 1)
+        self.assertEqual(survey.RankPosition(keys, enforce_subset.f32(0.6), 3), -1)
+        self.assertEqual(survey.TOP, 10)
+
+    def test_the_producer_runs_the_survey_without_changing_the_refusal(self):
+        sites = read(SITE_SOURCE)
+        body = sites[sites.index("protected bool ContinuePreCheck("):sites.index("protected void CountReject(")]
+        code = " ".join("\n".join(line.split("//", 1)[0] for line in body.split("\n")).split())
+        self.assertIn("int stationsLeft = (total - m_iPreIndex + 1) / 2; if (m_bPreRejected && "
+                      "!m_Survey.CanImprove(stationsLeft)) break; if (!budget.TakeSamples(1)) return false;", code)
+        self.assertIn("bool inWindow = DC_SteerTerrainMath.ZoneCrossOk(c, m_Sampling.m_iSide, cross); "
+                      "m_Survey.AddStation(inWindow); if (!inWindow) m_bPreRejected = true;", code)
+        self.assertIn("if (m_bPreRejected) { m_Sampling.m_iPreRun = m_Survey.m_iBestRun;", code)
+        self.assertIn("m_Survey.CountRefused(); } return true;", code)
+        self.assertIn("m_Survey.StartStrip();", sites[sites.index("protected void StartSampling("):])
+        # the lists: the near misses by zone share, the runs, the obstacle refusals, each bounded
+        reject = sites[sites.index("protected void CountReject("):sites.index("string DescribeRejects()")]
+        self.assertIn("AddToList(m_aRunList, m_aRunKeys, site, site.m_iPreRun);", reject)
+        self.assertIn("AddToList(m_aNearList, m_aNearKeys, site, site.m_fZoneShare - 0.0001 * site.m_iFailedCount);",
+                      reject)
+        self.assertIn("while (list.Count() > DC_SteerSurvey.TOP)", reject)
+        self.assertIn("if (m_aObstacleList.Count() < DC_SteerSurvey.TOP) m_aObstacleList.Insert(site);",
+                      " ".join(sites[sites.index("protected void StepObstacles("):].split()))
+
+    def test_every_survey_row_has_every_column(self):
+        sites = read(SITE_SOURCE)
+        columns = re.findall(r'"([^"]+)"', re.search(r"array<string> names = \{([^}]*)\};", sites).group(1))
+        self.assertEqual(len(columns), 26)
+        self.assertEqual(len(set(columns)), 26)
+
+        def adds(text):
+            count = len(re.findall(r"row\.Add\w+\(", text))
+            for loop in re.finditer(r"for \(int e = 0; e < (\d+); e\+\+\)\s*\{\s*row\.AddEmpty\(\);\s*\}", text):
+                count += int(loop.group(1)) - 1
+            return count
+
+        write = sites[sites.index("bool WriteSurvey("):sites.index("protected bool WriteSurveySite(")]
+        histogram = write[write.index("DC_ProbeRow row = new DC_ProbeRow();"):]
+        self.assertEqual(adds(histogram), 26)
+        site = sites[sites.index("protected bool WriteSurveySite("):sites.index("string DescribeSearch()")]
+        head = site[:site.index('if (list == "pre_run")')]
+        pre = site[site.index('if (list == "pre_run")'):site.index("return csv.WriteRow(row);")]
+        rest = site[site.index("return csv.WriteRow(row);") + 1:]
+        self.assertEqual(adds(head) + adds(pre), 26)
+        self.assertEqual(adds(head) + adds(rest), 26)
+        # the analysis reads columns the producer writes, from the file the e21 probe opens
+        for column in e21.SURVEY_COLUMNS:
+            self.assertIn(column, columns)
+        selfsteer = read(SELF_SOURCE)
+        self.assertIn('m_SurveyCsv = ctx.OpenCsv(PROBE_E21 + "_site_survey", columns);', selfsteer)
+        self.assertEqual(e21.SURVEY_FILE, "e21_site_survey")
+        self.assertIn('if (m_SurveyCsv && !full.WriteSurvey(m_SurveyCsv, "cross_full"))', selfsteer)
+        base = read(BASE_SOURCE)
+        steps = base[base.index("protected void StepSearches()"):]
+        self.assertLess(steps.index("m_Ctx.AppendHeaderLines(lines)"), steps.index("WriteSiteSurveys();"))
+        snapshot = base[base.index("protected void AppendSearchSnapshot("):]
+        self.assertIn("WriteSiteSurveys();", snapshot[:snapshot.index("protected bool RefuseStart(")])
+        for key in ("pre_rejected=", "zone_stations=", "longest_run_stations=", "longest_run_m=", "run_histogram=",
+                    "near_listed=", "obstacle_listed=", "runs_listed="):
+            self.assertIn('lines.Insert(p + "%s"' % key, sites)
+        self.assertIn('AppendSurveyLines(lines, prefix + ".survey.");', sites)
+
+    def test_apply_lists_every_failed_criterion(self):
+        math_ = ts.translated_terrain_math()
+        crit = ts.CriteriaStub("cross", half_width=8.0, corridor_half=5.0, corridor_points=ts.corridor_points(5.0),
+                               m_fGradeMax=0.02, m_fGradeWindowMax=0.035, m_fGradeWindowMaxAll=0.06, m_fCrossMin=0.05,
+                               m_fCrossMax=0.12, m_fCrossAbsMaxAll=0.15, m_fCrossTarget=0.065, m_fRmsMax=0.5)
+
+        def apply(height):
+            site = ts.SiteStub(210.0, 8.0, 75.0, 175.0)
+            lateral = crit.offsets()
+            along = [i * 5.0 for i in range(43)]
+
+            def arr(values):
+                return enforce_subset.EArray([enforce_subset.f32(v) for v in values], "float")
+
+            math_.Apply(site, crit, arr(along), arr(lateral), arr([height(a, lat) for a in along for lat in lateral]))
+            return site
+
+        good = apply(lambda a, lat: 50.0 - 0.065 * lat)
+        self.assertTrue(good.m_bTerrainOk)
+        self.assertEqual((good.m_sFailed, good.m_iFailedCount), ("", 0))
+        # a 6.5% cross-slope near the shore that also climbs 4%: low, graded, windowed
+        bad = apply(lambda a, lat: 2.0 + 0.04 * a - 0.065 * lat)
+        self.assertFalse(bad.m_bTerrainOk)
+        self.assertEqual(bad.m_sTerrainReason, "below_min_surface_y")
+        self.assertEqual(bad.m_sFailed, "below_min_surface_y|grade|grade_window")
+        self.assertEqual(bad.m_iFailedCount, 3)
+
+
+def survey_header(kind, refused, stations, longest, histogram, near=0, blocked=0, runs=0, step="5.00"):
+    p = "site.%s." % kind
+    return {p + "crit.step_m": step, p + "survey.pre_rejected": str(refused), p + "survey.zone_stations": str(stations),
+            p + "survey.longest_run_stations": str(longest), p + "survey.longest_run_m": "%.1f" % ((longest - 1) * 5.0),
+            p + "survey.run_histogram": histogram, p + "survey.near_listed": str(near),
+            p + "survey.obstacle_listed": str(blocked), p + "survey.runs_listed": str(runs)}
+
+
+class SurveyAnalysisTests(unittest.TestCase):
+    def setUp(self):
+        self.base = probe_common.make_temp_dir("t0eng_dd14f_")
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def test_the_analysis_summarises_the_survey(self):
+        header = survey_header("cross", 15040, 21, 14, "0:9000;3:4000;10:2000;11:30;14:10", near=2, blocked=1, runs=2)
+        header.update(survey_header("cross_full", 15100, 41, 12, "0:9100;12:6000"))
+        play = ts.build_e21(os.path.join(self.base, "e21", "play_01"), cross_found=False, header_extra=header)
+        columns = []
+        sites = read(SITE_SOURCE)
+        columns = re.findall(r'"([^"]+)"', re.search(r"array<string> names = \{([^}]*)\};", sites).group(1))
+
+        def row(**values):
+            return ",".join(str(values.get(c, "")) for c in columns)
+
+        lines = [",".join(columns),
+                 row(search="cross", list="near_miss", rank=1, source="grid", start_x="3000.4", start_z="756.1",
+                     heading_deg="45.25", failed="below_min_surface_y", zone_share="1.0000", cross_min_signed="0.0662",
+                     cross_max_signed="0.0943", grade="-0.0181", grade_window_max="0.0275",
+                     grade_window_max_all="0.1244", cross_abs_max_all="0.3444", wide_cross_abs_max="0.1156",
+                     rms_m="0.200", min_y="1.20", zone_stations=21),
+                 row(search="cross", list="near_miss", rank=2, source="grid", failed="below_min_surface_y|grade_window",
+                     zone_share="0.9990", zone_stations=21),
+                 row(search="cross", list="obstacle", rank=1, source="grid", failed="obstacle",
+                     obstacle="SCR_IndestructibleEnvironmentalEntity@2521.9_6.9_3183.4", zone_stations=21),
+                 row(search="cross", list="pre_run", rank=1, source="grid", start_x="1000.0", start_z="2000.0",
+                     heading_deg="10.00", failed="cross_zone_pre", run_stations=14, run_m="65.0", run_from_m="80.0",
+                     zone_stations=21),
+                 row(search="cross", list="run_histogram", rank=14, run_stations=14, run_m="65.0", zone_stations=21,
+                     strips=10)]
+        with open(os.path.join(play, "e21_site_survey.csv"), "w", encoding="ascii") as handle:
+            handle.write("\n".join(lines) + "\n")
+        code, text = ts.run_main(e21, [play, "--e22", ts.build_e22(os.path.join(self.base, "e22", "play_01"))])
+        survey = ts.detail(text, "c_cross_survey")
+        self.assertIn("cross_full: 15100 pre-check refusals, zone 41 stations, longest run 12 stations (55.0 m); "
+                      "6000 with a run of >= 11 stations (50 m), 0 with a run of >= 16 stations (75 m)", survey)
+        self.assertIn("cross: 15040 pre-check refusals, zone 21 stations, longest run 14 stations (65.0 m); 40 with a "
+                      "run of >= 11 stations (50 m), 0 with a run of >= 16 stations (75 m)", survey)
+        self.assertIn("near misses: #1 below_min_surface_y (share 1.0000, side x cross 0.0662..0.0943", survey)
+        self.assertIn("#2 below_min_surface_y|grade_window", survey)
+        self.assertIn("(listed near misses failing one criterion only: below_min_surface_y 1)", survey)
+        self.assertIn("1 terrain-ok strips listed as refused by an obstacle (first: "
+                      "SCR_IndestructibleEnvironmentalEntity", survey)
+        self.assertIn("longest runs at 1000.0 2000.0 heading 10.00 (65.0 m)", survey)
+        self.assertEqual(ts.item(text, "c_cross"), "INCOMPLETE", text)
+        # a play from a producer before the survey
+        plain = ts.build_e21(os.path.join(self.base, "plain", "play_01"), cross_found=False)
+        code, text = ts.run_main(e21, [plain, "--e22", ts.build_e22(os.path.join(self.base, "e22b", "play_01"))])
+        self.assertEqual(ts.detail(text, "c_cross_survey"), "no site survey in this play (a producer before DD-14f)")
+
+
 if __name__ == "__main__":
     unittest.main()

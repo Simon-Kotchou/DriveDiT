@@ -77,7 +77,10 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  uncertainty source; they are not implemented yet (no session has them): paired current-baseline
                  differences, a small-sample t interval, INCOMPLETE on insufficient or invalid pairs. No baseline
                  (P1 has no Mode B reference) -> INCOMPLETE. INFO the wheel-angle deviation from the flat zero
-                 command
+                 command; INFO c_cross_survey (diagnostic, DD-14f): the site survey of the cross searches
+                 (site.<kind>.survey.*, e21_site_survey.csv): the pre-check refusals, their longest runs of in-window
+                 zone stations and how many cover 50 / 75 m (the centre tyre pair only), the best near misses with
+                 every failed criterion and value, the strips an obstacle refused
   d_load         e22 load phases with both command signs, phase ok: delta_eff,ref = the median over the steady ref
                  rows (low slip); every mandated a_lat level (the steady rows of the level whose median |v r| is
                  within 0.3 m/s2 of 2.0 / 2.75 / 3.5, >= 1 s) and the brake segment (steady rows, median decel
@@ -938,6 +941,8 @@ def same_site(play, base_play, kind):
 
 
 def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
+    survey = survey_summary(play)
+    verdict.info("c_cross_survey", survey or "no site survey in this play (a producer before DD-14f)")
     found = play.header.get("site.cross.found")
     if found != "1":
         return verdict.check("c_cross", None, "no cross-slope site was found (site.cross.found=%s; first terrain "
@@ -1016,6 +1021,82 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
     state = sc.combine(states)
     verdict.check("c_cross", state, "; ".join(parts) + "; " + detail_site + sc.observed(states))
     return state
+
+
+SURVEY_FILE = "e21_site_survey"
+SURVEY_COLUMNS = ("search", "list", "rank", "source", "start_x", "start_z", "heading_deg", "failed", "zone_share",
+                  "cross_min_signed", "cross_max_signed", "grade", "grade_window_max", "grade_window_max_all",
+                  "cross_abs_max_all", "wide_cross_abs_max", "rms_m", "min_y", "obstacle", "run_stations", "run_m",
+                  "zone_stations", "strips")
+SURVEY_ZONES_M = (50.0, 75.0)       # the shorter measure zones the survey reports (diagnostic; the spec zone is 100 m)
+
+
+def survey_summary(play):
+    """Diagnostic of the cross-slope search's survey (DD-14f; site.<kind>.survey.* and e21_site_survey.csv): per
+    search, the pre-check refusals, the longest run of in-window zone stations and how many refused strips had a run
+    covering 50 / 75 m (the centre tyre pair only: a necessary condition for a shorter zone, never a site), the best
+    near misses with every failed criterion, and the strips an obstacle refused. None without any survey"""
+    searches = []
+    for kind in ("cross_full", "cross"):
+        prefix = "site.%s.survey." % kind
+        if play.header.get(prefix + "pre_rejected") is not None:
+            searches.append(kind)
+    rows = []
+    if play.has(SURVEY_FILE + ".csv"):
+        rows = play.csv(SURVEY_FILE, SURVEY_COLUMNS)
+    if not searches and not rows:
+        return None
+    parts = []
+    for kind in searches or sorted(set(r.get("search", "") for r in rows)):
+        prefix = "site.%s." % kind
+        step = probe_common.to_float(play.header.get(prefix + "crit.step_m"), 5.0)
+        stations = probe_common.to_int(play.header.get(prefix + "survey.zone_stations"))
+        histogram = {}
+        for item in (play.header.get(prefix + "survey.run_histogram") or "").split(";"):
+            run, _, count = item.partition(":")
+            if probe_common.to_int(run) is not None and probe_common.to_int(count) is not None:
+                histogram[probe_common.to_int(run)] = probe_common.to_int(count)
+        if not histogram:
+            for r in rows:
+                if r.get("search") == kind and r.get("list") == "run_histogram":
+                    histogram[probe_common.to_int(r.get("run_stations"), 0)] = probe_common.to_int(r.get("strips"), 0)
+        reach = []
+        for zone in SURVEY_ZONES_M:
+            need = int(round(zone / step)) + 1 if step else None
+            if need is not None:
+                reach.append("%d with a run of >= %d stations (%g m)" % (
+                    sum(n for run, n in histogram.items() if run >= need), need, zone))
+        text = "%s: %s pre-check refusals, zone %s stations, longest run %s stations (%s m); %s" % (
+            kind, play.header.get(prefix + "survey.pre_rejected", "-"), sc.fmt(stations, 4),
+            play.header.get(prefix + "survey.longest_run_stations", "-"),
+            play.header.get(prefix + "survey.longest_run_m", "-"), ", ".join(reach) or "no histogram")
+        near = [r for r in rows if r.get("search") == kind and r.get("list") == "near_miss"]
+        if near:
+            text += "; near misses: " + ", ".join(
+                "#%s %s (share %s, side x cross %s..%s, grade %s, windows %s / %s, |cross| all %s, edge %s, rms %s m, "
+                "min y %s m)" % (r.get("rank"), r.get("failed") or "-", r.get("zone_share"), r.get("cross_min_signed"),
+                                r.get("cross_max_signed"), r.get("grade"), r.get("grade_window_max"),
+                                r.get("grade_window_max_all"), r.get("cross_abs_max_all"),
+                                r.get("wide_cross_abs_max"), r.get("rms_m"), r.get("min_y"))
+                for r in near[:3])
+            single = {}
+            for r in near:
+                failed = r.get("failed") or "-"
+                if "|" not in failed:
+                    single[failed] = single.get(failed, 0) + 1
+            if single:
+                text += " (listed near misses failing one criterion only: %s)" % ", ".join(
+                    "%s %d" % kv for kv in sorted(single.items()))
+        blocked = [r for r in rows if r.get("search") == kind and r.get("list") == "obstacle"]
+        if blocked:
+            text += "; %d terrain-ok strips listed as refused by an obstacle (first: %s)" % (
+                len(blocked), blocked[0].get("obstacle") or "-")
+        runs = [r for r in rows if r.get("search") == kind and r.get("list") == "pre_run"]
+        if runs:
+            text += "; longest runs at " + ", ".join("%s %s heading %s (%s m)" % (
+                r.get("start_x"), r.get("start_z"), r.get("heading_deg"), r.get("run_m")) for r in runs[:3])
+        parts.append(text)
+    return "; ".join(parts) + " (diagnostic: the spec zone, cross window and min_surface_y are unchanged)"
 
 
 def drift_of(steps, name, rows, args):

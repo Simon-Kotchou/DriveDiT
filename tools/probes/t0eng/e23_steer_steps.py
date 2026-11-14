@@ -32,6 +32,10 @@ tracking. This analysis covers the raw engine path; what it cannot cover is INCO
   steer_sign     the kappa plateaus have the command's sign (+1 on 1.8.0.13 and 1.9.0.37)
   INFO           cmd -> kappa per bin (labelled PARTIAL: the command to the realised curvature, not the llc path),
                  the rate limit vs speed, the centering on release, the L/R angle ratio, the script-setter limit
+Plateaus (steer_sign, centering, the L/R ratio) are the last 3 rows before a release, used only when they lie
+steer_common.settle_rows(--max-lag-steps) rows or more after the onset (CC-07 step 0's settle rule): the shorter
+holds of the 30 / 40 / 60 km/h trains have no settled plateau (their last rows hold the onset transient, and a channel
+one row late still shows the level before the step), so they add no plateau.
 Structures (discrete in engine steps of dt; a row that covers n merged steps is n steps of the model with the row's
 command, its output compared at the last of them; target = g x u[step - d]):
   M1 delay           y = target
@@ -61,10 +65,15 @@ floor) the lowest BIC; a first-order stage that does not improve the fit beyond 
 Parameter stability: the selected structure fitted to each event alone; CV = stdev / |mean| of g (unresolved when a
 rate limit covers the whole on-time in more than 1/3 of the events), of tau, R and sigma; a stage active in some
 events and inactive in others (tau < dt / ln 100, no rate limit, no relaxation) is unresolved, never stable; the delay
-is stable when constant or its CV <= --max-cv. Without a complete footer every bin, PRBS and steer_sign result is
-withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input bin and the held-out
-PRBS at every bin speed to PASS and no aborted phase at those speeds; its scope is the validated cells only (each bin
-speed +-15% with the largest amplitude fitted there), no gap filling, no extrapolation to standstill.
+is stable when constant or its CV <= --max-cv. An input bin with an unresolved parameter also reports its raw readbacks
+(raw_readback, a diagnostic that decides nothing): the events whose input_post_steer equals cmd_steer within 5e-5 on
+one of the first 3 rows after a command change where the bin's model is still more than 2e-4 from the command; the
+post-step readback then shows the setter's value before the engine's smoothing (a sampling phase that comes and goes
+over a run), which the per-event fits read as no stage. Without a complete footer every bin, PRBS and
+steer_sign result is withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input
+bin and the held-out PRBS at every bin speed to PASS and no aborted phase at those speeds; its scope is the validated
+cells only (each bin speed +-15% with the largest amplitude fitted there), no gap filling, no extrapolation to
+standstill.
 Exit codes: 0 the analysis ran (the items carry the verdicts), 1 an input, identity or usage error.
 """
 
@@ -805,20 +814,25 @@ def prbs_windows(steps, path, channel, scale_rad, dt, status, planned=None):
     return out
 
 
-def plateau(window):
-    """Mean output over the last 3 rows before the release, minus the output before the onset (None without a
-    release index)."""
+PLATEAU_ROWS = 3
+
+
+def plateau(window, settle=sc.SETTLE_FROM):
+    """Mean output over the last PLATEAU_ROWS rows before the release, minus the output before the onset; None
+    without a release index or when those rows do not all lie settle rows or more after the onset (a step held
+    shorter, as the 30 / 40 / 60 km/h trains are, has no settled plateau: its last rows hold the onset transient
+    and, for a channel one row late, the level before the step; CC-07 step 0 applies the same settle rule)"""
     rel = window.get("release_index")
-    if rel is None or rel < 3:
+    if rel is None or rel - PLATEAU_ROWS < settle:
         return None
-    tail = [v for v in window["y"][rel - 3:rel] if v is not None]
+    tail = [v for v in window["y"][rel - PLATEAU_ROWS:rel] if v is not None]
     return sum(tail) / len(tail) - window["y0"] if tail else None
 
 
-def centering(window):
+def centering(window, settle=sc.SETTLE_FROM):
     """Seconds from the release until the output is back within 10% of the plateau of its pre-onset value, and the
-    remaining share of the plateau at the window end."""
-    p = plateau(window)
+    remaining share of the plateau at the window end (None without a settled plateau)."""
+    p = plateau(window, settle)
     rel = window.get("release_index")
     if p is None or rel is None or abs(p) < 1e-9:
         return None, None
@@ -873,7 +887,7 @@ def analyse_bin(windows, dt, args, step_size, gaps=(0, 0)):
         parts = parts + [None]
         state = None
     out.update({"state": state, "selected": selected, "params": params, "rate": rate, "test_r2": info["test_r2"],
-                "per_event": per_event})
+                "per_event": per_event, "unresolved": [text for ok, text in stable.values() if ok is None]})
     out["detail"] = ("%s (%s): held-out R2 %s (>= %g) on %d doublets (trained on %d), d %d steps, g %s, tau %s s, "
                      "rate limit %s /s, sigma %s m; %s (<= %g); %d events, signs %s; others: %s" % (
                          selected, STRUCTURE_NAMES[selected], sc.fmt(info["test_r2"], 4), args.min_r2,
@@ -886,6 +900,65 @@ def analyse_bin(windows, dt, args, step_size, gaps=(0, 0)):
         out["detail"] = ("delay not identifiable under merged dispatches (%d events with a command change first "
                          "observed after a dispatch of more than one engine step): " % merged) + out["detail"]
     return out
+
+
+RAW_READBACK_TOL = 5e-5       # half the 4-decimal CSV resolution of cmd_steer and input_post_steer
+RAW_READBACK_ROWS = 3         # the transient rows after a command change that are looked at
+RAW_READBACK_MARGIN = 4 * RAW_READBACK_TOL    # the bin model must still be this far from the command on the row
+RAW_READBACK_IDS = 12         # event identities listed at most
+
+
+def raw_readback(windows, params, dt):
+    """Diagnostic of the input path: ([event ids], rows) of the events whose readback equals the raw command
+    (|input_post_steer - cmd_steer| <= RAW_READBACK_TOL) on one of the first RAW_READBACK_ROWS rows after a command
+    change (the onset and the release) where the bin's model, run from the settled previous level, is still more than
+    RAW_READBACK_MARGIN from the command (y = g u + (g p - g u) a^steps, a = exp(-dt / tau); a gain below 1 alone
+    keeps a settled readback off the command). Such rows show no smoothing at all: the post-step readback was taken
+    before the engine's smoothing of that step (a sampling phase that comes and goes over a run), so the per-event fits
+    of those events find no stage. A row the model itself puts on the command (a short tau) is never counted. Not
+    gated: the stage stays unresolved"""
+    if params is None:
+        return [], 0
+    a = math.exp(-dt / params.tau) if params.tau > 0 else 0.0
+    ids, rows = [], 0
+    for w in windows:
+        hit = 0
+        previous = w["u_e"][w["offset"] - 1] if w["offset"] > 0 else 0.0
+        level = previous
+        since = steps = None             # rows and engine steps since the last command change
+        for row in w["rows"]:            # the first row is the onset: a change from the history before it
+            cmd, post = row.f.get("cmd_steer"), row.f.get("input_post_steer")
+            if cmd is None or post is None:
+                since = None
+                continue
+            if abs(cmd - level) > 1e-9:
+                previous, level, since, steps = level, cmd, 0, 0
+            if since is None or since >= RAW_READBACK_ROWS:
+                continue
+            since += 1
+            steps += sc.covered_steps(row, dt)
+            predicted = params.g * cmd + (params.g * previous - params.g * cmd) * a ** steps
+            if abs(post - cmd) <= RAW_READBACK_TOL and abs(predicted - cmd) > RAW_READBACK_MARGIN:
+                hit += 1
+        if hit:
+            first = w["rows"][0]
+            ids.append("%s#%s" % (first.phase, first.i.get("event_idx")))
+            rows += hit
+    return ids, rows
+
+
+def raw_readback_text(windows, res, dt):
+    """'; raw readback ...' for an input bin with an unresolved stage, else ''"""
+    if not res.get("unresolved") or not windows:
+        return ""
+    ids, rows = raw_readback(windows, res.get("params"), dt)
+    if not ids:
+        return "; no raw readback on a transient row (the stage's spread is not the readback sampling phase)"
+    shown = ", ".join(ids[:RAW_READBACK_IDS]) + (", ..." if len(ids) > RAW_READBACK_IDS else "")
+    return ("; raw readback on a transient row in %d of %d events (%s; %d rows: input_post_steer = cmd_steer within %g "
+            "where the bin model is still more than %g from it): the post-step readback sometimes precedes the "
+            "engine's smoothing, so those events can show no stage (a sampling phase, not identified dynamics)" % (
+                len(ids), len(windows), shown, rows, RAW_READBACK_TOL, RAW_READBACK_MARGIN))
 
 
 def channel_for(args, play, verdict):
@@ -993,7 +1066,8 @@ def analyse(play, args, verdict):
                     raw_states.append(None)
                     continue
                 res = results[(path, (speed, amplitude))]
-                verdict.check(name, res["state"], "PARTIAL (raw engine path): " + res["detail"])
+                note = raw_readback_text(res["windows"], res, dt) if path == "input" else ""
+                verdict.check(name, res["state"], "PARTIAL (raw engine path): " + res["detail"] + note)
                 raw_states.append(res["state"])
         for speed in SPEC_SPEEDS:
             name = "prbs_%s_%gkmh" % (path, speed)
@@ -1008,14 +1082,15 @@ def analyse(play, args, verdict):
     for key in extra:
         res = analyse_bin(input_bins[key], dt, args, key[1], input_gaps.get(key, (0, 0)))
         verdict.info("input_%gkmh_%g" % key, "outside the CC-08 grid (a validated cell of CC-07 (a)'s input model "
-                                             "only): %s, %s" % (STATE_TEXT[res["state"]], res["detail"]))
+                                             "only): %s, %s%s" % (STATE_TEXT[res["state"]], res["detail"],
+                                                                  raw_readback_text(input_bins[key], res, dt)))
     for speed in SPEC_SPEEDS:
         for amplitude, _ in SPEC_STEPS:
             res = results[("kappa", (speed, amplitude))]
             verdict.info("cmd_kappa_%gkmh_%g" % (speed, amplitude), "PARTIAL (cmd -> kappa_realised, not the llc "
                                                                    "path; not gated): %s, %s" % (
                                                                        STATE_TEXT[res["state"]], res["detail"]))
-    report_extras(channel, results, verdict)
+    report_extras(channel, results, verdict, sc.settle_rows(args.max_lag_steps))
     # a run aborted by the motion guards (or a skipped phase) leaves its speed's evidence incomplete even when the
     # footer is complete
     for name, (speed, result) in sorted(aborted.items()):
@@ -1060,7 +1135,9 @@ def input_model(play, args):
                      if speed in set(key[0] for key, _ in fitted))
     if stopped:
         return None, None, "e23 phases of the model's speeds did not end ok: %s" % ", ".join(stopped)
-    texts = ["%g km/h x %g: %s %s" % (key[0], key[1], STATE_TEXT[res["state"]], res["detail"].split(";")[0])
+    texts = ["%g km/h x %g: %s %s%s%s" % (key[0], key[1], STATE_TEXT[res["state"]], res["detail"].split(";")[0],
+                                          "".join("; " + text for text in res.get("unresolved") or []),
+                                          raw_readback_text(bins.get(key, []), res, dt))
              for key, res in fitted]
     states = [res["state"] for _, res in fitted]
     results = {("input", key): res for key, res in fitted}
@@ -1097,14 +1174,15 @@ def input_model(play, args):
         structure, model["d"], sc.fmt(model["g"], 4), sc.fmt(model["tau"], 3), sc.fmt(model["rate"], 4), len(fitted))
 
 
-def report_extras(channel, results, verdict):
-    """steer_sign, rate limit vs speed, centering, L/R ratio and the script-setter limit."""
+def report_extras(channel, results, verdict, settle=sc.SETTLE_FROM):
+    """steer_sign, rate limit vs speed, centering, L/R ratio and the script-setter limit; every plateau among them
+    only on steps held settle rows and more (plateau)."""
     signs = []
     for (path, key), res in results.items():
         if path != "kappa" or key == "prbs":
             continue
         for w in res["windows"]:
-            p = plateau(w)
+            p = plateau(w, settle)
             if p is not None and w["amplitude"] != 0:
                 signs.append(1 if p / w["amplitude"] > 0 else -1)
     if len(signs) >= 6:
@@ -1136,8 +1214,8 @@ def report_extras(channel, results, verdict):
         for key, res in bins_of(path):
             if not res["windows"]:
                 continue
-            t10 = [centering(w)[0] for w in res["windows"]]
-            residual = [centering(w)[1] for w in res["windows"]]
+            t10 = [centering(w, settle)[0] for w in res["windows"]]
+            residual = [centering(w, settle)[1] for w in res["windows"]]
             lines.append("%s %g km/h x %g: t10 %s s, residual %s" % (
                 path, key[0], key[1], sc.fmt(sc.median([v for v in t10 if v is not None]), 3),
                 sc.fmt(sc.median([v for v in residual if v is not None]), 3)))
@@ -1148,10 +1226,10 @@ def report_extras(channel, results, verdict):
             per = []
             for w in res["windows"]:
                 rel = w.get("release_index")
-                if rel is None or rel < 3:
+                if rel is None or rel - PLATEAU_ROWS < settle:
                     continue
-                left = [sc.channel_pair(s, channel)[0] for s in w["rows"][rel - 3:rel]]
-                right = [sc.channel_pair(s, channel)[1] for s in w["rows"][rel - 3:rel]]
+                left = [sc.channel_pair(s, channel)[0] for s in w["rows"][rel - PLATEAU_ROWS:rel]]
+                right = [sc.channel_pair(s, channel)[1] for s in w["rows"][rel - PLATEAU_ROWS:rel]]
                 left = [v for v in left if v is not None]
                 right = [v for v in right if v is not None]
                 if not left or not right:

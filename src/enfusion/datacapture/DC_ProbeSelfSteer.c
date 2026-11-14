@@ -33,7 +33,11 @@
 // stays m_fCrossHeldM: CC-07 c is judged on the held segment and the analysis needs >= 100 m of it, e21_selfsteer.py
 // MIN_CROSS_M; the old fallback cut both to 60 m, so a site found by it could never have been evidence) and the cross
 // phases use those lengths (header site.cross.fallback=1). Every refused candidate is counted by its reason
-// (site.cross.search.rejects, the near miss), so a search without a site says why.
+// (site.cross.search.rejects, the near miss), so a search without a site says why. e21_site_survey.csv (DD-14f,
+// DC_SteerSiteSearch.WriteSurvey, written when the searches end or the probe stops while they run; search cross_full
+// for the full-length search a fallback replaced, cross for the last one) lists the best near misses with every failed
+// criterion and value, the strips an obstacle refused, and for the pre-check refusals the longest run of in-window
+// zone stations with its histogram (site.cross.survey.*), so a shorter measure zone can be judged without a new search.
 // ============================================================================
 
 //------------------------------------------------------------------------------------------------
@@ -140,6 +144,8 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	protected ref array<float> m_aFlatSpeeds;
 	protected ref array<float> m_aCrossSpeeds;
 	protected bool m_bCrossFallbackUsed;
+	protected ref DC_ProbeCsv m_SurveyCsv;	//!< e21_site_survey.csv (DD-14f): the cross-slope search's survey
+	protected bool m_bSurveyWritten;
 	protected int m_iSettleAtSpeedSteps;
 
 	//------------------------------------------------------------------------------------------------
@@ -267,6 +273,46 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! e21_site_survey.csv when the cross-slope search runs (DC_SteerSiteSearch.WriteSurvey: a few dozen rows)
+	override bool OpenExtraCsvs(notnull DC_ProbeContext ctx)
+	{
+		m_bSurveyWritten = false;
+		if (!m_bCross || m_aCrossSpeeds.IsEmpty())
+			return true;
+
+		array<string> columns = {};
+		DC_SteerSiteSearch.AppendSurveyColumns(columns);
+		m_SurveyCsv = ctx.OpenCsv(PROBE_E21 + "_site_survey", columns);
+		return m_SurveyCsv != null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	override void CloseExtraCsvs()
+	{
+		if (m_SurveyCsv)
+			m_SurveyCsv.Close();
+
+		m_SurveyCsv = null;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The cross-slope search's survey rows (search cross; the full-length search's were written as cross_full before
+	//! the fallback replaced it), once
+	override void WriteSiteSurveys()
+	{
+		if (!m_SurveyCsv || m_bSurveyWritten)
+			return;
+
+		int index = m_aSearchKinds.Find(SITE_CROSS);
+		if (index < 0)
+			return;
+
+		m_bSurveyWritten = true;
+		if (!m_aSearches[index].WriteSurvey(m_SurveyCsv, SITE_CROSS))
+			LogWarning("the cross-slope site survey could not be written completely: " + m_SurveyCsv.GetFailure());
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! The cross-slope search (full segment lengths)
 	override void AddExtraSearches()
 	{
@@ -354,6 +400,9 @@ class DC_ProbeSelfSteer : DC_ProbeSteerBase
 			full.AppendHeaderLines(lines, "site.cross_full");
 			if (m_Ctx && !m_Ctx.AppendHeaderLines(lines))
 				LogWarning("the full-length cross search lines could not be appended to the run header");
+
+			if (m_SurveyCsv && !full.WriteSurvey(m_SurveyCsv, "cross_full"))
+				LogWarning("the full-length cross search survey could not be written completely: " + m_SurveyCsv.GetFailure());
 		}
 
 		m_bCrossFallbackUsed = true;

@@ -23,14 +23,31 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  |kappa| >= 0.004 1/m): per channel (rot, bone, ent, sig) the median |tan(delta_eff) / L - kappa| /
                  |kappa| <= --max-step0-error over >= 30 rows, and EVERY qualifying command change (the e22 stair
                  levels, the e23 onsets and releases with --e23) lags t50(delta_eff) - t50(input_post_steer) <=
-                 --max-lag-steps engine steps. A change is unmeasurable when a value is missing, no t50 is found or a
-                 row it depends on covers merged steps (the resolution is then coarser than one step); unmeasurable
-                 changes are counted, and more than --max-unmeasurable of them (or < 3 measurable) is INCOMPLETE.
+                 --max-lag-steps engine steps. A change qualifies only when both its command levels are held for
+                 settle + 1 rows or more (steer_common.settle_rows: 6 rows for the one-step lag, one more for every
+                 further step --max-lag-steps admits): the old level is read at the row before the change and the new
+                 one as the median from settle rows on, never past the new level's end. A shorter level (the e23
+                 trains at 60 km/h hold a +-1 step for one row by design) has no settled level on one side, so its
+                 t50s compare values the delayed channel never sat on; it is excluded and reported as short_hold with
+                 a steepest-step lag diagnostic, neither measured nor unmeasurable. A qualifying change is
+                 unmeasurable when a value is missing, no t50 is found or a row it depends on covers merged steps (the
+                 resolution is then coarser than one step); unmeasurable changes are counted, and more than
+                 --max-unmeasurable of them (or < 3 measurable, so also no qualifying change) is INCOMPLETE.
                  The first channel that passes is the wheel_angle (the steering0 signal at --signal-scale-deg per
-                 unit; that scale is carried to every reader); none passes and one is INCOMPLETE -> INCOMPLETE
+                 unit; that scale is carried to every reader); none passes and one is INCOMPLETE -> INCOMPLETE.
+                 INFO step0_error (diagnostic, no threshold): that channel's error by |kappa|, |a_lat|, speed and
+                 |delta_eff| bins and by turn direction, and per command level held with both signs the right / left
+                 angles and the wheelbase their sign-mean implies
   a_readback     every expected called row (all rows outside e21's no-call segment) of e21, e22 and e23 must be
                  there (each phase's physics_step start..end, one row per dispatched step) with steer_call 1 and a
                  finite command and readback, else INCOMPLETE; then |input_post_steer - cmd_steer| <= --readback-tol.
+                 Zero-command rows of the probe's own excluded contexts are not scored and are reported apart (INFO
+                 a_excluded: rows, deviations, the largest, per probe / segment; user decision 2026-11-13): the
+                 teleport and the settle after it (segments reset, settle), the stop braking (segment stop, every
+                 phase end and every abort) and the launch (an accel segment from its first row until the measured
+                 speed first reaches 2 km/h). The contexts come from the probe's schedule, never from the deviation or
+                 the acceleration; a non-zero command is never excluded, and the completeness check counts every row.
+                 Every other row is scored, a zero-command row anywhere else too.
                  A deviation is explained only by the CC-08 cmd -> steer_input model of e23 (input_model: every input
                  bin and the completed held-out PRBS at every bin speed PASS, one structure), inside its validated
                  cells (each bin speed +-15% with the largest amplitude fitted there; no gaps filled, no standstill
@@ -60,7 +77,10 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  uncertainty source; they are not implemented yet (no session has them): paired current-baseline
                  differences, a small-sample t interval, INCOMPLETE on insufficient or invalid pairs. No baseline
                  (P1 has no Mode B reference) -> INCOMPLETE. INFO the wheel-angle deviation from the flat zero
-                 command
+                 command; INFO c_cross_survey (diagnostic, DD-14f): the site survey of the cross searches
+                 (site.<kind>.survey.*, e21_site_survey.csv): the pre-check refusals, their longest runs of in-window
+                 zone stations and how many cover 50 / 75 m (the centre tyre pair only), the best near misses with
+                 every failed criterion and value, the strips an obstacle refused
   d_load         e22 load phases with both command signs, phase ok: delta_eff,ref = the median over the steady ref
                  rows (low slip); every mandated a_lat level (the steady rows of the level whose median |v r| is
                  within 0.3 m/s2 of 2.0 / 2.75 / 3.5, >= 1 s) and the brake segment (steady rows, median decel
@@ -86,7 +106,7 @@ STEP0_MIN_EVENTS = 3
 LOW_SLIP_KMH = (10.0, 20.0)
 LOW_SLIP_ALAT = 1.0
 CHANGE_MIN = 0.04
-SETTLE_FROM = 6
+SETTLE_FROM = sc.SETTLE_FROM
 SETTLE_TO = 15
 # mandated conditions (MIGRATION_1_9.md 6.1 CC-07)
 FLAT_SPEEDS = (20.0, 40.0)
@@ -141,6 +161,37 @@ def transitions(steps, segment_names):
     return out
 
 
+settle_rows = sc.settle_rows
+
+
+def min_hold_rows(max_lag_steps):
+    """The rows both command levels of a change must be held for its lag to be measured: the change row and the
+    settle_rows after it (lag_of reads the settled new level from settle_rows on, and the old level at the row
+    before the change, which must lie as far into its own level)"""
+    return settle_rows(max_lag_steps) + 1
+
+
+def level_holds(steps, k, limit):
+    """(rows the old command level was held up to row k - 1, rows the new level is held from row k), each counted
+    up to limit within the row's phase and run, whatever the segment label (a trim or a hold row with the same
+    command continues the level)"""
+    key = (steps[k].phase, steps[k].i.get("run_idx"))
+
+    def run(start, step, value):
+        count = 0
+        j = start
+        while 0 <= j < len(steps) and count < limit:
+            row = steps[j]
+            cmd = row.f.get("cmd_steer")
+            if (row.phase, row.i.get("run_idx")) != key or cmd is None or abs(cmd - value) > 1e-6:
+                break
+            count += 1
+            j += step
+        return count
+
+    return run(k - 1, -1, steps[k - 1].f.get("cmd_steer")), run(k, 1, steps[k].f.get("cmd_steer"))
+
+
 def t50_row(values, start, end, pre, final):
     span = final - pre
     if abs(span) < 1e-9:
@@ -151,14 +202,19 @@ def t50_row(values, start, end, pre, final):
     return None
 
 
-def lag_of(steps, inputs, angles, k, settle_to, dt):
-    """(lag in engine steps, None) of the command change at row k, or (None, reason) when it is not measurable"""
-    end = min(len(inputs), k + settle_to)
-    if k < 1 or end - k <= SETTLE_FROM:
+def lag_of(steps, inputs, angles, k, settle_to, dt, settle=SETTLE_FROM, new_hold=None):
+    """(lag in engine steps, None) of the command change at row k, or (None, reason) when it is not measurable. The
+    old level is read at row k - 1, the new one as the median from k + settle to the end of the window: settle_to
+    rows (shifted by any extra settle) and never past the new level's last row (new_hold rows from k; the rows of the
+    next level are no part of this change)"""
+    end = min(len(inputs), k + settle_to + (settle - SETTLE_FROM))
+    if new_hold is not None:
+        end = min(end, k + new_hold)
+    if k < 1 or end - k <= settle:
         return None, "short"
     pre_i, pre_a = inputs[k - 1], angles[k - 1]
-    tail_i = [v for v in inputs[k + SETTLE_FROM:end] if v is not None]
-    tail_a = [v for v in angles[k + SETTLE_FROM:end] if v is not None]
+    tail_i = [v for v in inputs[k + settle:end] if v is not None]
+    tail_a = [v for v in angles[k + settle:end] if v is not None]
     if pre_i is None or pre_a is None or not tail_i or not tail_a:
         return None, "missing"
     ti = t50_row(inputs, k, end, pre_i, sc.median(tail_i))
@@ -170,6 +226,29 @@ def lag_of(steps, inputs, angles, k, settle_to, dt):
         return None, "merged"
     lag = sum(sc.covered_steps(steps[i], dt) for i in range(lo + 1, hi + 1))
     return (lag if ta >= ti else -lag), None
+
+
+def steepest_lag(steps, inputs, angles, k, dt, reach):
+    """Diagnostic for a change too short for lag_of: the rows from the steepest step of the input (in the change's
+    direction, rows k..k + reach) to the steepest step of the angle, in engine steps; None without the values or
+    across a merged dispatch. It needs no settled level, so it reads a one-row pulse too"""
+    direction = (steps[k].f.get("cmd_steer") or 0.0) - (steps[k - 1].f.get("cmd_steer") or 0.0)
+    best = []
+    for series in (inputs, angles):
+        top, row = None, None
+        for i in range(k, min(len(series), k + reach + 1)):
+            if series[i] is None or series[i - 1] is None:
+                return None
+            change = (series[i] - series[i - 1]) * (1.0 if direction > 0 else -1.0)
+            if top is None or change > top:
+                top, row = change, i
+        if row is None or top <= 0:
+            return None
+        best.append(row)
+    lo, hi = min(best), max(best)
+    if any(sc.covered_steps(steps[i], dt) > 1 for i in range(k - 1, hi + 1)):
+        return None
+    return hi - lo if best[1] >= best[0] else lo - hi
 
 
 def step0_selection(load_play, args, extra_play=None):
@@ -196,10 +275,26 @@ def step0_selection(load_play, args, extra_play=None):
             low.append(s)
     aborted = {name: result for name, result in sc.aborted_phases(load_play, "e22").items()
                if name.startswith("stair_")}
-    changes = [(0, k, SETTLE_TO, dt) for k in transitions(steps, ("stair",))]
+    settle = settle_rows(args.max_lag_steps)
+    hold_min = min_hold_rows(args.max_lag_steps)
+    found = [(0, k, SETTLE_TO, dt) for k in transitions(steps, ("stair",))]
     if extra_steps and extra_dt:
-        changes += [(1, k, 12, extra_dt) for k in transitions(extra_steps, ("train",))]
+        found += [(1, k, SETTLE_TO, extra_dt) for k in transitions(extra_steps, ("train",))]
     rows_of = (steps, extra_steps)
+    # a change is measured only when both its levels are held long enough for the channels to settle (the old level
+    # at the row before the change, the new one from settle rows on); a shorter level (the e23 trains at 60 km/h hold
+    # a +-1 step for 1 row by design) is excluded and counted on its own, never as unmeasurable: its t50 compares a
+    # pre value and a tail that the delayed channel never sat on
+    changes, short = [], []
+    # the new level is counted as far as lag_of's window reaches (a cap at hold_min would cut a long level's settled
+    # tail to its first row)
+    window = SETTLE_TO + (settle - SETTLE_FROM)
+    for which, k, settle_to, step in found:
+        old, new = level_holds(rows_of[which], k, max(hold_min, window))
+        if old >= hold_min and new >= hold_min:
+            changes.append((which, k, settle_to, step, new))
+        else:
+            short.append((which, k, step))
     inputs = ([s.f.get("input_post_steer") for s in steps], [s.f.get("input_post_steer") for s in extra_steps])
     parts = []
     states = []
@@ -216,16 +311,22 @@ def step0_selection(load_play, args, extra_play=None):
             if key == "sig" and s.f.get("sig_steer"):
                 sig_scales.append(math.atan(s.kappa * wheelbase) / s.f.get("sig_steer"))
         lags, reasons = [], {}
-        for which, k, settle_to, step in changes:
-            lag, reason = lag_of(rows_of[which], inputs[which], angles[which], k, settle_to, step)
+        for which, k, settle_to, step, new in changes:
+            lag, reason = lag_of(rows_of[which], inputs[which], angles[which], k, settle_to, step, settle, new)
             if lag is None:
                 reasons[reason] = reasons.get(reason, 0) + 1
             else:
                 lags.append(lag)
+        steepest = {}
+        for which, k, step in short:
+            value = steepest_lag(rows_of[which], inputs[which], angles[which], k, step,
+                                 int(math.ceil(args.max_lag_steps)) + 2)
+            steepest[value] = steepest.get(value, 0) + 1
         err = sc.median(errors)
         err_state = None if len(errors) < STEP0_MIN_ROWS else err <= args.max_step0_error
         violations = sum(1 for x in lags if x > args.max_lag_steps)
         unmeasurable = sum(reasons.values())
+        # no qualifying change at all is no evidence (an all-short-hold play never passes)
         share = unmeasurable / float(len(changes)) if changes else 1.0
         if violations:
             lag_state = False
@@ -236,15 +337,16 @@ def step0_selection(load_play, args, extra_play=None):
         state = sc.combine([err_state, lag_state])
         states.append(state)
         entry = {"error": err, "rows": len(errors), "lags": lags, "violations": violations, "state": state,
-                 "unmeasurable": reasons}
+                 "unmeasurable": reasons, "short_hold": len(short), "steepest": steepest}
         if key == "sig":
             entry["fit_scale_deg"] = math.degrees(sc.median(sig_scales)) if sig_scales else None
         result["per"][key] = entry
         text = "%s: median error %s over %d rows; lag <= %g steps on %d of %d measurable changes (max %s), %d of " \
-               "%d unmeasurable (%s) -> %s" % (
+               "%d unmeasurable (%s), short_hold excluded %d (%s) -> %s" % (
                    key, sc.fmt(err * 100 if err is not None else None, 3, "%"), len(errors), args.max_lag_steps,
                    len(lags) - violations, len(lags), sc.fmt(max(lags) if lags else None, 3), unmeasurable,
-                   len(changes), ", ".join("%s %d" % r for r in sorted(reasons.items())) or "-", STATE_TEXT[state])
+                   len(changes), ", ".join("%s %d" % r for r in sorted(reasons.items())) or "-", len(short),
+                   steepest_text(steepest), STATE_TEXT[state])
         if key == "sig":
             text += " (scale %g deg/unit; best fit %s deg)" % (args.signal_scale_deg,
                                                                sc.fmt(entry["fit_scale_deg"], 4))
@@ -260,10 +362,99 @@ def step0_selection(load_play, args, extra_play=None):
         result["state"] = None
     else:
         result["state"] = False
-    result["detail"] = "L %s m, %d low-slip rows, %d command changes; %s; selected %s%s" % (
-        sc.fmt(wheelbase, 4), len(low), len(changes), "; ".join(parts), result["selected"] or "none",
-        "; stair phases not ok: " + ", ".join("%s %s" % kv for kv in sorted(aborted.items())) if aborted else "")
+    result["short_hold"] = len(short)
+    result["detail"] = "L %s m, %d low-slip rows, %d command changes (%d with both levels held >= %d rows, settled " \
+                       "from row %d; %d shorter); %s; selected %s%s" % (
+                           sc.fmt(wheelbase, 4), len(low), len(found), len(changes), hold_min, settle, len(short),
+                           "; ".join(parts), result["selected"] or "none",
+                           "; stair phases not ok: " + ", ".join("%s %s" % kv for kv in sorted(aborted.items()))
+                           if aborted else "")
+    result["low_rows"] = low
     return result
+
+
+ERROR_BINS = (("|kappa| 1/m", lambda s, d: abs(s.kappa), (0.004, 0.01, 0.02, 0.04, 0.08)),
+              ("|a_lat| m/s2", lambda s, d: abs(s.a_lat), (0.0, 0.25, 0.5, 0.75)),
+              ("speed km/h", lambda s, d: s.f.get("speed_kmh"), (10.0, 12.5, 15.0, 17.5)),
+              ("|delta_eff| deg", lambda s, d: abs(math.degrees(d)), (0.0, 2.0, 5.0, 10.0)))
+
+
+def error_breakdown(selection, channel, scale, bound):
+    """Diagnostic of the step-0 median error (no threshold, no verdict): the error of channel over the low-slip rows
+    by |kappa|, |a_lat|, speed and |delta_eff| bins and by turn direction, each bin's median |error| and median signed
+    error (tan(delta_eff) / L - kappa) / kappa; per command level held with both signs, the angle magnitudes right /
+    left and the curvature magnitudes, and the wheelbase their sign-mean angle implies. All rows at one speed make
+    a_lat proportional to kappa there: a wheelbase or channel-gain scale and an understeer gradient are then not
+    separable"""
+    rows = selection.get("low_rows") or []
+    wheelbase = selection.get("L")
+    data = []
+    for s in rows:
+        delta = sc.channel_angle(s, channel, scale)
+        if delta is not None and wheelbase and s.kappa:
+            data.append((s, delta, (math.tan(delta) / wheelbase - s.kappa) / s.kappa))
+    if not data:
+        return "%s: no low-slip rows with the channel" % channel
+
+    def summary(items):
+        return "n %d median |err| %s signed %s" % (len(items), sc.fmt(sc.median([abs(e) * 100 for e in items]), 3, "%"),
+                                                   sc.fmt(sc.median([e * 100 for e in items]), 3, "%"))
+
+    parts = []
+    for label, value, edges in ERROR_BINS:
+        bins = {}
+        for s, delta, err in data:
+            x = value(s, delta)
+            if x is None:
+                continue
+            index = sum(1 for edge in edges if x >= edge) - 1
+            bins.setdefault(index, []).append(err)
+        texts = []
+        for index in sorted(bins):
+            lo = edges[index] if index >= 0 else None
+            hi = edges[index + 1] if 0 <= index + 1 < len(edges) else None
+            name = "<%g" % edges[0] if index < 0 else ("%g..%g" % (lo, hi) if hi is not None else ">=%g" % lo)
+            texts.append("%s: %s" % (name, summary(bins[index])))
+        parts.append("by %s: %s" % (label, "; ".join(texts)))
+    sides = {"right (kappa > 0)": [e for s, _, e in data if s.kappa > 0],
+             "left (kappa < 0)": [e for s, _, e in data if s.kappa < 0]}
+    parts.append("by direction: %s" % "; ".join("%s %s" % (k, summary(v)) for k, v in sides.items() if v))
+    levels = {}
+    for s, delta, _ in data:
+        cmd = s.f.get("cmd_steer")
+        if cmd is not None and abs(cmd) > 1e-9:
+            levels.setdefault((s.segment, round(abs(cmd), 4)), {}).setdefault(1 if cmd > 0 else -1, []).append(
+                (abs(delta), abs(s.kappa)))
+    pairs = []
+    for (segment, level), by_sign in sorted(levels.items()):
+        if 1 not in by_sign or -1 not in by_sign:
+            continue
+        right = sc.median([a for a, _ in by_sign[1]])
+        left = sc.median([a for a, _ in by_sign[-1]])
+        k_right = sc.median([k for _, k in by_sign[1]])
+        k_left = sc.median([k for _, k in by_sign[-1]])
+        # a diagnostic never stops the analysis: a zero angle or curvature leaves its ratio unavailable
+        ratio = left / right if right > 0 else None
+        implied = math.tan((right + left) / 2.0) / ((k_right + k_left) / 2.0) if k_right + k_left > 0 else None
+        pairs.append("%s %g: |delta| %s / %s deg (left / right %s), |kappa| %s / %s 1/m, implied L %s m" % (
+            segment, level, sc.fmt(math.degrees(right), 4), sc.fmt(math.degrees(left), 4), sc.fmt(ratio, 4),
+            sc.fmt(k_right, 4), sc.fmt(k_left, 4), sc.fmt(implied, 4)))
+    if pairs:
+        parts.append("per level (right / left): " + "; ".join(pairs))
+    speeds = [s.f.get("speed_kmh") for s, _, _ in data if s.f.get("speed_kmh") is not None]
+    if speeds and max(speeds) - min(speeds) < 2.5:
+        parts.append("every row at %s..%s km/h: a_lat ~ kappa, so a wheelbase / gain scale and an understeer gradient "
+                     "are not separable" % (sc.fmt(min(speeds), 3), sc.fmt(max(speeds), 3)))
+    return "%s, L %s m (diagnostic only, the bound stays %s%%): %s" % (channel, sc.fmt(wheelbase, 4),
+                                                                       sc.fmt(bound * 100, 3), "; ".join(parts))
+
+
+def steepest_text(steepest):
+    """The steepest-step lags of the short-hold changes (diagnostic, not gated): 'steepest-step lag 1: 98, -: 2'"""
+    if not steepest:
+        return "-"
+    items = sorted(steepest.items(), key=lambda kv: (kv[0] is None, kv[0] if kv[0] is not None else 0))
+    return "steepest-step lag " + ", ".join("%s: %d" % ("-" if lag is None else lag, n) for lag, n in items)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -401,6 +592,46 @@ def called(step):
     return step.segment != "nocall"
 
 
+# (a) zero-command contexts reported apart (user decision 2026-11-13), defined a priori from the probe's own schedule
+# (DC_ProbeSteerBase segments), never from the deviation or the acceleration: the teleport and the settle after it
+# (reset, settle: brake 1 + handbrake), the probe's own stop braking (stop: brake 1, every phase end and every abort)
+# and the launch (accel from its first row until the car first reaches LAUNCH_KMH)
+EXCLUDED_SEGMENTS = {"reset": "teleport", "settle": "settle after a teleport", "stop": "stop braking"}
+LAUNCH_KMH = 2.0
+
+
+def zero_command(step):
+    cmd = step.f.get("cmd_steer")
+    return cmd is not None and abs(cmd) < 1e-9
+
+
+def launch_rows(steps):
+    """The row indices of every accel segment's launch: from its first row until the measured speed first reaches
+    LAUNCH_KMH (that row and the rest of the segment are scored); a row without a speed ends the launch too"""
+    out = set()
+    for _, _, segment, rows in sc.segments(steps):
+        if segment != "accel":
+            continue
+        for row in rows:
+            speed = row.f.get("speed_kmh")
+            if speed is None or speed >= LAUNCH_KMH:
+                break
+            out.add(row.index)
+    return out
+
+
+def excluded_context(step, launches):
+    """The excluded context of a called zero-command row ('teleport', 'settle after a teleport', 'stop braking',
+    'launch below 2 km/h'), else None: a non-zero command is never excluded"""
+    if not zero_command(step):
+        return None
+    if step.segment in EXCLUDED_SEGMENTS:
+        return EXCLUDED_SEGMENTS[step.segment]
+    if step.index in launches:
+        return "launch below %g km/h" % LAUNCH_KMH
+    return None
+
+
 def in_scope(step, scope):
     """Inside one of the model's validated (speed interval, largest |command|) cells: no gap filling, no
     extrapolation"""
@@ -411,7 +642,7 @@ def in_scope(step, scope):
     return any(lo <= v <= hi and abs(cmd) <= amp + 1e-9 for lo, hi, amp in scope["cells"])
 
 
-def model_residuals(model, scope, steps, dt, tol, bias_tol):
+def model_residuals(model, scope, steps, dt, tol, bias_tol, skip=None):
     """The CC-08 model against one play's called rows, block by block (a block: consecutive called rows of one phase
     and run; a teleport between phases is not a model step). Per block: the free-running prediction from the first
     settled row (|input - command| <= tol) and the one-step prediction from the previous measured input of the same
@@ -419,7 +650,9 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol):
     inside the model's scope and it has a finite predecessor; the free-running residual's mean over every
     BIAS_WINDOW_S must stay within bias_tol on every block (a persistent offset the one-step prediction would absorb).
     Returns the maxima and the counts: unexplained, outside (the scope), no_state (no predecessor or no settled
-    start before a deviation), bias_windows (windows over bias_tol)"""
+    start before a deviation), bias_windows (windows over bias_tol). skip(row): a row of an excluded zero-command
+    context, never scored and no part of the bias windows; a settled one may start the free-running prediction, which
+    runs on through them"""
     u_e, ends = [], []
     for s in steps:
         u_e.extend([s.f.get("cmd_steer") or 0.0] * sc.covered_steps(s, dt))
@@ -446,6 +679,13 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol):
                 # a missing value (already INCOMPLETE by the row check): the model state is not known past it
                 free_y = None
                 out["missing"] += 1
+                continue
+            if skip is not None and skip(row):
+                # never scored; a settled one (within tol) may start the free-running prediction like any row
+                if free_y is not None:
+                    free_y = model_step(model, free_y, u_e, ends[idx - 1], ends[idx] - ends[idx - 1], dt)
+                elif abs(post - cmd) <= tol:
+                    free_y = post
                 continue
             deviates = abs(post - cmd) > tol
             if deviates and not in_scope(row, scope):
@@ -501,15 +741,32 @@ def check_readback(sets, verdict, args, e23_play):
         states.append(complete)
         parts.append(text)
     total = 0
+    called_rows = 0          # every called row with a command and a readback: the evidence gate counts them all
     devs = []
     per_segment = {}
     late_zero = 0
+    excluded = {"rows": 0, "devs": 0, "max": 0.0, "per": {}}
+    launches = {}
     for name, play, probe, steps, _ in sets:
         zero_run = 0
+        launches[name] = launch_rows(steps)
         for s in steps:
             cmd, post = s.f.get("cmd_steer"), s.f.get("input_post_steer")
             if not called(s) or s.i.get("steer_call") != 1 or cmd is None or post is None:
                 zero_run = 0
+                continue
+            called_rows += 1
+            context = excluded_context(s, launches[name])
+            if context is not None:
+                # reported apart, never scored (the completeness check above still counts every row)
+                excluded["rows"] += 1
+                if abs(post - cmd) > args.readback_tol:
+                    excluded["devs"] += 1
+                    excluded["max"] = max(excluded["max"], abs(post - cmd))
+                    key = "%s/%s" % (name, s.segment if s.segment in EXCLUDED_SEGMENTS else "launch")
+                    count, top = excluded["per"].get(key, (0, 0.0))
+                    excluded["per"][key] = (count + 1, max(top, abs(post - cmd)))
+                zero_run = zero_run + 1
                 continue
             total += 1
             if abs(post - cmd) > args.readback_tol:
@@ -520,15 +777,21 @@ def check_readback(sets, verdict, args, e23_play):
                     late_zero += 1
             zero_run = zero_run + 1 if abs(cmd) < 1e-9 else 0
     worst = max([abs(s.f["input_post_steer"] - s.f["cmd_steer"]) for _, s in devs] or [0.0])
-    head = "%d called rows in %s: %d off by > %g (max %s; %d of them after >= 60 zero-command rows; %s)" % (
+    head = "%d scored called rows in %s: %d off by > %g (max %s; %d of them after >= 60 zero-command rows; %s)" % (
         total, "+".join(n for n, _, _, _, _ in sets), len(devs), args.readback_tol, sc.fmt(worst, 4), late_zero,
         ", ".join("%s %d" % kv for kv in sorted(per_segment.items())) or "-")
     parts.append(head)
-    if total < 100:
+    excluded_text = excluded_summary(excluded, args.readback_tol)
+    verdict.info("a_excluded", excluded_text)
+    parts.append("not scored: " + excluded_text)
+    # the evidence gate counts every called row (an excluded context is not scored, it is still evidence); a deviation
+    # is judged whatever the gate says, so an observed FAIL stays visible
+    if called_rows < 100:
         states.append(None)
         parts.append("< 100 called rows")
-    elif not devs:
-        states.append(True)
+    if not devs:
+        if called_rows >= 100:
+            states.append(True)
     elif e23_play is None:
         states.append(None)
         parts.append("the deterministic-dynamics exception needs the CC-08 input model (a complete --e23)")
@@ -542,7 +805,8 @@ def check_readback(sets, verdict, args, e23_play):
             merged = {"one_step": 0.0, "free": 0.0, "bias": 0.0, "accumulated": 0.0, "unexplained": 0, "outside": 0,
                       "no_state": 0, "bias_windows": 0}
             for name, play, probe, steps, dt in sets:
-                res = model_residuals(model, model["scope"], steps, dt, args.readback_tol, args.bias_tol)
+                res = model_residuals(model, model["scope"], steps, dt, args.readback_tol, args.bias_tol,
+                                      skip=lambda row, ex=launches[name]: excluded_context(row, ex) is not None)
                 for key in merged:
                     merged[key] = max(merged[key], res[key]) if isinstance(merged[key], float) else \
                         merged[key] + res[key]
@@ -562,6 +826,16 @@ def check_readback(sets, verdict, args, e23_play):
     state = sc.combine(states)
     verdict.check("a_readback", state, "; ".join(parts) + sc.observed(states))
     return state
+
+
+def excluded_summary(excluded, tol):
+    """The excluded zero-command contexts' rows, their deviations over tol, the largest and the split per probe /
+    segment (the 1.9 behaviour on record)"""
+    return ("zero-command rows of the probe's own teleport, settle after it, stop braking and launch below %g km/h "
+            "(user decision 2026-11-13): %d rows, %d off by > %g (max %s; %s)" % (
+                LAUNCH_KMH, excluded["rows"], excluded["devs"], tol, sc.fmt(excluded["max"], 4),
+                ", ".join("%s %d (max %s)" % (key, count, sc.fmt(top, 3))
+                          for key, (count, top) in sorted(excluded["per"].items())) or "-"))
 
 
 def info_nocall(steps, verdict):
@@ -680,6 +954,8 @@ def same_site(play, base_play, kind):
 
 
 def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
+    survey = survey_summary(play)
+    verdict.info("c_cross_survey", survey or "no site survey in this play (a producer before DD-14f)")
     found = play.header.get("site.cross.found")
     if found != "1":
         return verdict.check("c_cross", None, "no cross-slope site was found (site.cross.found=%s; first terrain "
@@ -758,6 +1034,83 @@ def check_cross(play, steps, results, verdict, args, channel, scale, baseline):
     state = sc.combine(states)
     verdict.check("c_cross", state, "; ".join(parts) + "; " + detail_site + sc.observed(states))
     return state
+
+
+SURVEY_FILE = "e21_site_survey"
+SURVEY_COLUMNS = ("search", "list", "rank", "source", "start_x", "start_z", "heading_deg", "failed", "zone_share",
+                  "cross_min_signed", "cross_max_signed", "grade", "grade_window_max", "grade_window_max_all",
+                  "cross_abs_max_all", "wide_cross_abs_max", "rms_m", "min_y", "obstacle", "run_stations", "run_m",
+                  "zone_stations", "strips")
+SURVEY_ZONES_M = (50.0, 75.0)       # the shorter measure zones the survey reports (diagnostic; the spec zone is 100 m)
+
+
+def survey_summary(play):
+    """Diagnostic of the cross-slope search's survey (DD-14f; site.<kind>.survey.* and e21_site_survey.csv): per
+    search, the pre-check refusals, the longest run of in-window zone stations and how many refused strips had a run
+    covering 50 / 75 m (the centre tyre pair only: a necessary condition for a shorter zone, never a site), the best
+    near misses with every failed criterion, and the strips an obstacle refused. None without any survey"""
+    searches = []
+    for kind in ("cross_full", "cross"):
+        prefix = "site.%s.survey." % kind
+        if play.header.get(prefix + "pre_rejected") is not None:
+            searches.append(kind)
+    rows = []
+    if play.has(SURVEY_FILE + ".csv"):
+        rows = play.csv(SURVEY_FILE, SURVEY_COLUMNS)
+    if not searches and not rows:
+        return None
+    parts = []
+    for kind in searches or sorted(set(r.get("search", "") for r in rows)):
+        prefix = "site.%s." % kind
+        step = probe_common.to_float(play.header.get(prefix + "crit.step_m"), 5.0)
+        stations = probe_common.to_int(play.header.get(prefix + "survey.zone_stations"))
+        histogram = {}
+        for item in (play.header.get(prefix + "survey.run_histogram") or "").split(";"):
+            run, _, count = item.partition(":")
+            if probe_common.to_int(run) is not None and probe_common.to_int(count) is not None:
+                histogram[probe_common.to_int(run)] = probe_common.to_int(count)
+        if not histogram:
+            for r in rows:
+                if r.get("search") == kind and r.get("list") == "run_histogram":
+                    histogram[probe_common.to_int(r.get("run_stations"), 0)] = probe_common.to_int(r.get("strips"), 0)
+        reach = []
+        for zone in SURVEY_ZONES_M:
+            # stations whose span (run - 1) x step covers the zone (rounded up: 9 stations at 6 m span 48 m < 50 m)
+            need = int(math.ceil(zone / step - 1e-9)) + 1 if step else None
+            if need is not None:
+                reach.append("%d with a run of >= %d stations (%g m)" % (
+                    sum(n for run, n in histogram.items() if run >= need), need, zone))
+        text = "%s: %s pre-check refusals, zone %s stations, longest run %s stations (%s m); %s" % (
+            kind, play.header.get(prefix + "survey.pre_rejected", "-"), sc.fmt(stations, 4),
+            play.header.get(prefix + "survey.longest_run_stations", "-"),
+            play.header.get(prefix + "survey.longest_run_m", "-"), ", ".join(reach) or "no histogram")
+        near = [r for r in rows if r.get("search") == kind and r.get("list") == "near_miss"]
+        if near:
+            text += "; near misses: " + ", ".join(
+                "#%s %s (share %s, side x cross %s..%s, grade %s, windows %s / %s, |cross| all %s, edge %s, rms %s m, "
+                "min y %s m)" % (r.get("rank"), r.get("failed") or "-", r.get("zone_share"), r.get("cross_min_signed"),
+                                r.get("cross_max_signed"), r.get("grade"), r.get("grade_window_max"),
+                                r.get("grade_window_max_all"), r.get("cross_abs_max_all"),
+                                r.get("wide_cross_abs_max"), r.get("rms_m"), r.get("min_y"))
+                for r in near[:3])
+            single = {}
+            for r in near:
+                failed = r.get("failed") or "-"
+                if "|" not in failed:
+                    single[failed] = single.get(failed, 0) + 1
+            if single:
+                text += " (listed near misses failing one criterion only: %s)" % ", ".join(
+                    "%s %d" % kv for kv in sorted(single.items()))
+        blocked = [r for r in rows if r.get("search") == kind and r.get("list") == "obstacle"]
+        if blocked:
+            text += "; %d terrain-ok strips listed as refused by an obstacle (first: %s)" % (
+                len(blocked), blocked[0].get("obstacle") or "-")
+        runs = [r for r in rows if r.get("search") == kind and r.get("list") == "pre_run"]
+        if runs:
+            text += "; longest runs at " + ", ".join("%s %s heading %s (%s m)" % (
+                r.get("start_x"), r.get("start_z"), r.get("heading_deg"), r.get("run_m")) for r in runs[:3])
+        parts.append(text)
+    return "; ".join(parts) + " (diagnostic: the spec zone, cross window and min_surface_y are unchanged)"
 
 
 def drift_of(steps, name, rows, args):
@@ -947,6 +1300,10 @@ def main(argv=None):
         verdict.check("step0_channel", selection["state"], selection["detail"])
         if selection["state"] is True:
             channel, scale = selection["selected"], selection["scale_rad"]
+        if selection.get("low_rows"):
+            shown = selection.get("selected") or sc.CHANNELS[0][0]
+            verdict.info("step0_error", error_breakdown(selection, shown, selection.get("scale_rad"),
+                                                        args.max_step0_error))
     else:
         verdict.check("step0_channel", None, "no e22 play (--e22)")
 

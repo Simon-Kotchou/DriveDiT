@@ -51,6 +51,14 @@
 // The chosen site, its measured slopes, its centre tyre-pair height profile (track_profile, for the same-ground check
 // of a baseline), its definition as an explicit candidate (explicit = x z heading) and the search counts go into the
 // run header (site.<kind>.*).
+// SURVEY (DD-14f; DC_SteerSurvey, site.<kind>.survey.*, WriteSurvey): so that a search without a site says what a
+// changed design would find, without another search. A strip the pre-check refuses goes on sampling its zone's centre
+// tyre pairs while its longest run of consecutive in-window zone stations can still grow (the refusal itself is the
+// same as before); the runs go into a histogram over every refused strip. Every fully sampled refusal lists all its
+// failed criteria (DC_SteerSite.m_sFailed), not only the first. WriteSurvey writes, at most 10 rows each, the best near
+// misses with every measured value, the terrain-ok strips an obstacle refused, the longest runs, and the histogram; the
+// extra samples are at most the zone's centre pairs per refused strip, fewer once its run cannot grow (on the 1.9.0.37
+// cross grids of the order of the search's own samples: seconds at 6000 per frame, far inside m_fSiteSearchMaxS).
 //
 // BUILD-AGNOSTIC: GetSurfaceY, TraceMove, TracePosition, TraceOBB (Mins, Maxs, Mat), TraceParam (Start, End, Flags,
 // LayerMask, ExcludeArray, TraceEnt), TraceFlags.ENTS, EPhysicsLayerPresets.Vehicle, IEntity.GetPrefabData and
@@ -243,6 +251,10 @@ class DC_SteerSite
 	float m_fZoneShare;					//!< share of the zone tyre-pair samples inside the cross window (diagnostic)
 	bool m_bTerrainOk;
 	string m_sTerrainReason;
+	string m_sFailed;					//!< every failed terrain criterion, '|'-joined in the order Apply checks them (survey)
+	int m_iFailedCount;					//!< how many (the survey ranks near misses of equal zone share by fewer)
+	int m_iPreRun = -1;					//!< cross_zone_pre: the longest run of zone stations whose centre tyre pair is in the window
+	float m_fPreRunFromM;				//!< cross_zone_pre: where that run starts along the strip [m]
 	float m_fScore;
 	int m_iObstacleTraces;
 	int m_iObstacleHits = -1;			//!< -1 = not checked
@@ -383,6 +395,116 @@ class DC_SteerBudget
 		m_iTraces -= 1;
 		m_iTracesUsed += 1;
 		return true;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+//! The site survey of one search (DD-14f; pure arithmetic: tests/enforce_subset.py runs it): for the strips the
+//! pre-check refuses (cross_zone_pre), the longest run of consecutive zone stations whose centre tyre pair lies inside
+//! the zone's cross window and a histogram of those runs over every refused strip, so a search without a site says
+//! whether a shorter measure zone would exist (the centre pair only: a necessary condition, the full check samples
+//! every corridor position); and where a refused or ranked item goes in a bounded top-TOP list
+class DC_SteerSurvey
+{
+	static const int TOP = 10;				//!< rows per list in the survey CSV
+
+	ref array<int> m_aRunHistogram = {};	//!< index = longest run in stations, value = refused strips
+	int m_iPreRejected;
+	int m_iLongestRun;						//!< the longest run of any refused strip
+	// the strip being pre-checked
+	int m_iRun;
+	int m_iBestRun;
+	int m_iBestRunFrom = -1;				//!< zone station index where the best run starts, -1 = none
+	int m_iStation;
+
+	//------------------------------------------------------------------------------------------------
+	//! A new strip's pre-check
+	void StartStrip()
+	{
+		m_iRun = 0;
+		m_iBestRun = 0;
+		m_iBestRunFrom = -1;
+		m_iStation = 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The next zone station of the strip: its centre tyre pair inside the window or not
+	void AddStation(bool inWindow)
+	{
+		if (inWindow)
+		{
+			m_iRun++;
+			if (m_iRun > m_iBestRun)
+			{
+				m_iBestRun = m_iRun;
+				m_iBestRunFrom = m_iStation - m_iRun + 1;
+			}
+		}
+		else
+		{
+			m_iRun = 0;
+		}
+
+		m_iStation++;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! true while the stations left could still make a longer run than the best so far (the pre-check of a refused
+	//! strip stops sampling once they cannot: its longest run is then final)
+	bool CanImprove(int stationsLeft)
+	{
+		return m_iRun + stationsLeft > m_iBestRun;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The refused strip's longest run into the histogram
+	void CountRefused()
+	{
+		while (m_aRunHistogram.Count() <= m_iBestRun)
+		{
+			m_aRunHistogram.Insert(0);
+		}
+
+		m_aRunHistogram[m_iBestRun] = m_aRunHistogram[m_iBestRun] + 1;
+		m_iPreRejected++;
+		m_iLongestRun = Math.MaxInt(m_iLongestRun, m_iBestRun);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Index of key in keys sorted descending (ties after the earlier ones), -1 when a list of cap entries is full
+	//! and key does not beat its last
+	static int RankPosition(notnull array<float> keys, float key, int cap)
+	{
+		int index = 0;
+		while (index < keys.Count() && keys[index] >= key)
+		{
+			index++;
+		}
+
+		if (index >= cap)
+			return -1;
+
+		return index;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! 'run:strips;...' of the non-empty histogram bins
+	string HistogramText()
+	{
+		string text;
+		for (int run = 0; run < m_aRunHistogram.Count(); run++)
+		{
+			int count = m_aRunHistogram[run];
+			if (count > 0)
+			{
+				if (text != string.Empty)
+					text += ";";
+
+				text += run.ToString() + ":" + count.ToString();
+			}
+		}
+
+		return text;
 	}
 }
 
@@ -594,6 +716,14 @@ class DC_SteerSiteSearch
 	protected ref array<string> m_aRejectReasons = {};	//!< every refusal reason seen, with its count
 	protected ref array<int> m_aRejectCounts = {};
 	protected ref DC_SteerSite m_NearMiss;	//!< the fully sampled refused candidate with the largest zone share
+	// the survey (DD-14f): site.<kind>.survey.* and WriteSurvey; every list bounded to DC_SteerSurvey.TOP
+	protected ref DC_SteerSurvey m_Survey = new DC_SteerSurvey();
+	protected ref array<ref DC_SteerSite> m_aNearList = {};		//!< fully sampled refusals, the largest zone share first
+	protected ref array<float> m_aNearKeys = {};
+	protected ref array<ref DC_SteerSite> m_aRunList = {};		//!< cross_zone_pre refusals, the longest run first
+	protected ref array<float> m_aRunKeys = {};
+	protected ref array<ref DC_SteerSite> m_aObstacleList = {};	//!< terrain-ok strips refused by an obstacle, in sweep order
+	protected int m_iZoneStations;				//!< zone stations of a grid strip's pre-check
 
 	//------------------------------------------------------------------------------------------------
 	//! excludes: the entities the obstacle sweeps ignore (the ego and its children)
@@ -852,13 +982,17 @@ class DC_SteerSiteSearch
 		}
 
 		m_bPreCheck = !m_aPreStations.IsEmpty();
+		m_iZoneStations = Math.MaxInt(m_iZoneStations, m_aPreStations.Count());
+		m_Survey.StartStrip();
 	}
 
 	//------------------------------------------------------------------------------------------------
 	//! The pre-check of the strip being sampled, one GetSurfaceY at a time while the frame has samples: the centre
 	//! tyre pair (corridor position (points - 1) / 2, on the centre line) at every zone station against the zone's
 	//! cross window (DC_SteerTerrainMath.ZoneCrossOk, the full check's own test). false when the samples ran out;
-	//! true when it ended (m_bPreRejected at the first pair outside the window)
+	//! true when it ended (m_bPreRejected when a pair lay outside the window). A refused strip samples on only while
+	//! its longest run of in-window stations can still grow (the survey, DC_SteerSurvey; the refusal itself is decided
+	//! at the first pair outside, as before), then its run goes on the site and into the histogram
 	protected bool ContinuePreCheck(notnull BaseWorld world, notnull DC_SteerBudget budget)
 	{
 		DC_SteerSiteCriteria c = m_Criteria;
@@ -868,6 +1002,11 @@ class DC_SteerSiteSearch
 		int total = 2 * m_aPreStations.Count();
 		while (m_iPreIndex < total)
 		{
+			// the stations left, the pair in progress included
+			int stationsLeft = (total - m_iPreIndex + 1) / 2;
+			if (m_bPreRejected && !m_Survey.CanImprove(stationsLeft))
+				break;
+
 			if (!budget.TakeSamples(1))
 				return false;
 
@@ -888,15 +1027,23 @@ class DC_SteerSiteSearch
 			}
 
 			float cross = (m_fPreLeftY - y) / (2 * c.m_fTrackHalfM);
-			if (!DC_SteerTerrainMath.ZoneCrossOk(c, m_Sampling.m_iSide, cross))
-			{
+			bool inWindow = DC_SteerTerrainMath.ZoneCrossOk(c, m_Sampling.m_iSide, cross);
+			m_Survey.AddStation(inWindow);
+			if (!inWindow)
 				m_bPreRejected = true;
-				m_bPreCheck = false;
-				return true;
-			}
 		}
 
 		m_bPreCheck = false;
+		if (m_bPreRejected)
+		{
+			m_Sampling.m_iPreRun = m_Survey.m_iBestRun;
+			m_Sampling.m_fPreRunFromM = -1;
+			if (m_Survey.m_iBestRunFrom >= 0)
+				m_Sampling.m_fPreRunFromM = m_aAlong[m_aPreStations[m_Survey.m_iBestRunFrom]];
+
+			m_Survey.CountRefused();
+		}
+
 		return true;
 	}
 
@@ -924,10 +1071,42 @@ class DC_SteerSiteSearch
 			m_sFirstExplicitReject = reason;
 
 		if (reason == REASON_PRE)
+		{
+			AddToList(m_aRunList, m_aRunKeys, site, site.m_iPreRun);
 			return;
+		}
 
 		if (!m_NearMiss || site.m_fZoneShare > m_NearMiss.m_fZoneShare)
 			m_NearMiss = site;
+
+		// equal zone shares: the fewer failed criteria first (the shares step by 1 / zone samples, far above this)
+		AddToList(m_aNearList, m_aNearKeys, site, site.m_fZoneShare - 0.0001 * site.m_iFailedCount);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! site into a survey list kept sorted by key (descending), at most DC_SteerSurvey.TOP entries
+	protected void AddToList(notnull array<ref DC_SteerSite> list, notnull array<float> keys, notnull DC_SteerSite site, float key)
+	{
+		int index = DC_SteerSurvey.RankPosition(keys, key, DC_SteerSurvey.TOP);
+		if (index < 0)
+			return;
+
+		if (index >= list.Count())
+		{
+			list.Insert(site);
+			keys.Insert(key);
+		}
+		else
+		{
+			list.InsertAt(site, index);
+			keys.InsertAt(key, index);
+		}
+
+		while (list.Count() > DC_SteerSurvey.TOP)
+		{
+			list.Remove(list.Count() - 1);
+			keys.Remove(keys.Count() - 1);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1094,6 +1273,9 @@ class DC_SteerSiteSearch
 				m_iObstacleRejected++;
 				if (m_sFirstObstacle.IsEmpty())
 					m_sFirstObstacle = site.m_sObstacle;
+
+				if (m_aObstacleList.Count() < DC_SteerSurvey.TOP)
+					m_aObstacleList.Insert(site);
 
 				m_aRanked.RemoveOrdered(0);
 				continue;
@@ -1305,7 +1487,148 @@ class DC_SteerSiteSearch
 
 		lines.Insert(s + "near_miss=" + DC_ProbeCsv.CleanField(nearMiss));
 		lines.Insert(s + "first_obstacle=" + DC_ProbeCsv.CleanField(m_sFirstObstacle));
+		AppendSurveyLines(lines, prefix + ".survey.");
 		lines.Insert(s + "rule=rejects counts every refused candidate by its first failed criterion (cross_zone_pre: a grid strip whose centre tyre pair left the zone's cross window at a zone station, before the full sampling); first_terrain_reject is the first refusal of any candidate, first_explicit_reject of an explicit one; near_miss the fully sampled refused candidate with the largest zone share; grid_complete 1 only when every grid point was visited, the strip cap suppressed no heading (strips_capped 0) and the search was not stopped; status done, time_cap (the probe's search time ran out) or the probe's stop reason (the probe stopped while it searched: stage and pending say where)");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The survey's summary lines (<prefix>*): the pre-check refusals, the zone stations, the longest run of
+	//! in-window zone stations of any refused strip, the run histogram and the list sizes of WriteSurvey
+	protected void AppendSurveyLines(notnull array<string> lines, string p)
+	{
+		int refused = m_Survey.m_iPreRejected;
+		int longest = m_Survey.m_iLongestRun;
+		float longestM = Math.Max(longest - 1, 0) * m_Criteria.m_fStepM;
+		int nearListed = m_aNearList.Count();
+		int obstacleListed = m_aObstacleList.Count();
+		int runsListed = m_aRunList.Count();
+		lines.Insert(p + "pre_rejected=" + refused.ToString());
+		lines.Insert(p + "zone_stations=" + m_iZoneStations.ToString());
+		lines.Insert(p + "longest_run_stations=" + longest.ToString());
+		lines.Insert(p + "longest_run_m=" + longestM.ToString(-1, 1));
+		lines.Insert(p + "run_histogram=" + DC_ProbeCsv.CleanField(m_Survey.HistogramText()));
+		lines.Insert(p + "near_listed=" + nearListed.ToString());
+		lines.Insert(p + "obstacle_listed=" + obstacleListed.ToString());
+		lines.Insert(p + "runs_listed=" + runsListed.ToString());
+		lines.Insert(p + "rule=run = the longest run of consecutive measure-zone stations whose centre tyre pair is inside the cross window, of a strip the pre-check refused (cross_zone_pre; the centre pair only, so a necessary condition for a shorter zone, never a site); run_m = (run - 1) x step_m; run_histogram = run:strips; the survey CSV lists the best near misses (fully sampled refusals by zone share, every failed criterion), the strips an obstacle refused and the longest runs, at most 10 each");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The survey CSV's columns (WriteSurvey)
+	static void AppendSurveyColumns(notnull array<string> columns)
+	{
+		array<string> names = {"search", "list", "rank", "source", "start_x", "start_z", "heading_deg", "failed", "zone_share", "cross_min_signed", "cross_max_signed", "cross_mean", "grade", "grade_window_max", "grade_window_max_all", "cross_abs_max_all", "wide_cross_abs_max", "rms_m", "min_y", "max_y", "obstacle", "run_stations", "run_m", "run_from_m", "zone_stations", "strips"};
+		foreach (string name : names)
+		{
+			columns.Insert(name);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The survey rows of this search (search: its name in the CSV): near_miss (every failed criterion and the measured
+	//! values), obstacle (the obstacle that refused a terrain-ok strip), pre_run (a pre-check refusal's longest run)
+	//! and run_histogram (one row per non-empty run length); at most DC_SteerSurvey.TOP rows per list. false when a
+	//! row could not be written
+	bool WriteSurvey(notnull DC_ProbeCsv csv, string search)
+	{
+		bool ok = true;
+		foreach (int i, DC_SteerSite near : m_aNearList)
+		{
+			if (!WriteSurveySite(csv, search, "near_miss", i + 1, near, near.m_sFailed))
+				ok = false;
+		}
+
+		foreach (int j, DC_SteerSite blocked : m_aObstacleList)
+		{
+			if (!WriteSurveySite(csv, search, "obstacle", j + 1, blocked, "obstacle"))
+				ok = false;
+		}
+
+		foreach (int k, DC_SteerSite run : m_aRunList)
+		{
+			if (!WriteSurveySite(csv, search, "pre_run", k + 1, run, REASON_PRE))
+				ok = false;
+		}
+
+		for (int r = 0; r < m_Survey.m_aRunHistogram.Count(); r++)
+		{
+			int strips = m_Survey.m_aRunHistogram[r];
+			if (strips == 0)
+				continue;
+
+			DC_ProbeRow row = new DC_ProbeRow();
+			row.AddString(DC_ProbeCsv.CleanField(search));
+			row.AddString("run_histogram");
+			row.AddInt(r);
+			for (int e = 0; e < 18; e++)
+			{
+				row.AddEmpty();
+			}
+
+			float runM = Math.Max(r - 1, 0) * m_Criteria.m_fStepM;
+			row.AddInt(r);
+			row.AddFloat(runM, 1);
+			row.AddEmpty();
+			row.AddInt(m_iZoneStations);
+			row.AddInt(strips);
+			if (!csv.WriteRow(row))
+				ok = false;
+		}
+
+		return ok;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One survey row of a candidate; a pre_run row has no full-strip values (only its pre-check was sampled)
+	protected bool WriteSurveySite(notnull DC_ProbeCsv csv, string search, string list, int rank, notnull DC_SteerSite site, string failed)
+	{
+		DC_ProbeRow row = new DC_ProbeRow();
+		float startX = site.m_vStart[0];
+		float startZ = site.m_vStart[2];
+		row.AddString(DC_ProbeCsv.CleanField(search));
+		row.AddString(list);
+		row.AddInt(rank);
+		row.AddString(DC_ProbeCsv.CleanField(site.m_sSource));
+		row.AddFloat(startX, 1);
+		row.AddFloat(startZ, 1);
+		row.AddFloat(site.m_fHeadingDeg, 2);
+		row.AddString(DC_ProbeCsv.CleanField(failed));
+		if (list == "pre_run")
+		{
+			for (int e = 0; e < 12; e++)
+			{
+				row.AddEmpty();
+			}
+
+			row.AddEmpty();
+			float runM = Math.Max(site.m_iPreRun - 1, 0) * m_Criteria.m_fStepM;
+			row.AddInt(site.m_iPreRun);
+			row.AddFloat(runM, 1);
+			row.AddFloat(site.m_fPreRunFromM, 1);
+			row.AddInt(m_iZoneStations);
+			row.AddEmpty();
+			return csv.WriteRow(row);
+		}
+
+		row.AddFloat(site.m_fZoneShare, 4);
+		row.AddFloat(site.m_fCrossMin, 4);
+		row.AddFloat(site.m_fCrossMax, 4);
+		row.AddFloat(site.m_fCrossMean, 4);
+		row.AddFloat(site.m_fGrade, 4);
+		row.AddFloat(site.m_fGradeWindowMax, 4);
+		row.AddFloat(site.m_fGradeWindowMaxAll, 4);
+		row.AddFloat(site.m_fCrossAbsMaxAll, 4);
+		row.AddFloat(site.m_fWideCrossAbsMax, 4);
+		row.AddFloat(site.m_fRmsM, 3);
+		row.AddFloat(site.m_fMinY, 2);
+		row.AddFloat(site.m_fMaxY, 2);
+		row.AddString(DC_ProbeCsv.CleanField(site.m_sObstacle));
+		row.AddEmpty();
+		row.AddEmpty();
+		row.AddEmpty();
+		row.AddInt(m_iZoneStations);
+		row.AddEmpty();
+		return csv.WriteRow(row);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1358,7 +1681,18 @@ class DC_SteerTerrainMath
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Fills site.m_fGrade .. m_fRmsM, m_fMinY / m_fMaxY, m_bTerrainOk, m_sTerrainReason and m_fScore
+	//! list + '|' + reason (reason alone for an empty list)
+	static string AddFailure(string list, string reason)
+	{
+		if (list == string.Empty)
+			return reason;
+
+		return list + "|" + reason;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Fills site.m_fGrade .. m_fRmsM, m_fMinY / m_fMaxY, m_bTerrainOk, m_sTerrainReason (the first failed criterion),
+	//! m_sFailed (every failed criterion) and m_fScore
 	static void Apply(DC_SteerSite site, DC_SteerSiteCriteria c, array<float> along, array<float> lateral, array<float> heights)
 	{
 		int n = along.Count();
@@ -1549,52 +1883,102 @@ class DC_SteerTerrainMath
 		site.m_fMinY = minY;
 		site.m_fMaxY = maxY;
 
-		// criteria, first failure named
-		if (crossCount < 2)
+		// criteria: every failure is listed (m_sFailed, the survey's near misses), the first one names the refusal
+		bool zoneEmpty = crossCount < 2;
+		bool lowSurface = minY < c.m_fMinSurfaceY;
+		bool gradeFails = Math.AbsFloat(grade) > c.m_fGradeMax;
+		bool windowFails = gradeWindowMax > c.m_fGradeWindowMax || gradeWindowMaxAll > c.m_fGradeWindowMaxAll;
+		bool crossAllFails = crossAbsMaxAll > c.m_fCrossAbsMaxAll || wideAbsMax > c.m_fCrossAbsMaxAll;
+		bool crossZoneFails = false;
+		if (c.IsCross())
+			crossZoneFails = crossMin < c.m_fCrossMin || crossMax > c.m_fCrossMax;
+		else
+			crossZoneFails = Math.Max(Math.AbsFloat(crossMin), Math.AbsFloat(crossMax)) > c.m_fCrossMax;
+
+		bool rmsFails = rms > c.m_fRmsMax;
+		string failed = string.Empty;
+		int failedCount = 0;
+		if (zoneEmpty)
+		{
+			failed = AddFailure(failed, "zone_empty");
+			failedCount++;
+		}
+
+		if (lowSurface)
+		{
+			failed = AddFailure(failed, "below_min_surface_y");
+			failedCount++;
+		}
+
+		if (gradeFails)
+		{
+			failed = AddFailure(failed, "grade");
+			failedCount++;
+		}
+
+		if (windowFails)
+		{
+			failed = AddFailure(failed, "grade_window");
+			failedCount++;
+		}
+
+		if (crossAllFails)
+		{
+			failed = AddFailure(failed, "cross_all");
+			failedCount++;
+		}
+
+		if (crossZoneFails)
+		{
+			failed = AddFailure(failed, "cross_zone");
+			failedCount++;
+		}
+
+		if (rmsFails)
+		{
+			failed = AddFailure(failed, "rms");
+			failedCount++;
+		}
+
+		site.m_sFailed = failed;
+		site.m_iFailedCount = failedCount;
+		if (zoneEmpty)
 		{
 			site.m_sTerrainReason = "zone_empty";
 			return;
 		}
 
-		if (minY < c.m_fMinSurfaceY)
+		if (lowSurface)
 		{
 			site.m_sTerrainReason = "below_min_surface_y";
 			return;
 		}
 
-		if (Math.AbsFloat(grade) > c.m_fGradeMax)
+		if (gradeFails)
 		{
 			site.m_sTerrainReason = "grade";
 			return;
 		}
 
-		if (gradeWindowMax > c.m_fGradeWindowMax || gradeWindowMaxAll > c.m_fGradeWindowMaxAll)
+		if (windowFails)
 		{
 			site.m_sTerrainReason = "grade_window";
 			return;
 		}
 
-		if (crossAbsMaxAll > c.m_fCrossAbsMaxAll || wideAbsMax > c.m_fCrossAbsMaxAll)
+		if (crossAllFails)
 		{
 			site.m_sTerrainReason = "cross_all";
 			return;
 		}
 
-		if (c.IsCross())
-		{
-			if (crossMin < c.m_fCrossMin || crossMax > c.m_fCrossMax)
-			{
-				site.m_sTerrainReason = "cross_zone";
-				return;
-			}
-		}
-		else if (Math.Max(Math.AbsFloat(crossMin), Math.AbsFloat(crossMax)) > c.m_fCrossMax)
+		if (crossZoneFails)
 		{
 			site.m_sTerrainReason = "cross_zone";
 			return;
 		}
 
-		if (rms > c.m_fRmsMax)
+		if (rmsFails)
 		{
 			site.m_sTerrainReason = "rms";
 			return;

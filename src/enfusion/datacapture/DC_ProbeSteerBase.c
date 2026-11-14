@@ -44,8 +44,9 @@
 //     settings API);
 //   - files: <probe>_steps.csv (one row per physics step: the actuator columns, steer_call, assist_mode, site,
 //     along_m / lateral_m in the site frame, in_area, seg_target, seg_flag, event_idx, the wheel-angle columns) and
-//     <probe>_phases.csv (one row per phase); run header lines vehicle.*, gear_policy.*, launch_clutch.*, steer.*,
-//     site.<kind>.*, assist.*, and at the stop the drive and channel summaries.
+//     <probe>_phases.csv (one row per phase), a subclass's extra CSVs (e21_site_survey.csv, e23_events.csv); run header
+//     lines vehicle.*, gear_policy.*, launch_clutch.*, steer.*, site.<kind>.* (with site.<kind>.survey.*), assist.*,
+//     and at the stop the drive and channel summaries.
 //
 // Durations are seconds converted with the runner's step length (GetStepDtS), segment counters advance by the engine
 // steps a dispatched step covers (CoveredSteps), as in DC_ProbeSequences. Every engine member used here exists with
@@ -481,6 +482,13 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 
 	//------------------------------------------------------------------------------------------------
 	void CloseExtraCsvs()
+	{
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! After the searches' header lines (all ended, or the probe stopped while they ran): a subclass writes its site
+	//! survey (e21: e21_site_survey.csv for the cross-slope search)
+	void WriteSiteSurveys()
 	{
 	}
 
@@ -984,6 +992,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 		if (m_Ctx && !m_Ctx.AppendHeaderLines(lines))
 			LogWarning("the site lines could not be appended to the run header");
 
+		WriteSiteSurveys();
 		m_iCursor = 0;
 		BeginPhase();
 	}
@@ -1031,6 +1040,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 			return;
 
 		m_iLastStep = physicsStep;
+		m_Actuator.SetReadContext(physicsStep, phase.m_sName, SegmentName(m_eSegment));
 		m_Actuator.ReadPost();
 		m_Channels.ReadChannels();
 		bool inArea = m_Area && m_Area.Contains(m_Actuator.GetPosition(), m_fAreaMarginM);
@@ -1195,6 +1205,8 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 
 		if (!m_Ctx.AppendHeaderLines(lines))
 			LogWarning("the interrupted search lines could not be appended to the run header");
+
+		WriteSiteSurveys();
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -118,6 +118,10 @@ class LaunchClutch:
         self.call_steps = 1.0
         self.forget_rpm()
 
+    def forget_engine(self):
+        """DC_LaunchClutch.ForgetEngine: the last step's engine state was no readback (no stall counts from it)."""
+        self.engine_seen = -1
+
     def forget_rpm(self):
         """DC_LaunchClutch.ForgetRpm: no readback history (no change of the mean, no rate)."""
         self.last_rpm = -1.0

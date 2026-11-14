@@ -835,7 +835,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
                 "m_aLaunchMpsPerKrpm.Count() && m_aLaunchMpsPerKrpm[forwardSlot] > 0) drivelineRpm = m_vVelLocal[2] / "
                 "m_aLaunchMpsPerKrpm[forwardSlot] * 1000; m_fAppliedClutch = m_LaunchClutch.Step(timeSlice, inGear, "
                 "m_bCmdHandbrake, m_fRpm, engineOn, m_fAppliedClutch, dip, drivelineRpm, m_fCmdThrottle, m_fCmdBrake, "
-                "m_iAppliedGear); if (m_LaunchClutch.ConsumeRestart()) StartModeA(); }")
+                "m_iAppliedGear); if (!m_bStateRead) m_LaunchClutch.ForgetEngine(); "
+                "if (m_LaunchClutch.ConsumeRestart()) StartModeA(); }")
         self.assertIn(call, apply_step)
         # after the speed hold (m_fCmdThrottle, m_fCmdBrake), the shift policy and its dip, before the setters;
         # cmd_clutch is the value passed to SetClutch
@@ -850,8 +851,8 @@ class LaunchClutchTiesTest(unittest.TestCase):
         self.assertIn("DC_LaunchClutchConfig launchClutch = DC_LaunchClutchConfig.Slip(); "
                       'return SetLaunchClutch(launchClutch, "DC_LaunchClutchConfig defaults");', init)
         start = enforce_body(self.probe, "DC_ProbeActuator", "StartModeA")
-        self.assertIn("m_Controller.SetPersistentHandBrake(false); if (!m_Controller.IsEngineOn()) "
-                      "m_Controller.ForceStartEngine();", start)
+        self.assertIn("m_Controller.SetPersistentHandBrake(false); if (!m_Controller.IsEngineOn()) { "
+                      "m_Controller.ForceStartEngine(); m_iModeAStarts++; }", start)
         set_launch = enforce_body(self.probe, "DC_ProbeActuator", "SetLaunchClutch")
         self.assertIn("if (!config.Check(failure))", set_launch)
         self.assertIn("if (config.IsActive() && m_bShiftPolicy && config.m_fFullRpm >= m_fDownshiftRpm)", set_launch)
@@ -1388,8 +1389,9 @@ class CalibrationTest(unittest.TestCase):
                             (name, lines))
         broken = [r for r in rows if not (r["phase"] == "steer_prbs" and r["segment"] == "settle")]
         lines, passed = analysis.check_play(broken, COMPLETE_HEADER)
-        self.assertFalse(passed)                                      # a speed-hold launch phase: FAIL
-        self.assertTrue(any(line.startswith("  steer_prbs") and "FAIL" in line for line in lines), lines)
+        # a speed-hold launch phase without its start: no evidence, never PASS (DD-14f: INCOMPLETE, not FAIL)
+        self.assertIsNone(passed)
+        self.assertTrue(any(line.startswith("  steer_prbs") and "INCOMPLETE" in line for line in lines), lines)
         other = rows + [dict(r, phase="e02a_cell") for r in rows if r["phase"] == "brake_0.30" and r["segment"] == "accel"]
         lines, passed = analysis.check_play(other, COMPLETE_HEADER)
         self.assertTrue(passed, lines)                                # not checked, so it adds no PASS and no FAIL
@@ -2069,6 +2071,195 @@ class SlipTiesTest(unittest.TestCase):
         self.assertNotIn("RPMFeedback", code_only(self.helper))
         self.assertNotIn("RPMFeedback", code_only(self.llc))
         self.assertEqual(model.OPTIONAL_STEP_COLUMNS, ("rpm_feedback",))
+
+
+
+def with_start_row(rows, engine_on=0.0, handbrake=1.0, segment="reset", rpm=0.0):
+    """rows with one row before them, as the probe writes its first step: the first phase's reset segment"""
+    first = rows[0]
+    start = dict(first, physics_step=first["physics_step"] - 1, segment=segment, cmd_throttle=0.0, cmd_brake=1.0,
+                 cmd_clutch=0.0, input_post_clutch=0.0, cmd_handbrake=handbrake, cmd_gear=1.0, rpm=rpm, speed_kmh=0.0,
+                 vel_l_z=0.0, engine_on=engine_on, world_time_ms=first["world_time_ms"] - 1000.0 * STEP_DT)
+    return [start] + [dict(r) for r in rows]
+
+
+def engine_off_header(records, events=None, stalls=0, **extra):
+    """COMPLETE_HEADER with the producer's engine-off records (DD-14f)"""
+    counted = len(records) if events is None else events
+    header = dict(COMPLETE_HEADER, **{"launch_clutch.stalls": str(stalls),
+                                      "launch_clutch.engine_off_events": str(counted)})
+    for i, text in enumerate(records):
+        header["launch_clutch.engine_off.%d" % i] = text
+    header.update(extra)
+    return header
+
+
+class EngineOffFollowupTest(unittest.TestCase):
+    """DD-14f: the first 1.9.0.37 Play with the slip clutch (d3ca) counted launch_clutch.stalls 1 for an engine that was
+    never started yet: the probe's first physics step ran before its teleport and Mode A start, and DC_ProbeActuator
+    passed the unread engine as on to the launch clutch's first Step. A stall while driving FAILs, the probe's own start
+    is reported, anything else is INCOMPLETE (never PASS)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.helper = read(HELPER_SOURCE)
+        cls.probe = read(PROBE_SOURCE)
+        cls.good = play_rows(LaunchClutch(**analysis.card_launch_clutch()), phases={"move_check": 0.5})
+
+    def test_a_default_engine_state_is_never_a_stall(self):
+        lc = model.LaunchClutch.slip()
+        lc.step(STEP_DT, False, True, 800.0, True, 1.0, False)       # no readback yet: the engine counts as on
+        lc.forget_engine()                                             # ... and is forgotten (DC_ProbeActuator)
+        lc.step(STEP_DT, False, True, 0.0, False, 1.0, False)        # the first readback: never started
+        lc.step(STEP_DT, False, True, 800.0, True, 1.0, False)
+        self.assertEqual(lc.stalls, 0)
+        lc.step(STEP_DT, True, False, 0.0, False, 1.0, False)        # seen on, then off: a stall
+        self.assertEqual(lc.stalls, 1)
+        self.assertEqual(class_method(self.helper, "DC_LaunchClutch", "ForgetEngine"), ") { m_iEngineSeen = -1;")
+        apply_step = enforce_body(self.probe, "DC_ProbeActuator", "ApplyStep")
+        self.assertLess(apply_step.index("m_LaunchClutch.Step("), apply_step.index(
+            "if (!m_bStateRead) m_LaunchClutch.ForgetEngine();"))
+
+    def test_the_producer_records_every_engine_off_readback(self):
+        read_post = enforce_body(self.probe, "DC_ProbeActuator", "ReadPost")
+        for statement in ("bool engineOn = m_Simulation.EngineIsOn(); bool firstRead = !m_bStateRead; bool engineOff = "
+                          "!engineOn && (firstRead || m_bEngineOn); m_bEngineOn = engineOn; m_bStateRead = true;",
+                          "if (engineOff) RecordEngineOff(firstRead);"):
+            self.assertIn(statement, read_post)
+        # rpm and speed of this readback are read before the record
+        self.assertLess(read_post.index("m_fSpeedKmh = m_Simulation.GetSpeedKmh();"),
+                        read_post.index("RecordEngineOff(firstRead)"))
+        record = enforce_body(self.probe, "DC_ProbeActuator", "RecordEngineOff")
+        self.assertIn("m_iEngineOffEvents++; if (m_aEngineOffRecords.Count() >= MAX_ENGINE_OFF_RECORDS) return;",
+                      record)
+        template = re.search(r'string\.Format\("(step %1 [^"]*)"', record).group(1)
+        sample = template
+        for k, value in enumerate(("155", "move_check", "reset", "1", "0.0", "0.00", "first", "0"), 1):
+            sample = sample.replace("%%%d" % k, value)
+        self.assertRegex(sample, analysis.ENGINE_OFF_RE)
+        summary = enforce_body(self.probe, "DC_ProbeActuator", "AppendDriveSummaryLines")
+        for key in ("launch_clutch.mode_a_starts=", "launch_clutch.engine_off_events=", "launch_clutch.engine_off.",
+                    "launch_clutch.engine_off_rule="):
+            self.assertIn(key, summary)
+        # every probe that reads the state names the readback's step, phase and segment first
+        for path, cls in ((PROBE_SOURCE, "DC_ProbeSequences"),
+                          (os.path.join(SCRIPTS, "DC_ProbeSteerBase.c"), "DC_ProbeSteerBase")):
+            post = enforce_body(read(path), cls, "OnProbePostSimulate")
+            context = "m_Actuator.SetReadContext(physicsStep, phase.m_sName, SegmentName(m_eSegment));"
+            self.assertLess(post.index(context), post.index("m_Actuator.ReadPost();"))
+
+    def test_the_d3ca_probe_start_is_reported_not_a_stall(self):
+        # the d3ca pattern from the steps alone (a play before the records): the first row off, rpm 0, in the first
+        # phase's reset with the handbrake, and launch_clutch.stalls 1
+        rows = with_start_row(self.good)
+        lines, state = analysis.check_play(rows, dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "1"}))
+        self.assertIs(state, True, lines)
+        self.assertTrue(any("engine off at the probe start, reported (not a stall)" in line for line in lines), lines)
+        # one stall more than the steps explain: INCOMPLETE, never PASS
+        lines, state = analysis.check_play(rows, dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "2"}))
+        self.assertIsNone(state, lines)
+        # a counter without any engine-off in the steps: INCOMPLETE as well
+        lines, state = analysis.check_play(self.good, dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "1"}))
+        self.assertIsNone(state, lines)
+        # the first row off with the handbrake released is a stall while driving
+        lines, state = analysis.check_play(with_start_row(self.good, handbrake=0.0),
+                                           dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "1"}))
+        self.assertIs(state, False, lines)
+
+    def test_the_steps_classify_every_fall(self):
+        # driving (the existing rule): FAIL
+        stalled = [dict(r) for r in self.good]
+        stalled[50]["engine_on"] = 0.0
+        self.assertIs(analysis.check_play(stalled, dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "1"}))[1], False)
+        # the engine falling off at a standstill with the handbrake commanded is not explained: INCOMPLETE
+        held = with_start_row(with_start_row(self.good, segment="settle"), engine_on=1.0, rpm=800.0)
+        self.assertEqual([(r["segment"], r["engine_on"]) for r in held[:2]], [("reset", 1.0), ("settle", 0.0)])
+        lines, state = analysis.check_play(held, dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "1"}))
+        self.assertIsNone(state, lines)
+        self.assertTrue(any("INCOMPLETE: an engine-off not explained" in line for line in lines), lines)
+
+    def test_missing_evidence_is_incomplete_and_a_fail_wins(self):
+        # Codex DD-14f, MEDIUM: an incomplete footer or a missing counter is no evidence (INCOMPLETE), but what a launch
+        # did wrong stays a FAIL next to it
+        self.assertIs(analysis.check_play(self.good, COMPLETE_HEADER)[1], True)
+        self.assertIsNone(analysis.check_play(self.good, dict(COMPLETE_HEADER, status="stopped"))[1])
+        partial = dict(COMPLETE_HEADER)
+        del partial["launch_clutch.restarts"]
+        self.assertIsNone(analysis.check_play(self.good, partial)[1])
+        self.assertIsNone(analysis.check_play([], COMPLETE_HEADER)[1])
+        dropped = [dict(r) for r in self.good]
+        for r in dropped[60:]:
+            r["rpm"] = 500.0                                           # below the guard: observed
+        self.assertIs(analysis.check_play(dropped, dict(COMPLETE_HEADER, status="stopped"))[1], False)
+
+    def test_the_steps_are_always_read_beside_the_records(self):
+        # Codex DD-14f, HIGH: with the records present the steps were not read: a stall while driving in the steps
+        # passed with no record, and a record could claim the probe start for it
+        stalled = [dict(r) for r in self.good]
+        stalled[50]["engine_on"] = 0.0
+        lines, state = analysis.check_play(stalled, engine_off_header([], stalls=0))
+        self.assertIs(state, False, lines)
+        claim = "step %d phase move_check segment reset handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0" % (
+            stalled[50]["physics_step"])
+        self.assertIs(analysis.check_play(stalled, engine_off_header([claim]))[1], False)
+        self.assertIs(analysis.check_play(stalled, engine_off_header(["step x"], stalls=1))[1], False)
+        # a record that disagrees with its row (kind, segment, phase or handbrake) explains nothing
+        rows = with_start_row(self.good)
+        step = rows[0]["physics_step"]
+        for text in ("step %d phase move_check segment settle handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0",
+                     "step %d phase other segment reset handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0",
+                     "step %d phase move_check segment reset handbrake 0 rpm 0.0 kmh 0.00 kind first starts 0",
+                     "step %d phase move_check segment reset handbrake 1 rpm 0.0 kmh 0.00 kind fall starts 0"):
+            lines, state = analysis.check_play(rows, engine_off_header([text % step]))
+            self.assertIsNone(state, (text, lines))
+        # an engine-off of the steps without its record
+        self.assertIsNone(analysis.check_play(rows, engine_off_header([]))[1])
+
+    def test_the_producer_records_classify_the_engine_off(self):
+        rows = with_start_row(self.good)
+        step = rows[0]["physics_step"]
+        start = "step %d phase move_check segment reset handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0" % step
+        lines, state = analysis.check_play(rows, engine_off_header([start]))
+        self.assertIs(state, True, lines)
+        # the new producer forgets the default state: a counted stall the records do not explain is INCOMPLETE
+        self.assertIsNone(analysis.check_play(rows, engine_off_header([start], stalls=1))[1])
+        # a fall while driving
+        stalled = [dict(r) for r in self.good]
+        stalled[50]["engine_on"] = 0.0
+        fall = "step %d phase move_check segment excite handbrake 0 rpm 300.0 kmh 4.00 kind fall starts 1" % (
+            stalled[50]["physics_step"])
+        self.assertIs(analysis.check_play(stalled, engine_off_header([fall], stalls=1))[1], False)
+        # a fall with the handbrake commanded, a record without its row, records dropped past the bound, a record
+        # that does not parse, the first readback after a Mode A start: INCOMPLETE
+        held = "step %d phase move_check segment settle handbrake 1 rpm 0.0 kmh 0.00 kind fall starts 1" % step
+        cases = {"held": (rows, [held], 1), "no row": (self.good, [start], 0),
+                 "dropped": (rows, [start], 0, 9), "garbled": (rows, [start, "step x"], 0),
+                 "after a start": (rows, [start.replace("starts 0", "starts 1")], 0)}
+        for label, case in cases.items():
+            rows_, records, stalls = case[:3]
+            events = case[3] if len(case) > 3 else None
+            lines, state = analysis.check_play(rows_, engine_off_header(records, events=events, stalls=stalls))
+            self.assertIsNone(state, (label, lines))
+
+    def test_the_fit_is_bounded_and_the_card_kept_unless_beaten(self):
+        x = analysis.project([math.log(0.04), math.log(120.0), -5.0, 60.0, -110.0, 70.0, 0.0, 80.0, 75.0])
+        self.assertEqual(x[2:], [0.0, 60.0, 0.0, 70.0, 0.0, 80.0, 75.0])
+        card = (dict(model.S105_19), 100.0)
+        self.assertEqual(analysis.choose_plant(card, [("toy", {"j": 1}, 120.0), ("card start", {"j": 2}, 150.0)])[1],
+                         "the card")
+        params, label, _ = analysis.choose_plant(card, [("toy", {"j": 1}, 120.0), ("card start", {"j": 2}, 90.0)])
+        self.assertEqual((params, label), ({"j": 2}, "the fit card start"))
+        self.assertEqual(analysis.choose_plant(card, [("toy", {"j": 1}, float("nan"))])[1], "the card")
+        # on the fixture play: a start with negative torque ends with every knot >= 0
+        rows, rho, windows = fixture_rows()
+        start = dict(model.S105_19, torque_nm=(-20.0, 66.5, 72.5, 76.1, 78.7, -40.0))
+        params, _, _ = analysis.fit(rows, rho, windows, start, iterations=3, log=lambda *_: None)
+        self.assertTrue(all(t >= 0.0 for t in params["torque_nm"]), params["torque_nm"])
+        self.assertGreaterEqual(params["rolling_n"], 0.0)
+        # main picks the plant with --fit and names it on the acceptance
+        main = read(os.path.join(REPO, "tools", "ident", "fit_launch_clutch.py"))
+        self.assertIn('print("acceptance, %s (%s) on %s: %s" % (label, config["mode"], plant,', main)
+        self.assertIn("params, plant, why = choose_plant((card, card_cost), candidates)", main)
 
 
 if __name__ == "__main__":

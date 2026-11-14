@@ -196,6 +196,27 @@ class Step0HoldTests(unittest.TestCase):
                                  r"[^;]*-> FAIL")
         self.assertIn("selected ent", detail)
 
+    def test_a_smoothed_channel_on_long_levels_still_fails(self):
+        # Codex DD-14f, HIGH: the new level was counted only up to the hold minimum, so even a 90-row level was read at
+        # one tail row; a wheel angle smoothed as y = 0.75 y + 0.25 x then passed with lag 1
+        b = ts.build_e22(self.path("e22", "play_01"))
+        state = {"l": 0.0, "r": 0.0}
+
+        def smooth(row):
+            for column, key in (("wa_rot_l", "l"), ("wa_rot_r", "r")):
+                state[key] = 0.75 * state[key] + 0.25 * float(row[column])
+                row[column] = "%.6f" % state[key]
+            return row
+
+        rewrite(b, "e22", smooth)
+        code, text = ts.run_main(e21, [ts.build_e21(self.path("e21", "play_01")), "--e22", b])
+        detail = ts.detail(text, "step0_channel")
+        self.assertRegex(detail, r"rot: median error [^;]*; lag <= 1 steps on \d+ of 11 measurable changes "
+                                 r"\(max [2-9]\)[^;]*-> FAIL")
+        steps = sc.load_steps(probe_common.Play(b), "e22")
+        k = e21.transitions(steps, ("stair",))[0]
+        self.assertGreater(e21.level_holds(steps, k, 99)[1], e21.min_hold_rows(1.0))
+
     def test_e23_plateaus_need_a_settled_hold(self):
         def window(rel, level=1.0):
             y = [0.9] + [level] * (rel - 1) + [0.1] + [0.0] * 10
@@ -241,6 +262,24 @@ class Step0ErrorBreakdownTests(unittest.TestCase):
         m = re.search(r"rot: median error ([\d.]+)% over \d+ rows", ts.detail(text, "step0_channel"))
         state = "PASS" if float(m.group(1)) <= 5.0 else "FAIL"
         self.assertRegex(ts.detail(text, "step0_channel"), r"rot: median error [^;]*; [^;]*-> %s" % state)
+
+
+def zero_angle_step(k, cmd, kappa):
+    raw = {c: "" for c in sc.STEP_COLUMNS}
+    raw.update({"physics_step": str(100 + k), "phase": "stair_10.5", "segment": "stair", "cmd_steer": "%.4f" % cmd,
+                "speed_kmh": "10.5", "vel_l_z": "2.9167", "angvel_l_y": "%.7f" % (kappa * 2.9167),
+                "wa_rot_l": "0.000000", "wa_rot_r": "0.000000"})
+    return sc.Step(raw, k)
+
+
+class ErrorBreakdownGuardTests(unittest.TestCase):
+    def test_zero_angles_leave_the_ratios_unavailable(self):
+        # Codex DD-14f, MEDIUM: a channel reading 0 on both signs divided by zero and stopped the analysis
+        rows = [zero_angle_step(k, 0.1 if k % 2 else -0.1, 0.02 if k % 2 else -0.02) for k in range(40)]
+        line = e21.error_breakdown({"low_rows": rows, "L": 2.42}, "rot", None, 0.05)
+        self.assertIn("stair 0.1: |delta| 0 / 0 deg (left / right -), |kappa| 0.02 / 0.02 1/m, implied L 0 m", line)
+        rows = [zero_angle_step(k, 0.1 if k % 2 else -0.1, 0.0) for k in range(40)]
+        self.assertTrue(e21.error_breakdown({"low_rows": rows, "L": 2.42}, "rot", None, 0.05))
 
 
 class RawReadbackTests(unittest.TestCase):

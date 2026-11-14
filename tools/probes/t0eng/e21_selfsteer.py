@@ -286,8 +286,11 @@ def step0_selection(load_play, args, extra_play=None):
     # a +-1 step for 1 row by design) is excluded and counted on its own, never as unmeasurable: its t50 compares a
     # pre value and a tail that the delayed channel never sat on
     changes, short = [], []
+    # the new level is counted as far as lag_of's window reaches (a cap at hold_min would cut a long level's settled
+    # tail to its first row)
+    window = SETTLE_TO + (settle - SETTLE_FROM)
     for which, k, settle_to, step in found:
-        old, new = level_holds(rows_of[which], k, hold_min)
+        old, new = level_holds(rows_of[which], k, max(hold_min, window))
         if old >= hold_min and new >= hold_min:
             changes.append((which, k, settle_to, step, new))
         else:
@@ -388,7 +391,7 @@ def error_breakdown(selection, channel, scale, bound):
     data = []
     for s in rows:
         delta = sc.channel_angle(s, channel, scale)
-        if delta is not None and wheelbase:
+        if delta is not None and wheelbase and s.kappa:
             data.append((s, delta, (math.tan(delta) / wheelbase - s.kappa) / s.kappa))
     if not data:
         return "%s: no low-slip rows with the channel" % channel
@@ -430,9 +433,11 @@ def error_breakdown(selection, channel, scale, bound):
         left = sc.median([a for a, _ in by_sign[-1]])
         k_right = sc.median([k for _, k in by_sign[1]])
         k_left = sc.median([k for _, k in by_sign[-1]])
-        implied = math.tan((right + left) / 2.0) / ((k_right + k_left) / 2.0)
+        # a diagnostic never stops the analysis: a zero angle or curvature leaves its ratio unavailable
+        ratio = left / right if right > 0 else None
+        implied = math.tan((right + left) / 2.0) / ((k_right + k_left) / 2.0) if k_right + k_left > 0 else None
         pairs.append("%s %g: |delta| %s / %s deg (left / right %s), |kappa| %s / %s 1/m, implied L %s m" % (
-            segment, level, sc.fmt(math.degrees(right), 4), sc.fmt(math.degrees(left), 4), sc.fmt(left / right, 4),
+            segment, level, sc.fmt(math.degrees(right), 4), sc.fmt(math.degrees(left), 4), sc.fmt(ratio, 4),
             sc.fmt(k_right, 4), sc.fmt(k_left, 4), sc.fmt(implied, 4)))
     if pairs:
         parts.append("per level (right / left): " + "; ".join(pairs))

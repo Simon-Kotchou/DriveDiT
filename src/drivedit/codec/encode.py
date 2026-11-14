@@ -36,9 +36,9 @@ into the boundary (``drivedit.process_paths.prepare_process``).
 Like the dc-2.0 reader, shards of Everon (``map_id`` everon) or under a ``heldout/`` or ``SEALED`` directory are refused
 unless ``sealed_eval=True`` (contract section 3.2).
 
-CLI::
+CLI (``dd-encode`` routes the process paths before torch is imported, ``drivedit.commands``)::
 
-    python -m drivedit.codec.encode <root>/<session_id>/features_v1 --codec cadre-1x16x16 --batch 16 --device cuda
+    dd-encode <root>/<session_id>/features_v1 --codec cadre-1x16x16 --batch 16 --device cuda
 """
 
 from __future__ import annotations

@@ -17,6 +17,13 @@ A codec maps features_v1 ``image`` frames to latent grids and back. Every arm fo
 
 ``get_codec(codec_id, device=..., dtype=...)`` builds an arm by id. ``CODECS`` carries each arm's pinned weight source
 and licence without loading anything, so tools can report provenance and check the local cache first.
+
+**Where weights download** (DD-23): into the Hugging Face cache (``HF_HUB_CACHE``, and ``HF_XET_CACHE`` for Xet
+storage), which huggingface_hub fixes when it is first imported. It is imported on first use (``fetch_weights``), not
+with this module, so an entry point can route the cache first (``drivedit.process_paths.prepare_process``: by default
+``<DATA_ROOT>/cache/huggingface``). Before a download ``fetch_weights`` checks both directories against the write
+boundary (``drivedit.local_paths.check_dir``) and refuses (``WriteRefusedError``) a cache outside it, such as the
+library default under ``~/.cache``; ``local_only=True`` only reads and is not checked.
 """
 
 from __future__ import annotations
@@ -28,19 +35,21 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
-import huggingface_hub
 import torch
-from huggingface_hub.errors import LocalEntryNotFoundError
+
+from drivedit import local_paths
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
     "CODECS",
+    "HUB_WRITE_DIRS",
     "Codec",
     "CodecInfo",
     "FrozenCodec",
     "WeightSource",
+    "check_hub_cache",
     "codec_ids",
     "fetch_weights",
     "get_codec",
@@ -271,12 +280,42 @@ def codec_ids() -> tuple[str, ...]:
     return tuple(CODECS)
 
 
-def fetch_weights(source: WeightSource, *, local_only: bool = False) -> Path:
-    """The local snapshot directory of ``source`` at its pinned revision, downloaded into ``HF_HOME`` if needed.
+#: The huggingface_hub cache directories a download writes into (``huggingface_hub.constants``).
+HUB_WRITE_DIRS: Final = ("HF_HUB_CACHE", "HF_XET_CACHE")
 
-    ``local_only=True`` never touches the network: it raises ``FileNotFoundError`` unless every file of ``source``
-    is already in the cache.
+
+def check_hub_cache() -> None:
+    """``WriteRefusedError`` unless every directory a Hugging Face download writes into (``HUB_WRITE_DIRS``, as the
+    imported huggingface_hub resolved them) passes the write boundary. Imports huggingface_hub."""
+    from huggingface_hub import constants  # noqa: PLC0415 -- fixes the cache paths: imported on first use only
+
+    for name in HUB_WRITE_DIRS:
+        path = getattr(constants, name, None)
+        if path is None:
+            continue
+        try:
+            local_paths.check_dir(path)
+        except local_paths.WriteRefusedError as exc:
+            raise local_paths.WriteRefusedError(
+                f"the Hugging Face cache {name}={path} is outside the write boundary, so no weights are downloaded "
+                "there. Set HF_HOME (or HF_HUB_CACHE and HF_XET_CACHE) to a directory on the data drive before "
+                "huggingface_hub is imported; the entry points do it (drivedit.process_paths.prepare_process). "
+                f"{exc}"
+            ) from exc
+
+
+def fetch_weights(source: WeightSource, *, local_only: bool = False) -> Path:
+    """The local snapshot directory of ``source`` at its pinned revision, downloaded into the Hugging Face cache
+    (``HF_HUB_CACHE``, under ``HF_HOME``) if needed, after ``check_hub_cache``.
+
+    ``local_only=True`` never touches the network and only reads: it raises ``FileNotFoundError`` unless every file
+    of ``source`` is already in the cache.
     """
+    import huggingface_hub  # noqa: PLC0415 -- after the entry point has set the cache environment
+    from huggingface_hub.errors import LocalEntryNotFoundError  # noqa: PLC0415
+
+    if not local_only:
+        check_hub_cache()
     try:
         snapshot = Path(
             huggingface_hub.snapshot_download(
@@ -306,8 +345,9 @@ def weights_cached(codec_id: str) -> bool:
 def get_codec(codec_id: str, *, device: torch.device | str, dtype: torch.dtype) -> Codec:
     """Build the registered codec ``codec_id`` on ``device`` with compute dtype ``dtype``.
 
-    Downloads its pinned weights on first use (into ``HF_HOME``). The arm module is imported here, not at package
-    import, because each arm pulls in its own third-party code (diffusers, or the CADRE source checkout).
+    Downloads its pinned weights on first use (``fetch_weights``, into the checked Hugging Face cache). The arm module
+    is imported here, not at package import, because each arm pulls in its own third-party code (diffusers, or the
+    CADRE source checkout).
     """
     info = CODECS.get(codec_id)
     if info is None:

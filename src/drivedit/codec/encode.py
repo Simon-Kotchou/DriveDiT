@@ -27,6 +27,12 @@ renamed into place at the end; a replaced output is moved aside first and delete
 half-written ``latents/<codec_id>``, and the published arrays always match their ``meta.json``. A lock left behind by
 a killed process is never removed automatically: the error names it and its holder.
 
+**Where.** Everything the pre-encoder creates, renames or removes lies in ``<root>/<session_id>/latents/``, next to the
+shard. The lock and the output must pass the write boundary (``check_destination``: ``drivedit.local_paths``, RAM or
+the verified data drive of the local config, never a Windows system volume; DD-23) before ``latents/`` is created;
+the CLI checks them before it loads the codec, after routing the process's caches (the Hugging Face weights, torch)
+into the boundary (``drivedit.process_paths.prepare_process``).
+
 Like the dc-2.0 reader, shards of Everon (``map_id`` everon) or under a ``heldout/`` or ``SEALED`` directory are refused
 unless ``sealed_eval=True`` (contract section 3.2).
 
@@ -53,8 +59,9 @@ import cv2
 import numpy as np
 import torch
 
-from drivedit import __version__
+from drivedit import __version__, local_paths
 from drivedit.codec.base import Codec, codec_ids, get_codec
+from drivedit.process_paths import command_line, prepare_process
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -67,7 +74,9 @@ __all__ = [
     "SHARD_SCHEMA",
     "LatentsLockedError",
     "ShardImages",
+    "check_destination",
     "encode_session",
+    "latents_root",
     "main",
     "read_shard",
 ]
@@ -299,6 +308,20 @@ def _publish(staging: Path, out_dir: Path) -> Path | None:
     return old
 
 
+def latents_root(shard_dir: Path | str) -> Path:
+    """``<root>/<session_id>/latents``: where the latents of the shard at ``shard_dir`` go (beside ``features_v1``)."""
+    return Path(shard_dir).parent / "latents"
+
+
+def check_destination(shard_dir: Path | str, codec_id: str) -> Path:
+    """``latents_root(shard_dir)`` when the write boundary allows the lock and the output of ``codec_id`` there;
+    ``WriteRefusedError`` otherwise. Writes nothing."""
+    root = latents_root(shard_dir)
+    local_paths.check_write(root / f".{codec_id}.lock")
+    local_paths.check_write(root / codec_id)
+    return root
+
+
 def encode_session(
     shard_dir: Path | str,
     codec: Codec,
@@ -309,14 +332,15 @@ def encode_session(
 ) -> Path:
     """Encode every image of the shard at ``shard_dir`` with ``codec``; returns ``<root>/<session_id>/latents/<id>``.
 
-    ``batch`` frames go through the codec at a time. Raises ``LatentsLockedError`` while another encode of the same
-    shard and codec runs, and ``FileExistsError`` for an existing output unless ``overwrite``.
+    ``batch`` frames go through the codec at a time. Raises ``WriteRefusedError`` for a destination outside the write
+    boundary (``check_destination``) before anything is written, ``LatentsLockedError`` while another encode of the
+    same shard and codec runs, and ``FileExistsError`` for an existing output unless ``overwrite``.
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     shard = read_shard(shard_dir, sealed_eval=sealed_eval)
     latent_shape = codec.latent_shape(*IMAGE_SIZE)
-    root = shard.shard_dir.parent / "latents"
+    root = check_destination(shard.shard_dir, codec.codec_id)
     root.mkdir(exist_ok=True)
     out_dir = root / codec.codec_id
     with _destination_lock(root / f".{codec.codec_id}.lock"):
@@ -348,10 +372,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--overwrite", action="store_true", help="replace an existing latents/<codec_id>")
     parser.add_argument("--sealed-eval", action="store_true", help="allow Everon / heldout / SEALED shards")
     args = parser.parse_args(argv)
-    codec = get_codec(args.codec, device=args.device, dtype=DTYPES[args.dtype])
-    out_dir = encode_session(
-        args.shard_dir, codec, batch=args.batch, overwrite=args.overwrite, sealed_eval=args.sealed_eval
-    )
+    with command_line("dd-encode"):
+        prepare_process()
+        check_destination(args.shard_dir, args.codec)  # before the codec loads
+        codec = get_codec(args.codec, device=args.device, dtype=DTYPES[args.dtype])
+        out_dir = encode_session(
+            args.shard_dir, codec, batch=args.batch, overwrite=args.overwrite, sealed_eval=args.sealed_eval
+        )
     print(out_dir)
     return 0
 

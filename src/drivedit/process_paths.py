@@ -14,29 +14,38 @@ The libraries of the model side pick their own write locations, outside every di
 | ``CUDA_CACHE_PATH`` | the CUDA driver's JIT cache | ``~/.nv/ComputeCache`` |
 | ``TORCH_FR_DUMP_TEMP_FILE`` | the NCCL flight recorder's dump on a DDP watchdog timeout | ``/tmp/nccl_trace_rank_`` |
 
+The opt-in outputs, which write only when their variable is set, are validated when set: torch's ``TORCH_LOGS_OUT``
+(opened when torch is imported), ``TORCH_TRACE`` and ``TORCH_COMPILE_DEBUG_DIR``, Xet's ``HF_XET_LOG_DEST``, Triton's
+dump and override dirs, and torchrun's ``TORCHELASTIC_ERROR_FILE``.
+
 On WSL ``~`` and ``/tmp`` lie on the Linux root filesystem, whose virtual disk is on the Windows system drive, so each
 of them is an accident waiting for a full system drive.
 
-``prepare_process()`` is for entry points (``dd-encode``, ``dd-train``, ``python -m drivedit.train.bench``,
-``tools/codec/measure_codecs.py``), called before any work, and its values pass to child processes (DataLoader
-workers, torchrun ranks, compile workers). For each variable of ``PROCESS_PATHS``:
+``prepare_process()`` is for entry points, called before any work, and its values pass to child processes (DataLoader
+workers, torchrun ranks, compile workers). The console scripts ``dd-train`` and ``dd-encode`` and
+``python -m drivedit.commands <command>`` call it before torch is even imported (``drivedit.commands``); the commands'
+own ``main`` (``python -m drivedit.train.cli``, ``drivedit.train.bench``, ``drivedit.codec.encode``,
+``tools/codec/measure_codecs.py``) call it too, after their imports. For each variable of ``PROCESS_PATHS``:
 
 - **Set** (non-empty): validated, never changed. It must be an absolute path (no ``~``, no ``$``) that the write
   boundary allows (``drivedit.local_paths.check_dir``: RAM or the verified data drive of the local config, never a
-  Windows system volume); ``TMPDIR`` must also be an existing directory (else ``tempfile`` falls back to ``/tmp``
-  without a word). The variables marked ``managed=False`` are only validated when set: their library default lies
-  under a managed one.
+  Windows system volume); ``TMPDIR`` must also be an existing writable directory. The variables marked
+  ``managed=False`` are only validated when set: their library default lies under a managed one, or they are opt-in.
 - **Unset or empty**: set to its default, derived the way the library itself derives it from the variable it follows
   (``HF_HUB_CACHE`` = ``$HF_HOME/hub``, ...), so a variable the user did set keeps its effect on everything below it;
-  a legacy name the library still honours (``HUGGINGFACE_HUB_CACHE``) is carried over. The two roots:
+  a legacy name the library still honours (``HUGGINGFACE_HUB_CACHE``) is carried over, after the same validation.
+  An empty value of an unmanaged variable or of a legacy name is removed (libraries read ``""`` as a relative path,
+  so it would land in the working directory); the library then follows its validated parent. The two roots:
   ``XDG_CACHE_HOME`` = ``<DATA_ROOT>/cache`` (persistent caches go to the data drive; without a local config there
   is no default, and the refusal says to set it or add the config), and ``TMPDIR`` = ``<RAM>/drivedit-tmp-<uid>``
   (short-lived scratch in RAM, ``/dev/shm``, which the boundary allows without a config; created mode 0700). RAM,
   not the data drive, also because the drvfs data volume cannot hold the Unix sockets multiprocessing puts there.
 
-Every value is computed and checked before anything changes: a refusal (``WriteRefusedError``, or
-``LocalPathsError`` for a missing config) leaves ``os.environ`` as it was. Python caches its temp dir on first use, so
-``prepare_process`` drops that cache and checks that ``tempfile.gettempdir()`` is the ``TMPDIR`` it validated.
+Every value is computed and checked, and a file is created and removed in ``TMPDIR`` (``tempfile.mkstemp`` with that
+``dir=``: a full or read-only RAM disk is refused here, never answered by another directory), before anything
+changes: a refusal (``WriteRefusedError``, or ``LocalPathsError`` for a missing config) leaves ``os.environ`` as it
+was. Then ``tempfile.tempdir`` is set to ``TMPDIR`` itself, so Python never searches its fallback list (``/tmp``,
+``/var/tmp``, the working directory).
 
 Library code never calls ``prepare_process`` (no import-time side effects): it gets a checked directory for temporary
 files from ``scratch_dir()``, which has no ``/tmp`` fallback, and it checks its own outputs with
@@ -96,10 +105,11 @@ class ProcessPath:
     managed: bool = True
 
 
-# In dependency order: a base comes before the variables that follow it. The derivations are the libraries' own
-# (huggingface_hub.constants, torch.hub.get_dir, torch._appdirs, torch._inductor.runtime.cache_dir_utils,
-# triton.knobs.cache_knobs, the CUDA driver, the c10d flight recorder); tests/drivedit/codec/test_process_paths_libs.py
-# reads them back from the installed huggingface_hub, torch and Triton.
+# In dependency order: a base comes before the variables that follow it. Where a library derives a variable from a
+# parent, the default is that derivation (huggingface_hub.constants, torch.hub.get_dir, torch._appdirs,
+# triton.knobs.cache_knobs); tests/drivedit/codec/test_process_paths_libs.py reads them back from the installed
+# huggingface_hub, torch, diffusers and (when installed) Triton. TORCHINDUCTOR_CACHE_DIR, CUDA_CACHE_PATH and
+# TORCH_FR_DUMP_TEMP_FILE have no parent in their library (their defaults lie under /tmp or ~): theirs are ours.
 PROCESS_PATHS: Final = (
     ProcessPath("TMPDIR", RAM, "drivedit-tmp-{uid}"),
     ProcessPath("XDG_CACHE_HOME", DATA, CACHE_DIR_REL),
@@ -122,6 +132,11 @@ PROCESS_PATHS: Final = (
     ),
     # Set by torchrun for its ranks, in torchrun's own temp dir (TMPDIR of the shell that started it, or --log-dir).
     ProcessPath("TORCHELASTIC_ERROR_FILE", "TMPDIR", "error.json", kind="file", managed=False),
+    # Opt-in outputs: nothing is written unless the variable is set (TORCH_LOGS_OUT is opened when torch is imported).
+    ProcessPath("TORCH_LOGS_OUT", "TMPDIR", "torch.log", kind="file", managed=False),
+    ProcessPath("TORCH_TRACE", "TMPDIR", "torch_trace", managed=False),
+    ProcessPath("TORCH_COMPILE_DEBUG_DIR", "TMPDIR", "torch_compile_debug", managed=False),
+    ProcessPath("HF_XET_LOG_DEST", "HF_XET_CACHE", "logs", kind="file", managed=False),
 )
 _BY_NAME: Final = {entry.name: entry for entry in PROCESS_PATHS}
 
@@ -178,12 +193,12 @@ def _resolve_one(entry: ProcessPath, environ: Mapping[str, str], resolved: Mappi
                 "would fall back to /tmp; create it or unset TMPDIR"
             )
         return given
-    if not entry.managed:
-        return None
     legacy = _given(environ, entry.legacy)
     if legacy is not None:
         _check(entry, legacy, f"from {entry.legacy}, which the library reads while {entry.name} is unset")
-        return legacy
+        return legacy if entry.managed else None
+    if not entry.managed:
+        return None
     value = _default(entry, resolved)
     _check(entry, value, "its default")
     return value
@@ -228,32 +243,43 @@ def scratch_dir(environ: Mapping[str, str] | None = None) -> Path:
     return Path(value)
 
 
+def _blank_names(environ: Mapping[str, str]) -> list[str]:
+    """The names of ``PROCESS_PATHS`` (and their legacy names) that are set to an empty or blank value."""
+    names = [n for e in PROCESS_PATHS for n in (e.name, e.legacy) if n is not None]
+    return [n for n in names if n in environ and not environ[n].strip()]
+
+
+def _probe_scratch(path: str) -> None:
+    """Create and remove one file in ``path`` (``dir=``, so nothing falls back elsewhere); WriteRefusedError if the
+    directory cannot take it (full, read-only)."""
+    try:
+        fd, probe = tempfile.mkstemp(prefix=".drivedit-probe-", dir=path)
+    except OSError as exc:
+        raise WriteRefusedError(
+            f"TMPDIR={path} cannot take a file ({exc}); refusing rather than use another dir"
+        ) from exc
+    os.close(fd)
+    os.unlink(probe)
+
+
 def prepare_process(environ: MutableMapping[str, str] | None = None) -> dict[str, str]:
-    """Route this process's caches and temporary files into the write boundary (the module docstring): resolve every
-    variable, create the default ``TMPDIR``, then set each managed variable that was unset or empty. Returns the
-    values (``resolve``). With ``environ=None`` this is ``os.environ``, and Python's cached temp dir is dropped and
-    checked against ``TMPDIR``. For entry points only; ``command_line`` turns its refusals into an exit message."""
+    """Route this process's caches and temporary files into the write boundary (the module docstring): resolve and
+    check every variable, create the default ``TMPDIR`` and write a probe file there, then remove the empty names and
+    set each managed variable that was unset or empty. Returns the values (``resolve``). With ``environ=None`` this is
+    ``os.environ``, and ``tempfile.tempdir`` is set to ``TMPDIR``. For entry points only; ``command_line`` turns its
+    refusals into an exit message."""
     env: MutableMapping[str, str] = os.environ if environ is None else environ
     values = resolve(env)
     if _given(env, "TMPDIR") is None:
         _make_scratch(values["TMPDIR"])
-    before = {name: env.get(name) for name in values}
+    _probe_scratch(values["TMPDIR"])
+    for name in _blank_names(env):
+        del env[name]
     for name, value in values.items():
         if _given(env, name) is None:
             env[name] = value
     if environ is None:
-        tempfile.tempdir = None  # computed again from TMPDIR on the next use
-        got = tempfile.gettempdir()
-        if os.path.realpath(got) != os.path.realpath(values["TMPDIR"]):
-            for name, old in before.items():  # leave the environment as it was
-                if old is None:
-                    env.pop(name, None)
-                else:
-                    env[name] = old
-            tempfile.tempdir = None
-            raise WriteRefusedError(
-                f"Python's temp dir would be {got}, not TMPDIR={values['TMPDIR']} (is it writable?); refusing"
-            )
+        tempfile.tempdir = values["TMPDIR"]  # never the fallback search of tempfile.gettempdir()
     return values
 
 

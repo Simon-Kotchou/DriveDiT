@@ -10,7 +10,8 @@ The package writes through the same write boundary as every tool: ``check_write`
 (RAM, or the verified drive of DATA_ROOT; never a volume whose root holds Windows/System32; caller roots only narrow
 it), so there is one implementation, driven by one table of test vectors
 (``tests/fixtures/local_config/boundary_vectors.py``) through both entry points. ``check_dir`` is the same check for a
-directory that files are written into; ``data_root`` and ``ram_root`` are the two places the boundary allows (DD-23).
+directory that files are written into, ``check_tree`` adds the links already inside one (a cache), and ``data_root``
+and ``ram_root`` are the two places the boundary allows (DD-23).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ __all__ = [
     "LocalPathsError",
     "WriteRefusedError",
     "check_dir",
+    "check_tree",
     "check_write",
     "data_root",
     "drive",
@@ -104,6 +106,40 @@ def check_dir(path: str | Path, roots: Sequence[str | Path] | None = None) -> Pa
     if not text:
         raise WriteRefusedError("refusing to write into '': not a directory path")
     return Path(check_write(os.path.join(text, DIR_PROBE), roots)).parent
+
+
+def check_tree(path: str | Path) -> Path:
+    """``check_dir(path)``, and for every symlink in the tree that exists under it (links are not followed while
+    walking) the write boundary on where the link leads: a library writing into a directory it owns, such as a cache,
+    follows the links it finds there, so a link out of the boundary is refused although the directory itself is
+    inside. A target that does not exist yet is judged by where it would be created. Writes nothing."""
+    root = check_dir(path)
+    pending = [str(root)] if root.is_dir() else []
+    while pending:
+        folder = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        _check_link(root, entry.path)
+                    elif entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+        except OSError as exc:
+            raise WriteRefusedError(f"refusing to write under {root}: cannot list {folder}: {exc}") from exc
+    return root
+
+
+def _check_link(root: Path, link: str) -> None:
+    target = os.path.realpath(link)
+    if target == str(root) or target.startswith(str(root).rstrip("/") + "/"):
+        return  # it leads back inside the directory checked (a Hugging Face snapshot link to its blob)
+    try:
+        if os.path.isdir(target):
+            check_dir(target)
+        else:
+            check_write(target)
+    except WriteRefusedError as exc:
+        raise WriteRefusedError(f"refusing to write under {root}: the link {link} leads to {target}: {exc}") from exc
 
 
 def data_root() -> Path:

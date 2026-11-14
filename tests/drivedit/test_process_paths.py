@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -17,7 +19,7 @@ import pytest
 from drivedit import local_paths
 from drivedit.local_paths import LocalPathsError, WriteRefusedError
 from drivedit.process_paths import DATA, PROCESS_PATHS, RAM, command_line, prepare_process, resolve, scratch_dir
-from tests.drivedit.boundary import NEVER, assert_never_written, world
+from tests.drivedit.boundary import NEVER, assert_never_written, clear_process_env, world
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 UID = os.getuid()
@@ -110,6 +112,11 @@ def test_an_empty_value_counts_as_unset(value: str) -> None:
         ("TMPDIR", NEVER, "refusing to write"),
         ("TMPDIR", "{B}/shm/no_such_dir", "not an existing writable directory"),
         ("HF_XET_CACHE", "{B}/shm/../mnt/z/xet", "'..'"),
+        ("HUGGINGFACE_ASSETS_CACHE", "{M}/z/assets", "Windows system drive"),  # the legacy name of an unmanaged one
+        ("TORCH_LOGS_OUT", NEVER + "/torch.log", "refusing to write"),
+        ("TORCH_TRACE", "{M}/z/trace", "Windows system drive"),
+        ("TORCH_COMPILE_DEBUG_DIR", "{M}/y/debug", "refusing to write"),
+        ("HF_XET_LOG_DEST", NEVER + "/xet.log", "refusing to write"),
     ],
 )
 def test_a_value_outside_the_boundary_is_refused_and_nothing_changes(name: str, value: str, fragment: str) -> None:
@@ -154,17 +161,42 @@ def test_without_a_config_the_caches_must_be_set() -> None:
 
 
 def test_prepare_process_points_os_environ_and_tempfile_into_the_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
-    for entry in PROCESS_PATHS:
-        for name in (entry.name, entry.legacy):
-            if name is not None:
-                monkeypatch.delenv(name, raising=False)  # undone afterwards, also for what prepare_process sets
-    monkeypatch.setattr(tempfile, "tempdir", "/never/used/temp/dir")
-    with world() as w:
+    with world() as w:  # first, so the world itself is made under the inherited TMPDIR
+        clear_process_env(monkeypatch)  # undone afterwards, also for what prepare_process sets
+        monkeypatch.setattr(tempfile, "tempdir", "/never/used/temp/dir")
         values = prepare_process()
         assert {name: os.environ[name] for name in values} == _expected_defaults(w)
-        assert tempfile.gettempdir() == values["TMPDIR"]
+        assert tempfile.tempdir == values["TMPDIR"]  # set, not searched for
         with tempfile.TemporaryDirectory() as made:
             assert os.path.dirname(made) == values["TMPDIR"]
+
+
+def test_a_tmpdir_that_cannot_take_a_file_is_refused_and_nothing_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def full(*_: object, **__: object) -> tuple[int, str]:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with world():
+        clear_process_env(monkeypatch)
+        monkeypatch.setattr(tempfile, "tempdir", "/never/used/temp/dir")
+        monkeypatch.setattr(tempfile, "mkstemp", full)
+        with pytest.raises(WriteRefusedError, match="cannot take a file"):
+            prepare_process()
+        assert all(entry.name not in os.environ for entry in PROCESS_PATHS)
+        assert tempfile.tempdir == "/never/used/temp/dir"
+
+
+def test_empty_unmanaged_and_legacy_values_are_removed() -> None:
+    """Libraries read "" as a relative path (the working directory); removed, they follow their validated parent."""
+    with world():
+        environ = {
+            "TORCH_EXTENSIONS_DIR": "",
+            "HF_ASSETS_CACHE": " ",
+            "HUGGINGFACE_HUB_CACHE": "",
+            "TORCH_LOGS_OUT": "",
+        }
+        values = prepare_process(environ)
+        assert environ == values
+        assert not {"TORCH_EXTENSIONS_DIR", "HF_ASSETS_CACHE", "HUGGINGFACE_HUB_CACHE", "TORCH_LOGS_OUT"} & set(environ)
 
 
 def test_scratch_dir_is_tmpdir_or_its_ram_default_never_the_system_temp_dir() -> None:
@@ -200,6 +232,28 @@ def test_command_line_turns_a_refusal_into_one_line() -> None:
 # ---------------------------------------------------------------------------------------- drivedit.local_paths
 
 
+def test_check_tree_refuses_a_link_inside_that_leads_out() -> None:
+    with world() as w:
+        cache = Path(w.mnt, "x", "DataRoot", "cache")
+        (cache / "hub" / "models--a--b" / "blobs").mkdir(parents=True)
+        (cache / "hub" / "models--a--b" / "blobs" / "f").write_bytes(b"")
+        (cache / "hub" / "models--a--b" / "snapshots").mkdir()
+        (cache / "hub" / "models--a--b" / "snapshots" / "f").symlink_to("../blobs/f")  # inside: fine
+        (cache / "hub" / "elsewhere_in_ram").symlink_to(Path(w.shm, "real"))  # into RAM: fine
+        assert local_paths.check_tree(cache) == cache
+        (cache / "hub" / ".locks").symlink_to(Path(w.mnt, "z"))
+        with pytest.raises(WriteRefusedError, match=r"\.locks leads to .*Windows system drive"):
+            local_paths.check_tree(cache)
+        (cache / "hub" / ".locks").unlink()
+        (cache / "hub" / "models--a--b" / "blobs" / "g").symlink_to(NEVER + "/g")  # dangling, out of the boundary
+        with pytest.raises(WriteRefusedError, match=f"blobs/g leads to {re.escape(NEVER)}/"):
+            local_paths.check_tree(cache)
+        assert local_paths.check_tree(Path(w.mnt, "x", "DataRoot", "missing")) == Path(
+            w.mnt, "x", "DataRoot", "missing"
+        )
+    assert_never_written()
+
+
 def test_check_dir_judges_a_directory_by_where_its_files_land() -> None:
     with world() as w:
         assert local_paths.check_dir(f"{w.mnt}/x/DataRoot/new/dir") == Path(f"{w.mnt}/x/DataRoot/new/dir")
@@ -228,7 +282,12 @@ def test_importing_the_package_changes_no_environment(tmp_path: Path) -> None:
     )
     env = {k: v for k, v in os.environ.items() if k not in MANAGED}
     result = subprocess.run(
-        [sys.executable, "-I", "-c", code, str(SRC)], cwd=tmp_path, env=env, capture_output=True, text=True, check=False
+        [sys.executable, "-I", "-B", "-c", code, str(SRC)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["True", "True"]

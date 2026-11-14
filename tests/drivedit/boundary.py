@@ -6,8 +6,11 @@
   block, under the config ``state``. Policy tests run there: they need no real mount and never skip.
 - ``require_real_boundary(path)``: ``path``, or a skip naming the boundary's reason, for tests that write through the
   real boundary into RAM scratch (a sandbox may hide /dev/shm's device; the boundary then refuses RAM, fail-closed).
+- ``clear_process_env(monkeypatch)``: every variable of ``PROCESS_PATHS`` (and its legacy name) unset for the test,
+  each restored afterwards, also when it was absent and something set it in between (``monkeypatch.delenv`` of an
+  absent name records nothing, so the name is set first).
 - ``set_process_env(monkeypatch, base)``: every managed variable of ``drivedit.process_paths.PROCESS_PATHS`` pointed
-  into ``base`` and every other one unset, through ``monkeypatch``, so an entry point's ``prepare_process`` finds them
+  into ``base`` and every other one unset (``clear_process_env``), so an entry point's ``prepare_process`` finds them
   set and changes nothing, and the test leaves the environment as it found it.
 """
 
@@ -60,20 +63,28 @@ def require_real_boundary(path: Path) -> Path:
     return path
 
 
-def set_process_env(monkeypatch: pytest.MonkeyPatch, base: Path) -> dict[str, str]:
-    """Every managed process path set to a directory (or file prefix) under ``base``, ``TMPDIR`` created; every
-    unmanaged one and every legacy name unset; Python's cached temp dir restored afterwards. Returns the values set."""
-    values: dict[str, str] = {}
+def clear_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every variable of ``PROCESS_PATHS`` and its legacy name unset for the test and restored afterwards (absent ones
+    deleted again); Python's cached temp dir restored afterwards too."""
     for entry in PROCESS_PATHS:
         for name in (entry.name, entry.legacy):
             if name is not None:
-                monkeypatch.delenv(name, raising=False)
+                monkeypatch.setenv(name, "")  # records the old value, or its absence
+                monkeypatch.delenv(name)
+    monkeypatch.setattr(tempfile, "tempdir", tempfile.tempdir)
+
+
+def set_process_env(monkeypatch: pytest.MonkeyPatch, base: Path) -> dict[str, str]:
+    """Every managed process path set to a directory (or file prefix) under ``base``, ``TMPDIR`` created; every
+    unmanaged one and every legacy name unset; Python's cached temp dir restored afterwards. Returns the values set."""
+    clear_process_env(monkeypatch)
+    values: dict[str, str] = {}
+    for entry in PROCESS_PATHS:
         if entry.managed:
             values[entry.name] = str(base / entry.name) + ("_" if entry.kind == "prefix" else "")
     (base / "TMPDIR").mkdir(parents=True, exist_ok=True)
     for name, value in values.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr(tempfile, "tempdir", tempfile.tempdir)
     return values
 
 

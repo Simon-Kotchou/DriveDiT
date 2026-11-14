@@ -30,9 +30,11 @@ least one launch phase (LAUNCH_PHASES), and in every launch checked:
   - a complete window (MIN_WINDOW_S, or one that couples) and motion above MOTION_KMH;
   - c = 1 by COUPLE_DEADLINE_S while the throttle stays >= COUPLE_DEADLINE_THROTTLE, else within the window;
   - no opening, and every in-gear rpm at or above stall_guard_rpm + MARGIN_RPM (also at the braking stops);
-and no stall, and the counter guard_drops is 0. A launch phase (LAUNCH_PHASES, the speed-hold phases) whose start or
-callbacks fail these is FAIL. A phase of another name whose first drive row is no stopped start is reported SKIPPED with
-the reason: never PASS.
+and no stall, and the counter guard_drops is 0. What a launch did against these is FAIL; a launch phase
+(LAUNCH_PHASES, the speed-hold phases) without the evidence (its stopped start, every callback, a window long enough)
+is INCOMPLETE, as is an incomplete capture (no rows, the footer, the launch_clutch block or a counter missing, no
+launch phase). A phase of another name whose first drive row is no stopped start is reported SKIPPED with the reason:
+never PASS.
 STALLS (DD-14f): every engine-off of the play is classified (classify_engine_off), from the producer's engine-off
 records (launch_clutch.engine_off.<i>: the readback's step, phase, segment, the commanded handbrake, rpm, speed, kind
 first / fall and the Mode A starts before it) or, for a play before them, from the steps (engine_on falling, and a first
@@ -41,8 +43,11 @@ row with the engine off):
   - the probe's first readback finding the engine off in its first reset segment, the handbrake commanded and no Mode A
     start yet: the engine was never started (the probe starts it after its teleport). Reported, not a stall; a producer
     before DD-14f counted it in launch_clutch.stalls (its first Step passed the unread engine as on);
-  - anything else (the engine off with the handbrake commanded otherwise, a record without its row, more stalls counted
-    than the records or rows explain, records dropped past the bound): INCOMPLETE, never PASS.
+  - anything else (the engine off with the handbrake commanded otherwise, a record without its row or one that disagrees
+    with it, an engine-off in the steps without its record, more stalls counted than explained, records dropped past
+    the bound): INCOMPLETE, never PASS.
+The steps are read in every play and reconciled with the records: a stall while driving in the steps FAILs whatever
+the records say.
 RESULT is PASS, FAIL or INCOMPLETE (a FAIL wins: a stall while driving or a failed launch is decided whatever is
 missing).
 
@@ -217,64 +222,72 @@ def engine_off_records(header):
 
 
 def classify_engine_off(rows, header):
-    """(state, lines): every engine-off of the play (module docstring STALLS). state False on a stall while driving,
-    None on anything unexplained, True when every engine-off is the probe's own start (or there is none)"""
-    lines, fails, unexplained = [], 0, 0
-    by_step = {r["physics_step"]: i for i, r in enumerate(rows)}
+    """(state, lines): every engine-off of the play (module docstring STALLS). The steps are always read (a first row
+    with the engine off, and every row where engine_on falls) and a stall while driving there FAILs whatever the
+    records say; the producer's records, when present, must account for every such row with the same step, phase,
+    segment, handbrake and kind, and every record must point at such a row. state False on a stall while driving, None
+    on anything unexplained, True when every engine-off is the probe's own start (or there is none)"""
+    lines, fails, unexplained, reported = [], 0, 0, 0
     first_phase = rows[0]["phase"] if rows else None
     counter = header.get("launch_clutch.stalls")
     records, total = engine_off_records(header)
-    events = []
-    if records is not None:
-        source = "the producer's engine-off records"
-        for rec in records:
-            if "step" not in rec:
-                events.append(("unexplained", "record %r does not parse" % rec["raw"], None))
-                continue
-            row = rows[by_step[rec["step"]]] if rec["step"] in by_step else None
-            if row is None or row["engine_on"]:
-                events.append(("unexplained", "%s (no row of step %d with the engine off)" % (rec["raw"], rec["step"]),
-                               rec))
-            elif not rec["handbrake"]:
-                events.append(("driving", rec["raw"], rec))
-            elif (rec["kind"] == "first" and rec["starts"] == 0 and rec["segment"] == PROBE_START_SEGMENT
-                  and rec["phase"] == first_phase):
-                events.append(("probe_start", rec["raw"], rec))
-            else:
-                events.append(("unexplained", rec["raw"], rec))
-        if total is None or total > len(records):
-            events.append(("unexplained", "%s engine-off events counted, %d recorded" % (
-                header.get("launch_clutch.engine_off_events"), len(records)), None))
-        falls = sum(1 for kind, _, rec in events if rec and rec.get("kind") == "fall")
-        expected = falls
-    else:
-        source = "the steps (a play before the engine-off records)"
-        if rows and not rows[0]["engine_on"]:
-            r = rows[0]
-            text = "step %d phase %s segment %s handbrake %d rpm %.1f kmh %.2f (the first row)" % (
-                r["physics_step"], r["phase"], r["segment"], int(r["cmd_handbrake"]), r["rpm"], r["speed_kmh"])
-            kind = "probe_start" if r["cmd_handbrake"] and r["segment"] == PROBE_START_SEGMENT else (
-                "driving" if not r["cmd_handbrake"] else "unexplained")
-            events.append((kind, text, {"kind": "first"}))
-        for a, b in zip(rows, rows[1:]):
-            if a["engine_on"] and not b["engine_on"]:
-                text = "step %d phase %s segment %s handbrake %d rpm %.1f kmh %.2f" % (
-                    b["physics_step"], b["phase"], b["segment"], int(b["cmd_handbrake"]), b["rpm"], b["speed_kmh"])
-                events.append(("driving" if not b["cmd_handbrake"] else "unexplained", text, {"kind": "fall"}))
-        falls = sum(1 for _, _, rec in events if rec["kind"] == "fall")
-        # the producer before DD-14f counted the probe start's engine-off as a stall (its first Step passed the
-        # unread engine as on); a fall in the last row may not have been seen by a later Step
-        expected = falls + sum(1 for kind, _, rec in events if rec["kind"] == "first")
-    for kind, text, _ in events:
-        if kind == "driving":
+    # the engine-offs the steps show: (kind, row index)
+    seen = []
+    if rows and not rows[0]["engine_on"]:
+        seen.append(("first", 0))
+    seen += [("fall", i) for i in range(1, len(rows)) if rows[i - 1]["engine_on"] and not rows[i]["engine_on"]]
+    by_step = {}
+    for rec in records or []:
+        if "step" in rec:
+            by_step.setdefault(rec["step"], []).append(rec)
+    used = set()
+
+    def describe(r, kind):
+        return "step %d phase %s segment %s handbrake %d rpm %.1f kmh %.2f (%s in the steps)" % (
+            r["physics_step"], r["phase"], r["segment"], int(r["cmd_handbrake"]), r["rpm"], r["speed_kmh"], kind)
+
+    for kind, i in seen:
+        r = rows[i]
+        text = describe(r, kind)
+        if not r["cmd_handbrake"]:
             fails += 1
             lines.append("  FAIL: a stall while driving (the handbrake released): %s" % text)
-        elif kind == "probe_start":
+            continue
+        probe_start = (kind == "first" and r["segment"] == PROBE_START_SEGMENT and r["phase"] == first_phase)
+        if records is not None:
+            match = next((rec for rec in by_step.get(r["physics_step"], [])
+                          if rec["kind"] == kind and rec["phase"] == r["phase"] and rec["segment"] == r["segment"]
+                          and rec["handbrake"] == bool(r["cmd_handbrake"])), None)
+            if match is None:
+                unexplained += 1
+                lines.append("  INCOMPLETE: an engine-off in the steps without a matching record: %s" % text)
+                continue
+            used.add(id(match))
+            probe_start = probe_start and match["starts"] == 0
+        if probe_start:
+            reported += 1
             lines.append("  engine off at the probe start, reported (not a stall): %s: the engine had not been "
                          "started yet; the probe starts it after its teleport" % text)
         else:
             unexplained += 1
             lines.append("  INCOMPLETE: an engine-off not explained: %s" % text)
+    if records is not None:
+        for rec in records:
+            if id(rec) not in used:
+                unexplained += 1
+                lines.append("  INCOMPLETE: an engine-off record no row of the steps shows as such: %s" % rec["raw"])
+        if total is None or total > len(records):
+            unexplained += 1
+            lines.append("  INCOMPLETE: %s engine-off events counted, %d recorded" % (
+                header.get("launch_clutch.engine_off_events"), len(records)))
+        source = "the steps and the producer's engine-off records"
+        # the producer counts a stall only from a readback on followed by one off (falls)
+        expected = sum(1 for kind, _ in seen if kind == "fall")
+    else:
+        source = "the steps (a play before the engine-off records)"
+        # the producer before DD-14f also counted the probe start's engine-off (its first Step passed the unread
+        # engine as on); a fall in the last row may not have been seen by a later Step
+        expected = len(seen)
     try:
         counted = int(counter) if counter is not None else None
     except ValueError:
@@ -286,8 +299,8 @@ def classify_engine_off(rows, header):
         unexplained += 1
         lines.append("  INCOMPLETE: launch_clutch.stalls %d, but %s explain %d" % (counted, source, expected))
     lines.insert(0, "engine-off (%s): %d stalls while driving, %d reported probe starts, %d unexplained; "
-                    "launch_clutch.stalls %s" % (source, fails, sum(1 for k, _, _ in events if k == "probe_start"),
-                                                 unexplained, counter if counter is not None else "-"))
+                    "launch_clutch.stalls %s" % (source, fails, reported, unexplained,
+                                                 counter if counter is not None else "-"))
     if fails:
         return False, lines
     if unexplained:
@@ -297,37 +310,45 @@ def classify_engine_off(rows, header):
 
 def check_play(rows, header):
     """The launch clutch of a play (see the module docstring); returns (lines, state): True PASS, False FAIL, None
-    INCOMPLETE. Refuses (FAIL) an incomplete capture: no rows, a run footer that is not status complete, a missing
-    launch_clutch block or counter, or no launch phase. Every launch checked (launch_window) must start stopped with no
-    missing callback, have a complete window (MIN_WINDOW_S, or one that couples), move above MOTION_KMH, couple fully by
-    COUPLE_DEADLINE_S while the throttle stays >= COUPLE_DEADLINE_THROTTLE (else within the window), never open the
-    clutch and stay at or above stall_guard_rpm + MARGIN_RPM in gear; a phase that is no launch phase and has no stopped
-    start is SKIPPED with its reason. Every engine-off is classified (classify_engine_off: a stall while driving FAILs,
-    the probe's own start is reported, anything else is INCOMPLETE) and the counter guard_drops must be 0. Times are
-    the covered times of the callbacks (timeslice_s), not callback counts."""
+    INCOMPLETE. Missing evidence is INCOMPLETE, never PASS: no rows, a run footer that is not status complete, a
+    missing launch_clutch block or counter, no launch phase, a launch without its stopped start or with a missing
+    callback or covered time, a window too short to judge. Every launch checked (launch_window) must have a complete
+    window (MIN_WINDOW_S, or one that couples), move above MOTION_KMH, couple fully by COUPLE_DEADLINE_S while the
+    throttle stays >= COUPLE_DEADLINE_THROTTLE (else within the window), never open the clutch and stay at or above
+    stall_guard_rpm + MARGIN_RPM in gear; what it observes against these is FAIL (openings and a low rpm also on an
+    incomplete window; no motion and no coupling only on a complete one). A phase that is no launch phase and has no
+    stopped start is SKIPPED with its reason. Every engine-off is classified (classify_engine_off: a stall while
+    driving FAILs, the probe's own start is reported, anything else is INCOMPLETE) and the counter guard_drops must
+    be 0. A FAIL wins over missing evidence. Times are the covered times of the callbacks (timeslice_s), not
+    callback counts."""
     lines, passed = [], True
+    state = {"incomplete": False}
 
     def fail(text):
         lines.append("  FAIL: " + text)
         return False
 
+    def missing(text):
+        lines.append("  INCOMPLETE: " + text)
+        state["incomplete"] = True
+
     launch = {k: header.get("launch_clutch." + k) for k in LAUNCH_KEYS if "launch_clutch." + k in header}
     lines.append("launch clutch: %s" % (", ".join("%s %s" % kv for kv in launch.items()) or "no launch_clutch block"))
     if not rows:
-        return lines + ["  FAIL: no steps (an incomplete capture)"], False
+        return lines + ["  INCOMPLETE: no steps (an incomplete capture)"], None
     if header.get("status") != "complete":
-        passed = fail("the run footer is not status=complete (%r): an incomplete capture" % header.get("status"))
+        missing("the run footer is not status=complete (%r): an incomplete capture" % header.get("status"))
     if "mode" not in launch:
-        passed = fail("the run header has no launch_clutch block")
+        missing("the run header has no launch_clutch block")
     guard = float(launch.get("stall_guard_rpm") or 600.0)
     starts = {}
     for i, r in enumerate(rows):
         if r["phase"] not in starts and r["segment"] in LAUNCH_SEGMENTS and is_drive(r):
             starts[r["phase"]] = i
     if not any(name in model.LAUNCH_PHASES for name in starts):
-        passed = fail("no launch phase (%s) in the steps" % ", ".join(model.LAUNCH_PHASES))
+        missing("no launch phase (%s) in the steps" % ", ".join(model.LAUNCH_PHASES))
     for name, first in starts.items():
-        last, times, problems, skip = launch_window(rows, first)
+        last, times, gaps, skip = launch_window(rows, first)
         if skip:
             lines.append("  %-14s SKIPPED: %s" % (name, skip))
             continue
@@ -344,29 +365,36 @@ def check_play(rows, header):
         cs = [r["cmd_clutch"] for r, t in zip(seg, times) if t < 3.0]
         nz = [b - a for a, b in zip(cs, cs[1:]) if abs(b - a) > 1e-6]
         rev = sum(1 for a, b in zip(nz, nz[1:]) if a * b < 0)
+        unknown = list(gaps)              # the evidence of the launch (its start, its callbacks, its window)
+        if span_s < MIN_WINDOW_S and coupled_s is None:
+            unknown.append("an incomplete window (%.2f s)" % span_s)
+        problems = []                     # what the launch did against the criteria
         if opens:
             problems.append("%d openings" % len(opens))
         if low < guard + MARGIN_RPM:
             problems.append("rpm %.0f below stall_guard_rpm + %g" % (low, MARGIN_RPM))
-        if top <= MOTION_KMH:
-            problems.append("no motion (max %.1f km/h)" % top)
-        if coupled_s is None:
-            problems.append("never coupled (c = 1)")
-        elif throttle >= COUPLE_DEADLINE_THROTTLE and coupled_s > COUPLE_DEADLINE_S:
+        if not unknown:
+            if top <= MOTION_KMH:
+                problems.append("no motion (max %.1f km/h)" % top)
+            if coupled_s is None:
+                problems.append("never coupled (c = 1)")
+        if coupled_s is not None and throttle >= COUPLE_DEADLINE_THROTTLE and coupled_s > COUPLE_DEADLINE_S:
             problems.append("coupled at %.2f s, after %.1f s" % (coupled_s, COUPLE_DEADLINE_S))
-        if span_s < MIN_WINDOW_S and coupled_s is None:
-            problems.append("an incomplete window (%.2f s)" % span_s)
         passed = passed and not problems
+        if unknown:
+            state["incomplete"] = True
         lines.append("  %-14s throttle %.2f%s: %d openings %s, c = 1 at %s, lowest rpm %.0f, max %.1f km/h, c "
-                     "reversals in 3 s %d%s" % (name, throttle, " (%s)" % seg[0]["segment"], len(opens),
-                                      "[" + ", ".join("%.2f s at %.1f km/h" % o for o in opens) + "]",
-                                      "-" if coupled_s is None else "%.2f s" % coupled_s, low, top, rev,
-                                      "" if not problems else "  <-- FAIL: " + "; ".join(problems)))
+                     "reversals in 3 s %d%s%s" % (name, throttle, " (%s)" % seg[0]["segment"], len(opens),
+                                        "[" + ", ".join("%.2f s at %.1f km/h" % o for o in opens) + "]",
+                                        "-" if coupled_s is None else "%.2f s" % coupled_s, low, top, rev,
+                                        "" if not problems else "  <-- FAIL: " + "; ".join(problems),
+                                        "" if not unknown else "  <-- INCOMPLETE: " + "; ".join(unknown)))
     engine_state, engine_lines = classify_engine_off(rows, header)
     lines.extend(engine_lines)
     if engine_state is False:
         passed = False
-    incomplete = engine_state is None
+    if engine_state is None:
+        state["incomplete"] = True
     for i in range(1, len(rows)):
         a, b = rows[i - 1], rows[i]
         if (a["cmd_clutch"] > 0 and b["cmd_clutch"] == 0 and b["cmd_brake"] > 0 and b["cmd_throttle"] == 0
@@ -381,9 +409,9 @@ def check_play(rows, header):
     counters = {k: header.get("launch_clutch." + k) for k in COUNTER_KEYS + ("lockups",)}
     lines.append("run header counters: %s" % ", ".join("%s %s" % (k, v if v is not None else "-")
                                                        for k, v in counters.items()))
-    missing = [k for k in COUNTER_KEYS if counters[k] is None]
-    if missing:
-        passed = fail("the run header misses launch_clutch.%s (an incomplete capture)" % ", launch_clutch.".join(missing))
+    absent = [k for k in COUNTER_KEYS if counters[k] is None]
+    if absent:
+        missing("the run header misses launch_clutch.%s (an incomplete capture)" % ", launch_clutch.".join(absent))
     if counters["guard_drops"] not in (None, "0"):
         passed = fail("launch_clutch.guard_drops %s" % counters["guard_drops"])
     feedback = rpm_feedback_text(rows)
@@ -391,7 +419,7 @@ def check_play(rows, header):
         lines.append(feedback)
     if not passed:
         return lines, False
-    return lines, None if incomplete else True
+    return lines, None if state["incomplete"] else True
 
 
 def rpm_feedback_text(rows):

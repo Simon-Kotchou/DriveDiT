@@ -1389,8 +1389,9 @@ class CalibrationTest(unittest.TestCase):
                             (name, lines))
         broken = [r for r in rows if not (r["phase"] == "steer_prbs" and r["segment"] == "settle")]
         lines, passed = analysis.check_play(broken, COMPLETE_HEADER)
-        self.assertFalse(passed)                                      # a speed-hold launch phase: FAIL
-        self.assertTrue(any(line.startswith("  steer_prbs") and "FAIL" in line for line in lines), lines)
+        # a speed-hold launch phase without its start: no evidence, never PASS (DD-14f: INCOMPLETE, not FAIL)
+        self.assertIsNone(passed)
+        self.assertTrue(any(line.startswith("  steer_prbs") and "INCOMPLETE" in line for line in lines), lines)
         other = rows + [dict(r, phase="e02a_cell") for r in rows if r["phase"] == "brake_0.30" and r["segment"] == "accel"]
         lines, passed = analysis.check_play(other, COMPLETE_HEADER)
         self.assertTrue(passed, lines)                                # not checked, so it adds no PASS and no FAIL
@@ -2176,6 +2177,43 @@ class EngineOffFollowupTest(unittest.TestCase):
         lines, state = analysis.check_play(held, dict(COMPLETE_HEADER, **{"launch_clutch.stalls": "1"}))
         self.assertIsNone(state, lines)
         self.assertTrue(any("INCOMPLETE: an engine-off not explained" in line for line in lines), lines)
+
+    def test_missing_evidence_is_incomplete_and_a_fail_wins(self):
+        # Codex DD-14f, MEDIUM: an incomplete footer or a missing counter is no evidence (INCOMPLETE), but what a launch
+        # did wrong stays a FAIL next to it
+        self.assertIs(analysis.check_play(self.good, COMPLETE_HEADER)[1], True)
+        self.assertIsNone(analysis.check_play(self.good, dict(COMPLETE_HEADER, status="stopped"))[1])
+        partial = dict(COMPLETE_HEADER)
+        del partial["launch_clutch.restarts"]
+        self.assertIsNone(analysis.check_play(self.good, partial)[1])
+        self.assertIsNone(analysis.check_play([], COMPLETE_HEADER)[1])
+        dropped = [dict(r) for r in self.good]
+        for r in dropped[60:]:
+            r["rpm"] = 500.0                                           # below the guard: observed
+        self.assertIs(analysis.check_play(dropped, dict(COMPLETE_HEADER, status="stopped"))[1], False)
+
+    def test_the_steps_are_always_read_beside_the_records(self):
+        # Codex DD-14f, HIGH: with the records present the steps were not read: a stall while driving in the steps
+        # passed with no record, and a record could claim the probe start for it
+        stalled = [dict(r) for r in self.good]
+        stalled[50]["engine_on"] = 0.0
+        lines, state = analysis.check_play(stalled, engine_off_header([], stalls=0))
+        self.assertIs(state, False, lines)
+        claim = "step %d phase move_check segment reset handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0" % (
+            stalled[50]["physics_step"])
+        self.assertIs(analysis.check_play(stalled, engine_off_header([claim]))[1], False)
+        self.assertIs(analysis.check_play(stalled, engine_off_header(["step x"], stalls=1))[1], False)
+        # a record that disagrees with its row (kind, segment, phase or handbrake) explains nothing
+        rows = with_start_row(self.good)
+        step = rows[0]["physics_step"]
+        for text in ("step %d phase move_check segment settle handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0",
+                     "step %d phase other segment reset handbrake 1 rpm 0.0 kmh 0.00 kind first starts 0",
+                     "step %d phase move_check segment reset handbrake 0 rpm 0.0 kmh 0.00 kind first starts 0",
+                     "step %d phase move_check segment reset handbrake 1 rpm 0.0 kmh 0.00 kind fall starts 0"):
+            lines, state = analysis.check_play(rows, engine_off_header([text % step]))
+            self.assertIsNone(state, (text, lines))
+        # an engine-off of the steps without its record
+        self.assertIsNone(analysis.check_play(rows, engine_off_header([]))[1])
 
     def test_the_producer_records_classify_the_engine_off(self):
         rows = with_start_row(self.good)

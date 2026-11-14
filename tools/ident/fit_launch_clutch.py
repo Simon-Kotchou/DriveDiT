@@ -60,6 +60,11 @@ what the play recorded.
 launches at throttle 0.3 / 0.5 / 0.6 / 1.0, a brake of 0.3 / 0.6 / 1.0 to a stop from 15 / 30 / 40 km/h, and the
 shift policy's shifts.
 
+--fit also chooses the plant that --replay and --acceptance run on (choose_plant): the fit is started from FIT_START
+(the independence check) and from the card (S105_19 with the play's drag), the torque at every knot and the rolling load
+kept >= 0 (projected after each step); the lower-cost result is the plant only when it fits the play better than the
+card (the same shooting cost), else the card stays. Without --fit the plant is the card.
+
 Exit codes: 0 PASS (or the requested analysis done), 1 the check did not pass (FAIL or INCOMPLETE), 2 input error.
 """
 
@@ -467,9 +472,16 @@ def solve(a, b):
     return x
 
 
+def project(x):
+    """The bounds of the fit: the rolling load and the gross torque at every knot >= 0 (J and the clutch capacity are
+    fitted as logarithms, so they stay positive)"""
+    return x[:2] + [max(v, 0.0) for v in x[2:]]
+
+
 def fit(rows, rho, windows, base, iterations=25, log=print):
-    """Levenberg-Marquardt over pack(params): returns (params, rms rpm, rms m/s)."""
-    x = pack(base)
+    """Levenberg-Marquardt over pack(params), every step projected onto the bounds (project): returns (params, rms
+    rpm, rms m/s)."""
+    x = project(pack(base))
     r = residual_vector(x, base, rows, rho, windows)
     cost = sum(v * v for v in r)
     lam = 1e-3
@@ -487,7 +499,7 @@ def fit(rows, rho, windows, base, iterations=25, log=print):
         for _ in range(8):
             a = [[jtj[i][j] + (lam * jtj[i][i] if i == j else 0.0) for j in range(len(x))] for i in range(len(x))]
             delta = solve(a, [-v for v in jtr])
-            xn = [xi + di for xi, di in zip(x, delta)]
+            xn = project([xi + di for xi, di in zip(x, delta)])
             rn = residual_vector(xn, base, rows, rho, windows)
             cn = sum(v * v for v in rn)
             if cn < cost:
@@ -502,6 +514,25 @@ def fit(rows, rho, windows, base, iterations=25, log=print):
     params = unpack(x, base)
     e_rpm, e_v = model.shooting_residuals(params, rows, rho, windows)
     return params, model.rms(e_rpm), model.rms(e_v)
+
+
+def shooting_cost(params, rows, rho, windows):
+    """The fit's cost of params on the play (the sum of squares of residual_vector)"""
+    return sum(v * v for v in residual_vector(pack(params), params, rows, rho, windows))
+
+
+def choose_plant(card, candidates):
+    """(params, label, why) of the plant replay and acceptance run on: the candidate fit with the lowest cost when it is
+    below the card's, else the card. card = (params, cost); candidates = [(label, params, cost)]"""
+    card_params, card_cost = card
+    usable = [c for c in candidates if c[2] is not None and math.isfinite(c[2])]
+    if not usable:
+        return card_params, "the card", "no fit"
+    label, params, cost = min(usable, key=lambda c: c[2])
+    if cost < card_cost:
+        return params, "the fit " + label, "cost %.1f < the card's %.1f" % (cost, card_cost)
+    return card_params, "the card", "the best fit (%s, cost %.1f) is no better than the card (%.1f)" % (
+        label, cost, card_cost)
 
 
 def describe_params(params):
@@ -604,6 +635,7 @@ def main(argv=None):
     rho = model.readback_timing(rows)
     windows = model.launch_windows(rows)
     params = dict(model.S105_19)
+    plant = "the card (S105_19)"
     if args.fit:
         drag, count = free_decay_per_s(rows, params["idle_rpm"])
         if drag is not None:
@@ -614,13 +646,21 @@ def main(argv=None):
         before = model.shooting_residuals(params, rows, rho, windows)
         print("  S105_19: %s; rms %.1f rpm, %.4f m/s" % (describe_params(params), model.rms(before[0]),
                                                          model.rms(before[1])))
-        params, e_rpm, e_v = fit(rows, rho, windows, dict(params, **FIT_START))
-        print("  fitted from %s: %s; rms %.1f rpm, %.4f m/s" % (
-            "J %.2f, clutch %.0f, torque %.0f" % (FIT_START["j_kgm2"], FIT_START["clutch_nm"], FIT_START["torque_nm"][0]),
-            describe_params(params), e_rpm, e_v))
+        card = dict(params)
+        card_cost = shooting_cost(card, rows, rho, windows)
+        candidates = []
+        for label, start in (("from J %.2f, clutch %.0f, torque %.0f" % (
+                FIT_START["j_kgm2"], FIT_START["clutch_nm"], FIT_START["torque_nm"][0]), dict(card, **FIT_START)),
+                ("from the card", dict(card))):
+            fitted, e_rpm, e_v = fit(rows, rho, windows, start)
+            cost = shooting_cost(fitted, rows, rho, windows)
+            candidates.append((label, fitted, cost))
+            print("  fitted %s: %s; rms %.1f rpm, %.4f m/s, cost %.1f" % (label, describe_params(fitted), e_rpm, e_v,
+                                                                          cost))
+        params, plant, why = choose_plant((card, card_cost), candidates)
+        print("  plant for replay and acceptance: %s (%s)" % (plant, why))
     if args.replay:
-        print("replay (closed loop, each launch with the play's readback timing; %s):"
-              % ("the fit" if args.fit else "S105_19"))
+        print("replay (closed loop, each launch with the play's readback timing; on %s):" % plant)
         recorded = {}
         for name, (first, last) in model.launch_windows(rows, seconds=8.0).items():
             opens = [i - first for i in range(first + 1, last + 1)
@@ -638,7 +678,7 @@ def main(argv=None):
     if args.acceptance:
         for label, config in (("DD-14c ramp", DD14C_RAMP), ("1.9.0.37 card", card_launch_clutch())):
             table, ok = acceptance(config, params)
-            print("acceptance, %s (%s): %s" % (label, config["mode"], "PASS" if ok else "FAIL"))
+            print("acceptance, %s (%s) on %s: %s" % (label, config["mode"], plant, "PASS" if ok else "FAIL"))
             for row, text in table.items():
                 print("  %-34s %s" % (row, text))
     print("RESULT %s" % {True: "PASS", False: "FAIL", None: "INCOMPLETE"}[passed])

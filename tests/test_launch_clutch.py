@@ -2203,5 +2203,26 @@ class EngineOffFollowupTest(unittest.TestCase):
             lines, state = analysis.check_play(rows_, engine_off_header(records, events=events, stalls=stalls))
             self.assertIsNone(state, (label, lines))
 
+    def test_the_fit_is_bounded_and_the_card_kept_unless_beaten(self):
+        x = analysis.project([math.log(0.04), math.log(120.0), -5.0, 60.0, -110.0, 70.0, 0.0, 80.0, 75.0])
+        self.assertEqual(x[2:], [0.0, 60.0, 0.0, 70.0, 0.0, 80.0, 75.0])
+        card = (dict(model.S105_19), 100.0)
+        self.assertEqual(analysis.choose_plant(card, [("toy", {"j": 1}, 120.0), ("card start", {"j": 2}, 150.0)])[1],
+                         "the card")
+        params, label, _ = analysis.choose_plant(card, [("toy", {"j": 1}, 120.0), ("card start", {"j": 2}, 90.0)])
+        self.assertEqual((params, label), ({"j": 2}, "the fit card start"))
+        self.assertEqual(analysis.choose_plant(card, [("toy", {"j": 1}, float("nan"))])[1], "the card")
+        # on the fixture play: a start with negative torque ends with every knot >= 0
+        rows, rho, windows = fixture_rows()
+        start = dict(model.S105_19, torque_nm=(-20.0, 66.5, 72.5, 76.1, 78.7, -40.0))
+        params, _, _ = analysis.fit(rows, rho, windows, start, iterations=3, log=lambda *_: None)
+        self.assertTrue(all(t >= 0.0 for t in params["torque_nm"]), params["torque_nm"])
+        self.assertGreaterEqual(params["rolling_n"], 0.0)
+        # main picks the plant with --fit and names it on the acceptance
+        main = read(os.path.join(REPO, "tools", "ident", "fit_launch_clutch.py"))
+        self.assertIn('print("acceptance, %s (%s) on %s: %s" % (label, config["mode"], plant,', main)
+        self.assertIn("params, plant, why = choose_plant((card, card_cost), candidates)", main)
+
+
 if __name__ == "__main__":
     unittest.main()

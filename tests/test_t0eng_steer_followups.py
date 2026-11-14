@@ -289,5 +289,119 @@ class RawReadbackTests(unittest.TestCase):
         self.assertIn("raw readback on a transient row", text)
 
 
+class ExcludedContextTests(unittest.TestCase):
+    """CC-07 (a): zero-command rows of the probe's own teleport, settle, stop braking and launch below 2 km/h are
+    reported apart and not scored (user decision 2026-11-13); everywhere else a deviation still counts"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = probe_common.make_temp_dir("t0eng_dd14f_")
+
+        def act():
+            return ts.Actuator(tau=0.014)
+
+        cls.plays = {"e21": ts.build_e21(os.path.join(cls.base, "e21", "play_01"), ts.SteerCar(actuator=act())),
+                     "e22": ts.build_e22(os.path.join(cls.base, "e22", "play_01"), ts.SteerCar(actuator=act())),
+                     "e23": ts.build_e23(os.path.join(cls.base, "e23", "play_01"), ts.SteerCar(actuator=act()))}
+        cls.case = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, True)
+
+    def session(self, **edits):
+        """Copies of the three plays with edits {probe: fn(row) -> row or None}; the e21 argv"""
+        ExcludedContextTests.case += 1
+        root = os.path.join(self.base, "case%d" % self.case)
+        out = {}
+        for probe, src in self.plays.items():
+            dst = os.path.join(root, probe, "play_01")
+            shutil.copytree(src, dst)
+            if probe in edits:
+                rewrite(dst, probe, edits[probe])
+            out[probe] = dst
+        return [out["e21"], "--e22", out["e22"], "--e23", out["e23"]]
+
+    def test_the_clean_session_passes_and_reports_the_contexts(self):
+        code, text = ts.run_main(e21, self.session())
+        self.assertEqual(ts.item(text, "a_readback"), "PASS", text)
+        self.assertRegex(ts.detail(text, "a_excluded"), r"^zero-command rows of the probe's own teleport, settle after "
+                                                        r"it, stop braking and launch below 2 km/h \(user decision "
+                                                        r"2026-11-13\): [1-9]\d* rows, \d+ off by > 0\.001")
+        # the release of a steering command into the stop is one of them (e22: the load command, then the stop)
+        self.assertRegex(ts.detail(text, "a_excluded"), r"e22/stop [1-9]")
+
+    def test_deviations_in_the_excluded_contexts_are_reported_not_scored(self):
+        launch = {"seen": set()}
+
+        def deviate(row):
+            if row["segment"] in ("stop", "settle") and float(row["cmd_steer"]) == 0.0:
+                row["input_post_steer"] = "0.01200"
+            if row["segment"] == "accel" and float(row["speed_kmh"]) < 2.0:
+                row["input_post_steer"] = "-0.01400"
+            return row
+
+        code, text = ts.run_main(e21, self.session(e21=deviate, e22=deviate))
+        self.assertEqual(ts.item(text, "a_readback"), "PASS", text)
+        excluded = ts.detail(text, "a_excluded")
+        for key, top in (("e21/launch", "0.014"), ("e21/settle", "0.012"), ("e21/stop", "0.012"),
+                         ("e22/launch", "0.014"), ("e22/settle", "0.012"), ("e22/stop", "0.012")):
+            self.assertRegex(excluded, r"%s [1-9]\d* \(max %s\)" % (key, re.escape(top)))
+        self.assertIn("not scored: zero-command rows", ts.detail(text, "a_readback"))
+        del launch
+
+    def test_a_zero_command_deviation_anywhere_else_still_fails(self):
+        def hold(row):
+            if row["phase"] == "flat_20" and row["segment"] == "hold":
+                row["input_post_steer"] = "0.01200"
+            return row
+
+        def late_accel(row):
+            if row["segment"] == "accel" and 9.0 <= float(row["speed_kmh"]) <= 11.0:
+                row["input_post_steer"] = "0.01200"
+            return row
+
+        for edit, where in ((hold, "e21/hold"), (late_accel, "e21/accel")):
+            code, text = ts.run_main(e21, self.session(e21=edit))
+            self.assertEqual(ts.item(text, "a_readback"), "FAIL", text)
+            scored = ts.detail(text, "a_readback").split("not scored:")[0]
+            self.assertRegex(scored, r"%s [1-9]" % where)
+            self.assertRegex(ts.detail(text, "a_readback"), r" [1-9]\d* deviating rows not explained")
+
+    def test_the_launch_is_the_accel_start_only(self):
+        # a row below 2 km/h after the car first reached it (here: an accel row at ~5 km/h read as 1.5) is scored
+        state = {"done": False}
+
+        def dip(row):
+            if not state["done"] and row["segment"] == "accel" and 4.5 <= float(row["speed_kmh"]) <= 5.5:
+                row["speed_kmh"] = "1.500"
+                row["input_post_steer"] = "0.01200"
+                state["done"] = True
+            return row
+
+        code, text = ts.run_main(e21, self.session(e21=dip))
+        self.assertNotEqual(ts.item(text, "a_readback"), "PASS", text)
+        self.assertIn("e21/accel 1", ts.detail(text, "a_readback").split("not scored:")[0])
+
+    def test_a_non_zero_command_is_never_excluded(self):
+        def settle_command(row):
+            if row["segment"] == "settle" and row["phase"] == "stair_10.5":
+                row["cmd_steer"] = "0.3000"
+                row["input_post_steer"] = "0.20000"
+            return row
+
+        code, text = ts.run_main(e21, self.session(e22=settle_command))
+        self.assertNotEqual(ts.item(text, "a_readback"), "PASS", text)
+        self.assertRegex(ts.detail(text, "a_readback").split("not scored:")[0], r"e22/settle [1-9]")
+
+    def test_an_excluded_context_never_hides_missing_rows(self):
+        def drop_stop(row):
+            return None if row["segment"] == "stop" and row["phase"] == "flat_40" else row
+
+        code, text = ts.run_main(e21, self.session(e21=drop_stop))
+        self.assertEqual(ts.item(text, "a_readback"), "INCOMPLETE", text)
+        self.assertRegex(ts.detail(text, "a_readback"), r"e21: flat_40: \d+ of \d+ rows")
+
+
 if __name__ == "__main__":
     unittest.main()

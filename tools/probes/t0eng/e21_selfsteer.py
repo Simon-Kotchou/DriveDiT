@@ -41,6 +41,13 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
   a_readback     every expected called row (all rows outside e21's no-call segment) of e21, e22 and e23 must be
                  there (each phase's physics_step start..end, one row per dispatched step) with steer_call 1 and a
                  finite command and readback, else INCOMPLETE; then |input_post_steer - cmd_steer| <= --readback-tol.
+                 Zero-command rows of the probe's own excluded contexts are not scored and are reported apart (INFO
+                 a_excluded: rows, deviations, the largest, per probe / segment; user decision 2026-11-13): the
+                 teleport and the settle after it (segments reset, settle), the stop braking (segment stop, every
+                 phase end and every abort) and the launch (an accel segment from its first row until the measured
+                 speed first reaches 2 km/h). The contexts come from the probe's schedule, never from the deviation or
+                 the acceleration; a non-zero command is never excluded, and the completeness check counts every row.
+                 Every other row is scored, a zero-command row anywhere else too.
                  A deviation is explained only by the CC-08 cmd -> steer_input model of e23 (input_model: every input
                  bin and the completed held-out PRBS at every bin speed PASS, one structure), inside its validated
                  cells (each bin speed +-15% with the largest amplitude fitted there; no gaps filled, no standstill
@@ -577,6 +584,46 @@ def called(step):
     return step.segment != "nocall"
 
 
+# (a) zero-command contexts reported apart (user decision 2026-11-13), defined a priori from the probe's own schedule
+# (DC_ProbeSteerBase segments), never from the deviation or the acceleration: the teleport and the settle after it
+# (reset, settle: brake 1 + handbrake), the probe's own stop braking (stop: brake 1, every phase end and every abort)
+# and the launch (accel from its first row until the car first reaches LAUNCH_KMH)
+EXCLUDED_SEGMENTS = {"reset": "teleport", "settle": "settle after a teleport", "stop": "stop braking"}
+LAUNCH_KMH = 2.0
+
+
+def zero_command(step):
+    cmd = step.f.get("cmd_steer")
+    return cmd is not None and abs(cmd) < 1e-9
+
+
+def launch_rows(steps):
+    """The row indices of every accel segment's launch: from its first row until the measured speed first reaches
+    LAUNCH_KMH (that row and the rest of the segment are scored); a row without a speed ends the launch too"""
+    out = set()
+    for _, _, segment, rows in sc.segments(steps):
+        if segment != "accel":
+            continue
+        for row in rows:
+            speed = row.f.get("speed_kmh")
+            if speed is None or speed >= LAUNCH_KMH:
+                break
+            out.add(row.index)
+    return out
+
+
+def excluded_context(step, launches):
+    """The excluded context of a called zero-command row ('teleport', 'settle after a teleport', 'stop braking',
+    'launch below 2 km/h'), else None: a non-zero command is never excluded"""
+    if not zero_command(step):
+        return None
+    if step.segment in EXCLUDED_SEGMENTS:
+        return EXCLUDED_SEGMENTS[step.segment]
+    if step.index in launches:
+        return "launch below %g km/h" % LAUNCH_KMH
+    return None
+
+
 def in_scope(step, scope):
     """Inside one of the model's validated (speed interval, largest |command|) cells: no gap filling, no
     extrapolation"""
@@ -587,7 +634,7 @@ def in_scope(step, scope):
     return any(lo <= v <= hi and abs(cmd) <= amp + 1e-9 for lo, hi, amp in scope["cells"])
 
 
-def model_residuals(model, scope, steps, dt, tol, bias_tol):
+def model_residuals(model, scope, steps, dt, tol, bias_tol, skip=None):
     """The CC-08 model against one play's called rows, block by block (a block: consecutive called rows of one phase
     and run; a teleport between phases is not a model step). Per block: the free-running prediction from the first
     settled row (|input - command| <= tol) and the one-step prediction from the previous measured input of the same
@@ -595,7 +642,9 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol):
     inside the model's scope and it has a finite predecessor; the free-running residual's mean over every
     BIAS_WINDOW_S must stay within bias_tol on every block (a persistent offset the one-step prediction would absorb).
     Returns the maxima and the counts: unexplained, outside (the scope), no_state (no predecessor or no settled
-    start before a deviation), bias_windows (windows over bias_tol)"""
+    start before a deviation), bias_windows (windows over bias_tol). skip(row): a row of an excluded zero-command
+    context, never scored, never a settled start, no part of the bias windows; the free-running prediction runs on
+    through it"""
     u_e, ends = [], []
     for s in steps:
         u_e.extend([s.f.get("cmd_steer") or 0.0] * sc.covered_steps(s, dt))
@@ -622,6 +671,10 @@ def model_residuals(model, scope, steps, dt, tol, bias_tol):
                 # a missing value (already INCOMPLETE by the row check): the model state is not known past it
                 free_y = None
                 out["missing"] += 1
+                continue
+            if skip is not None and skip(row):
+                if free_y is not None:
+                    free_y = model_step(model, free_y, u_e, ends[idx - 1], ends[idx] - ends[idx - 1], dt)
                 continue
             deviates = abs(post - cmd) > tol
             if deviates and not in_scope(row, scope):
@@ -680,12 +733,27 @@ def check_readback(sets, verdict, args, e23_play):
     devs = []
     per_segment = {}
     late_zero = 0
+    excluded = {"rows": 0, "devs": 0, "max": 0.0, "per": {}}
+    launches = {}
     for name, play, probe, steps, _ in sets:
         zero_run = 0
+        launches[name] = launch_rows(steps)
         for s in steps:
             cmd, post = s.f.get("cmd_steer"), s.f.get("input_post_steer")
             if not called(s) or s.i.get("steer_call") != 1 or cmd is None or post is None:
                 zero_run = 0
+                continue
+            context = excluded_context(s, launches[name])
+            if context is not None:
+                # reported apart, never scored (the completeness check above still counts every row)
+                excluded["rows"] += 1
+                if abs(post - cmd) > args.readback_tol:
+                    excluded["devs"] += 1
+                    excluded["max"] = max(excluded["max"], abs(post - cmd))
+                    key = "%s/%s" % (name, s.segment if s.segment in EXCLUDED_SEGMENTS else "launch")
+                    count, top = excluded["per"].get(key, (0, 0.0))
+                    excluded["per"][key] = (count + 1, max(top, abs(post - cmd)))
+                zero_run = zero_run + 1
                 continue
             total += 1
             if abs(post - cmd) > args.readback_tol:
@@ -696,10 +764,13 @@ def check_readback(sets, verdict, args, e23_play):
                     late_zero += 1
             zero_run = zero_run + 1 if abs(cmd) < 1e-9 else 0
     worst = max([abs(s.f["input_post_steer"] - s.f["cmd_steer"]) for _, s in devs] or [0.0])
-    head = "%d called rows in %s: %d off by > %g (max %s; %d of them after >= 60 zero-command rows; %s)" % (
+    head = "%d scored called rows in %s: %d off by > %g (max %s; %d of them after >= 60 zero-command rows; %s)" % (
         total, "+".join(n for n, _, _, _, _ in sets), len(devs), args.readback_tol, sc.fmt(worst, 4), late_zero,
         ", ".join("%s %d" % kv for kv in sorted(per_segment.items())) or "-")
     parts.append(head)
+    excluded_text = excluded_summary(excluded, args.readback_tol)
+    verdict.info("a_excluded", excluded_text)
+    parts.append("not scored: " + excluded_text)
     if total < 100:
         states.append(None)
         parts.append("< 100 called rows")
@@ -718,7 +789,8 @@ def check_readback(sets, verdict, args, e23_play):
             merged = {"one_step": 0.0, "free": 0.0, "bias": 0.0, "accumulated": 0.0, "unexplained": 0, "outside": 0,
                       "no_state": 0, "bias_windows": 0}
             for name, play, probe, steps, dt in sets:
-                res = model_residuals(model, model["scope"], steps, dt, args.readback_tol, args.bias_tol)
+                res = model_residuals(model, model["scope"], steps, dt, args.readback_tol, args.bias_tol,
+                                      skip=lambda row, ex=launches[name]: excluded_context(row, ex) is not None)
                 for key in merged:
                     merged[key] = max(merged[key], res[key]) if isinstance(merged[key], float) else \
                         merged[key] + res[key]
@@ -738,6 +810,16 @@ def check_readback(sets, verdict, args, e23_play):
     state = sc.combine(states)
     verdict.check("a_readback", state, "; ".join(parts) + sc.observed(states))
     return state
+
+
+def excluded_summary(excluded, tol):
+    """The excluded zero-command contexts' rows, their deviations over tol, the largest and the split per probe /
+    segment (the 1.9 behaviour on record)"""
+    return ("zero-command rows of the probe's own teleport, settle after it, stop braking and launch below %g km/h "
+            "(user decision 2026-11-13): %d rows, %d off by > %g (max %s; %s)" % (
+                LAUNCH_KMH, excluded["rows"], excluded["devs"], tol, sc.fmt(excluded["max"], 4),
+                ", ".join("%s %d (max %s)" % (key, count, sc.fmt(top, 3))
+                          for key, (count, top) in sorted(excluded["per"].items())) or "-"))
 
 
 def info_nocall(steps, verdict):

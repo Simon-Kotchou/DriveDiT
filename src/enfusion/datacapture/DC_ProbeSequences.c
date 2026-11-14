@@ -381,6 +381,15 @@ class DC_ProbeActuator
 	protected float m_fSinceDriveStartS = -1;	//!< world time since the last release while its check is pending, else -1
 	protected float m_fMaxKmhSinceDriveStart;
 	protected int m_iStuckForces;				//!< drive starts that latched ForceEnableSimulation
+	// Engine-off records (DD-14f): every readback that finds the engine off after one that found it on (fall), and a
+	// first readback that finds it off (first); the context of the readback from SetReadContext
+	static const int MAX_ENGINE_OFF_RECORDS = 8;
+	protected int m_iReadStep = -1;
+	protected string m_sReadPhase = "-";
+	protected string m_sReadSegment = "-";
+	protected int m_iEngineOffEvents;
+	protected ref array<string> m_aEngineOffRecords = {};
+	protected int m_iModeAStarts;				//!< StartModeA calls that found the engine off and called ForceStartEngine
 	protected bool m_bStuckWarningDue;			//!< ConsumeStuckWarning: the caller logs the latch once
 
 	// Launch clutch (DD-14c, DC_LaunchClutch.c): Init configures DC_LaunchClutchConfig.Ramp(), SetLaunchClutch the
@@ -755,6 +764,15 @@ class DC_ProbeActuator
 		lines.Insert("drive.stuck_forces=" + m_iStuckForces.ToString());
 		lines.Insert("drive.force_sim=" + DC_LaunchGuard.BoolText(m_bForced));
 		m_LaunchClutch.AppendSummaryLines(lines, "launch_clutch");
+		lines.Insert("launch_clutch.mode_a_starts=" + m_iModeAStarts.ToString());
+		lines.Insert("launch_clutch.engine_off_events=" + m_iEngineOffEvents.ToString());
+		foreach (int i, string record : m_aEngineOffRecords)
+		{
+			lines.Insert("launch_clutch.engine_off." + i.ToString() + "=" + record);
+		}
+
+		int maxRecords = MAX_ENGINE_OFF_RECORDS;
+		lines.Insert("launch_clutch.engine_off_rule=a readback (ReadPost, EngineIsOn) that finds the engine off: kind fall after one that found it on, kind first on the probe's first readback; step, phase and segment of that readback, handbrake as commanded there, starts = Mode A starts (ForceStartEngine) before it; the first " + maxRecords.ToString() + " kept, engine_off_events counts all; launch_clutch.stalls counts only a readback on followed by one off (a state passed before the first readback is forgotten)");
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -819,7 +837,10 @@ class DC_ProbeActuator
 
 		m_Controller.SetPersistentHandBrake(false);
 		if (!m_Controller.IsEngineOn())
+		{
 			m_Controller.ForceStartEngine();
+			m_iModeAStarts++;
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -979,6 +1000,11 @@ class DC_ProbeActuator
 				drivelineRpm = m_vVelLocal[2] / m_aLaunchMpsPerKrpm[forwardSlot] * 1000;
 
 			m_fAppliedClutch = m_LaunchClutch.Step(timeSlice, inGear, m_bCmdHandbrake, m_fRpm, engineOn, m_fAppliedClutch, dip, drivelineRpm, m_fCmdThrottle, m_fCmdBrake, m_iAppliedGear);
+			// the engine only counted as on (no readback yet): no seen state, so a first readback that finds an engine
+			// not started yet is no stall (it is an engine-off record of kind first, ReadPost)
+			if (!m_bStateRead)
+				m_LaunchClutch.ForgetEngine();
+
 			if (m_LaunchClutch.ConsumeRestart())
 				StartModeA();
 		}
@@ -1176,6 +1202,38 @@ class DC_ProbeActuator
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! The probe's context of the next ReadPost (its physics step, phase and segment): an engine-off record names it
+	void SetReadContext(int physicsStep, string phase, string segment)
+	{
+		m_iReadStep = physicsStep;
+		m_sReadPhase = phase;
+		m_sReadSegment = segment;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! One engine-off record (at most MAX_ENGINE_OFF_RECORDS kept, every one counted): the readback's step, phase,
+	//! segment, the commanded handbrake, rpm, speed, its kind (first: the probe's first readback; fall: on before) and
+	//! the Mode A starts before it
+	protected void RecordEngineOff(bool first)
+	{
+		m_iEngineOffEvents++;
+		if (m_aEngineOffRecords.Count() >= MAX_ENGINE_OFF_RECORDS)
+			return;
+
+		string handbrake = "0";
+		if (m_bCmdHandbrake)
+			handbrake = "1";
+
+		string kind = "fall";
+		if (first)
+			kind = "first";
+
+		string phase = DC_ProbeCsv.CleanField(m_sReadPhase);
+		string segment = DC_ProbeCsv.CleanField(m_sReadSegment);
+		m_aEngineOffRecords.Insert(string.Format("step %1 phase %2 segment %3 handbrake %4 rpm %5 kmh %6 kind %7 starts %8", m_iReadStep, phase, segment, handbrake, m_fRpm.ToString(-1, 1), m_fSpeedKmh.ToString(-1, 2), kind, m_iModeAStarts));
+	}
+
+	//------------------------------------------------------------------------------------------------
 	//! Call from OnProbePostSimulate: reads input_post_* and the vehicle state of this step
 	void ReadPost()
 	{
@@ -1197,7 +1255,10 @@ class DC_ProbeActuator
 
 		m_fRpm = m_Simulation.EngineGetRPM();
 		m_fRpmFeedback = m_Simulation.EngineGetRPMFeedback();
-		m_bEngineOn = m_Simulation.EngineIsOn();
+		bool engineOn = m_Simulation.EngineIsOn();
+		bool firstRead = !m_bStateRead;
+		bool engineOff = !engineOn && (firstRead || m_bEngineOn);
+		m_bEngineOn = engineOn;
 		m_bStateRead = true;
 		m_fSpeedKmh = m_Simulation.GetSpeedKmh();
 		m_vVelLocal = m_Simulation.GetVelocityLocal();
@@ -1219,6 +1280,8 @@ class DC_ProbeActuator
 		}
 
 		m_iWheelsContact = contacts;
+		if (engineOff)
+			RecordEngineOff(firstRead);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -2104,6 +2167,7 @@ class DC_ProbeSequences : DC_ProbeComponent
 			return;
 
 		m_iLastStep = physicsStep;
+		m_Actuator.SetReadContext(physicsStep, phase.m_sName, SegmentName(m_eSegment));
 		m_Actuator.ReadPost();
 		bool inArea = m_Area.Contains(m_Actuator.GetPosition(), m_fAreaMarginM);
 		WriteStepRow(physicsStep, timeSlice, phase, inArea);

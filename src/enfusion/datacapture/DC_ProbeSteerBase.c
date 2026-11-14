@@ -1040,6 +1040,7 @@ class DC_ProbeSteerBase : DC_ProbeComponent
 			return;
 
 		m_iLastStep = physicsStep;
+		m_Actuator.SetReadContext(physicsStep, phase.m_sName, SegmentName(m_eSegment));
 		m_Actuator.ReadPost();
 		m_Channels.ReadChannels();
 		bool inArea = m_Area && m_Area.Contains(m_Actuator.GetPosition(), m_fAreaMarginM);

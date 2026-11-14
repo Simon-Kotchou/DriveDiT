@@ -74,7 +74,8 @@
 //   - restarts counts these requests.
 //
 // COUNTERS (every mode counts stalls; the rest only count in "ramp" and "slip"; lock-ups only in "slip"):
-//   - stalls: EngineIsOn seen true, then false on the next Step;
+//   - stalls: EngineIsOn seen true, then false on the next Step (a state the caller passed without a readback is
+//     forgotten with ForgetEngine and never counts);
 //   - restarts;
 //   - guard drops;
 //   - max_slip_s: the longest span with 0 < c < 1 in gear, without a handbrake or dip, with the engine on.
@@ -770,6 +771,16 @@ class DC_LaunchClutch
 			m_fCoupling = 1;
 			m_iLockups++;
 		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! The engine state of the last Step was no readback (DC_ProbeActuator before its first ReadPost passes the engine
+	//! as on, so that no restart comes from a default): it is forgotten, so the next Step neither counts a stall from it
+	//! nor compares with it (DD-14f: the first 1.9.0.37 Play with mode slip counted 'stalls 1' for an engine that had
+	//! not been started yet when the probe's first physics step ran, before its teleport and Mode A start)
+	void ForgetEngine()
+	{
+		m_iEngineSeen = -1;
 	}
 
 	//------------------------------------------------------------------------------------------------

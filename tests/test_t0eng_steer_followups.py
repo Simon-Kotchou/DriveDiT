@@ -705,6 +705,11 @@ class SurveyAnalysisTests(unittest.TestCase):
                       "SCR_IndestructibleEnvironmentalEntity", survey)
         self.assertIn("longest runs at 1000.0 2000.0 heading 10.00 (65.0 m)", survey)
         self.assertEqual(ts.item(text, "c_cross"), "INCOMPLETE", text)
+        # Codex DD-14f, LOW: at 6 m stations 9 stations span 48 m, not 50
+        header = survey_header("cross", 5, 21, 9, "0:4;9:1", step="6.00")
+        coarse = ts.build_e21(os.path.join(self.base, "coarse", "play_01"), cross_found=False, header_extra=header)
+        code, text = ts.run_main(e21, [coarse, "--e22", ts.build_e22(os.path.join(self.base, "e22c", "play_01"))])
+        self.assertIn("0 with a run of >= 10 stations (50 m)", ts.detail(text, "c_cross_survey"))
         # a play from a producer before the survey
         plain = ts.build_e21(os.path.join(self.base, "plain", "play_01"), cross_found=False)
         code, text = ts.run_main(e21, [plain, "--e22", ts.build_e22(os.path.join(self.base, "e22b", "play_01"))])

@@ -1075,7 +1075,8 @@ def survey_summary(play):
                     histogram[probe_common.to_int(r.get("run_stations"), 0)] = probe_common.to_int(r.get("strips"), 0)
         reach = []
         for zone in SURVEY_ZONES_M:
-            need = int(round(zone / step)) + 1 if step else None
+            # stations whose span (run - 1) x step covers the zone (rounded up: 9 stations at 6 m span 48 m < 50 m)
+            need = int(math.ceil(zone / step - 1e-9)) + 1 if step else None
             if need is not None:
                 reach.append("%d with a run of >= %d stations (%g m)" % (
                     sum(n for run, n in histogram.items() if run >= need), need, zone))

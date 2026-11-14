@@ -4,6 +4,13 @@ Determinism: the data order and every random draw of the loss are functions of `
 from a checkpoint (model, EMA, optimiser, step) continues exactly as the uninterrupted run would. A process started
 by ``torchrun`` (``WORLD_SIZE`` > 1) joins the process group, wraps the model in DistributedDataParallel and takes its
 own slice of every global batch (efficiency 3.4 item 1: DDP, not FSDP, at <= 400M).
+
+Writes: ``run_config.json``, ``log.jsonl`` and ``checkpoints/`` under ``run_dir``, and nothing else. ``run_dir`` must
+pass the write boundary (``drivedit.local_paths``: RAM or the verified data drive of the local config, never a Windows
+system volume; DD-23): ``check_run_dir`` runs on every rank before the process group, the model or any file, and rank 0
+checks each file again just before writing it (a ``checkpoints`` folder or ``log.jsonl`` that is a symlink leading out
+of the boundary is refused). Caches and temporary files (torch.compile, Triton, CUDA) are the entry point's business:
+``drivedit.process_paths.prepare_process``.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, Sampler
 
+from drivedit import local_paths
 from drivedit.model.world_model import WorldModel
 from drivedit.train.config import RunConfig
 from drivedit.train.losses import diffusion_forcing_loss
@@ -119,18 +127,34 @@ def build_model(cfg: RunConfig) -> WorldModel:
         return WorldModel(cfg.model)
 
 
+#: The files the trainer writes directly under ``run_dir`` (checkpoints go to ``run_dir/CHECKPOINTS``).
+RUN_FILES: tuple[str, ...] = ("run_config.json", "log.jsonl")
+CHECKPOINTS = "checkpoints"
+
+
+def check_run_dir(run_dir: Path) -> None:
+    """``WriteRefusedError`` unless the write boundary allows every place the trainer writes under ``run_dir``: its
+    files (``RUN_FILES``) and ``checkpoints/`` (``drivedit.local_paths``). Writes nothing."""
+    for name in RUN_FILES:
+        local_paths.check_write(run_dir / name)
+    local_paths.check_dir(run_dir / CHECKPOINTS)
+
+
 class Trainer:
     """A plain loop over ``dataset`` windows (the DRIVEDIT_INTERFACES section 4 dict) for ``cfg.steps`` steps.
 
     The trainer trusts its dataset: split, sealed-map and decision-rate rules are enforced by
     ``drivedit.train.data.open_training_windows``, dd-train's only data entry point, not here.
 
-    ``run_dir`` receives ``run_config.json``, ``log.jsonl`` (rank 0) and ``checkpoints/step_<step>.pt``.
+    ``run_dir`` receives ``run_config.json``, ``log.jsonl`` (rank 0) and ``checkpoints/step_<step>.pt``; they must pass
+    the write boundary (``check_run_dir``), else ``WriteRefusedError`` before anything is built.
     """
 
     def __init__(
         self, cfg: RunConfig, dataset: Dataset[Any], run_dir: Path, *, device: torch.device | None = None
     ) -> None:
+        # Every rank checks, so a refused run_dir stops them all before the process group (none waits on a barrier).
+        check_run_dir(run_dir)
         self.cfg, self.dataset, self.run_dir = cfg, dataset, run_dir
         self.dist = DistInfo.from_env()
         if device is None:
@@ -169,7 +193,7 @@ class Trainer:
 
     @property
     def checkpoint_dir(self) -> Path:
-        return self.run_dir / "checkpoints"
+        return self.run_dir / CHECKPOINTS
 
     def lr_at(self, step: int) -> float:
         """Linear warm-up over ``warmup_steps``, then constant (MODELING_PLAN section 3)."""
@@ -240,6 +264,9 @@ class Trainer:
         """Write ``checkpoints/step_<step>.pt`` atomically (rank 0) and keep the newest ``keep_checkpoints``."""
         path = self.checkpoint_dir / f"step_{self.step:08d}.pt"
         if self.is_main:
+            tmp = path.with_suffix(".tmp")
+            for target in (tmp, path):
+                local_paths.check_write(target)
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
             state = {
                 "format": CHECKPOINT_FORMAT,
@@ -249,7 +276,6 @@ class Trainer:
                 "ema": self.ema.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
             }
-            tmp = path.with_suffix(".tmp")
             torch.save(state, tmp)
             tmp.replace(path)
             for old in sorted(self.checkpoint_dir.glob("step_*.pt"))[: -self.cfg.keep_checkpoints]:
@@ -278,8 +304,9 @@ class Trainer:
     # ------------------------------------------------------------------------------------------------------ helpers
 
     def _write_run_config(self) -> None:
-        self.run_dir.mkdir(parents=True, exist_ok=True)
         path = self.run_dir / "run_config.json"
+        local_paths.check_write(path)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         text = self.cfg.to_json()
         if path.exists() and RunConfig.from_json(path.read_text()) != self.cfg:
             raise ValueError(f"{path} holds a different run config; use a new run_dir")
@@ -290,7 +317,9 @@ class Trainer:
             return
         record = {"step": self.step, "step_s": round(seconds, 4), **{k: float(v) for k, v in logs.items()}}
         line = json.dumps(record)
-        with (self.run_dir / "log.jsonl").open("a") as f:
+        path = self.run_dir / "log.jsonl"
+        local_paths.check_write(path)
+        with path.open("a") as f:
             f.write(line + "\n")
         print(line, flush=True)
 

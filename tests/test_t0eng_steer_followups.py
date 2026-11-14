@@ -243,5 +243,51 @@ class Step0ErrorBreakdownTests(unittest.TestCase):
         self.assertRegex(ts.detail(text, "step0_channel"), r"rot: median error [^;]*; [^;]*-> %s" % state)
 
 
+class RawReadbackTests(unittest.TestCase):
+    """The input model's per-event first-order stage when the post-step readback sometimes shows the raw command"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = probe_common.make_temp_dir("t0eng_dd14f_")
+        def car():
+            return ts.SteerCar(actuator=ts.Actuator(tau=0.014))
+
+        cls.clean = ts.build_e23(os.path.join(cls.base, "clean", "play_01"), car(), grid="10:0.5x6")
+        cls.raw = ts.build_e23(os.path.join(cls.base, "raw", "play_01"), car(), grid="10:0.5x6")
+        state = {"previous": None}
+
+        # events 4..11: the readback equals the command on the row of each of their command changes, the onset and
+        # the release (the d3ca pattern; the release row still carries the released event's index)
+        def raw_rows(row):
+            cmd = row["cmd_steer"]
+            changed = state["previous"] is not None and cmd != state["previous"]
+            state["previous"] = cmd
+            if changed and row["segment"] == "train" and int(row["event_idx"]) >= 4:
+                row["input_post_steer"] = "%.5f" % float(cmd)
+            return row
+
+        rewrite(cls.raw, "e23", raw_rows)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, True)
+
+    def test_a_raw_readback_phase_is_named_and_stays_unresolved(self):
+        code, text = ts.run_main(e23, [self.clean])
+        self.assertEqual(ts.item(text, "input_10kmh_0.5"), "PASS", text)
+        self.assertNotIn("raw readback", ts.detail(text, "input_10kmh_0.5"))
+        code, text = ts.run_main(e23, [self.raw])
+        detail = ts.detail(text, "input_10kmh_0.5")
+        self.assertEqual(ts.item(text, "input_10kmh_0.5"), "INCOMPLETE", text)
+        self.assertRegex(detail, r"tau unresolved \(the stage is active in \d+ of 12 events\)")
+        self.assertRegex(detail, r"raw readback on a transient row in [1-9]\d* of 12 events")
+        # CC-07 (a)'s model exception names it too and stays unavailable
+        args = types.SimpleNamespace(min_events=6, max_cv=0.2, min_r2=0.9)
+        state, model, text = e23.input_model(probe_common.Play(self.raw), args)
+        self.assertIsNone(state)
+        self.assertIsNone(model)
+        self.assertIn("raw readback on a transient row", text)
+
+
 if __name__ == "__main__":
     unittest.main()

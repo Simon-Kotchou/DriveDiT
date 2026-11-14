@@ -65,10 +65,15 @@ floor) the lowest BIC; a first-order stage that does not improve the fit beyond 
 Parameter stability: the selected structure fitted to each event alone; CV = stdev / |mean| of g (unresolved when a
 rate limit covers the whole on-time in more than 1/3 of the events), of tau, R and sigma; a stage active in some
 events and inactive in others (tau < dt / ln 100, no rate limit, no relaxation) is unresolved, never stable; the delay
-is stable when constant or its CV <= --max-cv. Without a complete footer every bin, PRBS and steer_sign result is
-withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input bin and the held-out
-PRBS at every bin speed to PASS and no aborted phase at those speeds; its scope is the validated cells only (each bin
-speed +-15% with the largest amplitude fitted there), no gap filling, no extrapolation to standstill.
+is stable when constant or its CV <= --max-cv. An input bin with an unresolved parameter also reports its raw readbacks
+(raw_readback, a diagnostic that decides nothing): events whose input_post_steer equals cmd_steer within 5e-5 on one of
+the first 3 rows after a command change, where the bin's first-order stage predicts at most g (1 - exp(-dt / tau)) of
+the step; the post-step readback then shows the setter's value before the engine's smoothing (a sampling phase that
+comes and goes over a run), which the per-event fits read as no stage. Without a complete footer every bin, PRBS and
+steer_sign result is withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input
+bin and the held-out PRBS at every bin speed to PASS and no aborted phase at those speeds; its scope is the validated
+cells only (each bin speed +-15% with the largest amplitude fitted there), no gap filling, no extrapolation to
+standstill.
 Exit codes: 0 the analysis ran (the items carry the verdicts), 1 an input, identity or usage error.
 """
 
@@ -882,7 +887,7 @@ def analyse_bin(windows, dt, args, step_size, gaps=(0, 0)):
         parts = parts + [None]
         state = None
     out.update({"state": state, "selected": selected, "params": params, "rate": rate, "test_r2": info["test_r2"],
-                "per_event": per_event})
+                "per_event": per_event, "unresolved": [text for ok, text in stable.values() if ok is None]})
     out["detail"] = ("%s (%s): held-out R2 %s (>= %g) on %d doublets (trained on %d), d %d steps, g %s, tau %s s, "
                      "rate limit %s /s, sigma %s m; %s (<= %g); %d events, signs %s; others: %s" % (
                          selected, STRUCTURE_NAMES[selected], sc.fmt(info["test_r2"], 4), args.min_r2,
@@ -895,6 +900,54 @@ def analyse_bin(windows, dt, args, step_size, gaps=(0, 0)):
         out["detail"] = ("delay not identifiable under merged dispatches (%d events with a command change first "
                          "observed after a dispatch of more than one engine step): " % merged) + out["detail"]
     return out
+
+
+RAW_READBACK_TOL = 5e-5       # half the 4-decimal CSV resolution of cmd_steer and input_post_steer
+RAW_READBACK_ROWS = 3         # the transient rows after a command change in which a first-order stage still lags
+
+
+def raw_readback(windows, params, dt):
+    """Diagnostic of the input path: (events, rows) whose readback equals the raw command (|input_post_steer -
+    cmd_steer| <= RAW_READBACK_TOL) on one of the first RAW_READBACK_ROWS rows after a command change (the onset and
+    the release), where the bin's first-order stage predicts at most g (1 - exp(-dt / tau)) of the step; and that
+    share. Such rows are no smoothing at all: the post-step readback was taken before the engine's smoothing of that
+    step (a sampling phase that comes and goes over a run), so the per-event fits of those events find no stage while
+    the others do. Not gated: the stage stays unresolved"""
+    share = None
+    if params is not None and params.tau > 0:
+        share = abs(params.g) * (1.0 - math.exp(-dt / params.tau))
+    events = rows = 0
+    for w in windows:
+        hit = 0
+        previous = None
+        since = None
+        for row in w["rows"]:            # the first row is the onset: a change from the history before it
+            cmd, post = row.f.get("cmd_steer"), row.f.get("input_post_steer")
+            if cmd is None or post is None:
+                previous = cmd
+                continue
+            if previous is None or abs(cmd - previous) > 1e-9:
+                since = 0
+            if since is not None and since < RAW_READBACK_ROWS and abs(post - cmd) <= RAW_READBACK_TOL:
+                hit += 1
+            since = since + 1 if since is not None else None
+            previous = cmd
+        events += int(hit > 0)
+        rows += hit
+    return events, rows, share
+
+
+def raw_readback_text(windows, res, dt):
+    """'; raw readback ...' for an input bin with an unresolved stage, else ''"""
+    if not res.get("unresolved") or not windows:
+        return ""
+    events, rows, share = raw_readback(windows, res.get("params"), dt)
+    if not events:
+        return "; no raw readback on a transient row (the stage's spread is not the readback sampling phase)"
+    return ("; raw readback on a transient row in %d of %d events (%d rows: input_post_steer = cmd_steer within %g "
+            "where the bin model reaches %s of the step): the post-step readback sometimes precedes the engine's "
+            "smoothing, so those events show no stage (a sampling phase, not identified dynamics)" % (
+                events, len(windows), rows, RAW_READBACK_TOL, sc.fmt(share, 3)))
 
 
 def channel_for(args, play, verdict):
@@ -1002,7 +1055,8 @@ def analyse(play, args, verdict):
                     raw_states.append(None)
                     continue
                 res = results[(path, (speed, amplitude))]
-                verdict.check(name, res["state"], "PARTIAL (raw engine path): " + res["detail"])
+                note = raw_readback_text(res["windows"], res, dt) if path == "input" else ""
+                verdict.check(name, res["state"], "PARTIAL (raw engine path): " + res["detail"] + note)
                 raw_states.append(res["state"])
         for speed in SPEC_SPEEDS:
             name = "prbs_%s_%gkmh" % (path, speed)
@@ -1017,7 +1071,8 @@ def analyse(play, args, verdict):
     for key in extra:
         res = analyse_bin(input_bins[key], dt, args, key[1], input_gaps.get(key, (0, 0)))
         verdict.info("input_%gkmh_%g" % key, "outside the CC-08 grid (a validated cell of CC-07 (a)'s input model "
-                                             "only): %s, %s" % (STATE_TEXT[res["state"]], res["detail"]))
+                                             "only): %s, %s%s" % (STATE_TEXT[res["state"]], res["detail"],
+                                                                  raw_readback_text(input_bins[key], res, dt)))
     for speed in SPEC_SPEEDS:
         for amplitude, _ in SPEC_STEPS:
             res = results[("kappa", (speed, amplitude))]
@@ -1069,7 +1124,9 @@ def input_model(play, args):
                      if speed in set(key[0] for key, _ in fitted))
     if stopped:
         return None, None, "e23 phases of the model's speeds did not end ok: %s" % ", ".join(stopped)
-    texts = ["%g km/h x %g: %s %s" % (key[0], key[1], STATE_TEXT[res["state"]], res["detail"].split(";")[0])
+    texts = ["%g km/h x %g: %s %s%s%s" % (key[0], key[1], STATE_TEXT[res["state"]], res["detail"].split(";")[0],
+                                          "".join("; " + text for text in res.get("unresolved") or []),
+                                          raw_readback_text(bins.get(key, []), res, dt))
              for key, res in fitted]
     states = [res["state"] for _, res in fitted]
     results = {("input", key): res for key, res in fitted}

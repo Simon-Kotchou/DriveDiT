@@ -208,5 +208,40 @@ class Step0HoldTests(unittest.TestCase):
         self.assertEqual(e23.centering(window(4)), (None, None))
 
 
+class Step0ErrorBreakdownTests(unittest.TestCase):
+    def setUp(self):
+        self.base = probe_common.make_temp_dir("t0eng_dd14f_")
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def test_the_breakdown_names_an_asymmetric_channel_and_changes_no_verdict(self):
+        a = ts.build_e21(os.path.join(self.base, "e21", "play_01"))
+        b = ts.build_e22(os.path.join(self.base, "e22", "play_01"))
+
+        def left_larger(row):
+            if float(row["cmd_steer"]) < 0:
+                for column in ("wa_rot_l", "wa_rot_r"):
+                    row[column] = "%.6f" % (float(row[column]) * 1.04)
+            return row
+
+        rewrite(b, "e22", left_larger)
+        code, text = ts.run_main(e21, [a, "--e22", b])
+        line = ts.detail(text, "step0_error")
+        self.assertTrue(line.startswith("rot, L 2.42 m (diagnostic only, the bound stays 5%)"), line)
+        right = re.search(r"right \(kappa > 0\) n \d+ median \|err\| ([-\d.e]+)% signed ([-\d.e]+)%", line)
+        left = re.search(r"left \(kappa < 0\) n \d+ median \|err\| ([-\d.e]+)% signed ([-\d.e]+)%", line)
+        self.assertIsNotNone(right, line)
+        self.assertLess(abs(float(right.group(2))), 1.0)
+        self.assertGreater(float(left.group(2)), 3.0)
+        self.assertRegex(line, r"per level \(right / left\): ref 0\.3: [^;]*; stair 0\.05: \|delta\| [\d.]+ / "
+                               r"[\d.]+ deg \(left / right 1\.0[34]\d*\)")
+        self.assertIn("a wheelbase / gain scale and an understeer gradient are not separable", line)
+        for label in ("by |kappa| 1/m:", "by |a_lat| m/s2:", "by speed km/h:", "by |delta_eff| deg:"):
+            self.assertIn(label, line)
+        # the verdict is the median error against the unchanged bound, whatever the breakdown says
+        m = re.search(r"rot: median error ([\d.]+)% over \d+ rows", ts.detail(text, "step0_channel"))
+        state = "PASS" if float(m.group(1)) <= 5.0 else "FAIL"
+        self.assertRegex(ts.detail(text, "step0_channel"), r"rot: median error [^;]*; [^;]*-> %s" % state)
+
+
 if __name__ == "__main__":
     unittest.main()

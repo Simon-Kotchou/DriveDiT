@@ -34,7 +34,10 @@ MIGRATION_1_9.md 6.1 CC-07, item by item:
                  resolution is then coarser than one step); unmeasurable changes are counted, and more than
                  --max-unmeasurable of them (or < 3 measurable, so also no qualifying change) is INCOMPLETE.
                  The first channel that passes is the wheel_angle (the steering0 signal at --signal-scale-deg per
-                 unit; that scale is carried to every reader); none passes and one is INCOMPLETE -> INCOMPLETE
+                 unit; that scale is carried to every reader); none passes and one is INCOMPLETE -> INCOMPLETE.
+                 INFO step0_error (diagnostic, no threshold): that channel's error by |kappa|, |a_lat|, speed and
+                 |delta_eff| bins and by turn direction, and per command level held with both signs the right / left
+                 angles and the wheelbase their sign-mean implies
   a_readback     every expected called row (all rows outside e21's no-call segment) of e21, e22 and e23 must be
                  there (each phase's physics_step start..end, one row per dispatched step) with steer_call 1 and a
                  finite command and readback, else INCOMPLETE; then |input_post_steer - cmd_steer| <= --readback-tol.
@@ -353,7 +356,82 @@ def step0_selection(load_play, args, extra_play=None):
                            "; ".join(parts), result["selected"] or "none",
                            "; stair phases not ok: " + ", ".join("%s %s" % kv for kv in sorted(aborted.items()))
                            if aborted else "")
+    result["low_rows"] = low
     return result
+
+
+ERROR_BINS = (("|kappa| 1/m", lambda s, d: abs(s.kappa), (0.004, 0.01, 0.02, 0.04, 0.08)),
+              ("|a_lat| m/s2", lambda s, d: abs(s.a_lat), (0.0, 0.25, 0.5, 0.75)),
+              ("speed km/h", lambda s, d: s.f.get("speed_kmh"), (10.0, 12.5, 15.0, 17.5)),
+              ("|delta_eff| deg", lambda s, d: abs(math.degrees(d)), (0.0, 2.0, 5.0, 10.0)))
+
+
+def error_breakdown(selection, channel, scale, bound):
+    """Diagnostic of the step-0 median error (no threshold, no verdict): the error of channel over the low-slip rows
+    by |kappa|, |a_lat|, speed and |delta_eff| bins and by turn direction, each bin's median |error| and median signed
+    error (tan(delta_eff) / L - kappa) / kappa; per command level held with both signs, the angle magnitudes right /
+    left and the curvature magnitudes, and the wheelbase their sign-mean angle implies. All rows at one speed make
+    a_lat proportional to kappa there: a wheelbase or channel-gain scale and an understeer gradient are then not
+    separable"""
+    rows = selection.get("low_rows") or []
+    wheelbase = selection.get("L")
+    data = []
+    for s in rows:
+        delta = sc.channel_angle(s, channel, scale)
+        if delta is not None and wheelbase:
+            data.append((s, delta, (math.tan(delta) / wheelbase - s.kappa) / s.kappa))
+    if not data:
+        return "%s: no low-slip rows with the channel" % channel
+
+    def summary(items):
+        return "n %d median |err| %s signed %s" % (len(items), sc.fmt(sc.median([abs(e) * 100 for e in items]), 3, "%"),
+                                                   sc.fmt(sc.median([e * 100 for e in items]), 3, "%"))
+
+    parts = []
+    for label, value, edges in ERROR_BINS:
+        bins = {}
+        for s, delta, err in data:
+            x = value(s, delta)
+            if x is None:
+                continue
+            index = sum(1 for edge in edges if x >= edge) - 1
+            bins.setdefault(index, []).append(err)
+        texts = []
+        for index in sorted(bins):
+            lo = edges[index] if index >= 0 else None
+            hi = edges[index + 1] if 0 <= index + 1 < len(edges) else None
+            name = "<%g" % edges[0] if index < 0 else ("%g..%g" % (lo, hi) if hi is not None else ">=%g" % lo)
+            texts.append("%s: %s" % (name, summary(bins[index])))
+        parts.append("by %s: %s" % (label, "; ".join(texts)))
+    sides = {"right (kappa > 0)": [e for s, _, e in data if s.kappa > 0],
+             "left (kappa < 0)": [e for s, _, e in data if s.kappa < 0]}
+    parts.append("by direction: %s" % "; ".join("%s %s" % (k, summary(v)) for k, v in sides.items() if v))
+    levels = {}
+    for s, delta, _ in data:
+        cmd = s.f.get("cmd_steer")
+        if cmd is not None and abs(cmd) > 1e-9:
+            levels.setdefault((s.segment, round(abs(cmd), 4)), {}).setdefault(1 if cmd > 0 else -1, []).append(
+                (abs(delta), abs(s.kappa)))
+    pairs = []
+    for (segment, level), by_sign in sorted(levels.items()):
+        if 1 not in by_sign or -1 not in by_sign:
+            continue
+        right = sc.median([a for a, _ in by_sign[1]])
+        left = sc.median([a for a, _ in by_sign[-1]])
+        k_right = sc.median([k for _, k in by_sign[1]])
+        k_left = sc.median([k for _, k in by_sign[-1]])
+        implied = math.tan((right + left) / 2.0) / ((k_right + k_left) / 2.0)
+        pairs.append("%s %g: |delta| %s / %s deg (left / right %s), |kappa| %s / %s 1/m, implied L %s m" % (
+            segment, level, sc.fmt(math.degrees(right), 4), sc.fmt(math.degrees(left), 4), sc.fmt(left / right, 4),
+            sc.fmt(k_right, 4), sc.fmt(k_left, 4), sc.fmt(implied, 4)))
+    if pairs:
+        parts.append("per level (right / left): " + "; ".join(pairs))
+    speeds = [s.f.get("speed_kmh") for s, _, _ in data if s.f.get("speed_kmh") is not None]
+    if speeds and max(speeds) - min(speeds) < 2.5:
+        parts.append("every row at %s..%s km/h: a_lat ~ kappa, so a wheelbase / gain scale and an understeer gradient "
+                     "are not separable" % (sc.fmt(min(speeds), 3), sc.fmt(max(speeds), 3)))
+    return "%s, L %s m (diagnostic only, the bound stays %s%%): %s" % (channel, sc.fmt(wheelbase, 4),
+                                                                       sc.fmt(bound * 100, 3), "; ".join(parts))
 
 
 def steepest_text(steepest):
@@ -1045,6 +1123,10 @@ def main(argv=None):
         verdict.check("step0_channel", selection["state"], selection["detail"])
         if selection["state"] is True:
             channel, scale = selection["selected"], selection["scale_rad"]
+        if selection.get("low_rows"):
+            shown = selection.get("selected") or sc.CHANNELS[0][0]
+            verdict.info("step0_error", error_breakdown(selection, shown, selection.get("scale_rad"),
+                                                        args.max_step0_error))
     else:
         verdict.check("step0_channel", None, "no e22 play (--e22)")
 

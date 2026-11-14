@@ -66,10 +66,10 @@ Parameter stability: the selected structure fitted to each event alone; CV = std
 rate limit covers the whole on-time in more than 1/3 of the events), of tau, R and sigma; a stage active in some
 events and inactive in others (tau < dt / ln 100, no rate limit, no relaxation) is unresolved, never stable; the delay
 is stable when constant or its CV <= --max-cv. An input bin with an unresolved parameter also reports its raw readbacks
-(raw_readback, a diagnostic that decides nothing): events whose input_post_steer equals cmd_steer within 5e-5 on one of
-the first 3 rows after a command change, where the bin's first-order stage predicts at most g (1 - exp(-dt / tau)) of
-the step; the post-step readback then shows the setter's value before the engine's smoothing (a sampling phase that
-comes and goes over a run), which the per-event fits read as no stage. Without a complete footer every bin, PRBS and
+(raw_readback, a diagnostic that decides nothing): the events whose input_post_steer equals cmd_steer within 5e-5 on
+one of the first 3 rows after a command change where the bin's model is still more than 2e-4 from the command; the
+post-step readback then shows the setter's value before the engine's smoothing (a sampling phase that comes and goes
+over a run), which the per-event fits read as no stage. Without a complete footer every bin, PRBS and
 steer_sign result is withheld (INCOMPLETE with its observed tag). input_model (CC-07 a's exception) needs every input
 bin and the held-out PRBS at every bin speed to PASS and no aborted phase at those speeds; its scope is the validated
 cells only (each bin speed +-15% with the largest amplitude fitted there), no gap filling, no extrapolation to
@@ -903,51 +903,62 @@ def analyse_bin(windows, dt, args, step_size, gaps=(0, 0)):
 
 
 RAW_READBACK_TOL = 5e-5       # half the 4-decimal CSV resolution of cmd_steer and input_post_steer
-RAW_READBACK_ROWS = 3         # the transient rows after a command change in which a first-order stage still lags
+RAW_READBACK_ROWS = 3         # the transient rows after a command change that are looked at
+RAW_READBACK_MARGIN = 4 * RAW_READBACK_TOL    # the bin model must still be this far from the command on the row
+RAW_READBACK_IDS = 12         # event identities listed at most
 
 
 def raw_readback(windows, params, dt):
-    """Diagnostic of the input path: (events, rows) whose readback equals the raw command (|input_post_steer -
-    cmd_steer| <= RAW_READBACK_TOL) on one of the first RAW_READBACK_ROWS rows after a command change (the onset and
-    the release), where the bin's first-order stage predicts at most g (1 - exp(-dt / tau)) of the step; and that
-    share. Such rows are no smoothing at all: the post-step readback was taken before the engine's smoothing of that
-    step (a sampling phase that comes and goes over a run), so the per-event fits of those events find no stage while
-    the others do. Not gated: the stage stays unresolved"""
-    share = None
-    if params is not None and params.tau > 0:
-        share = abs(params.g) * (1.0 - math.exp(-dt / params.tau))
-    events = rows = 0
+    """Diagnostic of the input path: ([event ids], rows) of the events whose readback equals the raw command
+    (|input_post_steer - cmd_steer| <= RAW_READBACK_TOL) on one of the first RAW_READBACK_ROWS rows after a command
+    change (the onset and the release) where the bin's model, run from the settled previous level, is still more than
+    RAW_READBACK_MARGIN from the command (y = g u + (g p - g u) a^steps, a = exp(-dt / tau); a gain below 1 alone
+    keeps a settled readback off the command). Such rows show no smoothing at all: the post-step readback was taken
+    before the engine's smoothing of that step (a sampling phase that comes and goes over a run), so the per-event fits
+    of those events find no stage. A row the model itself puts on the command (a short tau) is never counted. Not
+    gated: the stage stays unresolved"""
+    if params is None:
+        return [], 0
+    a = math.exp(-dt / params.tau) if params.tau > 0 else 0.0
+    ids, rows = [], 0
     for w in windows:
         hit = 0
-        previous = None
-        since = None
+        previous = w["u_e"][w["offset"] - 1] if w["offset"] > 0 else 0.0
+        level = previous
+        since = steps = None             # rows and engine steps since the last command change
         for row in w["rows"]:            # the first row is the onset: a change from the history before it
             cmd, post = row.f.get("cmd_steer"), row.f.get("input_post_steer")
             if cmd is None or post is None:
-                previous = cmd
+                since = None
                 continue
-            if previous is None or abs(cmd - previous) > 1e-9:
-                since = 0
-            if since is not None and since < RAW_READBACK_ROWS and abs(post - cmd) <= RAW_READBACK_TOL:
+            if abs(cmd - level) > 1e-9:
+                previous, level, since, steps = level, cmd, 0, 0
+            if since is None or since >= RAW_READBACK_ROWS:
+                continue
+            since += 1
+            steps += sc.covered_steps(row, dt)
+            predicted = params.g * cmd + (params.g * previous - params.g * cmd) * a ** steps
+            if abs(post - cmd) <= RAW_READBACK_TOL and abs(predicted - cmd) > RAW_READBACK_MARGIN:
                 hit += 1
-            since = since + 1 if since is not None else None
-            previous = cmd
-        events += int(hit > 0)
-        rows += hit
-    return events, rows, share
+        if hit:
+            first = w["rows"][0]
+            ids.append("%s#%s" % (first.phase, first.i.get("event_idx")))
+            rows += hit
+    return ids, rows
 
 
 def raw_readback_text(windows, res, dt):
     """'; raw readback ...' for an input bin with an unresolved stage, else ''"""
     if not res.get("unresolved") or not windows:
         return ""
-    events, rows, share = raw_readback(windows, res.get("params"), dt)
-    if not events:
+    ids, rows = raw_readback(windows, res.get("params"), dt)
+    if not ids:
         return "; no raw readback on a transient row (the stage's spread is not the readback sampling phase)"
-    return ("; raw readback on a transient row in %d of %d events (%d rows: input_post_steer = cmd_steer within %g "
-            "where the bin model reaches %s of the step): the post-step readback sometimes precedes the engine's "
-            "smoothing, so those events show no stage (a sampling phase, not identified dynamics)" % (
-                events, len(windows), rows, RAW_READBACK_TOL, sc.fmt(share, 3)))
+    shown = ", ".join(ids[:RAW_READBACK_IDS]) + (", ..." if len(ids) > RAW_READBACK_IDS else "")
+    return ("; raw readback on a transient row in %d of %d events (%s; %d rows: input_post_steer = cmd_steer within %g "
+            "where the bin model is still more than %g from it): the post-step readback sometimes precedes the "
+            "engine's smoothing, so those events can show no stage (a sampling phase, not identified dynamics)" % (
+                len(ids), len(windows), shown, rows, RAW_READBACK_TOL, RAW_READBACK_MARGIN))
 
 
 def channel_for(args, play, verdict):

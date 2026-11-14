@@ -328,6 +328,26 @@ class RawReadbackTests(unittest.TestCase):
         self.assertIn("raw readback on a transient row", text)
 
 
+class RawReadbackRowTests(unittest.TestCase):
+    def window(self, posts, cmd=0.5):
+        rows = []
+        for k, post in enumerate(posts):
+            raw = {c: "" for c in sc.STEP_COLUMNS}
+            raw.update({"cmd_steer": "%.4f" % cmd, "input_post_steer": "%.5f" % post, "timeslice_s": "%.6f" % DT,
+                        "phase": "steps_10", "event_idx": "7"})
+            rows.append(sc.Step(raw, k))
+        return {"rows": rows, "u_e": [0.0] * 8, "offset": 8}
+
+    def test_a_row_the_model_puts_on_the_command_is_no_raw_readback(self):
+        # Codex DD-14f, MEDIUM: tau 0.01 s and gain 1 smooth 0.5 to 0.48216, 0.49936, 0.49998: the third row equals
+        # the command within 5e-5 by the model itself, so it is no raw readback
+        smooth = self.window([0.48216, 0.49936, 0.49998, 0.5])
+        self.assertEqual(e23.raw_readback([smooth], e23.Params(d=0, g=1.0, tau=0.01), DT), ([], 0))
+        # the d3ca pattern: the first row already on the command where the model says 0.46: named, with its event
+        raw = self.window([0.5, 0.4853, 0.4974, 0.4975])
+        self.assertEqual(e23.raw_readback([raw], e23.Params(d=0, g=0.995, tau=0.0125), DT), (["steps_10#7"], 1))
+
+
 class ExcludedContextTests(unittest.TestCase):
     """CC-07 (a): zero-command rows of the probe's own teleport, settle, stop braking and launch below 2 km/h are
     reported apart and not scored (user decision 2026-11-13); everywhere else a deviation still counts"""

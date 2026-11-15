@@ -109,19 +109,25 @@ def check_dir(path: str | Path, roots: Sequence[str | Path] | None = None) -> Pa
 
 
 def check_tree(path: str | Path) -> Path:
-    """``check_dir(path)``, and for every symlink in the tree that exists under it (links are not followed while
-    walking) the write boundary on where the link leads: a library writing into a directory it owns, such as a cache,
-    follows the links it finds there, so a link out of the boundary is refused although the directory itself is
-    inside. A target that does not exist yet is judged by where it would be created. Writes nothing."""
+    """``check_dir(path)``, and for every symlink in the tree that exists under it the write boundary on where the link
+    leads: a library writing into a directory it owns, such as a cache, follows the links it finds there, so a link out
+    of the boundary is refused although the directory itself is inside. A link to a directory outside the tree is
+    walked in turn (its own links count too; each real directory once, so a cycle ends), and a target that does not
+    exist yet is judged by where it would be created. Links back inside the tree pass: the walk sees their targets
+    anyway. Writes nothing."""
     root = check_dir(path)
     pending = [str(root)] if root.is_dir() else []
+    seen: set[str] = set(pending)
     while pending:
         folder = pending.pop()
         try:
             with os.scandir(folder) as entries:
                 for entry in entries:
                     if entry.is_symlink():
-                        _check_link(root, entry.path)
+                        target = _check_link(root, entry.path)
+                        if target is not None and os.path.isdir(target) and target not in seen:
+                            seen.add(target)
+                            pending.append(target)
                     elif entry.is_dir(follow_symlinks=False):
                         pending.append(entry.path)
         except OSError as exc:
@@ -129,10 +135,12 @@ def check_tree(path: str | Path) -> Path:
     return root
 
 
-def _check_link(root: Path, link: str) -> None:
+def _check_link(root: Path, link: str) -> str | None:
+    """The real target of ``link`` when it leads outside ``root`` and the boundary allows it (None inside ``root``);
+    WriteRefusedError naming the link otherwise."""
     target = os.path.realpath(link)
     if target == str(root) or target.startswith(str(root).rstrip("/") + "/"):
-        return  # it leads back inside the directory checked (a Hugging Face snapshot link to its blob)
+        return None  # back inside the tree (a Hugging Face snapshot link to its blob)
     try:
         if os.path.isdir(target):
             check_dir(target)
@@ -140,6 +148,7 @@ def _check_link(root: Path, link: str) -> None:
             check_write(target)
     except WriteRefusedError as exc:
         raise WriteRefusedError(f"refusing to write under {root}: the link {link} leads to {target}: {exc}") from exc
+    return target
 
 
 def data_root() -> Path:

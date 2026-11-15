@@ -107,6 +107,26 @@ def test_a_link_in_the_cache_that_leads_out_is_refused(
     assert_never_written()
 
 
+def test_a_link_out_through_a_linked_directory_is_refused(
+    monkeypatch: pytest.MonkeyPatch, downloads: list[dict[str, object]]
+) -> None:
+    """``.locks`` leads to an allowed RAM dir, and a link there leads out: huggingface_hub would follow both."""
+    with world() as w:
+        hub = Path(w.mnt, "x", "DataRoot", "cache", "hub")
+        hub.mkdir(parents=True)
+        external = Path(w.shm, "external-locks")
+        external.mkdir()
+        (hub / ".locks").symlink_to(external)
+        (external / "models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers").symlink_to(NEVER)
+        _point_cache(monkeypatch, str(hub), f"{w.shm}/xet")
+        with pytest.raises(
+            WriteRefusedError, match=f"models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers leads to {re.escape(NEVER)}"
+        ):
+            fetch_weights(SOURCE)
+    assert downloads == []
+    assert_never_written()
+
+
 def test_links_inside_the_cache_are_fine(monkeypatch: pytest.MonkeyPatch, downloads: list[dict[str, object]]) -> None:
     with world() as w:
         hub = Path(w.mnt, "x", "DataRoot", "cache", "hub")

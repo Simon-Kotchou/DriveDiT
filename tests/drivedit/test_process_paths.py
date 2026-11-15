@@ -18,7 +18,17 @@ import pytest
 
 from drivedit import local_paths
 from drivedit.local_paths import LocalPathsError, WriteRefusedError
-from drivedit.process_paths import DATA, PROCESS_PATHS, RAM, command_line, prepare_process, resolve, scratch_dir
+from drivedit.process_paths import (
+    DATA,
+    IMPORT_WRITERS,
+    PROCESS_PATHS,
+    RAM,
+    command_line,
+    prepare_import_writers,
+    prepare_process,
+    resolve,
+    scratch_dir,
+)
 from tests.drivedit.boundary import NEVER, assert_never_written, clear_process_env, world
 
 SRC = Path(__file__).resolve().parents[2] / "src"
@@ -117,6 +127,7 @@ def test_an_empty_value_counts_as_unset(value: str) -> None:
         ("TORCH_TRACE", "{M}/z/trace", "Windows system drive"),
         ("TORCH_COMPILE_DEBUG_DIR", "{M}/y/debug", "refusing to write"),
         ("HF_XET_LOG_DEST", NEVER + "/xet.log", "refusing to write"),
+        ("TORCH_DTRACE", NEVER + "/dtrace", "refusing to write"),
     ],
 )
 def test_a_value_outside_the_boundary_is_refused_and_nothing_changes(name: str, value: str, fragment: str) -> None:
@@ -251,6 +262,65 @@ def test_check_tree_refuses_a_link_inside_that_leads_out() -> None:
         assert local_paths.check_tree(Path(w.mnt, "x", "DataRoot", "missing")) == Path(
             w.mnt, "x", "DataRoot", "missing"
         )
+    assert_never_written()
+
+
+def test_check_tree_follows_a_directory_link_into_another_allowed_tree() -> None:
+    """``.locks`` leads to an allowed RAM dir whose own link leads to the system temp dir: walked too, refused."""
+    with world() as w:
+        hub = Path(w.mnt, "x", "DataRoot", "cache", "hub")
+        hub.mkdir(parents=True)
+        external = Path(w.shm, "external-locks")
+        external.mkdir()
+        (hub / ".locks").symlink_to(external)
+        (external / "loop").symlink_to(hub)  # a cycle ends
+        (external / "self").symlink_to(external)
+        assert local_paths.check_tree(hub) == hub
+        (external / "models--a--b").symlink_to(NEVER)
+        with pytest.raises(WriteRefusedError, match=f"models--a--b leads to {re.escape(NEVER)}"):
+            local_paths.check_tree(hub)
+    assert_never_written()
+
+
+@pytest.mark.parametrize(
+    ("variable", "link"),
+    [
+        ("TORCHINDUCTOR_CACHE_DIR", "locks"),  # Inductor creates its lock files there
+        ("TORCH_HOME", "hub/checkpoints"),  # torch.hub downloads its .partial files there
+        ("HF_HOME", "hub/.locks"),
+    ],
+)
+def test_prepare_process_refuses_a_link_out_of_a_cache(variable: str, link: str) -> None:
+    with world() as w:
+        cache = Path(_expected_defaults(w)[variable])
+        (cache / link).parent.mkdir(parents=True, exist_ok=True)
+        (cache / link).symlink_to(Path(w.mnt, "z"))
+        environ: dict[str, str] = {}
+        with pytest.raises(WriteRefusedError, match=f"{variable}.*the link .*{link} leads to .*Windows system drive"):
+            prepare_process(environ)
+        assert environ == {}
+
+
+def test_compile_debug_under_the_working_directory_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TORCH_COMPILE_DEBUG=1 without TORCH_COMPILE_DEBUG_DIR writes <cwd>/torch_compile_debug."""
+    with world() as w:
+        monkeypatch.chdir(Path(w.mnt, "z"))
+        with pytest.raises(WriteRefusedError, match=r"TORCH_COMPILE_DEBUG_DIR=.*working directory.*Windows system"):
+            prepare_process({"TORCH_COMPILE_DEBUG": "1"})
+        prepare_process({"TORCH_COMPILE_DEBUG": "1", "TORCH_COMPILE_DEBUG_DIR": f"{w.shm}/debug"})
+        prepare_process({"TORCH_COMPILE_DEBUG": "0"})
+
+
+def test_import_writers_are_checked_and_blanks_removed() -> None:
+    with world() as w:
+        environ = {"TORCH_LOGS_OUT": " ", "TORCH_TRACE": f"{w.shm}/trace", "TORCH_DTRACE": ""}
+        prepare_import_writers(environ)
+        assert environ == {"TORCH_TRACE": f"{w.shm}/trace"}
+        for name in IMPORT_WRITERS:
+            with pytest.raises(WriteRefusedError, match=name):
+                prepare_import_writers({name: NEVER + "/x"})
+    with world("missing") as w:  # no config needed: RAM is allowed without one
+        prepare_import_writers({"TORCH_LOGS_OUT": f"{w.shm}/torch.log"})
     assert_never_written()
 
 

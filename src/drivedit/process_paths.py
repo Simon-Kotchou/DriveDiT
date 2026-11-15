@@ -24,9 +24,10 @@ of them is an accident waiting for a full system drive.
 ``prepare_process()`` is for entry points, called once the command line is parsed and before any work that writes, and
 its values pass to child processes (DataLoader workers, torchrun ranks, compile workers): ``--help``, a usage error or
 ``dd-train --print-config`` (stdout only) never need it, so they work without a local config. Before that, the console
-scripts ``dd-train`` and ``dd-encode`` and ``python -m drivedit.commands <command>`` run ``check_import_writers()``
-before torch is even imported (``drivedit.commands``): it validates only what an import writes (``IMPORT_WRITERS``,
-torch's ``TORCH_LOGS_OUT``), when set, and needs no config. For each variable of ``PROCESS_PATHS``:
+scripts ``dd-train`` and ``dd-encode``, ``python -m drivedit.commands <command>`` and the commands' own modules
+(``python -m drivedit.train.cli``, ...) run ``prepare_import_writers()`` before torch is even imported: it checks only
+what torch takes up at import (``IMPORT_WRITERS``: ``TORCH_LOGS_OUT``, ``TORCH_TRACE``, ``TORCH_DTRACE``), when set,
+removes an empty one, and needs no config. For each variable of ``PROCESS_PATHS``:
 
 - **Set** (non-empty): validated, never changed. It must be an absolute path (no ``~``, no ``$``) that the write
   boundary allows (``drivedit.local_paths.check_dir``: RAM or the verified data drive of the local config, never a
@@ -73,13 +74,15 @@ from drivedit.local_paths import LocalPathsError, WriteRefusedError
 
 __all__ = [
     "CACHE_DIR_REL",
+    "COMPILE_DEBUG",
     "DATA",
     "IMPORT_WRITERS",
     "PROCESS_PATHS",
     "RAM",
     "ProcessPath",
-    "check_import_writers",
     "command_line",
+    "guard_module_main",
+    "prepare_import_writers",
     "prepare_process",
     "resolve",
     "scratch_dir",
@@ -138,12 +141,17 @@ PROCESS_PATHS: Final = (
     # Opt-in outputs: nothing is written unless the variable is set (TORCH_LOGS_OUT is opened when torch is imported).
     ProcessPath("TORCH_LOGS_OUT", "TMPDIR", "torch.log", kind="file", managed=False),
     ProcessPath("TORCH_TRACE", "TMPDIR", "torch_trace", managed=False),
+    ProcessPath("TORCH_DTRACE", "TMPDIR", "torch_dtrace", managed=False),
     ProcessPath("TORCH_COMPILE_DEBUG_DIR", "TMPDIR", "torch_compile_debug", managed=False),
     ProcessPath("HF_XET_LOG_DEST", "HF_XET_CACHE", "logs", kind="file", managed=False),
 )
 _BY_NAME: Final = {entry.name: entry for entry in PROCESS_PATHS}
-#: The variables a library writes to when it is merely imported (torch opens TORCH_LOGS_OUT in its __init__).
-IMPORT_WRITERS: Final = ("TORCH_LOGS_OUT",)
+#: The variables torch takes up when it is imported (it opens TORCH_LOGS_OUT in its __init__; its structured-trace
+#: settings are read then too), checked by a launcher before the import (``prepare_import_writers``).
+IMPORT_WRITERS: Final = ("TORCH_LOGS_OUT", "TORCH_TRACE", "TORCH_DTRACE")
+#: torch.compile's debug output: with TORCH_COMPILE_DEBUG on and no TORCH_COMPILE_DEBUG_DIR it writes under the
+#: working directory, so that default is checked when the switch is on.
+COMPILE_DEBUG: Final = ("TORCH_COMPILE_DEBUG", "TORCH_COMPILE_DEBUG_DIR", "torch_compile_debug")
 
 
 def _given(environ: Mapping[str, str], name: str | None) -> str | None:
@@ -219,7 +227,30 @@ def resolve(environ: Mapping[str, str] | None = None) -> dict[str, str]:
         value = _resolve_one(entry, env, resolved)
         if value is not None:
             resolved[entry.name] = value
+    _check_compile_debug(env)
+    _check_trees(resolved)
     return resolved
+
+
+def _check_compile_debug(environ: Mapping[str, str]) -> None:
+    switch, variable, child = COMPILE_DEBUG
+    if (_given(environ, switch) or "0").strip() not in ("0", "") and _given(environ, variable) is None:
+        default = os.path.join(os.getcwd(), child)
+        _check(_BY_NAME[variable], default, f"its default under the working directory, as {switch} is on")
+
+
+def _check_trees(resolved: Mapping[str, str]) -> None:
+    """``drivedit.local_paths.check_tree`` on each directory of ``resolved`` that no other one contains: a library
+    follows the links already in its cache (an Inductor ``locks`` or a torch.hub ``checkpoints`` link out of the
+    boundary would take its writes along)."""
+    dirs = sorted({v for n, v in resolved.items() if _BY_NAME[n].kind == "dir"})
+    tops = [d for d in dirs if not any(o != d and d.startswith(o.rstrip("/") + "/") for o in dirs)]
+    for top in tops:
+        names = ", ".join(n for n, v in resolved.items() if v == top or v.startswith(top.rstrip("/") + "/"))
+        try:
+            local_paths.check_tree(top)
+        except WriteRefusedError as exc:
+            raise WriteRefusedError(f"{names}: {exc}") from exc
 
 
 def _make_scratch(path: str) -> None:
@@ -248,14 +279,27 @@ def scratch_dir(environ: Mapping[str, str] | None = None) -> Path:
     return Path(value)
 
 
-def check_import_writers(environ: Mapping[str, str] | None = None) -> None:
-    """``WriteRefusedError`` unless every set variable of ``IMPORT_WRITERS`` passes the write boundary: for a launcher
-    to call before it imports torch. Reads only, needs no local config (an unset variable is not checked)."""
-    env = os.environ if environ is None else environ
+def prepare_import_writers(environ: MutableMapping[str, str] | None = None) -> None:
+    """For a launcher, before it imports torch: ``WriteRefusedError`` unless every set variable of ``IMPORT_WRITERS``
+    passes the write boundary, and an empty one is removed (torch would open a file named by the blank). Needs no
+    local config: an unset variable is not checked."""
+    env: MutableMapping[str, str] = os.environ if environ is None else environ
     for name in IMPORT_WRITERS:
         value = _given(env, name)
         if value is not None:
             _check(_BY_NAME[name], value, "set in the environment")
+    for name in IMPORT_WRITERS:
+        if name in env and _given(env, name) is None:
+            del env[name]
+
+
+def guard_module_main(module_name: str, prog: str) -> None:
+    """For a command module started as ``python -m <module>`` (``module_name`` is its ``__name__``, ``"__main__"``),
+    called before the module imports torch: ``prepare_import_writers``, a refusal exiting with one line. Does nothing
+    when the module is imported, so importing it has no side effect."""
+    if module_name == "__main__":
+        with command_line(prog):
+            prepare_import_writers()
 
 
 def _blank_names(environ: Mapping[str, str]) -> list[str]:

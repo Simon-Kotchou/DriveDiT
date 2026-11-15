@@ -139,3 +139,9 @@ CI (`.github/workflows/ci.yml`) has four jobs:
   sensitivity on toy dynamics, overfitting one batch, round trips, and the contract offsets.
 - **Every design choice has a source** (a paper, the research notes, or a measurement in this repo) in the docstring
   or the commit message. No performance number without a reproducible measurement.
+- **Writes stay inside the write boundary** (RAM or the verified data drive of the local config; DD-22, DD-23). An
+  output path passes `drivedit.local_paths.check_write` (`check_dir` for a directory) before anything is written
+  there. A command line calls `drivedit.process_paths.prepare_process()` before any work: it routes the caches of
+  Hugging Face, torch, torch.compile, Triton and CUDA to `<DATA_ROOT>/cache` and temporary files to RAM, and keeps a
+  variable the user set if the boundary allows it. Temporary files go to `process_paths.scratch_dir()`, never the
+  system temp dir. `tests/drivedit/test_write_sites.py` scans for this.

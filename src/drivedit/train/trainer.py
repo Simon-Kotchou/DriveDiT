@@ -4,6 +4,15 @@ Determinism: the data order and every random draw of the loss are functions of `
 from a checkpoint (model, EMA, optimiser, step) continues exactly as the uninterrupted run would. A process started
 by ``torchrun`` (``WORLD_SIZE`` > 1) joins the process group, wraps the model in DistributedDataParallel and takes its
 own slice of every global batch (efficiency 3.4 item 1: DDP, not FSDP, at <= 400M).
+
+Writes: ``run_config.json``, ``log.jsonl`` and ``checkpoints/`` under ``run_dir``, and nothing else. ``run_dir`` must
+pass the write boundary (``drivedit.local_paths``: RAM or the verified data drive of the local config, never a Windows
+system volume; DD-23): ``check_run_dir`` runs on every rank before the process group, the model or any file (it also
+refuses a link already inside ``run_dir`` that leads out of the boundary), and rank 0 checks each checkpoint and log
+file again just before writing it. The outcome of every rank-0 write (a refusal, a full disk, any error) is
+all-reduced, so every rank raises together and none waits in a collective for a rank that stopped. Caches and
+temporary files (torch.compile, Triton, CUDA) are the entry point's business
+(``drivedit.process_paths.prepare_process``).
 """
 
 from __future__ import annotations
@@ -11,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Iterator, Mapping, Sized
+from collections.abc import Callable, Iterator, Mapping, Sized
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -22,6 +31,7 @@ from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, Sampler
 
+from drivedit import local_paths
 from drivedit.model.world_model import WorldModel
 from drivedit.train.config import RunConfig
 from drivedit.train.losses import diffusion_forcing_loss
@@ -119,18 +129,36 @@ def build_model(cfg: RunConfig) -> WorldModel:
         return WorldModel(cfg.model)
 
 
+#: The files the trainer writes directly under ``run_dir`` (checkpoints go to ``run_dir/CHECKPOINTS``).
+RUN_FILES: tuple[str, ...] = ("run_config.json", "log.jsonl")
+CHECKPOINTS = "checkpoints"
+
+
+def check_run_dir(run_dir: Path) -> None:
+    """``WriteRefusedError`` unless the write boundary allows every place the trainer writes under ``run_dir``: its
+    files (``RUN_FILES``), ``checkpoints/``, and where every link already in the tree leads (``drivedit.local_paths``
+    ``check_tree``: a stale ``step_*.tmp`` link would be written through). Writes nothing."""
+    for name in RUN_FILES:
+        local_paths.check_write(run_dir / name)
+    local_paths.check_dir(run_dir / CHECKPOINTS)
+    local_paths.check_tree(run_dir)
+
+
 class Trainer:
     """A plain loop over ``dataset`` windows (the DRIVEDIT_INTERFACES section 4 dict) for ``cfg.steps`` steps.
 
     The trainer trusts its dataset: split, sealed-map and decision-rate rules are enforced by
     ``drivedit.train.data.open_training_windows``, dd-train's only data entry point, not here.
 
-    ``run_dir`` receives ``run_config.json``, ``log.jsonl`` (rank 0) and ``checkpoints/step_<step>.pt``.
+    ``run_dir`` receives ``run_config.json``, ``log.jsonl`` (rank 0) and ``checkpoints/step_<step>.pt``; they must pass
+    the write boundary (``check_run_dir``), else ``WriteRefusedError`` before anything is built.
     """
 
     def __init__(
         self, cfg: RunConfig, dataset: Dataset[Any], run_dir: Path, *, device: torch.device | None = None
     ) -> None:
+        # Every rank checks, so a refused run_dir stops them all before the process group (none waits on a barrier).
+        check_run_dir(run_dir)
         self.cfg, self.dataset, self.run_dir = cfg, dataset, run_dir
         self.dist = DistInfo.from_env()
         if device is None:
@@ -160,8 +188,7 @@ class Trainer:
         )
         self.rng = torch.Generator(device=device)
         self.step = 0
-        if self.is_main:
-            self._write_run_config()
+        self._on_main(f"write {self.run_dir / 'run_config.json'}", self._write_run_config)
 
     @property
     def is_main(self) -> bool:
@@ -169,7 +196,7 @@ class Trainer:
 
     @property
     def checkpoint_dir(self) -> Path:
-        return self.run_dir / "checkpoints"
+        return self.run_dir / CHECKPOINTS
 
     def lr_at(self, step: int) -> float:
         """Linear warm-up over ``warmup_steps``, then constant (MODELING_PLAN section 3)."""
@@ -239,7 +266,11 @@ class Trainer:
     def save_checkpoint(self) -> Path | None:
         """Write ``checkpoints/step_<step>.pt`` atomically (rank 0) and keep the newest ``keep_checkpoints``."""
         path = self.checkpoint_dir / f"step_{self.step:08d}.pt"
-        if self.is_main:
+        tmp = path.with_suffix(".tmp")
+
+        def write() -> None:
+            local_paths.check_write(tmp)
+            local_paths.check_write(path)
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
             state = {
                 "format": CHECKPOINT_FORMAT,
@@ -249,13 +280,12 @@ class Trainer:
                 "ema": self.ema.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
             }
-            tmp = path.with_suffix(".tmp")
             torch.save(state, tmp)
             tmp.replace(path)
             for old in sorted(self.checkpoint_dir.glob("step_*.pt"))[: -self.cfg.keep_checkpoints]:
                 old.unlink()
-        if dist.is_initialized():
-            dist.barrier()
+
+        self._on_main(f"write {path}", write)
         return path if self.is_main else None
 
     def load_checkpoint(self, path: Path) -> None:
@@ -277,22 +307,47 @@ class Trainer:
 
     # ------------------------------------------------------------------------------------------------------ helpers
 
-    def _write_run_config(self) -> None:
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+    def _on_main(self, what: str, action: Callable[[], None]) -> None:
+        """Run ``action`` (a write) on rank 0 only. Under DDP every rank then learns its outcome (an all-reduce, which
+        is also the barrier), so a refusal (``WriteRefusedError``) or a failed write (a full disk, any error) on rank 0
+        makes every rank raise together instead of leaving the others waiting in the next collective."""
+        error: Exception | None = None
+        if self.is_main:
+            try:
+                action()
+            except Exception as exc:  # re-raised below, on every rank
+                error = exc
+        if dist.is_initialized():
+            code = 0.0 if error is None else 1.0 if isinstance(error, local_paths.WriteRefusedError) else 2.0
+            flag = torch.tensor([code], device=self.device)
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            if error is None and flag.item() == 1.0:
+                raise local_paths.WriteRefusedError(f"rank 0 refused to {what}; every rank stops")
+            if error is None and flag.item() > 1.0:
+                raise RuntimeError(f"rank 0 failed to {what}; every rank stops")
+        if error is not None:
+            raise error
+
+    def _write_run_config(self) -> None:  # rank 0; run_dir was checked in __init__ (check_run_dir) just before
         path = self.run_dir / "run_config.json"
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         text = self.cfg.to_json()
         if path.exists() and RunConfig.from_json(path.read_text()) != self.cfg:
             raise ValueError(f"{path} holds a different run config; use a new run_dir")
         path.write_text(text + "\n")
 
     def _log(self, logs: Mapping[str, Tensor], *, seconds: float) -> None:
-        if not self.is_main:
-            return
-        record = {"step": self.step, "step_s": round(seconds, 4), **{k: float(v) for k, v in logs.items()}}
-        line = json.dumps(record)
-        with (self.run_dir / "log.jsonl").open("a") as f:
-            f.write(line + "\n")
-        print(line, flush=True)
+        path = self.run_dir / "log.jsonl"
+
+        def append() -> None:
+            local_paths.check_write(path)
+            record = {"step": self.step, "step_s": round(seconds, 4), **{k: float(v) for k, v in logs.items()}}
+            line = json.dumps(record)
+            with path.open("a") as f:
+                f.write(line + "\n")
+            print(line, flush=True)
+
+        self._on_main(f"append to {path}", append)  # every rank: it all-reduces under DDP
 
 
 def _read_checkpoint(path: Path, device: torch.device | str) -> dict[str, Any]:

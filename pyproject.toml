@@ -23,8 +23,9 @@ dependencies = [
 ]
 
 [project.scripts]
-dd-encode = "drivedit.codec.encode:main"   # latent pre-encoder (DD-19); needs the model and codec extras
-dd-train = "drivedit.train.cli:main"     # world-model training (DD-20); needs the model extra
+# Through drivedit.commands, which routes the caches and temp files into the write boundary before torch loads (DD-23).
+dd-encode = "drivedit.commands:dd_encode"   # latent pre-encoder (DD-19); needs the model and codec extras
+dd-train = "drivedit.commands:dd_train"     # world-model training (DD-20); needs the model extra
 
 [project.optional-dependencies]
 # The world-model side. The March 2026 model stack was removed in DD-16 (tag archive/model-2026-03); these extras

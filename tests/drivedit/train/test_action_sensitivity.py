@@ -19,6 +19,7 @@ from torch import Tensor
 
 from drivedit.model import WorldModel, WorldModelConfig
 from drivedit.train import ForcingSchedule, OptimConfig, RunConfig, Trainer
+from tests.drivedit.boundary import require_real_boundary
 from tests.drivedit.model.toy import ShiftDynamics, collate, tiny_config
 
 STEPS = 400
@@ -38,9 +39,8 @@ def trained(tmp_path_factory: pytest.TempPathFactory) -> WorldModel:
         log_every=STEPS,
         checkpoint_every=STEPS,
     )
-    trainer = Trainer(
-        run, ShiftDynamics(CFG, 4096, seed=1), Path(tmp_path_factory.mktemp("toy")), device=torch.device("cpu")
-    )
+    run_dir = require_real_boundary(Path(tmp_path_factory.mktemp("toy")))  # the trainer writes through it (DD-23)
+    trainer = Trainer(run, ShiftDynamics(CFG, 4096, seed=1), run_dir, device=torch.device("cpu"))
     trainer.fit()
     return trainer.model.eval()
 

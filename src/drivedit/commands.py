@@ -1,0 +1,68 @@
+"""The model-side commands, started so that the process paths are routed before torch is imported (DD-23).
+
+    dd-train ...                                   # console scripts of pyproject.toml
+    dd-encode ...
+    python -m drivedit.commands bench ...          # the step-time bench
+    torchrun --nproc-per-node 2 -m drivedit.commands dd-train --config run.json --run-dir <run dir>
+
+Each command's own module imports torch through its package (``drivedit.train``, ``drivedit.codec``), and importing
+torch already writes when ``TORCH_LOGS_OUT`` is set. So this module, which imports nothing heavy, first runs
+``drivedit.process_paths.prepare_import_writers`` (what torch takes up at import, when set, against the write
+boundary; no local config needed; a refusal exits with one line) and only then imports the command and runs its
+``main``. ``main`` parses its
+arguments, so ``--help`` and usage errors work anywhere, and calls ``prepare_process`` (every variable validated, the
+unset caches routed into the boundary) before any work that writes. ``python -m drivedit.train.cli`` and the other
+command modules do the same import-time check themselves, first thing (``process_paths.guard_module_main``).
+"""
+
+from __future__ import annotations
+
+import importlib
+import sys
+from collections.abc import Sequence
+from typing import Final
+
+from drivedit.process_paths import command_line, prepare_import_writers
+
+__all__ = ["COMMANDS", "bench", "dd_encode", "dd_train", "main", "run"]
+
+#: command name -> the module whose ``main(argv)`` runs it.
+COMMANDS: Final = {
+    "dd-train": "drivedit.train.cli",
+    "dd-encode": "drivedit.codec.encode",
+    "bench": "drivedit.train.bench",
+}
+
+
+def run(command: str, argv: Sequence[str] | None = None) -> int:
+    """``prepare_import_writers``, then import ``COMMANDS[command]`` and return its ``main(argv)`` (which calls
+    ``prepare_process`` after parsing its arguments)."""
+    with command_line(command):
+        prepare_import_writers()
+    module = importlib.import_module(COMMANDS[command])
+    result: int = module.main(argv)
+    return result
+
+
+def dd_train() -> int:
+    return run("dd-train")
+
+
+def dd_encode() -> int:
+    return run("dd-encode")
+
+
+def bench() -> int:
+    return run("bench")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m drivedit.commands <command> [args]``."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] not in COMMANDS:
+        raise SystemExit(f"usage: python -m drivedit.commands {{{','.join(COMMANDS)}}} [args]")
+    return run(args[0], args[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

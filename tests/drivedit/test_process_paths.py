@@ -301,6 +301,22 @@ def test_prepare_process_refuses_a_link_out_of_a_cache(variable: str, link: str)
         assert environ == {}
 
 
+def test_a_link_out_of_a_legacy_cache_root_is_refused() -> None:
+    """HUGGINGFACE_ASSETS_CACHE set (HF_ASSETS_CACHE not), outside every other cache root: the library writes under it,
+    so its tree is walked like the others."""
+    with world() as w:
+        assets = Path(w.shm, "legacy-assets")
+        assets.mkdir()
+        (assets / "dd23").symlink_to(Path(w.mnt, "z"))
+        environ = {"HUGGINGFACE_ASSETS_CACHE": str(assets)}
+        refusal = r"HF_ASSETS_CACHE.*the link .*dd23 leads to .*Windows system drive"
+        with pytest.raises(WriteRefusedError, match=refusal):
+            prepare_process(environ)
+        assert environ == {"HUGGINGFACE_ASSETS_CACHE": str(assets)}
+        (assets / "dd23").unlink()
+        assert "HF_ASSETS_CACHE" not in prepare_process(environ)  # validated, never set
+
+
 def test_compile_debug_under_the_working_directory_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
     """TORCH_COMPILE_DEBUG=1 without TORCH_COMPILE_DEBUG_DIR writes <cwd>/torch_compile_debug."""
     with world() as w:

@@ -228,8 +228,19 @@ def resolve(environ: Mapping[str, str] | None = None) -> dict[str, str]:
         if value is not None:
             resolved[entry.name] = value
     _check_compile_debug(env)
-    _check_trees(resolved)
+    _check_trees({**_unmanaged_legacy(env, resolved), **resolved})
     return resolved
+
+
+def _unmanaged_legacy(environ: Mapping[str, str], resolved: Mapping[str, str]) -> dict[str, str]:
+    """``{name: value}`` of the unmanaged variables that are unset while their legacy name is set: the library writes
+    under the legacy value (``HUGGINGFACE_ASSETS_CACHE``), so its tree is walked too, although nothing is set."""
+    out: dict[str, str] = {}
+    for entry in PROCESS_PATHS:
+        legacy = _given(environ, entry.legacy)
+        if not entry.managed and entry.name not in resolved and legacy is not None:
+            out[entry.name] = legacy
+    return out
 
 
 def _check_compile_debug(environ: Mapping[str, str]) -> None:

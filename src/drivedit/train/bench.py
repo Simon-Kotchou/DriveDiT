@@ -24,14 +24,17 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-import torch
-from torch import Tensor
-from torch.utils.data import Dataset
+from drivedit.process_paths import command_line, guard_module_main, prepare_process, scratch_dir
 
-from drivedit.model.config import PRESETS, WorldModelConfig
-from drivedit.process_paths import command_line, prepare_process, scratch_dir
-from drivedit.train.config import RunConfig
-from drivedit.train.trainer import Trainer
+guard_module_main(__name__, "bench")  # run as python -m: check what importing torch writes, before it (DD-23)
+
+import torch  # noqa: E402
+from torch import Tensor  # noqa: E402
+from torch.utils.data import Dataset  # noqa: E402
+
+from drivedit.model.config import PRESETS, WorldModelConfig  # noqa: E402
+from drivedit.train.config import RunConfig  # noqa: E402
+from drivedit.train.trainer import Trainer  # noqa: E402
 
 
 class RandomWindows(Dataset[dict[str, Tensor]]):

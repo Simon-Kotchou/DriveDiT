@@ -23,11 +23,14 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from drivedit.model.config import PRESETS
-from drivedit.process_paths import command_line, prepare_process
-from drivedit.train.config import RunConfig
-from drivedit.train.data import open_training_windows
-from drivedit.train.trainer import Trainer, check_run_dir
+from drivedit.process_paths import command_line, guard_module_main, prepare_process
+
+guard_module_main(__name__, "dd-train")  # run as python -m: check what importing torch writes, before it (DD-23)
+
+from drivedit.model.config import PRESETS  # noqa: E402
+from drivedit.train.config import RunConfig  # noqa: E402
+from drivedit.train.data import open_training_windows  # noqa: E402
+from drivedit.train.trainer import Trainer, check_run_dir  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:

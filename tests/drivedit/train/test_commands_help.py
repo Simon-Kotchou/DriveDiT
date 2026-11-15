@@ -13,6 +13,8 @@ import pytest
 
 from drivedit.commands import COMMANDS
 from drivedit.process_paths import PROCESS_PATHS
+from drivedit.train.cli import main
+from tests.drivedit.boundary import clear_process_env, world
 
 REPO = Path(__file__).resolve().parents[3]
 CALL = "import sys; sys.path.insert(0, sys.argv[1]); from drivedit.commands import main; sys.exit(main(sys.argv[2:]))"
@@ -57,8 +59,12 @@ def test_print_config_writes_nothing_and_needs_no_config(tmp_path: Path) -> None
     assert '"run_id": "probe_50m"' in result.stdout
 
 
-def test_work_without_a_config_is_refused_with_the_reason(tmp_path: Path) -> None:
-    result = _run(tmp_path, "dd-train", "--config", str(tmp_path / "run.json"), "--run-dir", str(tmp_path / "run"))
-    assert result.returncode == 1, result.stderr
-    assert result.stderr.startswith("dd-train: XDG_CACHE_HOME is not set, and its default <DATA_ROOT>/cache needs the")
-    assert not (tmp_path / "run").exists()
+def test_work_without_a_config_is_refused_with_the_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In the fake world (no skip where a sandbox hides /dev/shm's device): no config, no cache variable."""
+    with world("missing") as w:
+        clear_process_env(monkeypatch)
+        run_dir = Path(w.shm, "run")
+        refusal = r"^dd-train: XDG_CACHE_HOME is not set, and its default <DATA_ROOT>/cache"
+        with pytest.raises(SystemExit, match=refusal):
+            main(["--config", str(Path(w.shm, "run.json")), "--run-dir", str(run_dir)])
+        assert not run_dir.exists()

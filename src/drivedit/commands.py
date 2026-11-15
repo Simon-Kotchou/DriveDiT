@@ -7,11 +7,12 @@
 
 Each command's own module imports torch through its package (``drivedit.train``, ``drivedit.codec``), and importing
 torch already writes when ``TORCH_LOGS_OUT`` is set. So this module, which imports nothing heavy, first runs
-``drivedit.process_paths.check_import_writers`` (that variable, when set, against the write boundary; no local config
-needed; a refusal exits with one line) and only then imports the command and runs its ``main``. ``main`` parses its
+``drivedit.process_paths.prepare_import_writers`` (what torch takes up at import, when set, against the write
+boundary; no local config needed; a refusal exits with one line) and only then imports the command and runs its
+``main``. ``main`` parses its
 arguments, so ``--help`` and usage errors work anywhere, and calls ``prepare_process`` (every variable validated, the
 unset caches routed into the boundary) before any work that writes. ``python -m drivedit.train.cli`` and the other
-modules still work; only the import-time check is missing there.
+command modules do the same import-time check themselves, first thing (``process_paths.guard_module_main``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import sys
 from collections.abc import Sequence
 from typing import Final
 
-from drivedit.process_paths import check_import_writers, command_line
+from drivedit.process_paths import command_line, prepare_import_writers
 
 __all__ = ["COMMANDS", "bench", "dd_encode", "dd_train", "main", "run"]
 
@@ -34,10 +35,10 @@ COMMANDS: Final = {
 
 
 def run(command: str, argv: Sequence[str] | None = None) -> int:
-    """``check_import_writers``, then import ``COMMANDS[command]`` and return its ``main(argv)`` (which calls
+    """``prepare_import_writers``, then import ``COMMANDS[command]`` and return its ``main(argv)`` (which calls
     ``prepare_process`` after parsing its arguments)."""
     with command_line(command):
-        check_import_writers()
+        prepare_import_writers()
     module = importlib.import_module(COMMANDS[command])
     result: int = module.main(argv)
     return result

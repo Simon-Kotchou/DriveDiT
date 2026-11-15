@@ -55,13 +55,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-import cv2
-import numpy as np
-import torch
+from drivedit.process_paths import command_line, guard_module_main, prepare_process
 
-from drivedit import __version__, local_paths
-from drivedit.codec.base import Codec, codec_ids, get_codec
-from drivedit.process_paths import command_line, prepare_process
+guard_module_main(__name__, "dd-encode")  # run as python -m: check what importing torch writes, before it (DD-23)
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+
+from drivedit import __version__, local_paths  # noqa: E402
+from drivedit.codec.base import Codec, codec_ids, get_codec  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence

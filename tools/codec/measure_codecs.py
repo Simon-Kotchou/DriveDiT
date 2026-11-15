@@ -43,6 +43,10 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from drivedit.process_paths import guard_module_main
+
+guard_module_main(__name__, "measure_codecs")  # check what importing torch writes, before it (DD-23)
+
 import cv2
 import numpy as np
 import torch

@@ -59,3 +59,61 @@ def test_a_refusal_comes_before_torch_is_imported(tmp_path: Path, command: str) 
     assert first.startswith(f"{command}: TORCH_LOGS_OUT={NEVER}/"), result.stdout
     assert last == "torch not imported"
     assert_never_written()
+
+
+MODULE_PROBE = (
+    "import runpy, sys; sys.path.insert(0, sys.argv[1]); target = sys.argv[2]; sys.argv = [target, '--help']\n"
+    "try:\n"
+    "    if target.endswith('.py'):\n"
+    "        runpy.run_path(target, run_name='__main__')\n"
+    "    else:\n"
+    "        runpy.run_module(target, run_name='__main__', alter_sys=True)\n"
+    "except SystemExit as exc:\n"
+    "    print(exc)\n"
+    "print('torch imported' if 'torch' in sys.modules else 'torch not imported')\n"
+)
+MODULES = {
+    "drivedit.train.cli": "dd-train",
+    "drivedit.train.bench": "bench",
+    "drivedit.codec.encode": "dd-encode",
+    str(REPO / "tools" / "codec" / "measure_codecs.py"): "measure_codecs",
+}
+
+
+@pytest.mark.parametrize("target", sorted(MODULES))
+@pytest.mark.parametrize("value", [NEVER + "/torch.log", " "])
+def test_the_command_modules_check_before_torch_too(tmp_path: Path, target: str, value: str) -> None:
+    """python -m drivedit.train.cli (and the others): the packages load lazily, so the module's own guard runs before
+    torch is imported. A blank TORCH_LOGS_OUT is removed (torch would open a file named by it), an unsafe one
+    refused."""
+    names = {n for e in PROCESS_PATHS for n in (e.name, e.legacy) if n is not None}
+    env = {k: v for k, v in os.environ.items() if k not in names}
+    env |= {"TMPDIR": str(tmp_path), "TORCH_LOGS_OUT": value}
+    if value.strip():
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", MODULE_PROBE, str(REPO / "src"), target],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.strip().splitlines()
+        assert lines[0].startswith(f"{MODULES[target]}: TORCH_LOGS_OUT={NEVER}/"), result.stdout
+        assert lines[-1] == "torch not imported"
+    else:  # removed before torch reads it: no file named " " in the working directory
+        code = "import os, sys; sys.path.insert(0, sys.argv[1]); from drivedit import process_paths\n"
+        code += "process_paths.guard_module_main('__main__', 'x'); print(repr(os.environ.get('TORCH_LOGS_OUT')))\n"
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", code, str(REPO / "src")],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "None"
+        assert list(tmp_path.iterdir()) == []
+    assert_never_written()

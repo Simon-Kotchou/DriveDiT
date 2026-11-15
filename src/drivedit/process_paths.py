@@ -244,8 +244,10 @@ def _unmanaged_legacy(environ: Mapping[str, str], resolved: Mapping[str, str]) -
 
 
 def _check_compile_debug(environ: Mapping[str, str]) -> None:
+    """The compile-debug default under the working directory, when the switch is on as torch reads it: exactly "1"
+    (``torch._inductor.config``: ``os.environ.get("TORCH_COMPILE_DEBUG", "0") == "1"``)."""
     switch, variable, child = COMPILE_DEBUG
-    if (_given(environ, switch) or "0").strip() not in ("0", "") and _given(environ, variable) is None:
+    if environ.get(switch) == "1" and _given(environ, variable) is None:
         default = os.path.join(os.getcwd(), child)
         _check(_BY_NAME[variable], default, f"its default under the working directory, as {switch} is on")
 

@@ -324,7 +324,8 @@ def test_compile_debug_under_the_working_directory_is_checked(monkeypatch: pytes
         with pytest.raises(WriteRefusedError, match=r"TORCH_COMPILE_DEBUG_DIR=.*working directory.*Windows system"):
             prepare_process({"TORCH_COMPILE_DEBUG": "1"})
         prepare_process({"TORCH_COMPILE_DEBUG": "1", "TORCH_COMPILE_DEBUG_DIR": f"{w.shm}/debug"})
-        prepare_process({"TORCH_COMPILE_DEBUG": "0"})
+        for off in ("0", "", " ", "false", "true", "2", " 1 "):  # torch turns it on for exactly "1"
+            prepare_process({"TORCH_COMPILE_DEBUG": off})
 
 
 def test_import_writers_are_checked_and_blanks_removed() -> None:

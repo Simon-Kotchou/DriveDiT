@@ -41,3 +41,22 @@ def test_the_launcher_and_the_command_packages_import_without_torch(tmp_path: Pa
     result = _run(f"import sys; {imports}; {report}", tmp_path)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]"
+
+
+def test_the_lazy_exports_are_listed_and_resolve(tmp_path: Path) -> None:
+    """dir() lists every export before first use; each resolves to its defining module's object (needs torch, so in a
+    subprocess only where torch is installed)."""
+    code = (
+        "import importlib.util, drivedit.train as t, drivedit.codec as c\n"
+        "print(set(t.__all__) <= set(dir(t)), set(c.__all__) <= set(dir(c)))\n"
+        "if importlib.util.find_spec('torch'):\n"
+        "    from drivedit.train.trainer import Trainer; from drivedit.codec.encode import encode_session\n"
+        "    assert t.Trainer is Trainer and c.encode_session is encode_session\n"
+        "try:\n"
+        "    t.NoSuchName\n"
+        "except AttributeError as exc:\n"
+        "    print('NoSuchName' in str(exc))\n"
+    )
+    result = _run(code, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["True", "True", "True"]

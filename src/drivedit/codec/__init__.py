@@ -49,3 +49,8 @@ def __getattr__(name: str) -> Any:
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     return getattr(importlib.import_module(module), name)
+
+
+def __dir__() -> list[str]:
+    """The module's own names and the lazy exports (they are not in globals() until first used)."""
+    return sorted({*globals(), *_EXPORTS})

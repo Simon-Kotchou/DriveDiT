@@ -6,10 +6,12 @@
     torchrun --nproc-per-node 2 -m drivedit.commands dd-train --config run.json --run-dir <run dir>
 
 Each command's own module imports torch through its package (``drivedit.train``, ``drivedit.codec``), and importing
-torch already writes when ``TORCH_LOGS_OUT`` is set. So this module, which imports nothing heavy, first calls
-``drivedit.process_paths.prepare_process`` (validating every set variable, routing the unset caches into the write
-boundary; a refusal exits with one line) and only then imports the command and runs its ``main``, which checks again.
-``python -m drivedit.train.cli`` and the other modules still work, with their check after their imports.
+torch already writes when ``TORCH_LOGS_OUT`` is set. So this module, which imports nothing heavy, first runs
+``drivedit.process_paths.check_import_writers`` (that variable, when set, against the write boundary; no local config
+needed; a refusal exits with one line) and only then imports the command and runs its ``main``. ``main`` parses its
+arguments, so ``--help`` and usage errors work anywhere, and calls ``prepare_process`` (every variable validated, the
+unset caches routed into the boundary) before any work that writes. ``python -m drivedit.train.cli`` and the other
+modules still work; only the import-time check is missing there.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import sys
 from collections.abc import Sequence
 from typing import Final
 
-from drivedit.process_paths import command_line, prepare_process
+from drivedit.process_paths import check_import_writers, command_line
 
 __all__ = ["COMMANDS", "bench", "dd_encode", "dd_train", "main", "run"]
 
@@ -32,9 +34,10 @@ COMMANDS: Final = {
 
 
 def run(command: str, argv: Sequence[str] | None = None) -> int:
-    """``prepare_process``, then import ``COMMANDS[command]`` and return its ``main(argv)``."""
+    """``check_import_writers``, then import ``COMMANDS[command]`` and return its ``main(argv)`` (which calls
+    ``prepare_process`` after parsing its arguments)."""
     with command_line(command):
-        prepare_process()
+        check_import_writers()
     module = importlib.import_module(COMMANDS[command])
     result: int = module.main(argv)
     return result

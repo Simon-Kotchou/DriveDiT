@@ -21,11 +21,12 @@ dump and override dirs, and torchrun's ``TORCHELASTIC_ERROR_FILE``.
 On WSL ``~`` and ``/tmp`` lie on the Linux root filesystem, whose virtual disk is on the Windows system drive, so each
 of them is an accident waiting for a full system drive.
 
-``prepare_process()`` is for entry points, called before any work, and its values pass to child processes (DataLoader
-workers, torchrun ranks, compile workers). The console scripts ``dd-train`` and ``dd-encode`` and
-``python -m drivedit.commands <command>`` call it before torch is even imported (``drivedit.commands``); the commands'
-own ``main`` (``python -m drivedit.train.cli``, ``drivedit.train.bench``, ``drivedit.codec.encode``,
-``tools/codec/measure_codecs.py``) call it too, after their imports. For each variable of ``PROCESS_PATHS``:
+``prepare_process()`` is for entry points, called once the command line is parsed and before any work that writes, and
+its values pass to child processes (DataLoader workers, torchrun ranks, compile workers): ``--help``, a usage error or
+``dd-train --print-config`` (stdout only) never need it, so they work without a local config. Before that, the console
+scripts ``dd-train`` and ``dd-encode`` and ``python -m drivedit.commands <command>`` run ``check_import_writers()``
+before torch is even imported (``drivedit.commands``): it validates only what an import writes (``IMPORT_WRITERS``,
+torch's ``TORCH_LOGS_OUT``), when set, and needs no config. For each variable of ``PROCESS_PATHS``:
 
 - **Set** (non-empty): validated, never changed. It must be an absolute path (no ``~``, no ``$``) that the write
   boundary allows (``drivedit.local_paths.check_dir``: RAM or the verified data drive of the local config, never a
@@ -73,9 +74,11 @@ from drivedit.local_paths import LocalPathsError, WriteRefusedError
 __all__ = [
     "CACHE_DIR_REL",
     "DATA",
+    "IMPORT_WRITERS",
     "PROCESS_PATHS",
     "RAM",
     "ProcessPath",
+    "check_import_writers",
     "command_line",
     "prepare_process",
     "resolve",
@@ -139,6 +142,8 @@ PROCESS_PATHS: Final = (
     ProcessPath("HF_XET_LOG_DEST", "HF_XET_CACHE", "logs", kind="file", managed=False),
 )
 _BY_NAME: Final = {entry.name: entry for entry in PROCESS_PATHS}
+#: The variables a library writes to when it is merely imported (torch opens TORCH_LOGS_OUT in its __init__).
+IMPORT_WRITERS: Final = ("TORCH_LOGS_OUT",)
 
 
 def _given(environ: Mapping[str, str], name: str | None) -> str | None:
@@ -241,6 +246,16 @@ def scratch_dir(environ: Mapping[str, str] | None = None) -> Path:
     if _given(env, "TMPDIR") is None:
         _make_scratch(value)
     return Path(value)
+
+
+def check_import_writers(environ: Mapping[str, str] | None = None) -> None:
+    """``WriteRefusedError`` unless every set variable of ``IMPORT_WRITERS`` passes the write boundary: for a launcher
+    to call before it imports torch. Reads only, needs no local config (an unset variable is not checked)."""
+    env = os.environ if environ is None else environ
+    for name in IMPORT_WRITERS:
+        value = _given(env, name)
+        if value is not None:
+            _check(_BY_NAME[name], value, "set in the environment")
 
 
 def _blank_names(environ: Mapping[str, str]) -> list[str]:

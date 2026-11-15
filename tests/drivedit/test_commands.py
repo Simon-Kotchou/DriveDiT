@@ -13,7 +13,7 @@ import pytest
 
 from drivedit import commands
 from drivedit.process_paths import PROCESS_PATHS
-from tests.drivedit.boundary import NEVER, assert_never_written, require_real_boundary
+from tests.drivedit.boundary import NEVER, assert_never_written
 
 REPO = Path(__file__).resolve().parents[2]
 PROBE = (
@@ -41,15 +41,14 @@ def test_an_unknown_command_is_refused() -> None:
 
 @pytest.mark.parametrize("command", sorted(commands.COMMANDS))
 def test_a_refusal_comes_before_torch_is_imported(tmp_path: Path, command: str) -> None:
-    base = require_real_boundary(tmp_path)  # the caches below lie in RAM scratch the real boundary must allow
+    """Even for --help: torch would open TORCH_LOGS_OUT at import. No config or cache variable is needed for it."""
     names = {n for e in PROCESS_PATHS for n in (e.name, e.legacy) if n is not None}
     env = {k: v for k, v in os.environ.items() if k not in names}
-    (base / "tmp").mkdir()
-    env |= {"TMPDIR": str(base / "tmp"), "XDG_CACHE_HOME": str(base / "cache")}
-    env["TORCH_LOGS_OUT"] = NEVER + "/torch.log"  # torch would open it at import
+    env["TMPDIR"] = str(tmp_path)
+    env["TORCH_LOGS_OUT"] = NEVER + "/torch.log"
     result = subprocess.run(
         [sys.executable, "-I", "-B", "-c", PROBE, str(REPO / "src"), command, "--help"],
-        cwd=base,
+        cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,

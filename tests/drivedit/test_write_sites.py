@@ -38,6 +38,8 @@ PROCESS_PATHS = REPO / "src" / "drivedit" / "process_paths.py"
 NO_PROCESS_PATHS = {
     "src/drivedit/data/build.py": "numpy and OpenCV only (no library cache); build_session checks every output path",
     "src/drivedit/eval/e0.py": "writes nothing: its report goes to stdout",
+    "src/drivedit/commands.py": "a launcher: it checks the import-time writers, then runs a command whose own main "
+    "calls prepare_process (each is a command line of this scan)",
 }
 
 

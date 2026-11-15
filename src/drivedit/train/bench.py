@@ -8,8 +8,8 @@ excluded. This is the reproducible measurement behind any step-time number quote
 
 The trainer's run directory lives only for the measurement, in a temporary directory under
 ``drivedit.process_paths.scratch_dir()`` (``TMPDIR``, by default in RAM; never the system temp dir), after
-``prepare_process`` has routed the caches of torch.compile, Triton and CUDA into the write boundary (DD-23;
-``python -m drivedit.commands bench`` does that before torch is imported, ``python -m drivedit.train.bench`` after).
+``prepare_process`` has routed the caches of torch.compile, Triton and CUDA into the write boundary (DD-23).
+``python -m drivedit.commands bench`` also checks what importing torch writes before torch is imported.
 """
 
 from __future__ import annotations

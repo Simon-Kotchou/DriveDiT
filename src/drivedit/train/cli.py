@@ -8,8 +8,9 @@
 Before anything else a training run routes the process's caches and temporary files into the write boundary
 (``drivedit.process_paths.prepare_process``: torch.compile, Triton and CUDA caches under ``<DATA_ROOT>/cache``,
 temporary files in RAM) and checks ``--run-dir`` (``drivedit.train.trainer.check_run_dir``: RAM or the verified data
-drive of the local config, DD-23); a refusal exits with one line naming the reason. ``dd-train`` and
-``python -m drivedit.commands dd-train`` do the first step before torch is imported (``drivedit.commands``). torchrun
+drive of the local config, DD-23); a refusal exits with one line naming the reason. ``--help``, usage errors and
+``--print-config`` write nothing and need neither. ``dd-train`` and ``python -m drivedit.commands dd-train`` check what
+importing torch would write before torch is imported (``drivedit.commands``). torchrun
 itself runs before any of this: start it with ``TMPDIR`` (or ``--log-dir``) in RAM or on the data drive, or its
 per-run log directory goes to the system temp dir and every rank refuses the ``TORCHELASTIC_ERROR_FILE`` it was given
 there.
